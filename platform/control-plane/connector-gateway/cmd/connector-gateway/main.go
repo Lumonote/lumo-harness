@@ -1,0 +1,168 @@
+// Command connector-gateway 是连接器网关（§10.1 / §12.1「南北向的门」）。
+//
+// 四道闸：路由 + 鉴权（Vault 凭证 / OPA egress）+ 限速 + 熔断 + PII 脱敏 + 审计。
+// 所有外部调用都从这里出去，杜绝组件直连外部系统。
+//
+// 启动：connector-gateway -pg <dsn> -redis <addr> -listen :8082
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/lumo-harness/platform/connector-gateway/internal/audit"
+	"github.com/lumo-harness/platform/connector-gateway/internal/breaker"
+	"github.com/lumo-harness/platform/connector-gateway/internal/credentials"
+	"github.com/lumo-harness/platform/connector-gateway/internal/domain"
+	"github.com/lumo-harness/platform/connector-gateway/internal/gateway"
+	"github.com/lumo-harness/platform/connector-gateway/internal/policy"
+	"github.com/lumo-harness/platform/connector-gateway/internal/ratelimit"
+	"github.com/lumo-harness/platform/connector-gateway/internal/registry"
+	"github.com/lumo-harness/platform/connector-gateway/internal/server"
+)
+
+// headerAuth 从网关注入的头解析身份（与协作服务同一约定）。
+//
+// 生产形态：边缘/终端网关完成认证后注入这些头，下游链路走 mTLS；
+// 本服务不自行签发凭证，也不信任客户端自报的 realm/roles —— 那些头必须由
+// 网关覆写，网关之外的来源应被网络层挡在门外。
+type headerAuth struct{}
+
+func (headerAuth) Authenticate(r *http.Request) (domain.Caller, error) {
+	uid := r.Header.Get("X-Lumo-User")
+	realm := r.Header.Get("X-Lumo-Realm")
+	if uid == "" || realm == "" {
+		return domain.Caller{}, errors.New("缺少网关注入的身份头")
+	}
+	return domain.Caller{
+		UserID:    uid,
+		Realm:     domain.RealmID(realm),
+		Roles:     splitCSV(r.Header.Get("X-Lumo-Roles")),
+		SessionID: r.Header.Get("X-Lumo-Session"),
+		ProjectID: r.Header.Get("X-Lumo-Project"),
+		// 审批结论由终端网关在人工批准后带入；连接器网关只认这一个来源
+		Approved: r.Header.Get("X-Lumo-Approved") == "true",
+	}, nil
+}
+
+func main() {
+	var (
+		pgDSN      = flag.String("pg", envOr("LUMO_PG_DSN", "postgres://lumo:lumo@localhost:55432/lumo"), "PostgreSQL DSN")
+		redisAddr  = flag.String("redis", envOr("LUMO_REDIS_ADDR", "localhost:56379"), "Redis 地址（限流令牌桶）")
+		listen     = flag.String("listen", envOr("LUMO_LISTEN", ":8082"), "HTTP 监听地址")
+		credPrefix = flag.String("cred-prefix", envOr("LUMO_CRED_PREFIX", "LUMO_CRED_"), "Local-lite 凭证环境变量前缀")
+		adminRoles = flag.String("admin-roles", envOr("LUMO_ADMIN_ROLES", "admin"), "可注册/停用连接器的角色（逗号分隔）")
+		failOpen   = flag.Bool("limiter-fail-open", envOr("LUMO_LIMITER_FAIL_OPEN", "") == "true",
+			"限流器不可用时放行（默认拒绝）")
+	)
+	flag.Parse()
+
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := pgxpool.New(ctx, *pgDSN)
+	if err != nil {
+		log.Error("连接 PostgreSQL 失败", "err", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: *redisAddr})
+	defer rdb.Close()
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		// 限流是闸门不是装饰：Redis 不通就不该启动，否则等于裸奔
+		log.Error("连接 Redis 失败（限流不可用，拒绝启动）", "addr", *redisAddr, "err", err)
+		os.Exit(1)
+	}
+
+	reg := registry.NewPg(pool, 10*time.Second)
+	if err := reg.Init(ctx); err != nil {
+		log.Error("初始化连接器目录失败", "err", err)
+		os.Exit(1)
+	}
+	sink := audit.NewPg(pool)
+	if err := sink.Init(ctx); err != nil {
+		log.Error("初始化审计表失败", "err", err)
+		os.Exit(1)
+	}
+
+	creds := credentials.NewCaching(credentials.NewEnvStore(*credPrefix), 60*time.Second)
+	brk := breaker.NewGroup(breaker.DefaultConfig())
+
+	gw := gateway.New(gateway.Options{
+		Registry: reg,
+		Creds:    creds,
+		Policy:   policy.DefaultRules(),
+		Limiter:  ratelimit.New(rdb),
+		Breakers: brk,
+		Audit:    sink,
+		Logger:   log,
+	})
+	gw.FailOpenOnLimiterError = *failOpen
+
+	srv := &http.Server{
+		Addr: *listen,
+		Handler: server.New(server.Options{
+			Gateway:    gw,
+			Registry:   reg,
+			Breakers:   brk,
+			Auth:       headerAuth{},
+			Logger:     log,
+			AdminRoles: splitCSV(*adminRoles),
+		}).Routes(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		log.Info("连接器网关启动", "listen", *listen,
+			"credentials", "env:"+*credPrefix, "limiterFailOpen", *failOpen)
+		log.Warn("当前为 Local-lite 形态：凭证读环境变量、策略走进程内规则",
+			"remedy", "Standalone+ 换 Vault Store 与 OPA Policy 实现同一接口（architecture §13.2）")
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("HTTP 服务异常退出", "err", err)
+			stop()
+		}
+	}()
+
+	<-ctx.Done()
+	log.Info("收到停机信号，开始优雅关闭")
+	shutCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutCtx); err != nil {
+		log.Error("关闭 HTTP 服务失败", "err", err)
+	}
+	log.Info("连接器网关已停止")
+}
+
+func splitCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}

@@ -22,6 +22,7 @@ const knowledgeEntry = resolve(platformRoot, 'dsh-plugins/knowledge/src/index.ts
 const meteringEntry = resolve(platformRoot, 'dsh-plugins/metering/src/index.ts')
 const controlEntry = resolve(platformRoot, 'dsh-plugins/control/src/index.ts')
 const projectEntry = resolve(platformRoot, 'dsh-plugins/project/src/index.ts')
+const connectorEntry = resolve(platformRoot, 'dsh-plugins/connector/src/index.ts')
 const patchPath = resolve(here, '..', 'lumo.patch.yml')
 
 // 平台插件 patch（官方 patch 语法：insert 数组 = 追加条目）
@@ -40,6 +41,9 @@ writeFileSync(
           baseUrl: http://localhost:55433
           model: BAAI/bge-m3
           dimension: 1024
+        graph:
+          depth: 1
+          maxNodes: 50
     - id: lumo-metering
       name: ${JSON.stringify(meteringEntry)}
       inject: [llm]
@@ -65,6 +69,15 @@ writeFileSync(
         connectionString: postgres://lumo:lumo@localhost:55432/lumo
         projectId: dev-project
         realm: dev
+    - id: lumo-connector
+      name: ${JSON.stringify(connectorEntry)}
+      inject: [tools]
+      config:
+        gatewayUrl: http://localhost:58082
+        realm: dev
+        userId: dev-user
+        roles: [operator, admin]
+        projectId: dev-project
 `,
 )
 

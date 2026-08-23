@@ -9,6 +9,7 @@
     "dsh-plugins/*/src/**/*.ts",
     "dsh-plugins/*/bootstrap.ts",
     "dsh-plugins/*/tests/**/*.ts",
+    "data-plane/*/src/**/*.ts",
     "vitest.config.ts"
   ]
 }

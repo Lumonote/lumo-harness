@@ -1,8 +1,11 @@
 /**
  * @lumo/knowledge —— 知识库组件（组件化契约 §4.3 首次落地）。
  *
- * 提供：`ctx.knowledge`（seam，契约于 shared/seam-contracts/knowledge.ts）
- *      + RAG 检索工具（Consumer，注册进 ctx.tools，走 §5.4.7 只读 published）。
+ * 提供两个并列 seam（§5.4.5 GraphRAG 的两条腿）：
+ *   - `ctx.knowledge`      向量语义召回（契约 shared/seam-contracts/knowledge.ts）
+ *   - `ctx.knowledgeGraph` 图关系扩展（契约 shared/seam-contracts/graph.ts）
+ * 以及两个 Consumer 工具：`knowledge_query`（纯向量）与
+ * `knowledge_graph_query`（向量召回 → 图邻域扩展），均只读 published（铁律 17）。
  *
  * 插件形态：与 dsh 官方插件一致（tmux-context 惯例：
  * `export const inject` / `interface Config` + `const Config: z<Config>` /
@@ -15,7 +18,11 @@ import type {} from '@deepseek-ai/dsh-tools'
 import { PgKnowledgeProvider } from './pg-provider.ts'
 import { defineKnowledgeTool } from './consumer.ts'
 import { TeiClient } from './embedding.ts'
+import { PgGraphProvider } from './graph-provider.ts'
+import { GraphProjector } from './graph-projector.ts'
+import { defineGraphRagTool } from './graph-rag.ts'
 import type { KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
+import type { GraphSeam } from '../../../shared/seam-contracts/graph.ts'
 
 export interface EmbeddingConfig {
   /** TEI HTTP 地址（deploy/compose.local.yml 的 lumo-platform-tei :55433） */
@@ -25,6 +32,18 @@ export interface EmbeddingConfig {
   /** 向量维度（须与模型一致；bge-m3=1024） */
   dimension: number
   timeoutMs?: number
+}
+
+/** 图侧参数（Local-lite 用 PG 递归 CTE；Standalone+ 换 Nebula Provider，契约不变） */
+export interface GraphConfig {
+  /** 默认图扩展跳数（1–3；缺省 1 跳，代价可控） */
+  depth?: number
+  /** 单次邻域扩展的节点上限（缺省 50；超出显式标记 truncated） */
+  maxNodes?: number
+  /** outbox → 图 的投影轮询间隔 ms（缺省 2000） */
+  projectIntervalMs?: number
+  /** 单轮投影搬运条数上限（缺省 100） */
+  projectBatchSize?: number
 }
 
 export interface KnowledgeConfig {
@@ -38,6 +57,8 @@ export interface KnowledgeConfig {
   defaultTopK?: number
   /** 向量来源（默认 TEI/bge-m3） */
   embedding: EmbeddingConfig
+  /** 图扩展参数（缺省 1 跳 / 50 节点） */
+  graph?: GraphConfig
 }
 
 /** Schemastery validation for {@link KnowledgeConfig}（可选性由 interface 的 `?` 表达） */
@@ -52,12 +73,29 @@ export const Config: z<KnowledgeConfig> = z.object({
     dimension: z.number(),
     timeoutMs: z.number(),
   }),
+  graph: z.object({
+    depth: z.number(),
+    maxNodes: z.number(),
+    projectIntervalMs: z.number(),
+    projectBatchSize: z.number(),
+  }),
 })
+
+/** 两个 seam 并列挂在同一 Context 上；Consumer 只声明 consumes，不感知引擎（铁律 21） */
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    knowledge: KnowledgeSeam
+    knowledgeGraph: GraphSeam
+  }
+}
 
 /** 依赖注入：ctx.tools 必须先于本插件 mount（Consumer 注册工具面） */
 export const inject = ['tools']
 
 export function apply(ctx: Context, config: KnowledgeConfig): void {
+  const roles = config.roles ?? ['viewer']
+  const defaultTopK = config.defaultTopK ?? 5
+
   const embedding = new TeiClient({
     baseUrl: config.embedding.baseUrl,
     model: config.embedding.model,
@@ -66,31 +104,77 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   })
   const provider = new PgKnowledgeProvider({
     connectionString: config.connectionString,
-    allowedRoles: config.roles ?? ['viewer'],
+    allowedRoles: roles,
     embedding,
     embeddingModel: config.embedding.model,
   })
+  // 图 Provider 自持连接池：两个 seam 生命周期独立，换 Nebula 时不牵动向量侧
+  const graph = new PgGraphProvider({
+    connectionString: config.connectionString,
+    allowedRoles: roles,
+  })
+  // outbox 投影器：把 ingest 写下的图投影意图异步搬进图（最终一致，见 graph-projector.ts）
+  const projector = new GraphProjector(
+    { connectionString: config.connectionString, batchSize: config.graph?.projectBatchSize },
+    graph,
+  )
 
   ctx.effect(() => () => {
     void provider.close()
+    void graph.close()
+    void projector.close()
   })
 
   // seam 注册：一 ctx 一 provider（重复注册抛错是 Cordis 标准行为）
   ctx.provide('knowledge', provider)
+  ctx.provide('knowledgeGraph', graph)
 
-  // Consumer：RAG 工具（装配层固定 realm、只读 published —— 铁律 17）
+  // Consumer 1：纯向量 RAG（装配层固定 realm、只读 published —— 铁律 17）
   const unregister = defineKnowledgeTool(ctx, provider, {
     realm: config.realm,
-    roles: config.roles ?? ['viewer'],
-    defaultTopK: config.defaultTopK ?? 5,
+    roles,
+    defaultTopK,
+  })
+  // Consumer 2：GraphRAG（向量召回 → 图邻域扩展；输出带 provenance 标记，评审 R5）
+  const unregisterGraph = defineGraphRagTool(ctx, provider, graph, {
+    realm: config.realm,
+    roles,
+    defaultTopK,
+    graphDepth: config.graph?.depth ?? 1,
+    graphMaxNodes: config.graph?.maxNodes ?? 50,
   })
   ctx.effect(() => () => {
     unregister()
+    unregisterGraph()
   })
 
   // 幂等初始化（建表/索引）；失败即加载失败（响亮失败，§15）
-  void provider.init()
+  // 投影轮询必须等建表完成再起，否则前几轮全是「表不存在」噪音。
+  const ready = Promise.all([provider.init(), graph.init()])
+
+  // unref 不阻塞进程退出；插件卸载时随 effect 一起清掉。
+  // 投影失败只 warn 不抛 —— outbox 未标记 projected_at，下一轮自然重放。
+  const intervalMs = Math.max(config.graph?.projectIntervalMs ?? 2000, 200)
+  ctx.effect(() => {
+    let timer: ReturnType<typeof setInterval> | undefined
+    let disposed = false
+    void ready.then(() => {
+      if (disposed) return
+      timer = setInterval(() => {
+        projector.drain().catch((e: unknown) => {
+          ctx.logger.warn('knowledge: 图投影失败（将在下一轮重放）: %s', e)
+        })
+      }, intervalMs)
+      timer.unref?.()
+    }).catch((e: unknown) => {
+      ctx.logger.error('knowledge: 初始化失败，图投影未启动: %s', e)
+    })
+    return () => {
+      disposed = true
+      if (timer) clearInterval(timer)
+    }
+  })
 }
 
 export default apply
-export type { KnowledgeSeam }
+export type { KnowledgeSeam, GraphSeam }

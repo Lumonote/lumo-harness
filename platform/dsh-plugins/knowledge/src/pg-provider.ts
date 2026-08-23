@@ -12,7 +12,9 @@ import {
   type KnowledgeQuery,
   type KnowledgeSeam,
 } from '../../../shared/seam-contracts/knowledge.ts'
+import { forbidden } from '../../../shared/seam-contracts/errors.ts'
 import type { EmbeddingClient } from './embedding.ts'
+import { OUTBOX_DDL, collectProjection } from './graph-projector.ts'
 
 /** 幂等初始化：建表 + 建索引（含动态维度 vector(n)） */
 export function ddl(dimension: number): string {
@@ -42,7 +44,8 @@ CREATE TABLE IF NOT EXISTS knowledge_tombstones (
   doc_id     TEXT PRIMARY KEY,
   realm      TEXT NOT NULL,
   removed_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);`
+);
+${OUTBOX_DDL}`
 }
 
 export interface PgProviderConfig {
@@ -93,6 +96,11 @@ export class PgKnowledgeProvider implements KnowledgeSeam {
            doc.embeddingModel, i, chunk.text, JSON.stringify(vectors[i])],
         )
       }
+      // 图投影意图与 chunk 写入同事务（outbox；跨存储无事务，见 graph-projector.ts）
+      await client.query(
+        `INSERT INTO knowledge_graph_outbox (doc_id, realm, op, payload) VALUES ($1,$2,'upsert',$3)`,
+        [doc.docId, doc.realm, JSON.stringify(collectProjection(doc, chunks))],
+      )
       await client.query('COMMIT')
     } catch (e) {
       await client.query('ROLLBACK')
@@ -105,7 +113,7 @@ export class PgKnowledgeProvider implements KnowledgeSeam {
   async query(request: KnowledgeQuery): Promise<KnowledgeHit[]> {
     // 角色越权 → 显式拒绝（§6.3 OPA 下沉；不静默返回空）
     if (!request.roles.some((r) => this.allowedRoles.has(r))) {
-      throw new Error(`PgKnowledgeProvider: 角色 ${request.roles.join(',')} 无知识库检索权限`)
+      throw forbidden(`PgKnowledgeProvider: 角色 ${request.roles.join(',')} 无知识库检索权限`)
     }
     const vector = await this.embed(request.text)
     const rows = await this.pool.query<{
@@ -130,12 +138,27 @@ export class PgKnowledgeProvider implements KnowledgeSeam {
   }
 
   async remove(docId: string, realm: string): Promise<void> {
-    await this.pool.query('DELETE FROM knowledge_chunks WHERE doc_id = $1 AND realm = $2', [docId, realm])
-    await this.pool.query(
-      `INSERT INTO knowledge_tombstones (doc_id, realm) VALUES ($1,$2)
-       ON CONFLICT (doc_id) DO UPDATE SET removed_at = now()`,
-      [docId, realm],
-    )
+    // 抽除、墓碑、图删除意图必须同事务：任一半成功都会留下可召回的残留（数据泄漏路径 §5.4.3）
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('DELETE FROM knowledge_chunks WHERE doc_id = $1 AND realm = $2', [docId, realm])
+      await client.query(
+        `INSERT INTO knowledge_tombstones (doc_id, realm) VALUES ($1,$2)
+         ON CONFLICT (doc_id) DO UPDATE SET removed_at = now()`,
+        [docId, realm],
+      )
+      await client.query(
+        `INSERT INTO knowledge_graph_outbox (doc_id, realm, op) VALUES ($1,$2,'remove')`,
+        [docId, realm],
+      )
+      await client.query('COMMIT')
+    } catch (e) {
+      await client.query('ROLLBACK')
+      throw e
+    } finally {
+      client.release()
+    }
   }
 
   async rebuild(_realm: string): Promise<void> {

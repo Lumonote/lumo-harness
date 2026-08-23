@@ -57,6 +57,21 @@ importers:
         specifier: 4.22.4
         version: 4.22.4
 
+  dsh-plugins/connector:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: link:../../../deepseek-harness/vendor/cordis
+        version: link:../../../deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-tools':
+        specifier: link:../../../deepseek-harness/packages/core/tools
+        version: link:../../../deepseek-harness/packages/core/tools
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../deepseek-harness/vendor/schemastery
+        version: link:../../../deepseek-harness/vendor/schemastery
+      tsx:
+        specifier: 4.22.4
+        version: 4.22.4
+
   dsh-plugins/control:
     dependencies:
       '@deepseek-ai/cordis':
@@ -140,6 +155,30 @@ importers:
       pg:
         specifier: ^8.13.0
         version: 8.23.0
+      tsx:
+        specifier: 4.22.4
+        version: 4.22.4
+
+  dsh-plugins/seam-host:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: link:../../../deepseek-harness/vendor/cordis
+        version: link:../../../deepseek-harness/vendor/cordis
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../deepseek-harness/vendor/schemastery
+        version: link:../../../deepseek-harness/vendor/schemastery
+      tsx:
+        specifier: 4.22.4
+        version: 4.22.4
+
+  dsh-plugins/seam-proxy:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: link:../../../deepseek-harness/vendor/cordis
+        version: link:../../../deepseek-harness/vendor/cordis
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../deepseek-harness/vendor/schemastery
+        version: link:../../../deepseek-harness/vendor/schemastery
       tsx:
         specifier: 4.22.4
         version: 4.22.4

@@ -60,6 +60,27 @@ services:
       redis:
         condition: service_started
 
+  connector-gateway:    # 外部连接器网关（§10.1；四道闸 + PII 脱敏 + 审计）
+    build:
+      context: ../control-plane/connector-gateway
+    container_name: lumo-platform-connector-gateway
+    environment:
+      LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_REDIS_ADDR: redis:6379
+      LUMO_LISTEN: ":8082"
+      LUMO_ADMIN_ROLES: admin
+      # Local-lite 凭证形态：manifest 的 credentialRef 映射成
+      # LUMO_CRED_<REF 大写、非字母数字转 _>，凭证本身只经环境变量注入，不落库。
+      # 例：credentialRef "jira/token" → 环境变量 LUMO_CRED_JIRA_TOKEN
+      LUMO_CRED_PREFIX: LUMO_CRED_
+    ports:
+      - "58082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
 volumes:
   pgdata:
   redisdata:
@@ -68,4 +89,6 @@ volumes:
 # 平台进程（dsh node）本地裸进程运行：
 #   source ~/.nvm/nvm.sh && nvm use 24
 #   pnpm --filter @lumo/platform run local
-# 该形态缺 OLAP/图能力，对应 seam 返回 CapabilityUnavailable（显式拒绝，非模拟）
+# 该形态缺 OLAP 能力（Doris），对应 seam 返回 CapabilityUnavailable（显式拒绝，非模拟）。
+# 图能力由 PG 递归 CTE 轻量替代（铁律 21：Local-lite 允许换引擎，不承诺迁移）；
+# Standalone+ 换 Nebula Provider，Consumer 侧契约不变。
