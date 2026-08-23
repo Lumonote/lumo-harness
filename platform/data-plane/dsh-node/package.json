@@ -17,6 +17,7 @@
     "@deepseek-ai/dsh-session": "link:../../../deepseek-harness/packages/core/session",
     "@deepseek-ai/dsh-tools": "link:../../../deepseek-harness/packages/core/tools",
     "@lumo/control": "link:../../dsh-plugins/control",
+    "@lumo/mailbox": "link:../../dsh-plugins/mailbox",
     "@lumo/knowledge": "link:../../dsh-plugins/knowledge",
     "@lumo/metering": "link:../../dsh-plugins/metering",
     "@lumo/project": "link:../../dsh-plugins/project",

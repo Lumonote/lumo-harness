@@ -26,6 +26,7 @@ const projectEntry = resolve(platformRoot, 'dsh-plugins/project/src/index.ts')
 const connectorEntry = resolve(platformRoot, 'dsh-plugins/connector/src/index.ts')
 const recoveryEntry = resolve(platformRoot, 'dsh-plugins/recovery/src/index.ts')
 const sessionLogEntry = resolve(platformRoot, 'dsh-plugins/session-log/src/index.ts')
+const mailboxEntry = resolve(platformRoot, 'dsh-plugins/mailbox/src/index.ts')
 const patchPath = resolve(here, '..', 'lumo.patch.yml')
 
 // 节点标识：必须能区分同机重启，否则重启后的进程会被租约当成「本人续租」，
@@ -84,6 +85,12 @@ writeFileSync(
         connectionString: postgres://lumo:lumo@localhost:55432/lumo
         holder: ${JSON.stringify(nodeHolder)}
         leaseTtlMs: 30000
+    - id: lumo-mailbox
+      name: ${JSON.stringify(mailboxEntry)}
+      inject: [tools]
+      config:
+        connectionString: postgres://lumo:lumo@localhost:55432/lumo
+        realm: dev
     - id: lumo-recovery
       name: ${JSON.stringify(recoveryEntry)}
       inject: [tools]

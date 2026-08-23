@@ -536,6 +536,18 @@ dsh 原生即异步友好（日志 durable 可 replay、`agent.inject()` 异步�
 | **Future/Promise seam** | `agent A await(team.mailbox.wait(id))`，`B/human resolve(id)` → future 解析、A resume；背靠持久 mailbox，跨节点跨时间成立 |
 | **Trigger Bus** | cron/webhook/外部事件 → Gateway → 注入 inbox，沉睡长任务被唤醒（RocketMQ 延时消息实现） |
 
+> **硬规矩：信箱的持久性不能交给 Redis。** Redis Cluster 异步复制在故障切换时会丢已确认写入，而丢掉的若是一次 `resolve`，等待方就**永不唤醒**——它不崩溃、不报错、不占 CPU，监控上只是一个「还在跑」的任务，比崩溃难发现得多。持久性落 PG（集群形态可换 RocketMQ，seam 不变），Redis 只做读穿缓存与 presence，不参与成败判定。
+>
+> 三条把「无限挂起」降级成「超时重试」：
+>
+> 1. **每个等待强制带 TTL**，没有「永远等下去」这个选项；
+> 2. **TTL 到期即进死信**，等待方拿到 `expired` 并据此重试或上报；
+> 3. **对账扫描兜底**——唤醒通知（NOTIFY／消息投递）本就可能丢失，所以正确性建立在轮询与对账上，通知只用于降低延迟。
+>
+> 另一处必须防的竞态：**`resolve` 可能先于 `wait` 发生**。若 resolve 只是一次「信号」，那个信号就落空了，等待方随后进入永久等待。因此 resolve 必须**持久化结果值**，`wait` 必须先读既有结果再决定是否等待。
+>
+> 落地：`platform/dsh-plugins/mailbox`（评审 A3）。
+
 ### 8.2 多端（终端事件汇 + 能力协商 + presence）
 
 - **终端无关事件汇**：所有终端（web/CLI/IDE/mobile/API）订阅 `session/event` + task board + mailbox；连接即 **replay 历史 + live push**，全一致。
