@@ -23,6 +23,7 @@ const meteringEntry = resolve(platformRoot, 'dsh-plugins/metering/src/index.ts')
 const controlEntry = resolve(platformRoot, 'dsh-plugins/control/src/index.ts')
 const projectEntry = resolve(platformRoot, 'dsh-plugins/project/src/index.ts')
 const connectorEntry = resolve(platformRoot, 'dsh-plugins/connector/src/index.ts')
+const recoveryEntry = resolve(platformRoot, 'dsh-plugins/recovery/src/index.ts')
 const patchPath = resolve(here, '..', 'lumo.patch.yml')
 
 // 平台插件 patch（官方 patch 语法：insert 数组 = 追加条目）
@@ -69,6 +70,15 @@ writeFileSync(
         connectionString: postgres://lumo:lumo@localhost:55432/lumo
         projectId: dev-project
         realm: dev
+    - id: lumo-recovery
+      name: ${JSON.stringify(recoveryEntry)}
+      inject: [tools]
+      config:
+        connectionString: postgres://lumo:lumo@localhost:55432/lumo
+        prefixes:
+          # 连接器工具一律外部写：未显式声明幂等键的按非幂等处理（R2 fail closed）
+          - prefix: connector_
+            idempotency: non-idempotent
     - id: lumo-connector
       name: ${JSON.stringify(connectorEntry)}
       inject: [tools]
@@ -81,8 +91,10 @@ writeFileSync(
 `,
 )
 
-// 附加 CLI 参数（默认 headless 任务形；可经 `--` 覆盖）
-const extraArgs = process.argv.slice(2)
+// 附加 CLI 参数（默认 headless 任务形；可经 `--` 覆盖）。
+// `pnpm --filter … start -- <args>` 会把分隔符 `--` 原样带进 argv，
+// 若原样转发给官方 CLI，commander 会把其后的选项当成操作数 —— 这里剥掉。
+const extraArgs = process.argv.slice(2).filter((arg) => arg !== '--')
 const args = ['run', 'dsh', '--profile', 'headless', '--patch', patchPath, ...extraArgs]
 
 // pnpm 经 corepack 调用（Node ≥22 自带 corepack；避免依赖外壳 PATH）

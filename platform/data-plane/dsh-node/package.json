@@ -20,6 +20,7 @@
     "@lumo/knowledge": "link:../../dsh-plugins/knowledge",
     "@lumo/metering": "link:../../dsh-plugins/metering",
     "@lumo/project": "link:../../dsh-plugins/project",
+    "@lumo/recovery": "link:../../dsh-plugins/recovery",
     "tsx": "4.22.4"
   }
 }
