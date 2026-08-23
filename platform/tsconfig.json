@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "shared/**/*.ts",
+    "dsh-plugins/*/src/**/*.ts",
+    "dsh-plugins/*/bootstrap.ts",
+    "dsh-plugins/*/tests/**/*.ts",
+    "vitest.config.ts"
+  ]
+}
