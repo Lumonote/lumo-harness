@@ -34,8 +34,35 @@ services:
     volumes:
       - tei-data:/data
 
+  redis:                # 协作服务 WAL 热层（§5.4.7.4：确认前必须已落 WAL）
+    image: redis:7-alpine
+    container_name: lumo-platform-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "56379:6379"
+    volumes:
+      - redisdata:/data
+
+  collaborator:         # 知识库文档实时协作（§5.4.7；平台唯一有状态业务服务）
+    build:
+      context: ../control-plane/collaborator
+    container_name: lumo-platform-collaborator
+    environment:
+      LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_REDIS_ADDR: redis:6379
+      LUMO_LISTEN: ":8081"
+      LUMO_INSTANCE: collaborator-0
+    ports:
+      - "58081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
 volumes:
   pgdata:
+  redisdata:
   tei-data:
 
 # 平台进程（dsh node）本地裸进程运行：
