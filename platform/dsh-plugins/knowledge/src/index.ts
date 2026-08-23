@@ -14,7 +14,18 @@ import type {} from '@deepseek-ai/dsh-tools'
 
 import { PgKnowledgeProvider } from './pg-provider.ts'
 import { defineKnowledgeTool } from './consumer.ts'
+import { TeiClient } from './embedding.ts'
 import type { KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
+
+export interface EmbeddingConfig {
+  /** TEI HTTP 地址（deploy/compose.local.yml 的 lumo-platform-tei :55433） */
+  baseUrl: string
+  /** 模型标识（记录/版本化用；§5.4.4 换模型须换 collection） */
+  model: string
+  /** 向量维度（须与模型一致；bge-m3=1024） */
+  dimension: number
+  timeoutMs?: number
+}
 
 export interface KnowledgeConfig {
   /** pgvector 连接串。standalone/cluster 形态应切换 milvus provider（同契约） */
@@ -25,6 +36,8 @@ export interface KnowledgeConfig {
   roles?: string[]
   /** RAG 检索默认 topK */
   defaultTopK?: number
+  /** 向量来源（默认 TEI/bge-m3） */
+  embedding: EmbeddingConfig
 }
 
 /** Schemastery validation for {@link KnowledgeConfig}（可选性由 interface 的 `?` 表达） */
@@ -33,15 +46,29 @@ export const Config: z<KnowledgeConfig> = z.object({
   realm: z.string(),
   roles: z.array(z.string()),
   defaultTopK: z.number(),
+  embedding: z.object({
+    baseUrl: z.string(),
+    model: z.string(),
+    dimension: z.number(),
+    timeoutMs: z.number(),
+  }),
 })
 
 /** 依赖注入：ctx.tools 必须先于本插件 mount（Consumer 注册工具面） */
 export const inject = ['tools']
 
 export function apply(ctx: Context, config: KnowledgeConfig): void {
+  const embedding = new TeiClient({
+    baseUrl: config.embedding.baseUrl,
+    model: config.embedding.model,
+    dimension: config.embedding.dimension,
+    timeoutMs: config.embedding.timeoutMs,
+  })
   const provider = new PgKnowledgeProvider({
     connectionString: config.connectionString,
     allowedRoles: config.roles ?? ['viewer'],
+    embedding,
+    embeddingModel: config.embedding.model,
   })
 
   ctx.effect(() => () => {

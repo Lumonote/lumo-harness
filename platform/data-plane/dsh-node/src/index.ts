@@ -20,6 +20,8 @@ const dshRoot = resolve(platformRoot, '..', 'deepseek-harness')
 
 const knowledgeEntry = resolve(platformRoot, 'dsh-plugins/knowledge/src/index.ts')
 const meteringEntry = resolve(platformRoot, 'dsh-plugins/metering/src/index.ts')
+const controlEntry = resolve(platformRoot, 'dsh-plugins/control/src/index.ts')
+const projectEntry = resolve(platformRoot, 'dsh-plugins/project/src/index.ts')
 const patchPath = resolve(here, '..', 'lumo.patch.yml')
 
 // 平台插件 patch（官方 patch 语法：insert 数组 = 追加条目）
@@ -34,6 +36,10 @@ writeFileSync(
         realm: dev
         roles: [viewer, operator]
         defaultTopK: 5
+        embedding:
+          baseUrl: http://localhost:55433
+          model: BAAI/bge-m3
+          dimension: 1024
     - id: lumo-metering
       name: ${JSON.stringify(meteringEntry)}
       inject: [llm]
@@ -47,6 +53,18 @@ writeFileSync(
         componentId: dev-component
         feature: kb:qa
         defaultBudget: 1000000
+    - id: lumo-control
+      name: ${JSON.stringify(controlEntry)}
+      inject: [tools]
+      config:
+        connectionString: postgres://lumo:lumo@localhost:55432/lumo
+    - id: lumo-project
+      name: ${JSON.stringify(projectEntry)}
+      inject: [tools]
+      config:
+        connectionString: postgres://lumo:lumo@localhost:55432/lumo
+        projectId: dev-project
+        realm: dev
 `,
 )
 

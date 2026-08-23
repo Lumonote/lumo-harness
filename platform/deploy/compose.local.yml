@@ -23,8 +23,20 @@ services:
       timeout: 3s
       retries: 10
 
+  embedding:            # TEI 文本嵌入（bge-m3, 1024 维；LLM embedding 的独立 Provider，§5.4.4 版本化）
+    image: ghcr.io/huggingface/text-embeddings-inference:1.6
+    container_name: lumo-platform-tei
+    environment:
+      MODEL_ID: BAAI/bge-m3
+      PORT: "80"
+    ports:
+      - "55433:80"
+    volumes:
+      - tei-data:/data
+
 volumes:
   pgdata:
+  tei-data:
 
 # 平台进程（dsh node）本地裸进程运行：
 #   source ~/.nvm/nvm.sh && nvm use 24
