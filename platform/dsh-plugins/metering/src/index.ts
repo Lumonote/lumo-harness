@@ -29,9 +29,16 @@ export interface MeteringConfig {
   defaultBudget: number
 }
 
+/** 依赖注入：llm 服务须先 mount（计量挂在 llm/stream 瀑布） */
+export const inject = ['llm']
+
 export function apply(ctx: Context, config: MeteringConfig): void {
   const meter = new PgMeteringSeam(config.connectionString)
-  void meter.init()
+  void meter.init().then(async () => {
+    // 默认预算种子：幂等 upsert（仅当未显式配置 budget_trees 行时生效，§6.4 预算树）
+    await meter.setBudget('user', config.userId, config.defaultBudget)
+    await meter.setBudget('project', config.projectId, config.defaultBudget)
+  })
 
   const context = {
     userId: config.userId, deptId: config.deptId, role: config.role,

@@ -1,16 +1,20 @@
 # Local-lite 形态：1 二进制 + 1 PG —— 秒级启动，数据一次性（不承诺迁移，见 architecture §13.2）
 # 启动：docker compose -f compose.local.yml up
+# 项目/容器命名隔离：lumo-platform-* 前缀，与用户其它 compose 项目（如 lumonte-*）互不影响；
+# down -v 仅作用于本项目卷。
+name: lumo-platform-local
 version: "3.9"
 
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    container_name: lumo-platform-postgres
     environment:
       POSTGRES_USER: lumo
       POSTGRES_PASSWORD: lumo
       POSTGRES_DB: lumo
     ports:
-      - "5432:5432"
+      - "55432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

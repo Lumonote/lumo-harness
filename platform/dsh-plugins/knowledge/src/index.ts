@@ -35,6 +35,9 @@ export const Config: z<KnowledgeConfig> = z.object({
   defaultTopK: z.number(),
 })
 
+/** 依赖注入：ctx.tools 必须先于本插件 mount（Consumer 注册工具面） */
+export const inject = ['tools']
+
 export function apply(ctx: Context, config: KnowledgeConfig): void {
   const provider = new PgKnowledgeProvider({
     connectionString: config.connectionString,

@@ -1,5 +1,6 @@
 packages:
   - dsh-plugins/*
+  - data-plane/dsh-node
 allowBuilds:
   # tsx 依赖 esbuild 原生二进制（bootstrap 的 --import tsx 需要）
   esbuild: true

@@ -1,0 +1,24 @@
+# 本节点专属条目（官方 base bundle 经 loader overlay 叠加，见 src/index.ts）。
+# 平台插件以绝对路径挂载 —— 不用 bare 解析，避免与 dsh 树的解析锚点冲突；
+# 相对路径在构建产物迁移时保持同树即可。协作者注意：路径由启动器动态生成更稳，
+# 故此处用 ${LUMO_BASE} 占位并开启 interpolate（cordis-loader 的 evaluate 支持 env 展开）。
+- id: lumo-knowledge
+  name: !!js process.env.LUMO_PACKAGES + '/knowledge/src/index.ts'
+  config:
+    connectionString: postgres://lumo:lumo@localhost:5432/lumo
+    realm: dev
+    roles: [viewer, operator]
+    defaultTopK: 5
+
+- id: lumo-metering
+  name: !!js process.env.LUMO_PACKAGES + '/metering/src/index.ts'
+  config:
+    connectionString: postgres://lumo:lumo@localhost:5432/lumo
+    userId: dev-user
+    deptId: dev-dept
+    role: operator
+    projectId: dev-project
+    agentId: dev-agent
+    componentId: dev-component
+    feature: kb:qa
+    defaultBudget: 1000000
