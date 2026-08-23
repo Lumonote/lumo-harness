@@ -21,6 +21,7 @@
     "@lumo/metering": "link:../../dsh-plugins/metering",
     "@lumo/project": "link:../../dsh-plugins/project",
     "@lumo/recovery": "link:../../dsh-plugins/recovery",
+    "@lumo/session-log": "link:../../dsh-plugins/session-log",
     "tsx": "4.22.4"
   }
 }

@@ -756,12 +756,19 @@ ORM:     Ent (PG)
 | 数据 | 模型 | 存储 |
 |------|------|------|
 | 注册/权限/配额/计费明细 | 强一致 | Nacos Raft + PostgreSQL |
-| 日志复制/分析/图/血缘 | 最终一致 | Redis/Doris/Nebula |
+| **SessionEvent 日志（写路径）** | **强一致**（同步落库才算 append 成功） | **PostgreSQL** |
+| 日志热读缓存 / 分析 / 图 / 血缘 | 最终一致 | Redis/Doris/Nebula |
 | 向量检索召回 | 最终一致（可调一致性级别） | Milvus |
 | 冷归档 / 制品二进制 | 强一致（写后可读） | MinIO |
 | 跨集群联邦 | 强一致（中心）+ 最终一致（边缘） | TiDB/CRDB + Nacos 同步 |
 
 > **真相源永远在 PG + 复制式 SessionEvent 日志**；Doris/Nebula/Redis 是派生层，绝不反向充当事务真相。
+>
+> **硬规矩：Redis 不是日志真相源。** 日志既是权威恢复源（§7.1 崩溃恢复）又是多端一致性的唯一 reconcile 源（§4.2），就不能容忍失活丢写——而 Redis Cluster 异步复制在故障切换时会丢已确认写入。Redis 只承担**只读热缓存**，Doris/MinIO 只承担冷归档；两者都不参与写路径的成败判定。
+>
+> **单写者 + fencing token。** 每会话同一时刻只有一个节点有写权，由带 fencing token 的写者租约保证：令牌每次易主递增，append 必须携带，旧持有者带过期令牌回来时存储层直接拒绝。没有这条，RocketMQ 的至少一次投递会让两个节点同时 resume 同一任务、双双 append，日志就地分叉。`(session, seq)` 主键使分叉必然被发现——同 seq 上出现内容不同的事件即事故，响亮失败而非静默择一。
+>
+> 落地：`platform/dsh-plugins/session-log`（评审 A1）。
 
 ### 13.2 部署形态：本地 / 单机 / 集群与切换
 

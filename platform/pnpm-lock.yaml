@@ -56,6 +56,9 @@ importers:
       '@lumo/recovery':
         specifier: link:../../dsh-plugins/recovery
         version: link:../../dsh-plugins/recovery
+      '@lumo/session-log':
+        specifier: link:../../dsh-plugins/session-log
+        version: link:../../dsh-plugins/session-log
       tsx:
         specifier: 4.22.4
         version: 4.22.4
@@ -200,6 +203,27 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: link:../../../deepseek-harness/vendor/schemastery
         version: link:../../../deepseek-harness/vendor/schemastery
+      tsx:
+        specifier: 4.22.4
+        version: 4.22.4
+
+  dsh-plugins/session-log:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: link:../../../deepseek-harness/vendor/cordis
+        version: link:../../../deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-session':
+        specifier: link:../../../deepseek-harness/packages/core/session
+        version: link:../../../deepseek-harness/packages/core/session
+      '@deepseek-ai/dsh-tools':
+        specifier: link:../../../deepseek-harness/packages/core/tools
+        version: link:../../../deepseek-harness/packages/core/tools
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../deepseek-harness/vendor/schemastery
+        version: link:../../../deepseek-harness/vendor/schemastery
+      pg:
+        specifier: ^8.13.0
+        version: 8.23.0
       tsx:
         specifier: 4.22.4
         version: 4.22.4

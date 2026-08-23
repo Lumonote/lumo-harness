@@ -12,6 +12,7 @@
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { writeFileSync, rmSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { spawnSync } from 'node:child_process'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -24,7 +25,13 @@ const controlEntry = resolve(platformRoot, 'dsh-plugins/control/src/index.ts')
 const projectEntry = resolve(platformRoot, 'dsh-plugins/project/src/index.ts')
 const connectorEntry = resolve(platformRoot, 'dsh-plugins/connector/src/index.ts')
 const recoveryEntry = resolve(platformRoot, 'dsh-plugins/recovery/src/index.ts')
+const sessionLogEntry = resolve(platformRoot, 'dsh-plugins/session-log/src/index.ts')
 const patchPath = resolve(here, '..', 'lumo.patch.yml')
+
+// 节点标识：必须能区分同机重启，否则重启后的进程会被租约当成「本人续租」，
+// 白捡走上一代进程的写权（§A1 fencing 的前提是持有者身份唯一）。
+const nodeHolder = process.env['LUMO_NODE_ID']
+  ?? `${hostname()}:${process.pid}:${Date.now().toString(36)}`
 
 // 平台插件 patch（官方 patch 语法：insert 数组 = 追加条目）
 writeFileSync(
@@ -70,6 +77,13 @@ writeFileSync(
         connectionString: postgres://lumo:lumo@localhost:55432/lumo
         projectId: dev-project
         realm: dev
+    - id: lumo-session-log
+      name: ${JSON.stringify(sessionLogEntry)}
+      inject: [tools]
+      config:
+        connectionString: postgres://lumo:lumo@localhost:55432/lumo
+        holder: ${JSON.stringify(nodeHolder)}
+        leaseTtlMs: 30000
     - id: lumo-recovery
       name: ${JSON.stringify(recoveryEntry)}
       inject: [tools]
