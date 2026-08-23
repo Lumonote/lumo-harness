@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd /Users/palmer/IdeaProjects/projectSync/AI/project/lumo-harness/docs || exit 1\\necho \\\"=== internal link check ===\\\"\\ngrep -oh \\\"](\\\\./[^)]*)\\\" *.md | sed 's/](\\\\.\\\\///;s/)$//' | sort -u...",
+  "error": "Exit code 1\n=== internal link check ===\nOK   deepseek_harness_architecture_v2.md\n\n=== reverted-term occurrences per file ===\nINDEX.md                                             7\ndeepseek_harness_agent_scheduling.md                 2\ndeepseek_harness_architecture_v2.md                  18\ndeepseek_harness_distributed_design.md               4\ndeepseek_harness_gateway_no_apisix.md                25\ndeepseek_harness_gateway_tech_selection.md           33\ndeepseek_harness_lang_selection.md        ...",
+  "timestamp": "2026-08-23T08:02:22.821Z",
+  "retry_count": 1
+}
