@@ -1,0 +1,26 @@
+# Standalone 形态：与集群完全相同的引擎，单节点拓扑。承诺可在线升级到 Cluster（architecture §13.2）。
+# 启动：docker compose -f compose.standalone.yml up
+# 注：镜像由阶段 1+ 产出后填充 build:/image: 字段；当前为拓扑骨架。
+version: "3.9"
+
+services:
+  # ---- 数据引擎（同引擎单实例）----
+  postgres:      # pgvector 亦需此处（Standalone 向量走 Milvus，PG 为 OLTP 主库）
+    image: postgres:16
+  redis:         # 热共享态/信箱/限流
+    image: redis:7
+  minio:         # 对象存储：日志冷层/制品/知识库原文
+    image: minio/minio:latest
+  milvus:        # 向量（standalone 部署模式）
+    image: milvusdb/milvus:latest
+  rocketmq:      # 单 broker（namesrv + broker）
+    image: apache/rocketmq:5.3.1
+  # 可选（按 requires 校验）：doris 单节点、nebula 单节点 —— 未齐备时对应 seam 显式不可用
+
+  # ---- 平台编排（本地 compose 为单实例；装配层差异，业务代码无 if(standalone)）----
+  # 自研 Go 服务（阶段 2+ 填充）：edge-gateway / scheduler / collaborator / usage-ledger
+  # dsh-node：dsh 容器 + @lumo/* 插件（阶段 1+ 填充）
+
+volumes:
+  pgdata:
+  miniodata:

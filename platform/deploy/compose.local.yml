@@ -1,0 +1,28 @@
+# Local-lite 形态：1 二进制 + 1 PG —— 秒级启动，数据一次性（不承诺迁移，见 architecture §13.2）
+# 启动：docker compose -f compose.local.yml up
+version: "3.9"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: lumo
+      POSTGRES_PASSWORD: lumo
+      POSTGRES_DB: lumo
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lumo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+
+# 平台进程（dsh node）本地裸进程运行：
+#   source ~/.nvm/nvm.sh && nvm use 24
+#   pnpm --filter @lumo/platform run local
+# 该形态缺 OLAP/图能力，对应 seam 返回 CapabilityUnavailable（显式拒绝，非模拟）

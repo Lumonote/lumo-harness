@@ -1,0 +1,26 @@
+# Cluster（缩微）形态：自研服务多实例 + 中间件单实例 —— 本地调试分布式行为与故障注入。
+# 目的：验证我们自己的代码在多实例下的行为（R1/R2/A1/N1/CRDT 归属转移），而非中间件自身的 HA。
+# 启动：docker compose -f compose.cluster.yml up
+# 故障注入场景见同目录 README.md。当前为拓扑骨架，镜像由阶段 2–3 填充。
+version: "3.9"
+
+services:
+  # ---- 中间件：单实例（语义与生产一致即可）----
+  postgres:     { image: postgres:16 }
+  redis:        { image: redis:7 }
+  minio:        { image: minio/minio:latest }
+  milvus:       { image: milvusdb/milvus:latest }
+  rocketmq:     { image: apache/rocketmq:5.3.1 }
+  nacos:        { image: nacos/nacos-server:v2.4.0, environment: [MODE=standalone] }
+
+  # ---- 两个缩微集群（集群 A / 集群 B，验证 §7.4 跨集群放置/失联/控制指令）----
+  cluster-a-dsh-0:     { image: lumo/dsh-node:dev }      # 阶段 3 填充
+  cluster-a-dsh-1:     { image: lumo/dsh-node:dev }
+  cluster-b-dsh-0:     { image: lumo/dsh-node:dev }
+  cluster-b-dsh-1:     { image: lumo/dsh-node:dev }
+
+  # ---- 自研 Go 服务：多实例 ----
+  scheduler-0:   { image: lumo/scheduler:dev, command: ["--leader"] }   # N1: 验证 leader 选举
+  scheduler-1:   { image: lumo/scheduler:dev, command: ["--follower"] }
+  collaborator-0: { image: lumo/collaborator:dev }                      # §5.4.7.4: 归属转移
+  collaborator-1: { image: lumo/collaborator:dev }
