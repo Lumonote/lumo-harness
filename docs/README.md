@@ -1,0 +1,110 @@
+# DeepSeek Harness 分布式智能体平台 · 设计文档
+
+> **一句话**：在开源 [`dsh`](https://github.com/deepseek-ai/deepseek-harness)（Cordis 驱动的「一切皆插件」智能体框架）之上，**零侵入地**构建组件化、可分发、多智能体协同的分布式平台（Agent Capability PaaS）。
+
+> ## ⛔ 第一铁律
+> **严格不改 dsh 源码。** 全部能力只经 dsh 原生扩展点实现：Cordis plugin / bundle / `cordis.patch.yml` / seam / event / profile。dsh 始终以 npm 依赖引入，**绝不 fork / vendor / monkey-patch**。
+> **验证判据**：升级 dsh 版本无需 rebase 任何补丁；删除本平台全部代码后，dsh 仍可原样独立运行。
+
+---
+
+## 一、文档地图（共 3 篇）
+
+| 文档 | 内容 | 何时读 |
+|------|------|--------|
+| **[`architecture.md`](./architecture.md)** | **唯一权威技术规范**（§0–§15）：决策快照、约束、dsh 原生机制、分层与三平面、三大核心机制、数据层（含向量检索 §5.4 与知识库共享编辑 §5.4.7）、控制面、调度面（含多集群调度监控 §7.4）、协同面（含共享执行控制 §8.4）、连接器与 RBAC、**项目与协作工作区（§11.1，产品三入口：项目/专家·技能·连接器/自动化）**、网关与语言、选型总表、术语字典、20 条硬规矩 | 需要任何设计结论时 —— **以本篇为准** |
+| **[`roadmap.md`](./roadmap.md)** | 实施蓝图与端到端流程（§16–§17）：仓库布局、P0–P4 构建顺序、MVP 建议、五类端到端流程串联验证（含共享编辑 + 多集群监控） | 规划排期与验收时 |
+| **[`design-review.md`](./design-review.md)** | 独立评审意见：架构 / 技术选型 / 业务产品三维度，**5 条 P0 风险** + 对新增章节的评审 + 替代落地顺序 + 待补章节 | **实施前必读** |
+
+## 二、阅读路径
+
+| 目的 | 路径 |
+|------|------|
+| **快速对齐全局**（30 分钟） | `architecture` §0 决策快照 → §3 分层与三平面 → §15 二十条硬规矩 |
+| **实施前风险对齐** | `design-review` 第一章（5 条 P0），再回看 `architecture` 对应章节 |
+| **准备落地排期** | `roadmap` §16 **并读** `design-review` §5.2（两种顺序，见下方决策状态） |
+| **查名词边界** | `architecture` §14 术语精确定义 |
+| **查选型理由** | `architecture` §13 选型总表（含已否决备选） |
+| **理解 dsh 能给什么** | `architecture` §2 dsh 原生机制 → 上游 `deepseek-harness/docs/architecture.md`、`capability-seams.md`、`cordis-primer.md`（**只读**） |
+
+## 三、最终技术栈一览
+
+```text
+内核:        dsh (Cordis) — 零侵入
+注册/配置:   Nacos（收敛 etcd + NATS + ConfigDistributor）
+消息/A2A:    RocketMQ（事务/延时/幂等）
+策略/凭证:   OPA (Rego) / Vault
+可观测:      OTel + Prometheus + Grafana + Loki
+编排:        Kubernetes + Helm
+数据:        PostgreSQL(OLTP/主库) · Doris(OLAP) · Nebula(图/血缘) · Milvus(向量/RAG 召回)
+             · MinIO(对象存储:日志冷层/制品/Milvus 后端) · Redis Cluster(热/限流) · TiDB/CRDB(联邦,待决)
+知识库:      图 + 向量双 seam —— ctx.knowledge.graph(Nebula) + ctx.knowledge.vector(Milvus)
+推理:        dsh 原生 ctx.llm + 批处理网关
+网关:        全栈 Go 自研（边缘/LLM/连接器/终端 + 东西向 Seam Proxy），无 APISIX/Envoy
+语言:        统一 Go 1.22+（Rust 仅局部热点）
+协同多端:    React/TS 终端 + 复制式 SessionEvent 日志事件汇
+```
+
+## 三·补、部署形态
+
+| 形态 | 载体 | 组成 | 用途 |
+|------|------|------|------|
+| **Local-lite** | 本地（1 二进制 + 1 PG 容器） | PG（含 pgvector）+ 进程内队列/缓存 + 本地文件 | 日常开发、组件调试、CI 快速用例 |
+| **Standalone** | 本地 Docker / 生产单机 | 同引擎单节点：PG·Redis·MinIO·Milvus·RocketMQ·Nacos | 私有化小规模、POC 转正 |
+| **Cluster** | 本地 Docker（缩微）/ 生产 K8s | 完整分布式；**本地缩微 = 自研服务多实例 + 中间件单实例** | 生产；**本地用于调试分布式行为与故障注入** |
+
+- **形态 × 载体是两轴**：本地同样可跑 Standalone 与 Cluster 拓扑（`deploy/compose.*.yml`），同一套镜像与应用配置，只换编排清单。
+- **迁移界线**：Local-lite → Standalone 是**重装**（数据一次性）；Standalone → Cluster 是**单向在线升级**（`architecture` §13.2.7）。
+- **能力缺失显式拒绝**：Local-lite 无 OLAP/图能力时 seam 返回 `CapabilityUnavailable`，**不得用 PG 模拟**。
+
+详见 `architecture` §13.2。
+
+## 四、决策状态
+
+### 已定案（不再讨论替代方案）
+
+> 评审中原有的「改用其它产品／先用小的顶一顶」类建议已按决策清除，仅保留「怎么做好」的要求。
+
+| 议题 | 决策 | 随之而来的义务 |
+|------|------|---------------|
+| 向量检索 | **Milvus**（`ctx.knowledge.vector`） | `architecture` §5.4 完整设计；`review` T6 四项义务（依赖边界封死 / Provider 层 realm 强制过滤 / 向量–源一致性 / embedding 版本化） |
+| 对象存储 | **MinIO**（`ctx.datastore.object`） | 桶按 realm 隔离、生命周期分级、纠删码多节点部署 |
+| 网关 | **全栈 Go 自研**（边缘/LLM/连接器/终端 + Seam Proxy） | `review` R3 的能力清单（抗攻击/弹性/证书/热加载原子性）+ **压测、SLO、故障演练三项上线门槛** |
+| 数据层构成 | **PG + Doris + Nebula + Milvus + MinIO + Redis** | `review` T3 的运维准入条件（专职人力 / 容量基线 / 备份恢复演练 / schema 演进 / 降级预案） |
+
+### 仍待拍板
+
+| # | 议题 | 待决内容 | 出处 |
+|---|------|---------|------|
+| 1 | **落地首切顺序** | 规范为「Nacos → 自研网关 → 连接器 + DAG」；评审主张**先单节点垂直切片**（一个真实业务组件 + 知识库 seam + 计量）验证产品假设，再上分布式控制面。**技术栈一致，分歧只在顺序。** | `roadmap` §16.3 vs `review` §5.2 |
+| 2 | **是否引入 TiDB/CRDB** | 规范自标待决；视多集群联邦需求。**后加远比先加后拆便宜**，建议保持待决 | `architecture` §13.3 |
+| 3 | **项目与预算树的关系** | 项目是「归因维度」还是「并行预算树」？前者简单但项目无独立预算，后者表达力强但需双树原子扣减。**评审倾向后者**（企业按项目立项拨预算），需拍板并写进 §6.4 | `review` N3 |
+| 4 | **§6.1 manifest 存储写法需修订** | MinIO 加入后制品职责已三分：二进制→MinIO（sha256 内容寻址）、元数据+签名+依赖图→PG、灰度规则→Nacos Config。§6.1「manifest 存 `dataId={artifact}.yaml`」的措辞应据此更新 | `review` T1 |
+
+## 五、待补章节（当前完全缺失）
+
+`design-review` §5.3 列出 5 项规范尚未覆盖、但落地前必须补齐的内容：**安全模型/威胁模型**（尤其提示注入）、**测试与验证策略**、**故障模式目录与降级预案**、**SLO 与容量模型**（全篇无任何数字）、**迁移与回滚**。
+
+## 六、历史文档
+
+早期 15 篇 addendum 已于重构时删除——其内容 **100% 已并入 `architecture.md`**，保留只会造成口径冲突（早期几篇仍含 `etcd/NATS/ConfigDistributor/APISIX/Envoy` 等**已被推翻**的写法）。
+
+如需查阅原文，从 git 历史取回：`git show 798c37c:docs/<原文件名>`
+
+| 原文档 | 主题 | 现对应章节 |
+|--------|------|-----------|
+| `deepseek_harness_distributed_design.md` | 总体架构 | `architecture` §1–§4 |
+| `deepseek_harness_data_layer.md` | 数据层 | §5 |
+| `deepseek_harness_agent_scheduling.md` | 调度面 | §6.2、§7 |
+| `deepseek_harness_async_multiterminal.md` | 异步 + 多端 | §8.1、§8.2 |
+| `deepseek_harness_registry_bigdata_flow.md` | 注册 + 流程化 | §6.1、§9 |
+| `deepseek_harness_connectors_rbac_distribution.md` | 连接器 + RBAC + 分发 | §10 |
+| `deepseek_harness_tech_architecture.md` | 技术架构总纲 | 全文整合 |
+| `deepseek_harness_nacos_rocketmq_a2a.md` | Nacos + 自动安装 + RocketMQ | §6.1、§6.5、§8.3 |
+| `deepseek_harness_token_metering.md` | Token 计量·归因·配额 | §6.4 |
+| `deepseek_harness_user_flow_distribution.md` | 用户流程 + 定向分发 | §11 |
+| `deepseek_harness_tech_definitions.md` | 术语精确定义 | §14 |
+| `deepseek_harness_tech_selection.md` | 技术架构选型 | §13 |
+| `deepseek_harness_gateway_tech_selection.md` | 网关技术选型（原含 APISIX/Envoy） | §12（已修订为全自研） |
+| `deepseek_harness_lang_selection.md` | 自研语言选型 | §12.3 |
+| `deepseek_harness_gateway_no_apisix.md` | 网关全自研修订 | §12 |

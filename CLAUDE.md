@@ -54,7 +54,7 @@ A **design-specification repository**, not a code repository. It holds the techn
 turning the open-source [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)
 into a distributed agent platform (`deepseek-harnes 分布式集群改造`). There is no build system, no
 test suite, and no application source at this level — the content is `docs/` plus
-`README.md`/`LICENSE`. Only the latter two are committed so far; `docs/` is still untracked.
+`README.md`/`LICENSE`.
 
 Two trees, very different rules:
 
@@ -69,27 +69,31 @@ there to show up in `git status`.
 
 ## Documentation authority — read this before citing any doc
 
-`docs/deepseek_harness_architecture_v2.md` is the **single authoritative spec**. It is the
-consolidated, internally consistent V2 that merged the main architecture doc plus 15 addenda.
+`docs/` holds exactly four files. Start at `README.md`; cite `architecture.md` for design decisions.
 
-The other 16 files are **historical evolution snapshots kept for reference only**. Several still
-carry decisions that V2 explicitly reversed. Treat these as dead terminology — if you find them in
-an old doc, do not propagate them:
-
-| Reverted | Current decision |
+| File | Role |
 |---|---|
-| etcd + Redis heartbeat + `ConfigDistributor` | **Nacos** (naming + config hot-push + namespace federation) |
-| NATS JetStream | **RocketMQ** (transactional/delayed messages, A2A envelope, idempotency) |
-| APISIX edge + Envoy east-west | **Full-stack self-built Go gateways**, zero external gateway middleware |
-| Mixed Node/TS + Go for platform services | **Go 1.22+ everywhere** (Rust only for local hot spots) |
+| `docs/README.md` | Entry point: doc map, reading paths, tech stack, **待决事项** (open decisions), 待补章节 |
+| `docs/architecture.md` | **The single authoritative spec** (§0–§15). Every design conclusion comes from here |
+| `docs/roadmap.md` | Implementation blueprint + end-to-end flows (§16–§17, original numbering preserved) |
+| `docs/design-review.md` | Independent review: 5 P0 risks, an alternative sequencing, 5 missing sections |
 
-`docs/INDEX.md` maps each legacy doc to its V2 section and records its status; V2 §18 carries the
-same mapping and the two agree.
+Section numbers are continuous across `architecture.md` (§0–§15) and `roadmap.md` (§16–§17), so a
+bare "§16.3" means roadmap. Preserve that numbering — several cross-references depend on it.
 
-Every one of the 15 legacy docs opens with a banner marking it superseded and naming the V2 section
-that replaced it. Keep that invariant when adding or moving files. V2 itself has been checked and
-contains **no** leaked reverted terminology — its ~18 mentions of `etcd`/`NATS`/`APISIX`/`Envoy` all
-sit in "rejected alternative" columns or explicit 已推翻 statements, which is correct and should stay.
+**`architecture.md` and `design-review.md` disagree on four live decisions** (gateway build scope,
+first delivery slice, when to add datastores, artifact registry). `README.md` §四 tabulates them.
+Do not silently pick a side: if a task touches one, surface that it is undecided.
+
+The 15 historical addenda were deleted during the restructure — their content is 100% merged into
+`architecture.md`, and keeping them only created conflicting terminology. They are recoverable via
+`git show 798c37c:docs/<name>`. If you need to cite one, cite the merged section instead.
+
+Terminology that was **reversed** and must never be propagated as current: `etcd` + Redis heartbeat
++ `ConfigDistributor` → **Nacos**; NATS JetStream → **RocketMQ**; APISIX/Envoy → **self-built Go
+gateways**; mixed Node/TS + Go → **Go 1.22+**. `architecture.md` still contains these words ~18
+times, all correctly inside "rejected alternative" columns or explicit 已推翻 statements — that is
+intended and should stay.
 
 Docs are written in Chinese. Write new design docs in Chinese to match.
 

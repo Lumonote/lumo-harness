@@ -1,5 +1,11 @@
 
 deepseek-harness/
+.idea/
+.omc/
+deepseek-harness/.omc/
+docs/.omc/
+deepseek-harness/.idea/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
