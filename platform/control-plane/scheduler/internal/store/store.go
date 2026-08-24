@@ -6,11 +6,14 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/lumo-harness/platform/scheduler/internal/dispatch"
+	"github.com/lumo-harness/platform/scheduler/internal/domain"
 )
 
 // nowMS 库端当前时刻（毫秒）。所有租约与时间比较都走它，不用节点本地时钟。
@@ -116,3 +119,56 @@ func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 
 // Close 关闭连接池。
 func (s *Store) Close() { s.pool.Close() }
+
+// Acquire 建租 / 续租 / 接管三种情形一条语句完成（session-log 同形）。
+//
+// 续租不换 token（换则持有者自己的在途写会被自己的新 token 判为过期），
+// 易主才 +1。返回 ErrNotAcquired 表示他人持有未过期租约——调用方不应等待。
+func (s *Store) Acquire(ctx context.Context, holder string, ttlMs int64) (*domain.Lease, error) {
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO scheduler_leader_lease (id, holder, fencing_token, expires_at)
+		VALUES (1, $1, 1, `+nowMS+` + $2)
+		ON CONFLICT (id) DO UPDATE SET
+			holder = EXCLUDED.holder,
+			fencing_token = CASE WHEN scheduler_leader_lease.holder = EXCLUDED.holder
+				THEN scheduler_leader_lease.fencing_token
+				ELSE scheduler_leader_lease.fencing_token + 1 END,
+			expires_at = EXCLUDED.expires_at
+		WHERE scheduler_leader_lease.holder = EXCLUDED.holder
+		   OR scheduler_leader_lease.expires_at < `+nowMS+`
+		RETURNING holder, fencing_token, expires_at`,
+		holder, ttlMs)
+	var l domain.Lease
+	if err := row.Scan(&l.Holder, &l.FencingToken, &l.ExpiresAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrNotAcquired
+		}
+		return nil, fmt.Errorf("scheduler: acquire 失败: %w", err)
+	}
+	return &l, nil
+}
+
+// Release 令租约立即过期而非删行：token 高水位不回落，删行会让下一个
+// 持有者从 1 重新开始，旧持有者的过期令牌反而「复活」（spec §3 不变式 3）。
+func (s *Store) Release(ctx context.Context, holder string) error {
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE scheduler_leader_lease SET expires_at = 0
+		WHERE id = 1 AND holder = $1`, holder); err != nil {
+		return fmt.Errorf("scheduler: release 失败: %w", err)
+	}
+	return nil
+}
+
+// CurrentLease 读取当前租约；无持有者（expires_at=0 空租约哨兵）返回 nil。
+func (s *Store) CurrentLease(ctx context.Context) (*domain.Lease, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT holder, fencing_token, expires_at FROM scheduler_leader_lease WHERE id = 1`)
+	var l domain.Lease
+	if err := row.Scan(&l.Holder, &l.FencingToken, &l.ExpiresAt); err != nil {
+		return nil, fmt.Errorf("scheduler: 读租约失败: %w", err)
+	}
+	if l.ExpiresAt == 0 {
+		return nil, nil
+	}
+	return &l, nil
+}
