@@ -44,3 +44,13 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 	t.Fatal("条件在超时内未满足")
 }
+
+// rowCount 单值计数断言辅助。
+func rowCount(t *testing.T, st *store.Store, query string) int {
+	t.Helper()
+	var n int
+	if err := st.Pool().QueryRow(context.Background(), query).Scan(&n); err != nil {
+		t.Fatalf("计数失败: %v", err)
+	}
+	return n
+}
