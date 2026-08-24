@@ -75,6 +75,8 @@ export async function assertControlContract(
   // 审计全量可回溯：c1（授权）、c2（拒绝）各一条，无重复
   const log = await seam.audit('s1')
   assert(log.length === 2, '幂等去重：同 correlationId 仅一条审计（得 ' + log.length + '）')
-  assert(log.filter((e) => e.command === 'pause').length === 1, '同指令重放仅一次生效')
+  // 按 correlationId 过滤，不能按 command 过滤：bob 那条被拒记录的 command
+  // 同样是 'pause'（它是 {...req} 只覆写了 actor/role/correlationId）。
+  assert(log.filter((e) => e.requestId === 'c1').length === 1, '同指令重放仅一次生效')
   assert(log.some((e) => e.actor === 'bob' && !e.allowed), '被拒尝试也必须入审计')
 }
