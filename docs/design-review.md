@@ -97,6 +97,16 @@ V2 有 OPA / Vault / 签名 / 脱敏等控制，但**没有威胁模型章节**�
 - **高敏感外部写默认 HITL**（§10.3 已有此意，应提升为安全驱动的显式规则）。
 - 其余待补威胁：LLM 生成 SQL/Cypher 注入（§5.3.4 部分覆盖）、A2A 的 agent 间信任、注册表投毒、经 Seam Proxy 的混淆代理（confused deputy）。
 
+> **状态（2026-08-24）**：安全模型章节已补为 `architecture.md` **§18**，结构性防护三件套落地于 `platform/dsh-plugins/provenance`（Cordis 插件，零侵入）。本条建议的前三项闭环，第四项分派。
+>
+> - **来源标记闭环**：四档（system/user/internal/external），判据是「谁能写这段字节」；档位由装配层声明**不由工具自报**，未声明按 external 处理（fail closed）。`turnTaint` / `taintSources` / `toolEffect` 已作为 OPA 策略输入组装（§6.3 复用同一挂点，本插件只供事实不做裁决）。
+> - **每 turn 能力封闭闭环**：副作用三级与来源档位正交；受污染 turn 内只读放行、平台内写放行留审计、出平台写转 HITL。
+> - **敏感外部写 HITL 闭环**：复用 §10.3 与 `control` 插件既有审批通道，未新造机制。**取舍写在 §18.2：转人工而非禁止，代价是依赖人真的会看**，故审批疲劳被列为 SLO 观测项（HITL 通过率趋近 100% 即视为该闸失效）。
+> - **两条不变式**：turn 号取 dsh 原生 `turn/start`（不数 `user/message`——它含 `agent.inject()` 合成消息）；污点从 SessionEvent 日志重算不存进程内存（否则跨节点 resume 洗白污点，而攻击者可主动逼迁移）。后者附带修正了 `recovery` 插件（R2 交付）的同源缺陷：其 `countTurns` 数 `user/message`，turn 中途一次 inject 就让幂等键失配，**保护恰在其存在意义上静默失效**。
+> - **未闭环（§18.4 逐条列明）**：工作区文件按 `internal` 处理，被投毒的仓库文件可绕过；SQL/Cypher 注入归 §5.3.4；A2A 对端消息随 §8.3；注册表投毒归 §6.5；混淆代理随 R1 seam 分级表；**跨节点 resume 的真机 e2e 待补**——现有验证止于日志层等价性，未在 `compose.cluster.yml` 跑真实 resume。
+>
+> 核验：`pnpm typecheck` 无错，`pnpm vitest run` 36 项全绿（判决矩阵、分类器 fail-closed、污点单调与 turn 级重置、resume 等价性、recovery turn 口径回归）。设计说明见 `docs/superpowers/specs/2026-08-24-provenance-design.md`，实现计划见 `docs/superpowers/plans/2026-08-24-provenance.md`。
+
 ---
 
 ## 二、架构优化建议
@@ -367,7 +377,7 @@ realm + RBAC + ABAC + OPA 骨架合理。面向真实企业销售还缺：审批
 | P1 | N7 | 部署形态三前提：seam 契约测试、`if(standalone)` CI 门禁、缩微集群故障注入进 CI | §13.2 | |
 | P2 | N5 | CRDT 与复制日志两套「日志+快照」并存，须声明分工边界 | §5.4.7.4/§4.2 | |
 | P2 | N6 | 多集群数据驻留仅一句话，须提升为项目强约束并在三处强制 | §11.1/§7.4 | |
-| **P0** | R5 | 提示注入威胁完全缺失，需安全模型章节 | 全篇 | |
+| **P0** | R5 | 提示注入威胁完全缺失，需安全模型章节 | 全篇 | 安全模型补为 §18；来源标记+每turn能力封闭+出平台写 HITL 三件套已落地（provenance 插件）；工作区文件与真机 resume e2e 未覆盖（§18.4） |
 | P1 | A1 | 复制日志一致性自相矛盾，写路径需强一致 + fencing | §4.2/§13.1 | |
 | P1 | A3 | Redis 承载信箱与「持久」承诺冲突，需 TTL + 死信 + 对账 | §5.2/§8.1 | |
 | P1 | A5 | 零侵入可行性需逐项核验（跨节点 fork、计量旁路） | §4.2/§6.4 | |
