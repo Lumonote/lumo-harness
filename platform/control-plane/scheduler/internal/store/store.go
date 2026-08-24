@@ -468,3 +468,44 @@ func (s *Store) ClaimDispatch(ctx context.Context, nodeID string, limit int) ([]
 	}
 	return out, rows.Err()
 }
+
+// ReconcileEntry 集群本地放置记录（降级对账，占位语义）。
+type ReconcileEntry struct {
+	EntryID   string `json:"entry_id"`
+	TaskID    string `json:"task_id"`
+	ClusterID string `json:"cluster_id"`
+	State     string `json:"state"`
+}
+
+// Reconcile 对账占位语义（spec §6）：接收 + 去重 + 落账，需 leader。
+// 多集群的合并裁决逻辑留给 §7.4 集群 Scheduler 交付时实现——接口形状现在定死。
+func (s *Store) Reconcile(ctx context.Context, lease *domain.Lease, entries []ReconcileEntry) (int, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("scheduler: 开启事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := checkFencing(ctx, tx, lease); err != nil {
+		return 0, err
+	}
+	inserted := 0
+	for _, e := range entries {
+		if e.EntryID == "" {
+			continue
+		}
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO scheduler_reconcile_ledger (entry_id, task_id, cluster_id, state, recorded_at)
+			VALUES ($1, $2, $3, $4, `+nowMS+`)
+			ON CONFLICT (entry_id) DO NOTHING`,
+			e.EntryID, e.TaskID, e.ClusterID, e.State)
+		if err != nil {
+			return 0, fmt.Errorf("scheduler: 对账落账失败: %w", err)
+		}
+		inserted += int(tag.RowsAffected())
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("scheduler: 提交对账失败: %w", err)
+	}
+	return inserted, nil
+}
