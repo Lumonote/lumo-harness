@@ -71,6 +71,7 @@
 | 对象存储 | **MinIO**（`ctx.datastore.object`） | 桶按 realm 隔离、生命周期分级、纠删码多节点部署 |
 | 网关 | **全栈 Go 自研**（边缘/LLM/连接器/终端 + Seam Proxy） | `review` R3 的能力清单（抗攻击/弹性/证书/热加载原子性）+ **压测、SLO、故障演练三项上线门槛** |
 | 数据层构成 | **PG + Doris + Nebula + Milvus + MinIO + Redis** | `review` T3 的运维准入条件（专职人力 / 容量基线 / 备份恢复演练 / schema 演进 / 降级预案） |
+| 制品注册表 | **职责三分：原始字节→内容寻址对象存储、元数据/签名/依赖图→PG、灰度规则→Nacos**。硬约束是 **PG 是索引不是真相源**——执法只认按 digest 取回的原始字节，PG 元数据不得作为任何执法判断的输入 | `architecture` §6.1 已修订；实现见 `platform/control-plane/registry`，设计说明 [`specs/2026-08-24-registry-design.md`](./superpowers/specs/2026-08-24-registry-design.md)；待补 provisioner、OPA scope 评估、密钥轮换与吊销 |
 
 ### 仍待拍板
 
@@ -79,7 +80,6 @@
 | 1 | **落地首切顺序** | 规范为「Nacos → 自研网关 → 连接器 + DAG」；评审主张**先单节点垂直切片**（一个真实业务组件 + 知识库 seam + 计量）验证产品假设，再上分布式控制面。**技术栈一致，分歧只在顺序。** | `roadmap` §16.3 vs `review` §5.2 |
 | 2 | **是否引入 TiDB/CRDB** | 规范自标待决；视多集群联邦需求。**后加远比先加后拆便宜**，建议保持待决 | `architecture` §13.3 |
 | 3 | **项目与预算树的关系** | 项目是「归因维度」还是「并行预算树」？前者简单但项目无独立预算，后者表达力强但需双树原子扣减。**评审倾向后者**（企业按项目立项拨预算），需拍板并写进 §6.4 | `review` N3 |
-| 4 | **§6.1 manifest 存储写法需修订** | MinIO 加入后制品职责已三分：二进制→MinIO（sha256 内容寻址）、元数据+签名+依赖图→PG、灰度规则→Nacos Config。§6.1「manifest 存 `dataId={artifact}.yaml`」的措辞应据此更新 | `review` T1 |
 
 ## 五、待补章节（当前完全缺失）
 

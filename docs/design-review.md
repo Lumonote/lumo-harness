@@ -173,6 +173,15 @@ Nebula 按分区 Raft，**跨分区无原子性、无多语句事务**。标注�
 
 （关切 1「nacos-sdk-go 相对二线」不改变选型，但应在**发现路径**上做好降级：Nacos 不可用时节点用本地缓存的端点表继续服务，不得因注册中心抖动导致数据面停摆——纳入待补的故障模式目录。）
 
+> **状态（2026-08-24，阶段 3 第二项交付）**：`platform/control-plane/registry`（Go 独立服务）已落地，五类 manifest schema 在 `platform/shared/manifests`。职责三分照本条采纳：原始字节进内容寻址对象存储，元数据/签名/依赖图进 PG，灰度规则归 Nacos。
+>
+> - **一处实质分歧已记录**：本条原文「**签名与信任链在 PG 校验**」被修正为「校验对象是从对象存储按 digest 取回的原始字节，PG 全程不参与执法」。理由：在 PG 校验会让 registry 数据库本身成为信任根——攻击者写穿库即可把 `scopes: [kb:query]` 改成 `[data:write:*]`，而签名覆盖的字节没动过，验签照样通过。这是典型的 parser differential：签名覆盖的对象与执法依赖的对象不是同一个。验收测试 `TestTamperedMetadataDoesNotAffectEnforcement` 就是这条修正的判据——直接 `UPDATE registry_artifacts SET scopes=...` 后，生成的安装计划仍只带原始 scope。信任根（发布者公钥 + scope 上限）同理不入库，从 `REGISTRY_TRUST_FILE` 加载。
+> - **两处超出本条的补充**：① **身份断言**——重解析出的 `name`/`version` 必须等于请求的那个，否则 `ErrIdentityMismatch`；没有它，攻击者只需把制品 A 的 `digest`+`sig` 换成制品 B 的（两者都是合法签名，都验得过）就能绕过上面全部论证。② **scope 上限在 plan 阶段重查**——发布时查过一次不够，信任表可能事后收紧（发布者被降权），只在发布时查等于既得权限永久有效。
+> - **偏离记账**：`registry_rollouts` 灰度规则本期存 PG 而非 Nacos Config，与 N1 用 PG 租约同因——Nacos 尚未进部署拓扑。Nacos 进拓扑后按 `ReleaseChannel` 接口切换，**这不是对职责三分的否定，是排期上的临时顶替**。
+> - **未做**：provisioner（真正的安装与 reconcile）、OPA 对 scope 的评估、私钥轮换与吊销。
+>
+> 核验：单测 + 对活 PG / 活 MinIO 的集成测试全绿；判据「篡改 PG 不改变执法」与「篡改对象存储字节 → 验签失败」均在活库上实跑。设计说明见 `docs/superpowers/specs/2026-08-24-registry-design.md`。
+
 ### T2【P1】缺少持久化工作流引擎层 —— §8.1 + §9.2
 
 RocketMQ 的事务消息与延时消息理由**成立**，§8.3「扣配额 + 发任务」原子性是真实收益。
@@ -249,6 +258,10 @@ RocketMQ 的事务消息与延时消息理由**成立**，§8.3「扣配额 + �
 > **决策更新**：控制台已定为「项目 / 专家·技能·连接器 / 自动化」三入口（§11.1），**五类保持**，连接器独立成类与产品结构一致。原「四类可能才是诚实的数量」建议**被该决策覆盖**，不再讨论——但判定树（§4.3）与「连接器=外部 Provider 的组件」的边界定义依然有效，用于避免同类重复注册。
 
 **取代原「四类」建议，新增一个更值得做的分类检查**：按产品入口（项目 / 能力资产 / 自动化）看，四类制品+流程是否与三类入口一一对应——专家、技能、连接器归「能力资产」，流程归「自动化」，组件/知识库/会话归「项目」。**若任何一件制品在两个入口都能放，说明某处边界仍未划清。**
+
+> **状态（2026-08-24，随 T1 一并交付）**：判定树已写入 `architecture.md` §4.3，分类依据取本条建议的**创作者与保证**，不取运行时引擎；智能体 Agent 明确不进树（它是四类的消费者）；上一段的入口边界自检也一并写入，规定随每次 schema 变更执行。
+>
+> 五类 JSON Schema 落 `platform/shared/manifests/{component,skill,agent,connector,flow}.schema.json`，均 `additionalProperties: false`。`manifest_test.go` 的 `TestSchemaParity` 逐类比对 schema 的 `required` 与 Go 侧 `RequiredFields`，防止 schema 与解析器各说各话——这正是本条担心的「分类混乱」在实现层的对应物。
 
 ### B2【P1】「计量只在 ctx.llm 单截面」≠ 成本归因完整 —— §6.4
 
@@ -382,11 +395,11 @@ realm + RBAC + ABAC + OPA 骨架合理。面向真实企业销售还缺：审批
 | P1 | A3 | Redis 承载信箱与「持久」承诺冲突，需 TTL + 死信 + 对账 | §5.2/§8.1 | |
 | P1 | A5 | 零侵入可行性需逐项核验（跨节点 fork、计量旁路） | §4.2/§6.4 | |
 | P1 | A2 | Nebula 一致性表述需修正为分区内线性一致 | §5.1 | |
-| P1 | T1 | Nacos 不适合当制品库，制品另建内容寻址 + 签名registry | §6.1 | |
+| P1 | T1 | Nacos 不适合当制品库，制品另建内容寻址 + 签名registry | §6.1 | 职责三分已落定，`platform/control-plane/registry` 已交付；**本条「签名与信任链在 PG 校验」被修正为「只认对象存储原始字节，PG 不参与执法」**（PG 若参与即成信任根）；`registry_rollouts` 暂存 PG 顶 Nacos（偏离记账）；provisioner/OPA/密钥轮换未做 |
 | P1 | T2 | 缺持久化工作流层，评估 Temporal | §8.1/§9.2 | |
 | P1 | T3 | 全量数据层的运维准入条件（人力/基线/备份演练/schema 演进/降级预案）须先建立 | §5 | |
 | P1 | T6 | Milvus/MinIO 已采纳：封死 etcd/Pulsar 边界、Provider 层行级授权、向量-源一致性、embedding 版本化 | §5.1 | |
-| P1 | B1 | 五类制品判定树缺失，连接器是否独立成类存疑 | §4.3/§14 | |
+| P1 | B1 | 五类制品判定树缺失，连接器是否独立成类存疑 | §4.3/§14 | 判定树已写入 §4.3（按创作者与保证分类，Agent 不进树）；五类 schema 落 `platform/shared/manifests`，`TestSchemaParity` 守住 schema 与解析器必填字段一致 |
 | P1 | B2 | 成本归因不完整，需并行成本事件流 + cost_type | §6.4 | |
 | P2 | A4 / T4 / T5 / B3 / B4 / B5 | 见前文 | — | |
 

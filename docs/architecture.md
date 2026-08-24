@@ -160,6 +160,20 @@ Agent ──ctx.tools/query──▶ Seam Proxy ──gRPC──▶ Knowledge Pr
 | 连接器 Connector | 外部系统桥（API/MCP/SaaS/消息） | 注册进 `ctx.tools`，走 ConnectorGateway |
 | 流程 Flow | DAG 编排（用户自定义或通用） | 经 FlowEngine 执行，引用算子/组件 |
 
+**判定树（做一件新东西时，它该归哪类）：**
+
+```text
+这件东西改变了什么？
+├─ 只塑造模型行为（prompt / 工具选择 / 策略）  → 技能 Skill
+├─ 需要写新代码，提供带类型化 I/O 的服务契约   → 组件 Component
+│   └─ 且该契约的另一端是外部系统              → 连接器 Connector
+└─ 只连接既有件，不含新代码                    → 流程 Flow
+```
+
+分类依据是**创作者与保证**，不是运行时引擎。Cordis 挂载还是 FlowEngine 执行属于实现细节，泄漏进产品分类会让开发者拿到需求时没有判定程序可走。智能体 Agent 不进这棵树：它是引用的集合 + 角色定义，是上述四类的消费者而非并列项。
+
+边界自检：一件制品若在「项目」与「能力资产 / 自动化」两个入口都放得下，说明边界没划清，需回到这棵树重判。此检查随每次 schema 变更执行。
+
 **Component Manifest 示例：**
 
 ```yaml
@@ -392,8 +406,20 @@ query ──▶ ctx.knowledge.vector: top-k 语义召回(带 realm 过滤)
 |----------|------------|
 | 节点/实例 | Naming：`service=dsh-node`，`metadata={nodeRole, capabilities:[doris,nebula,gpu]}` |
 | 能力/Seam | instance `metadata.seams`（Scheduler/SeamProxy 经 Naming 发现） |
-| 制品(组件/技能/智能体/MCP) | Naming：`component.{name}`/`agent.{name}`；Config：`dataId={artifact}.yaml` 存 manifest/版本/签名/依赖 |
+| 制品(组件/技能/智能体/MCP) | Naming：`component.{name}`/`agent.{name}`；manifest 本体不进 Nacos，见下方职责三分 |
 | 算子/流程 | 同上，进 Operator/Flow Catalog |
+
+**制品存储的职责三分**（修订：原文写「Config：`dataId={artifact}.yaml` 存 manifest/版本/签名/依赖」，YAML 与「Nacos 存 manifest」两处均已否掉）：
+
+| 内容 | 落处 | 理由 |
+|---|---|---|
+| 制品原始字节（JSON，被签名覆盖） | 内容寻址对象存储（sha256，MinIO） | 执法唯一依据；内容寻址使重传天然幂等 |
+| 元数据 / 签名 / 依赖图 | PostgreSQL | 供查询与依赖遍历，**是索引不是真相源** |
+| 灰度规则 | Nacos Config（本期以 PG `registry_rollouts` 顶，见 `design-review.md` T1 偏离记账） | 需热推与订阅语义 |
+
+**硬约束**：安装端执法只信按 digest 从对象存储取回的原始字节——重新解析它，重新验签，重新核对身份与 scope 上限。PG 里的 `scopes`/`requires`/依赖行不得作为任何执法判断的输入，它们只服务于查询与展示。否则写穿 registry 数据库就等于换掉信任根：把 `kb:query` 改成 `data:write:*` 而签名照样验得过（parser differential）。
+
+manifest 格式为 JSON 而非 YAML：签名覆盖的是上传的原始字节，不做规范化重序列化；而 YAML 的解析分歧（重复键取值、Norway problem、锚点展开）正是这里要防的攻击面。YAML 只作为编写期语法糖，不上线。
 
 - 节点身份走 dsh `CredentialKey`，**realm ↔ Nacos namespace** 映射做租户隔离。
 - 配置分发：bundle 配置、`cordis.patch.yml` 等价物、灰度规则、OPA bundle 全存 Nacos Config，节点 `addListener` 热加载，无需重启。
