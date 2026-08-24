@@ -385,3 +385,86 @@ func (s *Store) GetPlacement(ctx context.Context, taskID string) (domain.Placeme
 	}
 	return p, nil
 }
+
+// PendingTasks 供 drain loop 取排队任务（priority 高者先，同优先级先到先得）。
+func (s *Store) PendingTasks(ctx context.Context, limit int) ([]domain.Task, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT task_id, realm, cluster_id, requires, priority FROM scheduler_tasks
+		WHERE state = 'PENDING' ORDER BY priority DESC, created_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("scheduler: 取排队任务失败: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.Task
+	for rows.Next() {
+		var t domain.Task
+		var requires string
+		if err := rows.Scan(&t.TaskID, &t.Realm, &t.ClusterID, &requires, &t.Priority); err != nil {
+			return nil, fmt.Errorf("scheduler: 扫描排队任务失败: %w", err)
+		}
+		if err := json.Unmarshal([]byte(requires), &t.Requires); err != nil {
+			return nil, fmt.Errorf("scheduler: 解析 requires 失败: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ActiveCounts 每节点活跃放置数（放置规划的槽位输入）。
+func (s *Store) ActiveCounts(ctx context.Context) (map[string]int, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT node_id, count(*) FROM scheduler_tasks
+		WHERE state IN ('PLACED', 'RUNNING') GROUP BY node_id`)
+	if err != nil {
+		return nil, fmt.Errorf("scheduler: 活跃计数失败: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]int)
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("scheduler: 扫描活跃计数失败: %w", err)
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
+// ClaimDispatch 执行节点认领派发给它的信封；claimed_by 置位即被取走（幂等）。
+//
+// 两处刻意为之：① 结果按 id 排序返回——`UPDATE ... RETURNING` 的行序不保证，
+// 而派发队列必须 FIFO，故用 CTE 在外层再排一次；② SKIP LOCKED 让多个节点
+// 并发认领互不阻塞（各取各的行，不会重复投递）。
+func (s *Store) ClaimDispatch(ctx context.Context, nodeID string, limit int) ([]dispatch.Envelope, error) {
+	rows, err := s.pool.Query(ctx, `
+		WITH picked AS (
+			SELECT id FROM scheduler_dispatch_outbox
+			WHERE node_id = $1 AND claimed_by IS NULL
+			ORDER BY id LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		), claimed AS (
+			UPDATE scheduler_dispatch_outbox o
+			SET claimed_by = $1, claimed_at = `+nowMS+`
+			FROM picked WHERE o.id = picked.id
+			RETURNING o.id, o.payload
+		)
+		SELECT payload FROM claimed ORDER BY id`, nodeID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("scheduler: 认领派发失败: %w", err)
+	}
+	defer rows.Close()
+	var out []dispatch.Envelope
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return nil, fmt.Errorf("scheduler: 扫描派发失败: %w", err)
+		}
+		var env dispatch.Envelope
+		if err := json.Unmarshal([]byte(payload), &env); err != nil {
+			return nil, fmt.Errorf("scheduler: 解析派发失败: %w", err)
+		}
+		out = append(out, env)
+	}
+	return out, rows.Err()
+}
