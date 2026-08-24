@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lumo-harness/manifests/skill.schema.json",
+  "title": "Skill 制品清单",
+  "description": "面向模型的能力包（prompt + 工具 + 策略）。判定测试：只塑造模型行为。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "name", "version", "publisher", "scopes"],
+  "properties": {
+    "apiVersion": { "const": "lumo.artifact/v1" },
+    "kind": { "const": "Skill" },
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{2,63}$" },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "publisher": { "type": "string", "minLength": 1 },
+    "scopes": {
+      "type": "array", "minItems": 1,
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*(:[a-z0-9*-]+){1,2}$" }
+    },
+    "requires": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "olap": { "type": "boolean" }, "graph": { "type": "boolean" },
+        "vector": { "type": "boolean" }, "object": { "type": "boolean" },
+        "gpu": { "type": "boolean" }
+      }
+    },
+    "deps": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "version"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{2,63}$" },
+          "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" }
+        }
+      }
+    }
+  }
+}
