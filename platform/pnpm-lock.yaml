@@ -209,6 +209,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: link:../../../deepseek-harness/vendor/schemastery
         version: link:../../../deepseek-harness/vendor/schemastery
+      '@lumo/provenance':
+        specifier: workspace:*
+        version: link:../provenance
       pg:
         specifier: ^8.13.0
         version: 8.23.0

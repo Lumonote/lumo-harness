@@ -8,10 +8,16 @@
  *   - `tools/pre-execute`：**执行前**落写前意图（WAL）；识别重放并按幂等分类裁决
  *   - `tools/post-execute`：落执行结果，把意图从「孤儿」状态解除
  *
- * 幂等键 = (session, turn, tool, argsFingerprint)。turn 取会话日志里 `user/message`
- * 事件的条数——它由日志派生，`seed` 重放后能重建出同一个值，因此跨节点 resume 时
- * 稳定。同一 turn 内以相同参数二次调用非幂等工具，本身就是可疑的重复（如 edit
- * 二次应用会出错），按重放拦截；下一 turn 的同参调用是新意图，正常放行。
+ * 幂等键 = (session, turn, tool, argsFingerprint)。turn 取 dsh 原生 `turn/start`
+ * 事件的 turn 号（`invariant.ts` 强制严格连续），由日志派生，`seed` 重放后能重建出
+ * 同一个值，因此跨节点 resume 时稳定。
+ *
+ * 曾用「数 `user/message` 条数」，那是错的：该事件含 `agent.inject()` 合成消息
+ * （文件变更通知等），turn 中途一次 inject 就让计数 +1，同参重放算出不同的键 →
+ * 不被识别为重放 → 保护恰好在它存在的意义上失效。口径与 provenance 插件共用。
+ *
+ * 同一 turn 内以相同参数二次调用非幂等工具，本身就是可疑的重复（如 edit 二次应用
+ * 会出错），按重放拦截；下一 turn 的同参调用是新意图，正常放行。
  */
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -20,6 +26,8 @@ import type {} from '@deepseek-ai/dsh-tools'
 import { PgRecoveryJournal } from './pg-journal.ts'
 import { IdempotencyClassifier, fingerprintArgs, idempotencyKey } from './classify.ts'
 import type { CallIntent, Idempotency, RecoverySeam } from '../../../shared/seam-contracts/recovery.ts'
+import type { SessionEventLike } from '../../../shared/seam-contracts/provenance.ts'
+import { currentTurn } from '../../provenance/src/taint.ts'
 
 export interface RecoveryConfig {
   connectionString: string
@@ -65,12 +73,14 @@ export function apply(ctx: Context, config: RecoveryConfig): void {
   const pending = new Map<string, string>()
 
   ctx.on('tools/pre-execute', async function (exec, next) {
-    const session = (exec as { agent?: { session?: { id?: string, events?: readonly { type: string }[] } } }).agent?.session
+    const session = (exec as {
+      agent?: { session?: { id?: string; events?: readonly SessionEventLike[] } }
+    }).agent?.session
     const sessionRef = session?.id
     // 无会话上下文（系统内部调用）不记账：它们不属于可 resume 的 turn
     if (!sessionRef) return next()
 
-    const turn = countTurns(session?.events)
+    const turn = currentTurn(session?.events ?? [])
     const toolName = exec.name
     const warning = classifier.warnOnce(toolName)
     if (warning) ctx.logger.warn(warning)
@@ -132,18 +142,3 @@ export default apply
 export { PgRecoveryJournal } from './pg-journal.ts'
 export { IdempotencyClassifier, BUILTIN_IDEMPOTENCY } from './classify.ts'
 export type { RecoverySeam }
-
-/**
- * Turn 序号 = 会话日志里 `user/message` 的条数。
- *
- * 必须由**日志**派生而非进程内计数器：跨节点 resume 走 `CreateSessionOptions.seed`
- * 重放事件，只有日志派生的值才能在新节点上重建出同一个序号——幂等键依赖这一点。
- */
-function countTurns(events: readonly { type: string }[] | undefined): number {
-  if (!events) return 0
-  let turns = 0
-  for (const event of events) {
-    if (event.type === 'user/message') turns += 1
-  }
-  return turns
-}
