@@ -407,6 +407,7 @@ query ──▶ ctx.knowledge.vector: top-k 语义召回(带 realm 过滤)
 - **排序**：优先级 + EDF(截止时间) + 每 realm WFQ(加权公平，防大租户饿死小租户)。
 - **四道并发闸**：全局 LLM token 预算 / 节点 Slot 上限 / 租户并发配额 / Seam 速率熔断(Doris/PG)。
 - **容错**：Task 持久 + 日志复制 → worker 死重投 resume；subtask 持久 → 重 claim；节点下线任务漂回 Global Bus。
+- **Scheduler 自身的 HA（评审 N1）**：leader 选举 + fencing + 降级语义见 §7.4.1 决策记录；落地 `platform/control-plane/scheduler`。
 
 ### 6.3 OPA 单一策略点 + Vault 凭证
 
@@ -499,6 +500,12 @@ pull Task → 在 Slot 挂载 preset(cordis patch, isolate realm) → loop:
 - **版本一致性**：同一 agent/组件版本先完成**全集群分发**才允许全局调度（发布版本经 Provisioner 同步到每个集群的 Registry）。
 - **容错（两段式判定，严禁秒级切换）**：集群失联先入 `suspect`（30s，**停止向其新放置，已有任务不动**），持续失联再入 `down`（90s）才漂移任务。**理由**：跨集群迁移代价远高于等待——秒级阈值会让一次网络抖动引发全量任务大迁移，反而制造故障。迁移前必须确认 fencing（原集群不可能仍在执行），否则违反 R2 的幂等要求。
 - **执行记录**：一个任务只在**一个集群**执行；全局执行记录（PG 全局 Registry + 复制日志）记录 `{taskId, clusterId, 状态, 尝试次数}`，跨集群重放置产生新 attempt 而非并行执行。
+
+> **Scheduler 自身的 HA（评审 N1）**：全局 Scheduler 以 1+1 热备运行，**leader 选举底座取 PG 单行租约**（fencing token 与放置写路径同源，放置事务内校验）——偏离 N1 原文括号的「Nacos/Raft」建议，理由是 fencing 必须与被保护的写路径同源：放置写入落 PG，Nacos 侧身份无法用单次原子操作覆盖「旧 leader 失租后其写仍在新 leader 之后提交」的窗口；若为堵窗口再在 PG 存 term，Nacos 层只是多余一跳。租约三不变式：时间一律取库端时钟；续租不换 token、易主才 +1；释放置过期而非删行（token 高水位不回落）。代价：PG 进入选举关键路径，PG 挂则选不出 leader——复制日志已把 PG 放在关键路径上，未引入新单点；**若日志迁离 PG，此决策需重审**。
+>
+> 降级曲线（N1 第 2 条）：无 leader 时放置请求**快速失败**（503 no-leader，绝不挂起）；对账接口 `POST /v1/reconcile` 预留（占位语义：接收 + 去重 + 落账）。集群本地放置降级随集群 Scheduler 落地。
+>
+> 落地：`platform/control-plane/scheduler`（评审 N1 第 1 条闭环；第 2 条按「快速失败 + 对账接口」部分闭环，多集群本地放置随 §7.4）。spec：`docs/superpowers/specs/2026-08-24-scheduler-design.md`。
 
 #### 7.4.2 全局监控模型
 

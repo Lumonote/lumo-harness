@@ -65,7 +65,7 @@ N1 的要求：① 全局 Scheduler 以 leader 选举 + 热备运行，**放置�
 
 **任务表**：task_id（PK）、realm、cluster_id、requires、priority、state、attempt、node_id、fencing_token（放置时持有的隔离令牌，追溯「这条放置是哪一代租约下写的」）、时间戳。**payload 类列一律 TEXT 存 JSON 文本**——session-log 实测教训：JSONB 拒收 `\u0000` 而模型内容带 NUL 是常事，静默丢行会在日志留空洞；保真度优先于按内容检索。
 
-**attempt 单飞**（§7.4.1「一个任务只在一个集群执行」的单集群化）：`task_id` 上带 `state IN (PLACED, RUNNING)` 条件的唯一部分索引。同一任务重放置必须旧 attempt 已终结（COMPLETED/FAILED/ABORTED），新 attempt +1——**重放置产生新 attempt 而非并行执行**。
+**attempt 单飞**（§7.4.1「一个任务只在一个集群执行」的单集群化）：task_id 是主键（每任务单行），单飞由放置事务内 `FOR UPDATE` 任务行 + 状态检查保证——活跃 attempt（PLACED/RUNNING）时幂等返回既有放置，不产生第二次派发；旧 attempt 已终结（COMPLETED/FAILED/ABORTED）时开启 attempt+1。**重放置产生新 attempt 而非并行执行**。（实现记录：初稿设想的「task_id 部分唯一索引」无意义——task_id 全局唯一，单行即单状态，事务内状态检查已充分。）
 
 **放置事务步骤**：BEGIN → 锁租约行校验 fencing → 写任务行（task_id 冲突时幂等返回既有放置，不产生第二次派发）→ 写 outbox 行 → COMMIT。放置与派发同事务是 §13.2 选 PG outbox 替代 RocketMQ 的首要理由：PG 事务天然提供「扣槽位 + 发任务」的原子性。
 
