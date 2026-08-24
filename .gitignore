@@ -35,7 +35,10 @@ share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
+# 锚定到仓库根：setuptools 的 MANIFEST 只可能在根。
+# 不锚定的话，因 macOS 的 core.ignorecase=true，它会连带吞掉任何叫 manifest 的目录
+# （例如 platform/control-plane/registry/internal/manifest）。
+/MANIFEST
 
 # PyInstaller
 #   Usually these files are written by a python script from a template
