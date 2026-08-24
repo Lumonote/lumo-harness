@@ -81,6 +81,34 @@ services:
       redis:
         condition: service_started
 
+  scheduler-0:         # 全局任务调度 §6.2/§7.4.1（评审 N1：leader 选举 + fencing）
+    build:
+      context: ../control-plane/scheduler
+    container_name: lumo-platform-scheduler-0
+    environment:
+      LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_LISTEN: ":8083"
+      LUMO_INSTANCE: scheduler-0
+    ports:
+      - "58083:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  scheduler-1:         # 热备（1+1）：kill leader 验证接管（§13.2.5 场景）
+    build:
+      context: ../control-plane/scheduler
+    container_name: lumo-platform-scheduler-1
+    environment:
+      LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_LISTEN: ":8083"
+      LUMO_INSTANCE: scheduler-1
+    ports:
+      - "58084:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:
   redisdata:
