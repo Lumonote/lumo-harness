@@ -54,7 +54,31 @@ export class PgMeteringSeam implements MeteringSeam {
     await this.pool.query(METERING_DDL)
   }
 
-  async reserve(ctx: MeterContext): Promise<MeterResult> {
+  /**
+   * 测试专用逃生口（TRUNCATE / 断言用查询）。
+   *
+   * 显式给一个窄口，而不是让测试去碰私有 `pool`：碰私有字段的测试会在下一次重构
+   * 时坏掉，而坏掉的方式是「测试自己报错」而非「被测行为变了」，很难判断。
+   */
+  async raw<T extends pg.QueryResultRow = pg.QueryResultRow>(
+    sql: string,
+    params: unknown[] = [],
+  ): Promise<T[]> {
+    const r = await this.pool.query<T>(sql, params)
+    return r.rows
+  }
+
+  /**
+   * 前置拦截：两棵树都查，任一不足即拒。
+   *
+   * `estimate` 给了就判「够不够这一次」，不给退回「余额是否还有」。只判后者的话，
+   * 剩 1 token 的用户可以发起任意大的调用——封顶在事前完全不起作用，只能靠事后
+   * 扣成负数补救。
+   */
+  async reserve(ctx: MeterContext, estimate?: number): Promise<MeterResult> {
+    const need = estimate !== undefined && Number.isFinite(estimate) && estimate > 0
+      ? estimate
+      : 1
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
@@ -67,11 +91,11 @@ export class PgMeteringSeam implements MeteringSeam {
         ['project', ctx.projectId],
       )
       // 并行树：任一超限即拒（评审 N3）
-      if (userRow.rows.length === 0 || userRow.rows[0]!.budget <= 0) {
+      if (userRow.rows.length === 0 || Number(userRow.rows[0]!.budget) < need) {
         await client.query('ROLLBACK')
         return { approved: false, reason: 'denied-user-budget', ledgerRef: '' }
       }
-      if (projRow.rows.length === 0 || projRow.rows[0]!.budget <= 0) {
+      if (projRow.rows.length === 0 || Number(projRow.rows[0]!.budget) < need) {
         await client.query('ROLLBACK')
         return { approved: false, reason: 'denied-project-budget', ledgerRef: '' }
       }
@@ -87,7 +111,14 @@ export class PgMeteringSeam implements MeteringSeam {
     try {
       await client.query('BEGIN')
       // 双树同事务扣减（§8.3 事务消息将扩展为分布式形态；本地 PG 事务满足本地形态）
-      const upd = `UPDATE budget_trees SET budget = budget - $2 WHERE kind = $1 AND id = $3 AND budget >= $2`
+      //
+      // **无条件扣减，允许负数。** 这里曾有 `AND budget >= $2`，于是「余额 500、消耗
+      // 600」时 0 行被更新且无报错，余额冻结在 500 而台账照记 —— 下一次 reserve 读到
+      // 500 继续放行。一旦「余额 < 单次调用量」，封顶就永久失效，方向朝着无限消费。
+      //
+      // 允许负数不是放松封顶，恰恰是让封顶可判：余额永远非负时，「已透支多少」这个量
+      // 根本不存在，也就无法区分「刚好用完」与「超了三倍」。
+      const upd = `UPDATE budget_trees SET budget = budget - $2 WHERE kind = $1 AND id = $3`
       await client.query(upd, ['user', record.tokens, record.context.userId])
       await client.query(upd, ['project', record.tokens, record.context.projectId])
       await client.query(
@@ -110,12 +141,22 @@ export class PgMeteringSeam implements MeteringSeam {
     }
   }
 
+  /**
+   * 余额查询。**可为负**——负数即透支量。
+   *
+   * 无预算记录时返回 `+Infinity`，即 **fail open**。这与「未定级即拒绝」的精神相反，
+   * 是显式选择而非疏漏：翻成 fail closed 会让所有未预置 `budget_trees` 行的部署
+   * 立刻停摆，那是一次生产事故而不是一次修复。正确的收敛路径是先加「预算记录缺失」
+   * 告警，观察到零告警后再翻向。这一条已记入评审 B2 落地状态，不要当它已解决。
+   */
   async balance(key: { kind: 'user' | 'project'; id: string }): Promise<number> {
     const row = await this.pool.query<{ budget: number }>(
       'SELECT budget FROM budget_trees WHERE kind = $1 AND id = $2',
       [key.kind, key.id],
     )
-    return row.rows[0]?.budget ?? Number.POSITIVE_INFINITY
+    // pg 把 BIGINT 读成字符串，不转数字会让 `bal === 5000` 这类断言以字符串比较失败
+    const raw = row.rows[0]?.budget
+    return raw === undefined ? Number.POSITIVE_INFINITY : Number(raw)
   }
 
   async setBudget(kind: 'user' | 'project', id: string, budget: number): Promise<void> {

@@ -7,12 +7,17 @@ class MemoryMeteringSeam implements MeteringSeam {
   projectBudget = 0
   commitCount = 0
 
-  async reserve(ctx: Parameters<MeteringSeam['reserve']>[0]): Promise<MeterResult> {
+  async reserve(
+    ctx: Parameters<MeteringSeam['reserve']>[0],
+    estimate?: number,
+  ): Promise<MeterResult> {
     // 并行预算树：任一超限即拒（评审 N3）
-    if (ctx.projectId === 'p1' && this.projectBudget <= 0) {
+    // 判据是「够不够这一次」：给了 estimate 就按它判，否则退回「余额是否还有」
+    const need = estimate ?? 1
+    if (ctx.projectId === 'p1' && this.projectBudget < need) {
       return { approved: false, reason: 'denied-project-budget', ledgerRef: '' }
     }
-    if (this.userBudget <= 0) {
+    if (this.userBudget < need) {
       return { approved: false, reason: 'denied-user-budget', ledgerRef: '' }
     }
     return { approved: true, reason: 'ok', ledgerRef: `ledger-${++this.commitCount}` }

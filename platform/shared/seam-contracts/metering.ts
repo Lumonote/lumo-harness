@@ -32,11 +32,17 @@ export interface MeterRecord {
 }
 
 export interface MeteringSeam {
-  /** 前置拦截：预算检查 + 限流（两棵树都查，任一超限拒绝） */
-  reserve(context: MeterContext): Promise<MeterResult>
+  /**
+   * 前置拦截：预算检查 + 限流（两棵树都查，任一超限拒绝）。
+   *
+   * `estimate` 是本次调用的预估消耗量：给了就判「余额够不够这一次」，不给只判
+   * 「余额是否还有」。**刻意做成可选**——`llm/stream` 在首 token 发出前拿不到准确
+   * 预估，硬性要求会逼调用方编一个数字，而假预估比没预估更坏：它看起来像个判据。
+   */
+  reserve(context: MeterContext, estimate?: number): Promise<MeterResult>
   /** 实际消耗落账（reserve 通过后调用） */
   commit(record: MeterRecord): Promise<void>
-  /** 预算树余额查询（维度: user/project） */
+  /** 预算树余额查询（维度: user/project）。**可为负数**——负数即透支量。 */
   balance(key: { kind: 'user' | 'project'; id: string }): Promise<number>
 }
 
@@ -72,4 +78,39 @@ export async function assertMeteringContract(
   // 溯源记录可用（场景 3 后：project 已扣 5000 后余 5000，需仍可查询）
   const bal = await seam.balance({ kind: 'project', id: 'p1' })
   assert(typeof bal === 'number' && bal === 5000, '余额须可查询且数值正确')
+
+  // —— 场景 4：扣减必须无条件执行，允许负数 ——
+  //
+  // 这一条是补回一个真实缺陷：PG 实现曾在 UPDATE 上带 `AND budget >= $2`，于是
+  // 「余额 500、消耗 600」时 0 行被更新、无报错，余额**冻结在 500**，而台账照记。
+  // 下一次 reserve 读到 500 > 0 继续放行 —— 一旦「余额 < 单次调用量」，封顶就永久
+  // 失效，方向朝着无限消费。
+  //
+  // 允许负数不是放松封顶，恰恰是让封顶可判：余额永远非负时，「已透支多少」这个量
+  // 根本不存在，也就无法区分「刚好用完」与「超了三倍」。
+  await resetBudgets(500, 500)
+  await seam.commit({ context: ctx, tokens: 600, model: 'deepseek', costType: 'llm', costUsd: 0.6 })
+  const over = await seam.balance({ kind: 'user', id: 'u1' })
+  assert(over === -100, `超限扣减必须落到负数（得到 ${over}）—— 冻结在正数上等于封顶失效`)
+
+  // 透支后必须拒（默认透支额度为 0）
+  const afterOver = await seam.reserve(ctx)
+  assert(!afterOver.approved, '余额为负时必须拒绝')
+
+  // —— 场景 5：reserve 判「够不够这一次」——
+  //
+  // 只判「余额 > 0」的话，剩 1 token 的用户可以发起任意大的调用：封顶在事前完全
+  // 不起作用，只能靠事后扣成负数补救。
+  await resetBudgets(1, 10000)
+  const tooBig = await seam.reserve(ctx, 100)
+  assert(!tooBig.approved, '余额 1 而预估 100 必须拒绝')
+
+  await resetBudgets(1000, 10000)
+  const fits = await seam.reserve(ctx, 100)
+  assert(fits.approved, '余额 1000 而预估 100 必须通过')
+
+  // 不传 estimate 时退回「余额是否还有」——既有调用方行为不变
+  await resetBudgets(1, 10000)
+  const noEstimate = await seam.reserve(ctx)
+  assert(noEstimate.approved, '不传 estimate 时余额为正即通过（保持既有调用方行为）')
 }
