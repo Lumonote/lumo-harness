@@ -28,7 +28,7 @@
 - Create: `platform/shared/seam-contracts/remotability.ts`
 - Create: `platform/shared/seam-contracts/__tests__/remotability.contract.spec.ts`
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 `remotability.contract.spec.ts`，四组断言：
 
@@ -37,7 +37,7 @@
 3. **预算自洽**：每个 `remotable` 条目 `perTurnCallBudget × latencyBudgetMs ≤ TURN_NETWORK_BUDGET_MS`。
 4. **幂等性单一来源**：`remotable` 条目的每个方法都声明了 `idempotent`；非 `remotable` 条目不得声明 `methods`（声明了说明定级与实现不一致）。
 
-- [ ] **Step 2: 实现分级表（绿）**
+- [x] **Step 2: 实现分级表（绿）**
 
 `remotability.ts` 导出：
 
@@ -68,13 +68,13 @@ export function isIdempotent(seam: string, method: string): boolean
 
 条目按设计说明 §3–§5 逐条填，`why` 用设计说明表格里的理由，**不要写成「见文档」**——错误信息里能读到原因才有用。
 
-- [ ] **Step 3: 跑测试**
+- [x] **Step 3: 跑测试**
 
 ```bash
 cd platform && pnpm vitest run shared/seam-contracts/__tests__/remotability.contract.spec.ts
 ```
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```
 feat(seam): 可远程化分级表——未定级即拒绝，幂等性并入单一真相源
@@ -87,23 +87,23 @@ feat(seam): 可远程化分级表——未定级即拒绝，幂等性并入单�
 **Files:**
 - Modify: `platform/shared/seam-contracts/remote.ts`
 
-- [ ] **Step 1: 先加断言（红）**
+- [x] **Step 1: 先加断言（红）**
 
 在 `remotability.contract.spec.ts` 里加一组：`remote.ts` 的 `isIdempotent` 与分级表对**所有** `remotable` seam 的所有方法给出相同答案，且对未定级 seam 一律 false。
 
-- [ ] **Step 2: 删表改代理（绿）**
+- [x] **Step 2: 删表改代理（绿）**
 
 `remote.ts` 删掉 `IDEMPOTENT_METHODS`，`isIdempotent` 改为转发到 `remotability.ts`。签名不变，`client.ts` 不动。删除时留一行注释说明幂等性搬去了哪里——否则下一个人会在这里重新加一张表。
 
 **注意循环依赖**：`remotability.ts` 不得 import `remote.ts`（`remote.ts` 单向依赖 `remotability.ts`）。`assertRemotable` 需要抛 `RemoteSeamError` 的话会形成环——因此 `assertRemotable` 抛普通 `Error`，由调用方（`seam-host`）负责转成 `forbidden`。
 
-- [ ] **Step 3: 全量跑 seam-contracts 测试 + typecheck**
+- [x] **Step 3: 全量跑 seam-contracts 测试 + typecheck**
 
 ```bash
 cd platform && pnpm vitest run shared/seam-contracts && pnpm run typecheck
 ```
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```
 refactor(seam): 幂等白名单并入分级表——两张表必然漂移
@@ -117,7 +117,7 @@ refactor(seam): 幂等白名单并入分级表——两张表必然漂移
 - Modify: `platform/dsh-plugins/seam-proxy/src/index.ts`
 - Create: `platform/dsh-plugins/seam-proxy/__tests__/gate.spec.ts`
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 `gate.spec.ts` 直接测一个纯函数而不是整个插件 apply（插件需要真 Cordis Context，成本高且不测到重点）。因此先从 `index.ts` 里抽出：
 
@@ -133,20 +133,20 @@ export function assertSeamsRemotable(seams: readonly string[]): void
 - `['nonexistent-seam']` 抛，消息说明「未定级」而不是「不存在」——语义是 fail closed
 - `[]` 通过（不接管任何 seam 是合法的）
 
-- [ ] **Step 2: 实现并接到 apply（绿）**
+- [x] **Step 2: 实现并接到 apply（绿）**
 
 `index.ts`：
 - `seams` 配置类型从 `Array<'knowledge' | 'knowledgeGraph'>` 放宽为 `string[]`。**这是刻意的**：收窄的联合类型让非法值在 TS 编译期就被挡住，看似更好，但 `cordis.yml` 是运行时 YAML，编译期类型对它不起作用，只会造成「类型上不可能发生所以不校验」的错觉。放宽 + 运行时闸才是真的防线。
 - `mode === 'remote'` 时，在建 client 之前调 `assertSeamsRemotable(seams)`。顺序要紧：先校验再建连接，否则非法配置会先开一堆 socket。
 - `mode === 'local'` 时**也要校验**——local 模式今天不注册远程 Provider，但配置里写着 `terminals` 说明作者的意图是错的，等切到 remote 才炸就晚了。
 
-- [ ] **Step 3: 跑测试**
+- [x] **Step 3: 跑测试**
 
 ```bash
 cd platform && pnpm vitest run dsh-plugins/seam-proxy
 ```
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```
 feat(seam-proxy): 加载期可远程化闸——local 模式同样校验，配置放宽给运行时闸
@@ -160,11 +160,11 @@ feat(seam-proxy): 加载期可远程化闸——local 模式同样校验，配�
 - Modify: `platform/dsh-plugins/seam-host/src/server.ts`（或 `dispatch.ts`，视 seam 名解析在哪）
 - Create: `platform/dsh-plugins/seam-host/__tests__/gate.spec.ts`
 
-- [ ] **Step 1: 读现状**
+- [x] **Step 1: 读现状**
 
 先读 `server.ts` 定位 seam 名从请求路径解析出来、交给 `isSeamName`/`methodSpec` 之前的那一点。闸 B 必须插在**触碰任何 Provider 之前**。
 
-- [ ] **Step 2: 先写测试（红）**
+- [x] **Step 2: 先写测试（红）**
 
 - `never` 类 seam 名 → `forbidden`，且断言 Provider 的 mock 未被调用（这是判据 4 的「不触碰 Provider」）
 - 未定级 seam 名 → `forbidden`
@@ -172,13 +172,13 @@ feat(seam-proxy): 加载期可远程化闸——local 模式同样校验，配�
 
 再加一条契约断言（放 `remotability.contract.spec.ts` 更合适，因为它跨两个包）：**`remotable` 集合 == `METHOD_TABLE` 键集合**。两边不等就是定级与实现不一致。
 
-- [ ] **Step 3: 实现（绿）**
+- [x] **Step 3: 实现（绿）**
 
 在 seam 名解析之后立刻校验，失败抛 `forbidden`（用 `errors.ts` 的既有 helper）。
 
 注意错误码选择：不可远程化用 `forbidden` 而不是 `invalid`。理由——`invalid` 语义是「参数/方法非法」，而这里 seam 名是合法标识符，被拒的原因是**准入策略**。且 `forbidden` 不计入熔断（见 `remote.ts` 的 `countsAsFailure`），这正确：客户端配置错了不该把 host 判死刑。
 
-- [ ] **Step 4: 跑测试并提交**
+- [x] **Step 4: 跑测试并提交**
 
 ```
 feat(seam-host): 服务端可远程化闸——准入判据不交给调用方
@@ -194,7 +194,7 @@ feat(seam-host): 服务端可远程化闸——准入判据不交给调用方
 - Modify: `platform/dsh-plugins/seam-proxy/src/client.ts`
 - Modify: `platform/dsh-plugins/seam-proxy/src/index.ts`（配置项）
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 `turn-budget.spec.ts`，被测对象是一个纯计数器：
 
@@ -220,11 +220,11 @@ export class TurnCallBudget {
 - 无预算声明的 seam（不该发生，因为闸 A 已拦）→ 不计数不抛，交给闸 A 报错，这里不重复执法
 - **只在第一次越界时回调一次**，之后同 turn 同 seam 不再刷告警——否则一个写得碎的组件会刷出上百条相同告警，把信号埋掉
 
-- [ ] **Step 2: 实现（绿）**
+- [x] **Step 2: 实现（绿）**
 
 内部用 `Map<turn, Map<seam, count>>`。**必须处理内存增长**：turn 只增不减，长会话会让 Map 无界膨胀。做法：只保留最近 N 个 turn（N=8），超出时淘汰最旧——预算是 turn 内语义，历史 turn 的计数没有用途。这一点要写进注释，因为「看起来能用但会漏内存」是最容易过 review 的缺陷。
 
-- [ ] **Step 3: 接到 client.ts（绿）**
+- [x] **Step 3: 接到 client.ts（绿）**
 
 `SeamProxyConfig` 加 `budgetMode?: BudgetMode` 与 `onBudgetViolation?`；`call()` 增加可选 `turn` 参数……
 
@@ -234,7 +234,7 @@ export class TurnCallBudget {
 
 这条决定要记进 Self-Review：它把预算的准确性押在「有人记得调 setTurn」上。替代方案是用 AsyncLocalStorage 隐式传播，更准确但引入一个跨 await 的隐式上下文，调试成本高。当前选显式，理由是本项的预算是**回归探测器**而非安全闸，漏计的代价可接受；若将来改成 `enforce` 为默认，就必须换成隐式传播。
 
-- [ ] **Step 4: 跑测试并提交**
+- [x] **Step 4: 跑测试并提交**
 
 ```
 feat(seam-proxy): 每 turn 调用预算——粗粒度硬规矩的执法点，默认告警可配拒绝
@@ -249,19 +249,19 @@ feat(seam-proxy): 每 turn 调用预算——粗粒度硬规矩的执法点，�
 - Modify: `docs/design-review.md`（R1 落地状态 + 汇总表那一行）
 - Modify: `docs/README.md`（§五 待补章节进度不动；R1 属评审条目不属待补章节）
 
-- [ ] **Step 1: §4.1 改写**
+- [x] **Step 1: §4.1 改写**
 
 现文第一句把 dsh 的远程沙箱特例推广成「任意 seam」。**不要删掉这句**——它是设计初衷的记录；改成「原推广已被 R1 收窄」并给出收窄后的表述：杠杆来自平台新增能力 seam，不来自搬迁 dsh 原有 seam。附三张表（`never` / `needs-design` / `remotable`）与两条硬规矩，指向 `remotability.ts` 为唯一真相源。
 
 **必须写进去的一句**：`ctx.fs` 判 `never` 指的是「通用 SeamProxy 不得代理」，`fs-e2b` 走 `ctx.e2b` 专用句柄依然合法。不写这句，下一个人会认为规范自相矛盾（dsh 明明有远程 fs）。
 
-- [ ] **Step 2: R1 落地状态**
+- [x] **Step 2: R1 落地状态**
 
 格式同 N1/T1。要点：三道闸、白名单里没有 dsh 原生 seam 这个结论、`ctx.web` 判 `needs-design` 是治理决定而非技术决定、闸 C 默认 `warn` 的理由、`setTurn` 显式传播的已知弱点。
 
-- [ ] **Step 3: 汇总表 R1 行**
+- [x] **Step 3: 汇总表 R1 行**
 
-- [ ] **Step 4: 校验 + 提交**
+- [x] **Step 4: 校验 + 提交**
 
 ```bash
 file docs/architecture.md docs/design-review.md
@@ -278,20 +278,20 @@ docs(seam): §4.1 分级表与两条硬规矩、评审 R1 落地状态
 
 本项读了大量 dsh 源码与文档，必须证明未写入。
 
-- [ ] **Step 1**
+- [x] **Step 1**
 
 ```bash
 git -C deepseek-harness describe --tags --dirty   # 必须 dsh-v0.1.1-rc.2，无 -dirty
 git -C deepseek-harness status --porcelain -uno   # 必须无输出
 ```
 
-- [ ] **Step 2: 全量测试 + typecheck**
+- [x] **Step 2: 全量测试 + typecheck**
 
 ```bash
 cd platform && pnpm vitest run && pnpm run typecheck
 ```
 
-- [ ] **Step 3: 对照验收判据**
+- [x] **Step 3: 对照验收判据**
 
 | # | 判据 | 对应测试 |
 |---|---|---|
