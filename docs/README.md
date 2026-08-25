@@ -72,6 +72,7 @@
 | 网关 | **全栈 Go 自研**（边缘/LLM/连接器/终端 + Seam Proxy） | `review` R3 的能力清单（抗攻击/弹性/证书/热加载原子性）+ **压测、SLO、故障演练三项上线门槛** |
 | 数据层构成 | **PG + Doris + Nebula + Milvus + MinIO + Redis** | `review` T3 的运维准入条件（专职人力 / 容量基线 / 备份恢复演练 / schema 演进 / 降级预案） |
 | 制品注册表 | **职责三分：原始字节→内容寻址对象存储、元数据/签名/依赖图→PG、灰度规则→Nacos**。硬约束是 **PG 是索引不是真相源**——执法只认按 digest 取回的原始字节，PG 元数据不得作为任何执法判断的输入 | `architecture` §6.1 已修订；实现见 `platform/control-plane/registry`，设计说明 [`specs/2026-08-24-registry-design.md`](./superpowers/specs/2026-08-24-registry-design.md)；待补 provisioner、OPA scope 评估、密钥轮换与吊销 |
+| Seam 可远程化边界 | **分级表是准入判据的唯一真相源，未定级即拒绝**。§4.1 原文「任意 seam 可远程化」已收窄：杠杆来自平台新增的能力 seam，不来自搬迁 dsh 原有 seam——白名单里没有一个 dsh 原生 seam，这是结论不是遗漏 | `architecture` §4.1.1–§4.1.2；实现见 `platform/shared/seam-contracts/remotability.ts` + 三道闸，设计说明 [`specs/2026-08-24-seam-remotability-design.md`](./superpowers/specs/2026-08-24-seam-remotability-design.md)；待补 `needs-design` 13 项各自的远程形态、跨 AZ 预算实测 |
 
 ### 仍待拍板
 

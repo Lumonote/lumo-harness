@@ -140,6 +140,71 @@ Agent ──ctx.tools/query──▶ Seam Proxy ──gRPC──▶ Knowledge Pr
    (Consumer 不变)           (Go 自研)            (真实 Provider, 原生实现)
 ```
 
+#### 4.1.1 分级表 —— 上面那句「任意 seam」已被评审 R1 收窄
+
+上面第一句的推广**前提为真、结论过宽**，保留原文是为了记录设计初衷，但它不再是当前结论。
+
+dsh 能远程化 filesystem/subprocess，是因为它专门造了 `ctx.e2b` 这个**共享远端句柄的所有者**，让 `fs-e2b` 与 `subprocess-e2b` 落在同一个远端 Linux 运行时里。那是一条特例路径，不是 seam 抽象自带的能力。收窄后的表述：
+
+> §4.1 的杠杆来自**平台新增的能力 seam**（知识库、图、分析、GPU 推理），不来自把 dsh 原有 seam 搬到网上。
+
+**唯一真相源是代码不是本表**：`platform/shared/seam-contracts/remotability.ts`。本节是它的可读投影，两者不一致时以代码为准——因为准入闸读的是代码。
+
+**`never`（远程化会破坏语义正确性或安全边界）**
+
+| seam | 形状 | 理由（摘要） |
+|---|---|---|
+| `ctx.terminals` / `ctx.subprocess` / `ctx.shell` / `ctx.codeRuntime` / `ctx.fs` | handle | OS 句柄：PTY、进程树、fd、watch、进程内 binding |
+| `ctx.sandbox` | handle | 强制点必须与被约束进程同机，隔网执法等于不执法——沙箱退化成建议 |
+| `ctx.approval` / `ctx.userQuestions` / `ctx.directoryPicker` / `ctx.authorization` | waterfall | 人在环 + 事件瀑布的 `next()` 同步链，远程不可达即拒绝会把审批变成拒绝服务 |
+| `ctx.credentials` | local-state | 远程化等于让凭证值跨节点传输，与「凭证只在 Vault」冲突 |
+| `ctx.settings` / `ctx.sandboxPolicy` / `ctx.shellEnv` | local-state | 本节点的装配输入；跨节点的「本节点配置」不可推理 |
+| `ctx.compaction` | waterfall | 需完整会话历史，远程化等于每次把全量历史过网 |
+| `ctx.sessionTelemetry` / `ctx.webServer` / `ctx.clientModules` / `ctx.apiProxy` | transport | 它们**是**网络面本身，不是网络面的消费者 |
+| `ctx.tools` / `ctx.systemPrompt` / `ctx.invariants` | registry | 注册面是装配结果，远程化注册面等于远程化插件图 |
+| `ctx.fileReferences` | unary | 返回 Agent cwd 下的路径，单独远程化会给出另一台机器的路径 |
+
+> **`ctx.fs` 判 `never` 指的是「通用 SeamProxy 不得代理 fs」。** `fs-e2b` 走 `ctx.e2b` 持有的专用远端句柄依然合法——那是特例路径，不是本表授权的通用能力。不写清这一句，下一个人会认为规范自相矛盾（dsh 明明有远程 fs）。
+
+**`needs-design`（存在正确的远程形态，但不是通用一元代理）**
+
+| seam | 正确归属 |
+|---|---|
+| `ctx.llm` / `ctx.sessionTitle` | LLM 网关（§6.4 计量单截面在此，必须过网关而非 SeamProxy） |
+| `ctx.sessionPersistence` / `ctx.sessionQuery` | 复制式 SessionEvent 日志（§4.2） |
+| `ctx.subagents` / `ctx.workflowEngine` | Scheduler（§6.2）+ FlowEngine（§9.2） |
+| `ctx.attachments` / `ctx.spillStore` | `ctx.datastore.object`（MinIO，§5.1） |
+| `ctx.storage` | `ctx.datastore.sql`（PG，§5.1） |
+| `ctx.skills` | 制品注册表 + provisioner（§6.1） |
+| `ctx.lsp` | E2B 式专用沙箱路径（连同 fs / subprocess 整体搬走工作区） |
+| `ctx.web` | 连接器网关（§12） |
+| `ctx.jobs` | R2 的 turn 级恢复契约定稿后重判 |
+
+> `ctx.web` 判 `needs-design` 是**治理决定不是技术决定**：它技术上完全可远程化（一元、无句柄、幂等），但出平台流量必须过网关做 PII 与配额，绕开网关的远程 web 是治理漏洞。
+>
+> `never` 与 `needs-design` 的区别不是难度，是**是否存在一个正确的远程形态**：`ctx.sandbox` 投入多少工程量都不成立；`ctx.llm` 有正确形态（服务端流），只是不是一元代理。
+
+**`remotable`**：`knowledge`、`knowledgeGraph`。
+
+> 白名单里**一个 dsh 原生 seam 都没有，这是结论不是遗漏**，不要「补全」它。它正是上面那条收窄的直接后果。
+
+#### 4.1.2 两条硬规矩
+
+**A. 未定级即拒绝（fail closed）。** 新 seam 默认不可远程。反过来默认放行的话，一个漏定级的句柄型 seam 会静默过网，故障出现在离原因很远的地方（用户按 Ctrl-C、resume 后句柄失效），而 `cordis.yml` 那一行早没人看了。
+
+执法点是**两道独立的闸**，因为它们防的不是同一件事：
+
+| 闸 | 位置 | 防什么 |
+|---|---|---|
+| A | `seam-proxy` 加载期（`local` 模式同样校验） | 装配错误——自己人写错配置 |
+| B | `seam-host` 请求解析后、触碰任何 Provider 之前 | 不可信对端——host 不得采信调用方关于「什么可远程」的声明 |
+
+闸 B 的错误码是 `forbidden` 而非 `invalid`：seam 名是合法标识符，被拒原因是**准入策略**；且 `forbidden` 不计入熔断——客户端配置错了不该把健康 host 判死刑。
+
+**B. 粗粒度是硬规矩，量化成每 turn 调用预算。**「seam 粒度要粗」不可执法，量化后可执法：单 turn 网络开销上限 `TURN_NETWORK_BUDGET_MS = 6400`，每个 `remotable` seam 的 `perTurnCallBudget × latencyBudgetMs` 不得超过它（有测试守着）。
+
+闸 C 在 `seam-proxy` 客户端，**默认 `warn` 而非 `enforce`**：超预算是性能回归，不是安全事故；默认拒绝会把「某个组件写得太碎」升级成「用户这一轮直接失败」。但告警是结构化的 `{seam, turn, count, budget}`，可进 CI 断言——否则它退化成纸面要求。
+
 ### 4.2 复制式 SessionEvent 日志（共享真相）
 
 - 原生：`core/session` 是 append-only 日志，`deriveMessages()` 投影历史，`ctx.sessions.fork()` 复制会话。
