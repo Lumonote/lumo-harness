@@ -6,6 +6,12 @@
  * 树扣减原子性：本实现以 PG 事务完成；分布式的 RocketMQ 事务消息在 P2 接入（铁律 5）。
  */
 import pg from 'pg'
+import {
+  COST_TYPES,
+  assertCostEvent,
+  isCostType,
+  type CostEvent,
+} from '../../../shared/seam-contracts/cost-events.ts'
 import type {
   MeterContext,
   MeterRecord,
@@ -43,6 +49,28 @@ CREATE TABLE IF NOT EXISTS budget_commit_seq (
 );
 `
 
+/**
+ * 增量迁移（评审 B2 的新维度）。
+ *
+ * **必须用 ALTER 而不是只改上面的 CREATE**：既有库已经建过表，`CREATE TABLE IF NOT
+ * EXISTS` 对它是空操作，只改 CREATE 会得到「本地新库测试全绿、部署到既有库后列不
+ * 存在」——这是这类改动最经典的失败方式。
+ *
+ * 新列可空：历史行不回填假数据（设计说明 §7）。回填会让「本项上线前的成本」看起来
+ * 像是已经分类过的，而它并没有。
+ */
+export const METERING_MIGRATIONS = `
+ALTER TABLE usage_ledger ADD COLUMN IF NOT EXISTS trace_id TEXT;
+ALTER TABLE usage_ledger ADD COLUMN IF NOT EXISTS emitter  TEXT;
+ALTER TABLE usage_ledger ADD COLUMN IF NOT EXISTS qty      NUMERIC(20,6);
+ALTER TABLE usage_ledger ADD COLUMN IF NOT EXISTS unit     TEXT;
+
+-- 判据 6 要按 trace 取回因果链；无索引会随台账增长退化成全表扫
+CREATE INDEX IF NOT EXISTS usage_ledger_trace_idx ON usage_ledger (trace_id);
+-- 按 (类型, 时间) 下钻是「解释一次尖峰」的主查询路径
+CREATE INDEX IF NOT EXISTS usage_ledger_type_ts_idx ON usage_ledger (cost_type, ts DESC);
+`
+
 export class PgMeteringSeam implements MeteringSeam {
   private pool: pg.Pool
 
@@ -52,6 +80,7 @@ export class PgMeteringSeam implements MeteringSeam {
 
   async init(): Promise<void> {
     await this.pool.query(METERING_DDL)
+    await this.pool.query(METERING_MIGRATIONS)
   }
 
   /**
@@ -121,17 +150,20 @@ export class PgMeteringSeam implements MeteringSeam {
       const upd = `UPDATE budget_trees SET budget = budget - $2 WHERE kind = $1 AND id = $3`
       await client.query(upd, ['user', record.tokens, record.context.userId])
       await client.query(upd, ['project', record.tokens, record.context.projectId])
-      await client.query(
-        `INSERT INTO usage_ledger
-           (user_id, dept_id, role, project_id, agent_id, component_id, feature, session_ref, model, tokens, cost_type, cost_usd)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-        [
-          record.context.userId, record.context.deptId, record.context.role,
-          record.context.projectId, record.context.agentId, record.context.componentId,
-          record.context.feature, record.context.sessionRef, record.model,
-          record.tokens, record.costType, record.costUsd,
-        ],
-      )
+      await insertLedger(client, {
+        context: record.context,
+        costType: 'llm.tokens',
+        qty: record.tokens,
+        unit: 'tokens',
+        // 现有 commit() 路径尚无 trace 上下文（调用方是 llm/stream 瀑布）。
+        // 用显式哨兵而不是空串：空串会和「发出方忘了填」混在一起，而这两件事的
+        // 处理方式不同——前者等接线，后者是 bug。
+        traceId: record.traceId ?? 'legacy-llm-cross-section',
+        emitter: 'metering:llm-cross-section',
+        costUsd: record.costUsd,
+        tokens: record.tokens,
+        model: record.model,
+      })
       await client.query('COMMIT')
     } catch (e) {
       await client.query('ROLLBACK')
@@ -139,6 +171,31 @@ export class PgMeteringSeam implements MeteringSeam {
     } finally {
       client.release()
     }
+  }
+
+  /**
+   * 成本事件入账（评审 B2 的并行成本流）。
+   *
+   * **校验在写库之前**：一行脏数据一旦进了 append-only 台账就不能删，删了就破坏了
+   * §6.4 的 append-only 承诺。
+   */
+  async emit(e: CostEvent): Promise<void> {
+    assertCostEvent(e)
+    const client = await this.pool.connect()
+    try {
+      await insertLedger(client, e)
+    } finally {
+      client.release()
+    }
+  }
+
+  /** 按 trace 取回一条因果链。顺序稳定（ts, id），否则「这次尖峰的构成」每次读都不同。 */
+  async byTrace(traceId: string): Promise<CostEvent[]> {
+    const rows = await this.raw<LedgerRow>(
+      `SELECT * FROM usage_ledger WHERE trace_id = $1 ORDER BY ts ASC, id ASC`,
+      [traceId],
+    )
+    return rows.map(rowToEvent)
   }
 
   /**
@@ -170,4 +227,71 @@ export class PgMeteringSeam implements MeteringSeam {
   async close(): Promise<void> {
     await this.pool.end()
   }
+}
+
+/** `usage_ledger` 的原始行形状。 */
+interface LedgerRow {
+  user_id: string; dept_id: string; role: string; project_id: string
+  agent_id: string; component_id: string; feature: string; session_ref: string
+  model: string | null; tokens: number | string | null
+  cost_type: string; cost_usd: number | string
+  trace_id: string | null; emitter: string | null
+  qty: number | string | null; unit: string | null
+}
+
+/**
+ * `usage_ledger` 的**唯一写入方法**。
+ *
+ * `commit()`（LLM 截面）与 `emit()`（其它成本类型）都走它。两条写路径各写一遍
+ * INSERT 就是 schema 的第二份副本——加一列时只会改一处，另一处静默过期，而过期的
+ * 方向是「新维度在某类成本上永远为空」，看起来像那类成本天生没有 trace。
+ *
+ * 发出方跨语言（连接器网关是 Go），因此约束是**表只有一个写入者**：Go 侧经 sink
+ * 接口交事件，不直连这张表。
+ */
+async function insertLedger(client: pg.PoolClient, e: CostEvent): Promise<void> {
+  await client.query(
+    `INSERT INTO usage_ledger
+       (user_id, dept_id, role, project_id, agent_id, component_id, feature,
+        session_ref, model, tokens, cost_type, cost_usd, trace_id, emitter, qty, unit)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+    [
+      e.context.userId, e.context.deptId, e.context.role, e.context.projectId,
+      e.context.agentId, e.context.componentId, e.context.feature, e.context.sessionRef,
+      e.model ?? null,
+      // 非 token 类型的 tokens 列写 0 而不是 NULL：既有的 SUM(tokens) 报表遇到 NULL
+      // 会得到 NULL 而不是原来的数，那是一次静默的报表回归
+      e.tokens ?? 0,
+      e.costType, e.costUsd, e.traceId, e.emitter, e.qty, e.unit,
+    ],
+  )
+}
+
+function rowToEvent(r: LedgerRow): CostEvent {
+  const costType = r.cost_type
+  if (!isCostType(costType)) {
+    // 读到闭集外的类型说明是本项上线前的历史行，或有人绕过 sink 直写了表
+    throw new Error(
+      `usage_ledger 中存在闭集外的 cost_type=${costType}（trace=${r.trace_id}）：` +
+      `历史行或有写入方绕过了 sink`,
+    )
+  }
+  const e: CostEvent = {
+    context: {
+      userId: r.user_id, deptId: r.dept_id, role: r.role, projectId: r.project_id,
+      agentId: r.agent_id, componentId: r.component_id, feature: r.feature,
+      sessionRef: r.session_ref,
+    },
+    costType,
+    qty: Number(r.qty ?? 0),
+    unit: r.unit ?? COST_TYPES[costType].unit,
+    traceId: r.trace_id ?? '',
+    emitter: r.emitter ?? '',
+    costUsd: Number(r.cost_usd),
+  }
+  if (costType === 'llm.tokens') {
+    e.tokens = Number(r.tokens ?? 0)
+    if (r.model) e.model = r.model
+  }
+  return e
 }

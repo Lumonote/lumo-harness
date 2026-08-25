@@ -29,6 +29,25 @@ export interface MeterRecord {
   model: string
   costType: string
   costUsd: number
+  /** 归因链：把一次 request 内跨成本类型的多行串起来。缺省时落哨兵值。 */
+  traceId?: string
+}
+
+/**
+ * 成本事件汇入口（评审 B2 的并行成本流）。
+ *
+ * **`usage_ledger` 只有一个写入者。** 发出方跨语言（连接器网关是 Go，seam Provider
+ * 与 jobs 是 TS 插件），各自直连 PG 写台账就会有 N 份 schema 副本，必然漂移——这与
+ * 「幂等白名单两张表」是同一类错误。发出方产出事件，由实现本接口的那一个写入者落库。
+ *
+ * §6.4 已写明计量事件走 RocketMQ `usage.event.*` 异步削峰，那是目标形态；RocketMQ
+ * 尚未进部署拓扑（与 Nacos 同因），因此本期是进程内直写。接口留在这一层就是为了
+ * 换传输时不动发出方。
+ */
+export interface CostEventSink {
+  emit(event: import('./cost-events.ts').CostEvent): Promise<void>
+  /** 按 trace 取回一条因果链，顺序稳定。 */
+  byTrace(traceId: string): Promise<Array<import('./cost-events.ts').CostEvent>>
 }
 
 export interface MeteringSeam {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { PgMeteringSeam, METERING_DDL } from '../src/pg-meter.ts'
+import { schemaDsn } from './pg-schema.ts'
 import { assertMeteringContract } from '../../../shared/seam-contracts/metering.ts'
 
 /**
@@ -13,13 +14,17 @@ import { assertMeteringContract } from '../../../shared/seam-contracts/metering.
  *
  * 无 DSN 时 **skip 且 skip 可见**——静默 return 会让报告显示「通过」，那正是本项要
  * 修的元问题。
+ *
+ * 走本文件专属的 schema（见 `pg-schema.ts`）：与 `sink.spec.ts` 共用时，两边的
+ * TRUNCATE 会互相抹掉对方的夹具，红的原因与被测代码无关。
  */
 const DSN = process.env['METERING_TEST_DSN']
+const dsn = () => schemaDsn(DSN!, 'metering_contract_test')
 
 describe('metering 契约 —— 对真 PG', () => {
   const t = DSN ? it : it.skip
   t(`并行双树语义（需 METERING_TEST_DSN，当前${DSN ? '已设置' : '未设置 → 跳过，非通过'}）`, async () => {
-    const seam = new PgMeteringSeam(DSN!)
+    const seam = new PgMeteringSeam(await dsn())
     try {
       await seam.init()
       // TRUNCATE 而非 DROP：DROP 会让并行跑的其它用例拿到不存在的表
@@ -36,7 +41,7 @@ describe('metering 契约 —— 对真 PG', () => {
   })
 
   t('DDL 幂等 —— init 跑两次不报错（既有库上必然发生）', async () => {
-    const seam = new PgMeteringSeam(DSN!)
+    const seam = new PgMeteringSeam(await dsn())
     try {
       await seam.init()
       await seam.init()
