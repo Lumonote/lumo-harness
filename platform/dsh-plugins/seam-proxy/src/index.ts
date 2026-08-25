@@ -17,6 +17,7 @@ import z from '@deepseek-ai/schemastery'
 import { SeamProxyClient } from './client.ts'
 import { assertSeamsRemotable } from './gate.ts'
 import { createRemoteGraph, createRemoteKnowledge } from './remote-seams.ts'
+import type { BudgetMode } from '../../../shared/seam-contracts/turn-budget.ts'
 import type { KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
 import type { GraphSeam } from '../../../shared/seam-contracts/graph.ts'
 
@@ -46,6 +47,14 @@ export interface SeamProxyPluginConfig {
    * remotable seam 时不必再改这里的联合类型。
    */
   seams?: string[]
+  /**
+   * 闸 C：每 turn 每 seam 的调用次数上限的执法模式。缺省 `warn`。
+   *
+   * 默认告警而非拒绝：超预算是性能回归，不是安全事故。默认 `enforce` 会把「某个
+   * 组件写得太碎」升级成「用户这一轮直接失败」。生产上先看告警量，确认没有误报
+   * 再按 realm 逐步收紧。
+   */
+  budgetMode?: BudgetMode
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -67,6 +76,7 @@ export const Config: z<SeamProxyPluginConfig> = z.object({
   failureThreshold: z.number(),
   openForMs: z.number(),
   seams: z.array(z.string()),
+  budgetMode: z.union(['warn', 'enforce'] as const),
 })
 
 export function apply(ctx: Context, config: SeamProxyPluginConfig): void {
@@ -103,6 +113,14 @@ export function apply(ctx: Context, config: SeamProxyPluginConfig): void {
     maxAttempts: config.maxAttempts,
     failureThreshold: config.failureThreshold,
     openForMs: config.openForMs,
+    budgetMode: config.budgetMode,
+    // 一行一个 KV 对：告警要能被日志管道解析成指标，不能只是给人读的一句话
+    onBudgetViolation: (v) => {
+      ctx.logger.warn(
+        'seam-proxy: 超出每 turn 调用预算 seam=%s turn=%s count=%d budget=%d',
+        v.seam, v.turn, v.count, v.budget,
+      )
+    },
   })
   ctx.provide('seamProxy', client)
 
@@ -120,4 +138,4 @@ export function apply(ctx: Context, config: SeamProxyPluginConfig): void {
 export default apply
 export { SeamProxyClient }
 export { assertSeamsRemotable }
-export type { KnowledgeSeam, GraphSeam }
+export type { KnowledgeSeam, GraphSeam, BudgetMode }

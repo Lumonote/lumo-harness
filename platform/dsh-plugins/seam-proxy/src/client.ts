@@ -12,6 +12,12 @@ import {
   isIdempotent,
   type SeamResponse,
 } from '../../../shared/seam-contracts/remote.ts'
+import {
+  NO_TURN,
+  TurnCallBudget,
+  type BudgetMode,
+  type BudgetViolation,
+} from '../../../shared/seam-contracts/turn-budget.ts'
 
 export interface SeamProxyConfig {
   /** 远端 seam host 地址列表（静态；Nacos 发现时经 setEndpoints 热更新） */
@@ -28,6 +34,9 @@ export interface SeamProxyConfig {
   /** 熔断：连续失败阈值 / 打开时长 */
   failureThreshold?: number
   openForMs?: number
+  /** 闸 C：每 turn 调用预算模式，缺省 `warn`（超预算是性能回归，不是安全事故） */
+  budgetMode?: BudgetMode
+  onBudgetViolation?: (v: BudgetViolation) => void
 }
 
 export class SeamProxyClient {
@@ -37,6 +46,19 @@ export class SeamProxyClient {
   private readonly realm: string
   private readonly userId: string
   private readonly token: string | undefined
+  private readonly budget: TurnCallBudget
+  /**
+   * 当前 turn 指针（闸 C）。
+   *
+   * turn 不进 seam 接口：`remote-seams.ts` 明确禁止远程专有参数，因为「远程适配器
+   * 与本地 Provider 接口完全相同」是 §4.1 的核心约束 —— 加一个 turn 参数就等于
+   * Consumer 要知道自己在跟远程说话。所以由平台侧的 turn 边界监听器调
+   * {@link setTurn}。
+   *
+   * **已知弱点**：漏调 setTurn 会让预算失准且静默。当前可接受，因为闸 C 是回归
+   * 探测器而非安全闸；若默认改成 `enforce`，必须先换成 AsyncLocalStorage 隐式传播。
+   */
+  private turn = NO_TURN
 
   constructor(config: SeamProxyConfig) {
     this.balancer = new Balancer({
@@ -49,6 +71,15 @@ export class SeamProxyClient {
     this.realm = config.realm
     this.userId = config.userId ?? 'system'
     this.token = config.token
+    this.budget = new TurnCallBudget({
+      mode: config.budgetMode,
+      onViolation: config.onBudgetViolation,
+    })
+  }
+
+  /** 由平台侧的 turn 边界监听器调用。空串按「没有 turn」处理，不接受歧义标识。 */
+  setTurn(turn: string): void {
+    this.turn = turn.length > 0 ? turn : NO_TURN
   }
 
   setEndpoints(urls: string[]): void {
@@ -67,6 +98,17 @@ export class SeamProxyClient {
    * 业务错误的情况绝不重试 —— 那是重复副作用的来源。
    */
   async call(seam: string, method: string, args: unknown[]): Promise<unknown> {
+    // 闸 C：记一次**逻辑调用**，不是一次网络往返。重试不计数 —— 计了的话一段抖动的
+    // 网络就会触发预算告警，把网络问题记到组件粒度的头上，而这个闸测的是组件粒度。
+    //
+    // enforce 模式下这里会抛。翻译成 forbidden：不可重试、不计入熔断（远端是健康的，
+    // 是本地策略拒绝的），且语义上「调用方的问题不是节点故障」正好对上。
+    try {
+      this.budget.record(seam, this.turn)
+    } catch (e) {
+      throw new RemoteSeamError('forbidden', e instanceof Error ? e.message : String(e))
+    }
+
     const retryable = isIdempotent(seam, method)
     const attempts = retryable ? this.maxAttempts : 1
     const targets = this.balancer.candidates(attempts)
