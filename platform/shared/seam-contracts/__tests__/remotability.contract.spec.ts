@@ -9,6 +9,7 @@ import {
   isRemotable,
   type SeamGrade,
 } from '../remotability.ts'
+import { isIdempotent as remoteIsIdempotent } from '../remote.ts'
 
 /**
  * dsh 上游全部 `seam` 角色服务，**人工抄录**自
@@ -151,5 +152,21 @@ describe('幂等性单一来源', () => {
     expect(isIdempotent('knowledge', 'constructor')).toBe(false)
     expect(isIdempotent('knowledge', 'toString')).toBe(false)
     expect(isIdempotent('ctx.terminals', 'write')).toBe(false)
+  })
+
+  it('remote.ts 的 isIdempotent 与分级表逐方法一致 —— 两张表必然漂移，所以只留一张', () => {
+    for (const [seam, g] of entries()) {
+      if (g.class !== 'remotable') continue
+      for (const method of Object.keys(g.methods!)) {
+        expect(remoteIsIdempotent(seam, method), `${seam}.${method}`)
+          .toBe(isIdempotent(seam, method))
+      }
+    }
+  })
+
+  it('remote.ts 对未定级 seam 同样 false', () => {
+    expect(remoteIsIdempotent('made-up-seam', 'query')).toBe(false)
+    expect(remoteIsIdempotent('ctx.terminals', 'write')).toBe(false)
+    expect(remoteIsIdempotent('knowledge', 'constructor')).toBe(false)
   })
 })

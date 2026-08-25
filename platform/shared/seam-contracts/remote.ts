@@ -67,20 +67,16 @@ export class RemoteSeamError extends Error {
 }
 
 /**
- * 各 seam 的**幂等方法白名单**。
+ * 各 seam 的**幂等方法白名单**住在分级表里，不在这里。
  *
- * 只有列在这里的方法允许在网络失败后自动重试。这不是性能优化，是正确性边界：
- * 「请求已到达但响应丢失」时重试一个非幂等方法会造成重复副作用。
- * 契约上幂等（upsert/last-wins/delete）的方法才可以进这张表。
+ * 曾经这里有一张 `IDEMPOTENT_METHODS`，而评审 R1 要求的分级表里幂等性又是一列。
+ * 两处并存必然漂移：加一个方法时只会改一处，另一处静默过期，而过期的方向是
+ * 「以为不幂等所以不重试」（可用性损失）或「以为幂等所以重试」（重复副作用）——
+ * 后者是正确性事故。所以幂等性只留一处，见 `remotability.ts`。
+ *
+ * 本函数签名保持不变，`client.ts` 无需改动。
  */
-export const IDEMPOTENT_METHODS: Readonly<Record<string, ReadonlySet<string>>> = {
-  knowledge: new Set(['query', 'ingest', 'remove', 'rebuild']),
-  knowledgeGraph: new Set(['neighborhood', 'upsertNodes', 'upsertEdges', 'removeNode']),
-}
-
-export function isIdempotent(seam: string, method: string): boolean {
-  return IDEMPOTENT_METHODS[seam]?.has(method) ?? false
-}
+export { isIdempotent } from './remotability.ts'
 
 /** 把线上的错误码映射成 HTTP 状态（host 侧用），保持两端语义一致。 */
 export function statusForCode(code: SeamErrorCode): number {
