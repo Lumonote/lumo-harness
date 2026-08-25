@@ -37,6 +37,7 @@ import {
   METHOD_TABLE,
   type SeamName,
 } from './dispatch.ts'
+import { assertSeamRemotable } from './gate.ts'
 
 export interface SeamHostLogger {
   info(format: string, ...args: unknown[]): void
@@ -99,7 +100,20 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: SeamHo
 
   try {
     const caller = authenticate(req, options)
-    if (!isSeamName(seamName)) throw invalid(`未知 seam ${seamName}`)
+
+    // 闸 B：先问「这个 seam 允许过网吗」，再问「这个 host 实现了它吗」。
+    //
+    // 顺序要紧。反过来的话，`ctx.terminals` 会被 isSeamName 判成 invalid ——
+    // 「未知 seam」这个措辞是错的：它不是未知，它是**被明确禁止**的。错误码也会错成
+    // invalid，读日志的人会去查参数而不是去查准入。
+    //
+    // 位置也要紧：在读请求体之前、在触碰任何 Provider 之前。被拒的调用不该先让我们
+    // 吃掉一兆字节的 body。
+    assertSeamRemotable(seamName)
+
+    // 分级为 remotable 但本 host 没有方法表：说明分级表与实现漂移了（有跨包契约
+    // 测试守着）。此时是 invalid 而非 forbidden —— 准入是允许的，只是这里没有。
+    if (!isSeamName(seamName)) throw invalid(`本节点未实现 seam ${seamName}`)
 
     const body = await readBody(req, options.maxBodyBytes)
     const payload = parseCall(body)
