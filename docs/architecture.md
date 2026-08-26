@@ -282,13 +282,20 @@ spec:
 
 > **Milvus 内部依赖的边界（重要）**：Milvus 集群模式自带 **etcd**（其元数据）与 **Pulsar/Kafka**（其内部日志 broker）。这些**仅是 Milvus 的内部实现，被封装在 Milvus 部署单元之内**，**不承担任何平台级职责**——平台的注册/配置**唯一**是 Nacos（§6.1），平台的消息/A2A 骨干**唯一**是 RocketMQ（§8.3）。严禁任何平台组件连接 Milvus 自带的 etcd/Pulsar，也严禁把它们当作第二套注册或消息设施。运维上按「一个有状态中间件」整体对待。
 
-> **实现状态（2026-08-26，对象存储 seam 首切片已落地）**：`platform/dsh-plugins/object-store`
+> **实现状态（2026-08-26，对象存储 seam + 附件 + storage→sql KV 已落地）**：`platform/dsh-plugins/object-store`
 > （MinIO Provider + `ctx.spillStore` 收敛）——插件 `apply` 注册 `ctx.objectStore`（§5.1 `ctx.datastore.object`
 > 的落地实现面）：realm 前缀隔离（越狱段拒绝，键规则纯函数锁在
 > `shared/seam-contracts/object-store.ts`）、写后可读强一致、内容寻址 `putContent`（sha256 同键幂等）、
 > 缺对象 undefined、后端不可达 `capabilityUnavailable`（铁律 21，不降级本地）。`ctx.spillStore` 收敛
-> （seam 远程形态设计 §1 第 11 行）：溢出内容对象化、跨节点 resume 任意节点经同一 seam 取回。附件后端
-> （第 10 行）/storage→sql KV（第 12 行）/web→连接器网关（第 8 行）显式外（设计说明
+> （seam 远程形态设计 §1 第 11 行）：溢出内容对象化、跨节点 resume 任意节点经同一 seam 取回。
+> **附件后端（seam 远程形态设计 §1 第 10 行）**：`platform/dsh-plugins/attachments` 的 MinIO 版
+> `AttachmentStore`（继承 dsh `AttachmentStore` + 复用 attachment-local 归一化），注册 `ctx.attachments`；
+> save→ref 是 `<realm>/content/<sha256>` 对象键、同内容同键幂等、读回 digest 校验，缺对象 NOT_FOUND、
+> 篡改 CORRUPT、非法引用 INVALID、不可达 `capabilityUnavailable`，键规则锁在 `shared/seam-contracts/attachment.ts`。
+> **storage→sql KV（seam 远程形态设计 §1 第 12 行）**：`platform/dsh-plugins/storage` 的 PG KV 后端
+> （`PgStorageBackend implements StorageBackend`，镜像 storage-sqlite），`ctx.storage` 收敛到
+> `ctx.datastore.sql`（PG，schema 版本化）；与 sqlite 跑**同一份** dsh 契约套件（`storage/storage/tests/contract.ts`），
+> 真 PG 全绿。web→连接器网关（第 8 行）仍显式外（设计说明
 > `docs/superpowers/specs/2026-08-26-object-store-design.md` §1）。
 
 ### 5.2 平台自身元数据 backing 推荐
