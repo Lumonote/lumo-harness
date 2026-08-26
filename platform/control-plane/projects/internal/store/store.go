@@ -47,6 +47,10 @@ var (
 	ErrLastOwner       = errors.New("最后一个 owner 不可移除或降级（项目不可成为无主孤儿）")
 	ErrNotArchived     = errors.New("删除只接受 archived 态——归档是常态，删除是异常（先归档再删）")
 	ErrAlreadyMember   = errors.New("该用户已是成员")
+	// ErrMeteringNotReady budget_trees 表尚未创建（真相源在 TS metering 插件，
+	// dsh-node 首启时建）。项目树种子是创建的硬依赖——不建表（第二 DDL 真相源
+	// 比等待更贵），把装配顺序如实暴露给调用方。
+	ErrMeteringNotReady = errors.New("budget_trees 尚未创建（计量插件未初始化——须先完成 metering 建表再创建项目）")
 )
 
 // Store PG 存储。
@@ -101,6 +105,9 @@ func (s *Store) CreateProject(ctx context.Context, id, realm, name, creator stri
 		INSERT INTO budget_trees (kind, id, budget)
 		VALUES ('project', $1, $2)
 		ON CONFLICT DO NOTHING`, id, s.defaultBudget); err != nil {
+		if isUndefinedTable(err) {
+			return domain.Project{}, ErrMeteringNotReady
+		}
 		return domain.Project{}, fmt.Errorf("种子项目预算树失败: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -385,11 +392,19 @@ func (s *Store) getProjectByID(ctx context.Context, projectID string) (domain.Pr
 	return p, "", nil
 }
 
-// isUniqueViolation PG 23505。
+// isUniqueViolation PG 23505；isUndefinedTable PG 42P01。
 func isUniqueViolation(err error) bool {
 	var pgErr interface{ SQLState() string }
 	if errors.As(err, &pgErr) {
 		return pgErr.SQLState() == "23505"
+	}
+	return false
+}
+
+func isUndefinedTable(err error) bool {
+	var pgErr interface{ SQLState() string }
+	if errors.As(err, &pgErr) {
+		return pgErr.SQLState() == "42P01"
 	}
 	return false
 }

@@ -75,13 +75,15 @@
 | Seam 可远程化边界 | **分级表是准入判据的唯一真相源，未定级即拒绝**。§4.1 原文「任意 seam 可远程化」已收窄：杠杆来自平台新增的能力 seam，不来自搬迁 dsh 原有 seam——白名单里没有一个 dsh 原生 seam，这是结论不是遗漏 | `architecture` §4.1.1–§4.1.2；实现见 `platform/shared/seam-contracts/remotability.ts` + 三道闸，设计说明 [`specs/2026-08-24-seam-remotability-design.md`](./superpowers/specs/2026-08-24-seam-remotability-design.md)；**needs-design 13 项各自的远程形态已设计**（[`specs/2026-08-26-seam-remote-forms-design.md`](./superpowers/specs/2026-08-26-seam-remote-forms-design.md)，含实现顺序 P2a–P3）；跨 AZ 预算实测保持待补（需真多 AZ 环境，不可本机模拟） |
 | 成本归因与预算策略 | **单截面只保留为 token 截面**（B2 明确要求保留）；成本走并行事件流：`cost_type` 闭集 + trace 归因 + 单一写入者。预算树三档行为（软限额/透支/硬停），默认退化与今天一致 | `architecture` §6.4；实现见 `platform/shared/seam-contracts/{cost-events,budget-policy,metering}.ts` + `platform/dsh-plugins/metering`，设计说明 [`specs/2026-08-25-cost-attribution-design.md`](./superpowers/specs/2026-08-25-cost-attribution-design.md)；**PG 侧「本期配额」总额模型已落地**（[`specs/2026-08-26-budget-total-model-design.md`](./superpowers/specs/2026-08-26-budget-total-model-design.md)，2026-08-26）；**事件异步削峰本地等价已落地**（PG 事务 outbox + 进程内调度器，幂等键/事件时刻/批处理，[`specs/2026-08-26-metering-outbox-design.md`](./superpowers/specs/2026-08-26-metering-outbox-design.md)）；**台账列清单单源化**（`shared/manifests/usage-ledger.schema.json`——DDL 与 INSERT 同源生成；Go 消费侧（usage-ledger）将 go:embed 同一文件）；**Doris 聚合已设计**（[`specs/2026-08-26-doris-aggregation-design.md`](./superpowers/specs/2026-08-26-doris-aggregation-design.md)——日分区列式 cube、PG 单向重建、桶级幂等、缺 Doris 显式拒绝；实现随 Doris 进拓扑）；**RocketMQ 传输已落地（Standalone 形态，2026-08-26 实测）**——发布/消费都进 Go（npm 无可用 TS 客户端）：`platform/control-plane/usage-ledger`（publisher：outbox 锁批→broker；consumer：校验→幂等落账；四不变式真 broker e2e 全绿，[`specs/2026-08-26-ledger-rmq-transport-design.md`](./superpowers/specs/2026-08-26-ledger-rmq-transport-design.md)），与 TS 侧 `ledgerTransport` 互斥装配；cluster 多实例/HA 随 helm。待补：Doris 聚合实现 |
 
+| 项目与预算树（N3 拍板） | **项目 = 并行预算树**（2026-08-26 定案）：一次调用同时扣用户树与项目树，任一超限即拒；双树同事务扣减为 TS metering 既有已测行为（口径升格），项目树治理面（创建即种子 `budget_trees kind='project'`）由 projects 服务承担 | `architecture` §6.4/§11.1/§22；实现见 `platform/control-plane/projects` + 契约 `shared/seam-contracts/projects.ts`，设计说明 [`specs/2026-08-26-project-workspace-design.md`](./superpowers/specs/2026-08-26-project-workspace-design.md)；**§11.1 首切片已落地**（项目实体/生命周期/成员角色/用量聚合，真 PG 全绿） |
+
 ### 仍待拍板
 
 | # | 议题 | 待决内容 | 出处 |
 |---|------|---------|------|
 | 1 | **落地首切顺序** | 规范为「Nacos → 自研网关 → 连接器 + DAG」；评审主张**先单节点垂直切片**（一个真实业务组件 + 知识库 seam + 计量）验证产品假设，再上分布式控制面。**技术栈一致，分歧只在顺序。** | `roadmap` §16.3 vs `review` §5.2 |
 | 2 | **是否引入 TiDB/CRDB** | 规范自标待决；视多集群联邦需求。**后加远比先加后拆便宜**，建议保持待决 | `architecture` §13.3 |
-| 3 | **项目与预算树的关系** | 项目是「归因维度」还是「并行预算树」？前者简单但项目无独立预算，后者表达力强但需双树原子扣减。**评审倾向后者**（企业按项目立项拨预算），需拍板并写进 §6.4 | `review` N3 |
+
 
 ## 五、待补章节（当前完全缺失）
 

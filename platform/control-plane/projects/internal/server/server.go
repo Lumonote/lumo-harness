@@ -120,6 +120,12 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"name taken in realm"}`, http.StatusConflict)
 			return
 		}
+		if errors.Is(err, store.ErrMeteringNotReady) {
+			// 装配顺序的如实暴露：metering 建表先于项目创建（standalone 拓扑
+			// 未部署 dsh-node 时会走到这里）。503 而非 500——这是待装配不是故障。
+			http.Error(w, `{"error":"metering tables not initialized; run metering plugin init first"}`, http.StatusServiceUnavailable)
+			return
+		}
 		s.log.Error("创建项目失败", "err", err)
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 		return

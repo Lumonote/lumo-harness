@@ -145,6 +145,21 @@ services:
       postgres:
         condition: service_healthy
 
+  # projects：项目工作区（§11.1 首切片）——项目实体/生命周期/成员角色/用量聚合。
+  # N3 拍板 B（2026-08-26）：项目 = 并行预算树——创建即种子 budget_trees
+  # kind='project' 行；执法（双树同事务扣减）在 TS metering，本服务只治理不执法。
+  projects:
+    build:
+      context: ../control-plane/projects
+    environment:
+      LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_LISTEN: ":8086"
+    ports:
+      - "18086:8086"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # usage-ledger：计量台账 RocketMQ 传输（§6.4 异步削峰，设计说明 2026-08-26）。
   # publisher（outbox→broker）+ consumer（broker→usage_ledger）双 goroutine 单实例。
   # 装配互斥：dsh-node 侧 metering 插件须配 ledgerTransport: 'rmq'（本形态）——

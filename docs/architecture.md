@@ -550,7 +550,7 @@ manifest 格式为 JSON 而非 YAML：签名覆盖的是上传的原始字节，
 | **功能级计数** | 每次 LLM 调用打 `feature` 标签（来自组件/skill manifest 或 agent preset），回答"知识库问答这个功能各部门花多少" |
 | **按人/部门/角色归因** | trace context（`user_id`/`dept_id`/`role`）随请求经 dsh 调用链 baggage 透传；组织树同步自 SSO 作权威来源 |
 | **平台级溯源** | `usage_ledger`（PG，append-only + 签名）一行串起 request→session→user→dept→role→agent→component→feature→seam→model→token→成本，与连接器审计/session 事件打通 |
-| **限流 + 限额度** | 限流：Redis 令牌桶按 `global/tenant/dept/role/user/feature` 多层级前置拦截；额度：平台→部门→角色→用户的预算树（三态表见上） |
+| **限流 + 限额度** | 限流：Redis 令牌桶按 `global/tenant/dept/role/user/feature` 多层级前置拦截；额度：平台→部门→角色→用户的预算树（三态表见上）**+ 项目并行预算树**（**2026-08-26 拍板**，评审 N3 选项 B：一次调用同时扣用户树与项目树，任一超限即拒；双树同事务扣减与拒绝信息带树标识已落地，项目树治理面见 §11.1 实现注记） |
 
 - **存储分工**：明细进 PG（强一致溯源）、聚合进 Doris（看板 cube）、限流/额度走 Redis（TTL 对齐周期）。
   **列清单单一真相源**：`platform/shared/manifests/usage-ledger.schema.json`——DDL/INSERT 同源生成
@@ -795,6 +795,15 @@ Session Console（任一终端）
 | **计量与账单归属** | 项目是计费记账的最小单元：`usage_ledger` 增加 `project_id` 维度；项目仪表板 = 此项目用量/预算/费用红线 | §6.4 归因 |
 | **面向上游** | 项目是「交付物」而不是「开发者环境」——项目里跑产品、跑试运行（灰度）；单项目可有多个 realm 内环境（demo/试产/生产） | §10.3 分发 |
 | **多集群视角** | 项目视图下显示各集群运行状态（§7.4 全局监控维度），项目可设计集群偏好/数据驻留 | §7.4 |
+
+> **实现状态（2026-08-26，首切片已落地）**：`platform/control-plane/projects` Go 服务 + 契约
+> `platform/shared/seam-contracts/projects.ts`（状态机/角色能力矩阵双实现）——项目实体（realm 内
+> `(realm,name)` 唯一）、生命周期（active↔archived，删除须 archived 态 + `X-Lumo-Confirm` 两层
+> 显式授权）、成员角色（owner/editor/viewer，最后 owner 保护）、**项目 = 并行预算树**（创建即种子
+> `budget_trees kind='project'` 行，与用户树同表同键；执法双树同事务扣减在 TS metering 已落地）、
+> 用量聚合端点（`usage_ledger` 按 cost_type 聚合 + 预算四态）。删除不删账（台账 append-only 不因
+> 组织实体消失破例）。模板/知识空间挂载/OPA 跨项目节点/多集群视角显式推迟（设计说明
+> `docs/superpowers/specs/2026-08-26-project-workspace-design.md` §7）。
 
 > **为什么项目归 §11 而不是 §10**：项目是用户工作流与制品分发的一部分（用户从「项目」入口构建其意图，产物是「经验/自动化工件」），是权限载体与计量单元，不是**构造单元**（组件/技能/专家是构造单元）。若项目被当作第四大类制品，三类能力（专家·技能·连接器）没有载体；若把它当「权限外壳」，权限模型就无法落到工作单元。
 
@@ -1380,7 +1389,7 @@ SessionEvent 日志 append-only、每会话单调序号（§8.2）——这让�
 | Nebula 图 schema / space 划分 | 重划 | 全量重建 |
 | Milvus collection / partition key / embedding 版本 | 重划（§5.4.4） | 全量重建（且旧 embedding 与新模型不可混窗） |
 | `usage_ledger` append-only | 删行修账 | 破坏审计承诺 |
-| realm / 项目与预算树的关系（**待拍板 3**，§11.1/§6.4） | 改判 | 会计口径重算 |
+| realm / 项目与预算树的关系（**已拍板 2026-08-26：项目 = 并行预算树**，§11.1/§6.4） | 改判 | 会计口径重算 |
 | 事件成本类型闭集（§6.4，`cost_type` 闭集） | 扩集 | 闭集外拒绝入账的事实性反转（只能加新取值，不删旧取值） |
 
 > 勾稽关系：本清单里的每一项都对应一次「早期决定、后期难改」——§5.3 把这个作为接入前的门，此处把它变成检查表。
