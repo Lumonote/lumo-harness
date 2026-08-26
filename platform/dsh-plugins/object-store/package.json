@@ -17,6 +17,7 @@
     "@deepseek-ai/cordis": "link:../../../deepseek-harness/vendor/cordis",
     "@deepseek-ai/dsh-spill": "link:../../../deepseek-harness/packages/spill/spill",
     "@deepseek-ai/schemastery": "link:../../../deepseek-harness/vendor/schemastery",
-    "minio": "^8.0.5"
+    "minio": "^8.0.5",
+    "tsx": "4.22.4"
   }
 }
