@@ -12,6 +12,7 @@ import {
   isCostType,
   type CostEvent,
 } from '../../../shared/seam-contracts/cost-events.ts'
+import { worseOf, type BudgetState } from '../../../shared/seam-contracts/budget-policy.ts'
 import type {
   MeterContext,
   MeterRecord,
@@ -103,6 +104,10 @@ export class PgMeteringSeam implements MeteringSeam {
    * `estimate` 给了就判「够不够这一次」，不给退回「余额是否还有」。只判后者的话，
    * 剩 1 token 的用户可以发起任意大的调用——封顶在事前完全不起作用，只能靠事后
    * 扣成负数补救。
+   *
+   * 返回值带 `state`：双树取更严者（§5），`approved ⟺ state !== 'hard'`。
+   * 投影口径见 `stateOfTree`——本实现只存剩余、不存总额，算不出「已用」，所以
+   * 退化为「放不放得下这一次」；三态在 PG 侧留待「总额模型」落地（见 `stateOfTree`）。
    */
   async reserve(ctx: MeterContext, estimate?: number): Promise<MeterResult> {
     const need = estimate !== undefined && Number.isFinite(estimate) && estimate > 0
@@ -111,25 +116,29 @@ export class PgMeteringSeam implements MeteringSeam {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
-      const userRow = await client.query<{ budget: number }>(
+      const userRow = await client.query<BudgetTreeRow>(
         'SELECT budget FROM budget_trees WHERE kind = $1 AND id = $2 FOR UPDATE',
         ['user', ctx.userId],
       )
-      const projRow = await client.query<{ budget: number }>(
+      const projRow = await client.query<BudgetTreeRow>(
         'SELECT budget FROM budget_trees WHERE kind = $1 AND id = $2 FOR UPDATE',
         ['project', ctx.projectId],
       )
       // 并行树：任一超限即拒（评审 N3）
-      if (userRow.rows.length === 0 || Number(userRow.rows[0]!.budget) < need) {
+      const userState = stateOfTree(userRow.rows[0], need)
+      const projState = stateOfTree(projRow.rows[0], need)
+      // 双树取更严者（§5）；`reason` 保留区分两树的语义（既有调用方依赖）
+      const state = worseOf(userState, projState)
+      if (projState === 'hard' && userState !== 'hard') {
         await client.query('ROLLBACK')
-        return { approved: false, reason: 'denied-user-budget', ledgerRef: '' }
+        return { approved: false, reason: 'denied-project-budget', ledgerRef: '', state }
       }
-      if (projRow.rows.length === 0 || Number(projRow.rows[0]!.budget) < need) {
+      if (userState === 'hard') {
         await client.query('ROLLBACK')
-        return { approved: false, reason: 'denied-project-budget', ledgerRef: '' }
+        return { approved: false, reason: 'denied-user-budget', ledgerRef: '', state }
       }
       await client.query('COMMIT')
-      return { approved: true, reason: 'ok', ledgerRef: '' }
+      return { approved: true, reason: 'ok', ledgerRef: '', state }
     } finally {
       client.release()
     }
@@ -249,6 +258,26 @@ interface LedgerRow {
  * 发出方跨语言（连接器网关是 Go），因此约束是**表只有一个写入者**：Go 侧经 sink
  * 接口交事件，不直连这张表。
  */
+/** `budget_trees` 行。预算列是 BIGINT，pg 读成字符串。 */
+type BudgetTreeRow = { budget: string | number }
+
+/**
+ * 某棵树对「一次 need 大小的调用」的投影状态（口径见契约 `MeterResult.state`）。
+ *
+ * **为什么只可能返回 within / hard**：`budget_trees.budget` 存的是**剩余**（每 commit
+ * 扣减，可为负），不是总额。没有总额就算不出「已用」，二态里的软限额 / 透支额度也就
+ * 无从计算——这三态需要「本期配额」模型（`setBudget(总额)` + 每期重置），超出本任务
+ * Step 3 范围，记入 §7 相似的不做清单。
+ *
+ * 因此这里的投影退化为旧判据的表述：**这棵树还能不能放下这一次调用**。没有行的树
+ * 没有预算可用（旧实现即「无行即拒」），同样 `hard`——统一由
+ * `state === 'hard'` 裁决，而不是散落两个分支各判一遍。
+ */
+function stateOfTree(row: BudgetTreeRow | undefined, need: number): BudgetState {
+  if (!row) return 'hard'
+  return Number(row.budget) < need ? 'hard' : 'within'
+}
+
 async function insertLedger(client: pg.PoolClient, e: CostEvent): Promise<void> {
   await client.query(
     `INSERT INTO usage_ledger

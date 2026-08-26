@@ -3,6 +3,7 @@
  * 并行预算树模型（评审 N3）：一次调用同时扣「用户树」与「项目树」，任一超限即拒。
  * 明细落 PG（强一致溯源），限流额度前置拦截；本契约不关心具体存储，只断言语义。
  */
+import type { BudgetState } from './budget-policy.ts'
 
 export interface MeterContext {
   userId: string
@@ -20,6 +21,24 @@ export interface MeterResult {
   reason?: 'denied-user-budget' | 'denied-project-budget' | 'ok'
   /** 消费记录引用（后续溯源一行串起 request→session→user→project→feature，§6.4） */
   ledgerRef: string
+  /**
+   * 双树中**更严**的那个态（§5，与 N3 的「任一超限即拒」一致）。
+   *
+   * 语义：**本次调用做完后**各树的投影状态，`used = (budget − balance) + need`，
+   * 其中 `need = estimate ?? 1`（没有预估时按最小消费单位投影）。
+   *
+   * 与 `approved` 必须自洽：`approved === (state !== 'hard')`。透支是「放行且记账」，
+   * 不是「拒绝」——把 `overdraft` 也判成拒绝就等于没实现透支。契约对两个实现都断言
+   * 这条等价关系，否则 stub 与 PG 会各自漂移出一套「大致对」的语义。
+   *
+   * 为什么是投影而不是「当前余额的正负」：余额为正却判拒（余额 1、预估 100）的情形
+   * 里，前者会说 `within` 而后者的正确措辞是 `hard`（连这次预估都放不下）——两条
+   * 信息互相矛盾的 state 会被调用方当成「反正有个字段就对了」，比没有更糟。
+   *
+   * 未配置额度的树只可能出现 `within` / `hard`（见 `budget-policy.ts` 的缺省值），
+   * 所以这个字段对既有部署不引入新行为。
+   */
+  state: BudgetState
 }
 
 export interface MeterRecord {
@@ -76,22 +95,40 @@ export async function assertMeteringContract(
     agentId: 'a1', componentId: 'c1', feature: 'kb:qa', sessionRef: 's1',
   }
 
+  /**
+   * 每次 `reserve` 都查一遍 `approved ⟺ state !== 'hard'`。
+   *
+   * 放在契约里而不是各实现的测试里，是因为这正是本项开头修的那个元问题的形状：stub
+   * 照契约写、PG 另外写，两者语义不一致而都「通过」。状态与放行判定分成两处表达时，
+   * 最容易漂移的就是「透支到底放不放行」——把 `overdraft` 也判成拒绝等于没实现透支，
+   * 而那个 bug 在两边各自的测试里都看不出来。
+   */
+  const check = (r: MeterResult, label: string): MeterResult => {
+    assert(r.state !== undefined, `${label}：必须返回 state`)
+    assert(
+      r.approved === (r.state !== 'hard'),
+      `${label}：approved(${r.approved}) 与 state(${r.state}) 不自洽` +
+      ` —— 透支是「放行且记账」，不是「拒绝」`,
+    )
+    return r
+  }
+
   // —— 场景 1：预算内通过 ——
   await resetBudgets(1000, 500)
-  const ok = await seam.reserve(ctx)
+  const ok = check(await seam.reserve(ctx), '场景1 预算内')
   assert(ok.approved && ok.reason === 'ok', '预算内调用必须通过')
 
   // —— 场景 2：项目树超限拒绝（user 仍充足；并行树任一超限即拒，评审 N3）——
   // 一次调用同时扣两棵树（1000-600=400, 500-600=-100）→ user 尚足而项目已超
   await seam.commit({ context: ctx, tokens: 600, model: 'deepseek', costType: 'llm', costUsd: 0.6 })
-  const projOver = await seam.reserve(ctx)
+  const projOver = check(await seam.reserve(ctx), '场景2 项目树超限')
   assert(!projOver.approved && projOver.reason === 'denied-project-budget', '项目树超限必须拒绝')
 
   // —— 场景 3：用户树超限拒绝（项目树保持充足）——
   // 一次调用同时扣两棵树（user 100 超、project 10000 仍足）→ 应判用户树
   await resetBudgets(100, 10000)
   await seam.commit({ context: ctx, tokens: 5000, model: 'deepseek', costType: 'llm', costUsd: 5 })
-  const userOver = await seam.reserve(ctx)
+  const userOver = check(await seam.reserve(ctx), '场景3 用户树超限')
   assert(!userOver.approved && userOver.reason === 'denied-user-budget', '用户树超限必须拒绝')
 
   // 溯源记录可用（场景 3 后：project 已扣 5000 后余 5000，需仍可查询）
@@ -113,7 +150,7 @@ export async function assertMeteringContract(
   assert(over === -100, `超限扣减必须落到负数（得到 ${over}）—— 冻结在正数上等于封顶失效`)
 
   // 透支后必须拒（默认透支额度为 0）
-  const afterOver = await seam.reserve(ctx)
+  const afterOver = check(await seam.reserve(ctx), '场景4 透支后')
   assert(!afterOver.approved, '余额为负时必须拒绝')
 
   // —— 场景 5：reserve 判「够不够这一次」——
@@ -121,15 +158,15 @@ export async function assertMeteringContract(
   // 只判「余额 > 0」的话，剩 1 token 的用户可以发起任意大的调用：封顶在事前完全
   // 不起作用，只能靠事后扣成负数补救。
   await resetBudgets(1, 10000)
-  const tooBig = await seam.reserve(ctx, 100)
+  const tooBig = check(await seam.reserve(ctx, 100), '场景5 预估过大')
   assert(!tooBig.approved, '余额 1 而预估 100 必须拒绝')
 
   await resetBudgets(1000, 10000)
-  const fits = await seam.reserve(ctx, 100)
+  const fits = check(await seam.reserve(ctx, 100), '场景5 预估合适')
   assert(fits.approved, '余额 1000 而预估 100 必须通过')
 
   // 不传 estimate 时退回「余额是否还有」——既有调用方行为不变
   await resetBudgets(1, 10000)
-  const noEstimate = await seam.reserve(ctx)
+  const noEstimate = check(await seam.reserve(ctx), '场景5 无预估')
   assert(noEstimate.approved, '不传 estimate 时余额为正即通过（保持既有调用方行为）')
 }
