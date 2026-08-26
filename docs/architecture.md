@@ -555,7 +555,7 @@ manifest 格式为 JSON 而非 YAML：签名覆盖的是上传的原始字节，
 - **存储分工**：明细进 PG（强一致溯源）、聚合进 Doris（看板 cube）、限流/额度走 Redis（TTL 对齐周期）。
   **列清单单一真相源**：`platform/shared/manifests/usage-ledger.schema.json`——DDL/INSERT 同源生成
   （Go 消费侧 go:embed 同一文件），加列只改清单，杜绝「schema 第二份」。
-- **异步削峰**：计量事件不留请求路径——`commit`（LLM 截面）与 `emit`（并行成本流）把已校验事件写入 `usage_event_outbox`（**与预算扣减同一事务**，原子配套），由搬运器批量投递入 `usage_ledger`：`event_key` 幂等（至少一次投递不重复入账）、事件时刻保真（`ts` = 发生时刻，非投影时刻）、按序搬运。写穿即见换**有界最终一致**（≤ drain 周期），`reserve`/`balance` 不搬。**Local-lite = PG 事务 outbox + 进程内调度器**（§13.2 等价形态，2026-08-26 已落地）；Standalone+/Cluster = 事件走 RocketMQ `usage.event.*` 消费侧（待 RocketMQ 进拓扑，见评审 B2 偏离①）。设计说明 `docs/superpowers/specs/2026-08-26-metering-outbox-design.md`。
+- **异步削峰**：计量事件不留请求路径——`commit`（LLM 截面）与 `emit`（并行成本流）把已校验事件写入 `usage_event_outbox`（**与预算扣减同一事务**，原子配套），由搬运器批量投递入 `usage_ledger`：`event_key` 幂等（至少一次投递不重复入账）、事件时刻保真（`ts` = 发生时刻，非投影时刻）、按序搬运。写穿即见换**有界最终一致**（≤ drain 周期），`reserve`/`balance` 不搬。**Local-lite = PG 事务 outbox + 进程内调度器**（§13.2 等价形态，2026-08-26 已落地）；Standalone+/Cluster = 事件走 RocketMQ `usage-events-<cost_type>` 消费侧（**2026-08-26 修正：原写 `usage.event.*`——RocketMQ topic 合法字符集 `^[%|a-zA-Z0-9_-]+$`，点号非法，由真实 broker 联调首次发现并改此命名**；待 RocketMQ 进拓扑，见评审 B2 偏离①）。设计说明 `docs/superpowers/specs/2026-08-26-metering-outbox-design.md`。
 - **调度联动**：Scheduler 放置时读预算余量，预算将尽的任务降优先级/suspend。
 
 ### 6.5 分发自动安装 Provisioner（声明式 reconcile）

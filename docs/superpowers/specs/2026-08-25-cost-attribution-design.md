@@ -87,7 +87,7 @@ seam Provider  ─┼─▶ CostEventSink ─▶ usage_ledger（唯一写入者�
 ctx.jobs       ─┘
 ```
 
-§6.4 已写明「计量事件走 RocketMQ `usage.event.*`，不阻塞推理」，那是目标形态。RocketMQ 尚未进部署拓扑（与 Nacos 同因，见 T1 落地状态的偏离记账），因此本期 sink 是**进程内直写 + 同一张表**，接口留成可替换的那一层。这是排期上的临时顶替，不是对异步削峰的否定。
+§6.4 已写明「计量事件走 RocketMQ `usage-events-<cost_type>`，不阻塞推理」（命名 2026-08-26 修正：原 `usage.event.*`，真实 broker 联调发现 topic 点号非法），那是目标形态。RocketMQ 尚未进部署拓扑（与 Nacos 同因，见 T1 落地状态的偏离记账），因此本期 sink 是**进程内直写 + 同一张表**，接口留成可替换的那一层。这是排期上的临时顶替，不是对异步削峰的否定。
 
 ---
 

@@ -3,6 +3,9 @@ node_modules/
 
 deepseek-harness/
 .idea/
+# 本地工具状态（CodeGraph 索引 / Serena 记忆），非项目产物
+.codegraph/
+.serena/
 .omc/
 deepseek-harness/.omc/
 docs/.omc/

@@ -59,7 +59,8 @@ export interface MeterRecord {
  * 与 jobs 是 TS 插件），各自直连 PG 写台账就会有 N 份 schema 副本，必然漂移——这与
  * 「幂等白名单两张表」是同一类错误。发出方产出事件，由实现本接口的那一个写入者落库。
  *
- * §6.4 已写明计量事件走 RocketMQ `usage.event.*` 异步削峰，那是目标形态；RocketMQ
+ * §6.4 已写明计量事件走 RocketMQ `usage-events-<cost_type>` 异步削峰（2026-08-26
+ * 由真实 broker 联调修正：topic 点号非法，合法字符集 ^[%|a-zA-Z0-9_-]+$），那是目标形态；RocketMQ
  * 尚未进部署拓扑（与 Nacos 同因），因此本期是进程内直写。接口留在这一层就是为了
  * 换传输时不动发出方。
  */

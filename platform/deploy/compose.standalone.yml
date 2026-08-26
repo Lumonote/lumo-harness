@@ -48,6 +48,13 @@ services:
 
   rocketmq:      # 单容器跑 namesrv + broker（RocketMQ 5.3.1）
     #
+    # 首次启动注意：镜像里没有 /home/rocketmq/store，docker 新建卷时属主为 root，
+    # 运行用户 rocketmq 无权创建 config/ 子目录 → broker init 失败（NPE 假象，
+    # 真实报错见容器内 logs/rocketmqlogs/broker.log 的 FileNotFoundException）。
+    # 首次 up 后执行一次修复（见 deploy/README.md「首次启动」）：
+    #   docker exec -u 0 lumo-platform-standalone-rocketmq-1 \
+    #     chown -R rocketmq:rocketmq /home/rocketmq/store
+    #
     # brokerIP1 必须写 127.0.0.1：容器网络里 broker 默认注册自己的 br 网段 IP，
     # 而 Docker Desktop(macOS) 上宿主机不可达容器 IP——客户端经 published port 得到
     # 的 broker 地址是 172.x，会连不上。dev broker.conf（rocketmq-broker-dev.conf）

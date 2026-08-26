@@ -21,6 +21,23 @@ docker compose stop collaborator-0                    # §5.4.7.4: CRDT 归属�
 # 网络分区用 toxiproxy/tc 注入（R1: SeamProxy 熔断 + 背压）
 ```
 
+## 首次启动（standalone 的 rocketmq）
+
+镜像中无 `/home/rocketmq/store`，docker 新建卷时属主为 root，运行用户 rocketmq 无权限
+创建 `config/` 子目录 → broker init 失败（日志只显示 shutdown 期的 NPE 假象，真因见
+容器内 `logs/rocketmqlogs/broker.log` 的 `FileNotFoundException`）。首次 `up` 后执行一次：
+
+```sh
+docker exec -u 0 lumo-platform-standalone-rocketmq-1 \
+  chown -R rocketmq:rocketmq /home/rocketmq/store
+docker compose -f compose.standalone.yml restart rocketmq
+```
+
+验证：`docker logs lumo-platform-standalone-rocketmq-1 | grep "boot success"` 应见
+`The broker[...] boot success`。**topic 命名注意**：RocketMQ 合法字符集
+`^[%|a-zA-Z0-9_-]+$`，点号非法——文档里的 `usage.event.*` 已于 2026-08-26 修正为
+`usage-events-<cost_type>`。
+
 ## 约定
 
 - **同一套镜像与应用配置，只换编排清单**；禁止「本地专用镜像」或「本地专用配置项」。

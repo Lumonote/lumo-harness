@@ -1,7 +1,7 @@
 # 计量事件异步削峰 —— TDD 实现计划
 
 **设计说明**：`docs/superpowers/specs/2026-08-26-metering-outbox-design.md`
-**评审条目**：B2 落地状态的显式偏离①（RocketMQ `usage.event.*` 异步削峰待 RocketMQ 进拓扑）
+**评审条目**：B2 落地状态的显式偏离①（RocketMQ `usage-events-<cost_type>` 异步削峰待 RocketMQ 进拓扑；原写 `usage.event.*`，2026-08-26 真实 broker 联调发现点号非法而修正）
 **规范章节**：`docs/architecture.md` §6.4（异步削峰）/ §13.2（Local-lite 等价：PG 事务 outbox + 进程内调度器）
 **仓库先例**：`platform/dsh-plugins/knowledge/src/graph-projector.ts`（同形状，照它做）
 
@@ -11,7 +11,7 @@
 
 **第一铁律**：`deepseek-harness/` 只读。本项只动 `platform/` 与 `docs/`，收尾合规校验不可跳过。
 
-**本地交付本地等价形态**：§6.4 承诺「RocketMQ `usage.event.*` 异步削峰」；§13.2 明文
+**本地交付本地等价形态**：§6.4 承诺「RocketMQ `usage-events-<cost_type>` 异步削峰」（命名修正文首已记）；§13.2 明文
 Local-lite 等价 = **PG 事务 outbox + 进程内调度器**（PG 事务天然提供「扣配额+发任务」
 原子性）。RocketMQ 未进拓扑，B2 偏离①**保持记账**——本切片不得冒充 RocketMQ 已落地，
 文档措辞必须是「本地等价已落地 / RocketMQ 传输仍待拓扑」。

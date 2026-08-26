@@ -1,6 +1,6 @@
 # 计量事件异步削峰设计说明 —— usage_event_outbox:扣减与事件同事务,台账搬离请求路径
 
-**评审条目**：B2 落地状态偏离①（RocketMQ `usage.event.*` 异步削峰待 RocketMQ 进拓扑）
+**评审条目**：B2 落地状态偏离①（RocketMQ `usage-events-<cost_type>` 异步削峰待 RocketMQ 进拓扑；原写 `usage.event.*`——**2026-08-26 真实 broker 联调发现 topic 点号非法（合法字符集 `^[%|a-zA-Z0-9_-]+$`），已修正命名**）
 **规范章节**：`docs/architecture.md` §6.4（异步削峰）/ §13.2（Local-lite 等价形态）
 **前置**：`docs/superpowers/specs/2026-08-26-budget-total-model-design.md`（总额模型）+ `knowledge/src/graph-projector.ts`（仓库内同构先例）
 
@@ -10,7 +10,7 @@
 
 §6.4 的原文承诺：
 
-> **异步削峰**：计量事件走 RocketMQ `usage.event.*`，不阻塞推理。
+> **异步削峰**：计量事件走 RocketMQ `usage-events-<cost_type>`（命名修正见文首），不阻塞推理。
 
 §13.2 给了 Local-lite 的等价形态：
 
