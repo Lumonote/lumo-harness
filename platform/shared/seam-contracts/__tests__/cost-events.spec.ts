@@ -34,6 +34,17 @@ describe('cost_type 是闭集 —— 自由文本列撑不起「解释一次尖�
     ])
   })
 
+  it('闭集锁：COST_TYPES 与 manifests/cost-types.manifest.json 逐项一致（单源不漂移）', async () => {
+    // 2026-08-26 单源化：数值真相源在 manifest（Go 消费侧 embed 同一文件）。
+    // 本断言保证 TS 侧派生没有漏改——只改 manifest 此处即红，提醒显式同步两语言。
+    const manifest = await import('../../manifests/cost-types.manifest.json', { with: { type: 'json' } })
+    const m = manifest.default.costTypes as Record<string, { unit: string }>
+    expect(Object.keys(m).sort()).toEqual(Object.keys(COST_TYPES).sort())
+    for (const t of Object.keys(COST_TYPES) as CostType[]) {
+      expect(COST_TYPES[t].unit, `${t} 单位漂移`).toBe(m[t]!.unit)
+    }
+  })
+
   it('每类都能构造出合法事件', () => {
     for (const t of Object.keys(COST_TYPES) as CostType[]) {
       // llm.tokens 额外要求 tokens/model（它是唯一的 token 截面）

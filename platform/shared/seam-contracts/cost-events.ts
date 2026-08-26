@@ -12,6 +12,7 @@
  * 命名**而不是静默缺席。未命名的缺口会让读账单的人以为账上就是全部。
  */
 import type { MeterContext } from './metering.ts'
+import costTypesManifest from '../manifests/cost-types.manifest.json' with { type: 'json' }
 
 /**
  * 成本类型闭集。
@@ -22,8 +23,12 @@ import type { MeterContext } from './metering.ts'
  *
  * `unit` 是该类型的**唯一合法单位**。把量塞进错误的单位列会让口径不可读，而口径不可
  * 读的账单等于没有账单。
+ *
+ * **数值单一真相源**：闭集数值出自 `shared/manifests/cost-types.manifest.json`
+ * （2026-08-26 单源化）；Go 消费侧（usage-ledger）embed 同一文件做校验。新增类型 =
+ * 改 manifest + 两侧锁测试先红，语义注释只在此处。
  */
-export const COST_TYPES = {
+export const COST_TYPES = costTypesManifest.costTypes as {
   /** 唯一的 **token** 截面（`ctx.llm`）。B2 明确要求保留单截面规则。 */
   'llm.tokens': { unit: 'tokens' },
   /** 连接器网关出向调用：SaaS 按次计费。 */
@@ -42,7 +47,7 @@ export const COST_TYPES = {
   'storage.bytes': { unit: 'byte-day' },
   /** 非 LLM 推理的 GPU 时间。 */
   'inference.gpu': { unit: 'second' },
-} as const
+}
 
 export type CostType = keyof typeof COST_TYPES
 

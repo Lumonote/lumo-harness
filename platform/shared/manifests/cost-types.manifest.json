@@ -1,0 +1,12 @@
+{
+  "title": "成本类型闭集（跨语言单一真相源）",
+  "description": "2026-08-26。本文件是 cost_type 闭集的数值唯一来源：TS 侧（cost-events.ts 的 COST_TYPES 由此派生）、Go 侧（usage-ledger 校验器将 go:embed 同一文件）。新增类型 = 只改本文件 + 两侧锁测试先红 → 显式更新，杜绝「闭集两处、只改一处」——闭集外拒绝入账是审计承诺，数值分叉会让两语言收下不同的账。语义注释（为什么是闭集、为什么 unit 唯一）留在 TS 文档注释，不在此重复。",
+  "costTypes": {
+    "llm.tokens":       { "unit": "tokens" },
+    "connector.call":   { "unit": "call" },
+    "seam.query":       { "unit": "rows" },
+    "job.compute":      { "unit": "second" },
+    "storage.bytes":    { "unit": "byte-day" },
+    "inference.gpu":    { "unit": "second" }
+  }
+}
