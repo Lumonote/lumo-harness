@@ -282,6 +282,24 @@ importers:
         specifier: 4.22.4
         version: 4.22.4
 
+  dsh-plugins/storage:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: link:../../../deepseek-harness/vendor/cordis
+        version: link:../../../deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-storage':
+        specifier: link:../../../deepseek-harness/packages/storage/storage
+        version: link:../../../deepseek-harness/packages/storage/storage
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../deepseek-harness/vendor/schemastery
+        version: link:../../../deepseek-harness/vendor/schemastery
+      pg:
+        specifier: ^8.13.0
+        version: 8.23.0
+      tsx:
+        specifier: 4.22.4
+        version: 4.22.4
+
 packages:
 
   '@esbuild/aix-ppc64@0.28.2':
