@@ -29,10 +29,10 @@ describe('metering 契约 —— 对真 PG', () => {
     try {
       await seam.init()
       // TRUNCATE 而非 DROP：DROP 会让并行跑的其它用例拿到不存在的表
-      await seam.raw(`TRUNCATE usage_ledger, budget_trees`)
+      await seam.raw(`TRUNCATE usage_ledger, budget_trees, usage_event_outbox`)
       const assert = (cond: boolean, msg: string) => expect(cond, msg).toBe(true)
       await assertMeteringContract(seam, assert, async (user, project) => {
-        await seam.raw(`TRUNCATE usage_ledger, budget_trees`)
+        await seam.raw(`TRUNCATE usage_ledger, budget_trees, usage_event_outbox`)
         // number = 旧行两态（**不能走 setBudget**——那是期初重配为总额模式，左闭边界
         // 会让「场景5 无预估：remaining==need 放行」翻转）；BudgetLimits = setBudget 重配
         const seeded = async (kind: 'user' | 'project', c: number | BudgetLimits): Promise<void> => {

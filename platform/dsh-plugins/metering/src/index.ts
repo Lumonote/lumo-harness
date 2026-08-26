@@ -27,6 +27,10 @@ export interface MeteringConfig {
   feature: string
   /** 无预算记录时的隐性额度：缺省 1e9（即视为不限额）；启用额度管理需预置 budget_trees 行 */
   defaultBudget: number
+  /** 台账搬运轮询间隔 ms（缺省 1000；outbox → usage_ledger，设计说明 2026-08-26 §5） */
+  drainIntervalMs?: number
+  /** 单轮搬运条数上限（缺省 100） */
+  drainBatchSize?: number
 }
 
 /** 依赖注入：llm 服务须先 mount（计量挂在 llm/stream 瀑布） */
@@ -34,14 +38,40 @@ export const inject = ['llm']
 
 export function apply(ctx: Context, config: MeteringConfig): void {
   const meter = new PgMeteringSeam(config.connectionString)
-  void meter.init().then(async () => {
-    // 默认预算种子：**仅当无行时插入**（§6.4 预算树）。
-    // 此处曾调用 setBudget——那是一年期初重配语义（remaining=total），每次插件重启都会
-    // 把运维配置的总额/硬停冲回 defaultBudget（1e9）；且哪怕旧语义也覆盖了运维在
-    // budget_trees 上的显式配置（注释写「仅当未显式配置时生效」，实现却是无条件 upsert，
-    // 注释与实现不符）。seedDefaultBudget 用 DO NOTHING + 旧模式行，两者都对齐。
-    await meter.seedDefaultBudget('user', config.userId, config.defaultBudget)
-    await meter.seedDefaultBudget('project', config.projectId, config.defaultBudget)
+
+  const drainIntervalMs = Math.max(config.drainIntervalMs ?? 1000, 100)
+  const drainBatchSize = config.drainBatchSize ?? 100
+
+  // 计量事件从请求路径拿掉后的后台搬运（设计说明 2026-08-26 §5）：
+  // outbox → usage_ledger 轮询。失败只 warn 不抛——outbox 未标记 projected_at，
+  // 下一轮自然重放（同 knowledge 投影器）。unref 不阻塞进程退出。
+  ctx.effect(() => {
+    let timer: ReturnType<typeof setInterval> | undefined
+    let disposed = false
+    // 幂等初始化（建表/迁移）；失败即加载失败（响亮失败，§15）。
+    // 种子与轮询必须等建表完成再起，否则前几轮全是「表不存在」噪音。
+    void meter.init().then(async () => {
+      // 默认预算种子：**仅当无行时插入**（§6.4 预算树）。
+      // 此处曾调用 setBudget——那是一年期初重配语义（remaining=total），每次插件重启都会
+      // 把运维配置的总额/硬停冲回 defaultBudget（1e9）；且哪怕旧语义也覆盖了运维在
+      // budget_trees 上的显式配置（注释写「仅当未显式配置时生效」，实现却是无条件 upsert，
+      // 注释与实现不符）。seedDefaultBudget 用 DO NOTHING + 旧模式行，两者都对齐。
+      await meter.seedDefaultBudget('user', config.userId, config.defaultBudget)
+      await meter.seedDefaultBudget('project', config.projectId, config.defaultBudget)
+      if (disposed) return
+      timer = setInterval(() => {
+        meter.drainOnce(drainBatchSize).catch((e: unknown) => {
+          ctx.logger.warn('metering: 台账搬运失败（将在下一轮重放）: %s', e)
+        })
+      }, drainIntervalMs)
+      timer.unref?.()
+    }).catch((e: unknown) => {
+      ctx.logger.error('metering: 初始化失败，台账搬运未启动: %s', e)
+    })
+    return () => {
+      disposed = true
+      if (timer) clearInterval(timer)
+    }
   })
 
   const context = {

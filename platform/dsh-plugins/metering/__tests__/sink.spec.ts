@@ -53,11 +53,16 @@ async function withSeam(fn: (seam: PgMeteringSeam) => Promise<void>): Promise<vo
   const seam = new PgMeteringSeam(await schemaDsn(DSN!, 'metering_sink_test'))
   try {
     await seam.init()
-    await seam.raw(`TRUNCATE usage_ledger, budget_trees`)
+    await seam.raw(`TRUNCATE usage_ledger, budget_trees, usage_event_outbox`)
     await fn(seam)
   } finally {
     await seam.close()
   }
+}
+
+/** 写穿即见已是有界最终一致（设计说明 2026-08-26 §4）：台账由 drainOnce 搬入。 */
+async function drained(seam: PgMeteringSeam): Promise<void> {
+  await seam.drainOnce()
 }
 
 interface Row {
@@ -114,6 +119,7 @@ describe(`CostEventSink 落库 —— 对真 PG（需 METERING_TEST_DSN，当前
   t('六类事件各落一行，归因字段完整', async () => {
     await withSeam(async (seam) => {
       for (const type of ALL_TYPES) await seam.emit(eventOf(type))
+      await drained(seam)
 
       const rows = await seam.raw<Row>(`SELECT * FROM usage_ledger ORDER BY id ASC`)
       expect(rows.map((r) => r.cost_type)).toEqual(ALL_TYPES)
@@ -141,6 +147,7 @@ describe(`CostEventSink 落库 —— 对真 PG（需 METERING_TEST_DSN，当前
   t('llm.tokens 仍写 tokens 列 —— 既有 SUM(tokens) 报表不能被本项改动破坏', async () => {
     await withSeam(async (seam) => {
       await seam.emit(eventOf('llm.tokens', { qty: 600 }))
+      await drained(seam)
       const [row] = await seam.raw<Row>(`SELECT * FROM usage_ledger`)
       expect(row!.tokens).toBe(600)
       expect(row!.model).toBe('deepseek')
@@ -153,6 +160,7 @@ describe(`CostEventSink 落库 —— 对真 PG（需 METERING_TEST_DSN，当前
       await seam.emit(eventOf('llm.tokens', { qty: 600 }))
       await seam.emit(eventOf('job.compute', { qty: 30 }))
       await seam.emit(eventOf('storage.bytes', { qty: 1024 }))
+      await drained(seam)
 
       const rows = await seam.raw<Row>(
         `SELECT * FROM usage_ledger WHERE cost_type <> 'llm.tokens'`,
@@ -192,6 +200,7 @@ describe(`CostEventSink 落库 —— 对真 PG（需 METERING_TEST_DSN，当前
       }
       // 另一条链，不得混入
       await seam.emit(eventOf('job.compute', { traceId: 'tr-other', qty: 7 }))
+      await drained(seam)
 
       const got = await seam.byTrace('tr-chain')
       expect(got.map((e) => e.costType)).toEqual(chain.map(([t]) => t))
@@ -209,6 +218,7 @@ describe(`CostEventSink 落库 —— 对真 PG（需 METERING_TEST_DSN，当前
     await withSeam(async (seam) => {
       const written = eventOf('inference.gpu', { traceId: 'tr-rt', qty: 42.5, costUsd: 1.25 })
       await seam.emit(written)
+      await drained(seam)
       const [read] = await seam.byTrace('tr-rt')
       expect(read).toEqual(written)
     })
@@ -221,6 +231,10 @@ describe(`CostEventSink 落库 —— 对真 PG（需 METERING_TEST_DSN，当前
 
       const [{ n }] = await seam.raw<{ n: string }>(`SELECT count(*)::text AS n FROM usage_ledger`)
       expect(n, '校验必须在写库之前').toBe('0')
+      const [{ o }] = await seam.raw<{ o: string }>(
+        `SELECT count(*)::text AS o FROM usage_event_outbox`,
+      )
+      expect(o, '坏事件也不得进入 outbox——outbox 不是绕过校验的通道').toBe('0')
     })
   })
 
@@ -229,6 +243,10 @@ describe(`CostEventSink 落库 —— 对真 PG（需 METERING_TEST_DSN，当前
       await expect(seam.emit(eventOf('job.compute', { unit: 'rows' }))).rejects.toThrow(/second/)
       const [{ n }] = await seam.raw<{ n: string }>(`SELECT count(*)::text AS n FROM usage_ledger`)
       expect(n).toBe('0')
+      const [{ o }] = await seam.raw<{ o: string }>(
+        `SELECT count(*)::text AS o FROM usage_event_outbox`,
+      )
+      expect(o).toBe('0')
     })
   })
 
@@ -252,6 +270,7 @@ describe(`CostEventSink 落库 —— 对真 PG（需 METERING_TEST_DSN，当前
       await seam.commit({
         context: ctx, tokens: 700, model: 'deepseek', costType: 'llm', costUsd: 0.7,
       })
+      await drained(seam)
 
       const [row] = await seam.raw<Row>(`SELECT * FROM usage_ledger`)
       // costType 落的是闭集取值 'llm.tokens'，而不是调用方传的自由文本 'llm'
@@ -273,6 +292,7 @@ describe(`CostEventSink 落库 —— 对真 PG（需 METERING_TEST_DSN，当前
         context: ctx, tokens: 700, model: 'deepseek', costType: 'llm',
         costUsd: 0.7, traceId: 'tr-wired',
       })
+      await drained(seam)
       const chain = await seam.byTrace('tr-wired')
       expect(chain.map((e) => e.costType)).toEqual(['llm.tokens'])
       expect(chain[0]!.tokens).toBe(700)

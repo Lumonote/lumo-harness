@@ -25,7 +25,7 @@ const ctx: MeterContext = {
 async function freshSeam(): Promise<PgMeteringSeam> {
   const seam = new PgMeteringSeam(await dsn())
   await seam.init()
-  await seam.raw(`TRUNCATE budget_trees, usage_ledger`)
+  await seam.raw(`TRUNCATE budget_trees, usage_ledger, usage_event_outbox`)
   return seam
 }
 
