@@ -825,6 +825,17 @@ Session Console（任一终端）
 - **生命周期状态机**：`draft → submitted → published → targeted → deprecated`（每次 publish 产生版本，回滚即重指版本）。
 - 运行消耗记 `feature=flow:<id>` 纳入 §6.4 计量溯源。
 
+> **实现状态（2026-08-26，制品层已落地）**：`platform/control-plane/flows` Go 服务 + 契约
+> `platform/shared/seam-contracts/flows.ts`（状态机/防环/audience 匹配双实现）——
+> 生命周期状态机（draft→submitted→published→targeted→deprecated，deprecated 终态；回滚
+> = 重指发布快照，不是状态转移）、FlowReview（manager/admin 且**非作者**——职责分离；
+> dept 归属校验随组织树 P2）、audience 定向分发（roles/depts/users，空 audience 恒假——
+> 配置错误宁可不可见）、**版本快照与回滚**（approve 同事务写 flow_versions + 重指 version；
+> 发布快照不可变）、DAG **防环入库护栏**（Kahn 拓扑，环在入库前拦）。流程面板三可见性
+> 路径（global/targeted 命中/private 项目成员）Go 统一裁决。**执行不在内**——FlowEngine
+> 是 P2 主件；LLM 生成/拖拽编辑器/Nacos 热下发/canary 同为 P2（设计说明
+> `docs/superpowers/specs/2026-08-26-user-flows-design.md` §7 显式外清单）。
+
 ---
 
 ## 12. 网关技术（全栈 Go 自研，零外部网关中间件）

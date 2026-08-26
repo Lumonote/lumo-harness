@@ -145,6 +145,21 @@ services:
       postgres:
         condition: service_healthy
 
+  # flows：第五类制品（用户自定义流程）——生命周期/FlowReview/定向分发/版本回滚
+  #（§11 后半，制品层；执行是 FlowEngine P2）。只读 projects 服务的
+  # project_members 表做成员判定（同库跨表，无服务间调用）。
+  flows:
+    build:
+      context: ../control-plane/flows
+    environment:
+      LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_LISTEN: ":8087"
+    ports:
+      - "18087:8087"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # projects：项目工作区（§11.1 首切片）——项目实体/生命周期/成员角色/用量聚合。
   # N3 拍板 B（2026-08-26）：项目 = 并行预算树——创建即种子 budget_trees
   # kind='project' 行；执法（双树同事务扣减）在 TS metering，本服务只治理不执法。
