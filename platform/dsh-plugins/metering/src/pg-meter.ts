@@ -12,7 +12,12 @@ import {
   isCostType,
   type CostEvent,
 } from '../../../shared/seam-contracts/cost-events.ts'
-import { worseOf, type BudgetState } from '../../../shared/seam-contracts/budget-policy.ts'
+import {
+  budgetState,
+  resolveLimits,
+  worseOf,
+  type BudgetState,
+} from '../../../shared/seam-contracts/budget-policy.ts'
 import type {
   MeterContext,
   MeterRecord,
@@ -42,6 +47,11 @@ CREATE TABLE IF NOT EXISTS budget_trees (
   kind    TEXT NOT NULL CHECK (kind IN ('user', 'project')),
   id      TEXT NOT NULL,
   budget  BIGINT NOT NULL,
+  -- 本期配额总额与限额（总额模型，设计说明 2026-08-26）。NULL = 旧模式：
+  -- 只认剩余、仅 within/hard（既有行为）；非空 = 四态，used = (total − remaining) + need
+  budget_total BIGINT NULL,
+  soft_limit   BIGINT NULL,   -- NULL = 缺省=budget_total
+  overdraft    BIGINT NULL,   -- NULL = 0
   PRIMARY KEY (kind, id)
 );
 
@@ -70,6 +80,13 @@ ALTER TABLE usage_ledger ADD COLUMN IF NOT EXISTS unit     TEXT;
 CREATE INDEX IF NOT EXISTS usage_ledger_trace_idx ON usage_ledger (trace_id);
 -- 按 (类型, 时间) 下钻是「解释一次尖峰」的主查询路径
 CREATE INDEX IF NOT EXISTS usage_ledger_type_ts_idx ON usage_ledger (cost_type, ts DESC);
+
+-- 总额模型（设计说明 2026-08-26）：既有库的表已建过，必须 ALTER 而不是只改上面的
+-- CREATE（CREATE IF NOT EXISTS 对既有库是空操作）。新列可空：历史行保持旧模式两态，
+-- 不回填假数据。
+ALTER TABLE budget_trees ADD COLUMN IF NOT EXISTS budget_total BIGINT;
+ALTER TABLE budget_trees ADD COLUMN IF NOT EXISTS soft_limit   BIGINT;
+ALTER TABLE budget_trees ADD COLUMN IF NOT EXISTS overdraft    BIGINT;
 `
 
 export class PgMeteringSeam implements MeteringSeam {
@@ -117,11 +134,11 @@ export class PgMeteringSeam implements MeteringSeam {
     try {
       await client.query('BEGIN')
       const userRow = await client.query<BudgetTreeRow>(
-        'SELECT budget FROM budget_trees WHERE kind = $1 AND id = $2 FOR UPDATE',
+        'SELECT budget, budget_total, soft_limit, overdraft FROM budget_trees WHERE kind = $1 AND id = $2 FOR UPDATE',
         ['user', ctx.userId],
       )
       const projRow = await client.query<BudgetTreeRow>(
-        'SELECT budget FROM budget_trees WHERE kind = $1 AND id = $2 FOR UPDATE',
+        'SELECT budget, budget_total, soft_limit, overdraft FROM budget_trees WHERE kind = $1 AND id = $2 FOR UPDATE',
         ['project', ctx.projectId],
       )
       // 并行树：任一超限即拒（评审 N3）
@@ -225,11 +242,106 @@ export class PgMeteringSeam implements MeteringSeam {
     return raw === undefined ? Number.POSITIVE_INFINITY : Number(raw)
   }
 
-  async setBudget(kind: 'user' | 'project', id: string, budget: number): Promise<void> {
+  /**
+   * 期初/重配（设计说明 2026-08-26 §3）：本期配额设为 `total`，剩余重置为 `total`。
+   *
+   * opts 语义：**给则替换对应列，不给则保留存储值**（新行即 NULL 缺省 = softLimit 取
+   * budget_total、overdraft 0）——「只改预算、不改软限额」是运维的默认预期。
+   *
+   * 校验在写入时做（fail closed at config）：配置不自洽（负值/NaN/softLimit > total）
+   * 在 `setBudget` 处拒绝，而不是延迟成 `reserve` 判态时的 run 时抛错。
+   */
+  async setBudget(
+    kind: 'user' | 'project', id: string, total: number,
+    opts?: { softLimit?: number; overdraft?: number },
+  ): Promise<void> {
+    resolveLimits(total, opts)
     await this.pool.query(
-      `INSERT INTO budget_trees (kind, id, budget) VALUES ($1,$2,$3)
-       ON CONFLICT (kind, id) DO UPDATE SET budget = EXCLUDED.budget`,
-      [kind, id, budget],
+      `INSERT INTO budget_trees (kind, id, budget, budget_total, soft_limit, overdraft)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (kind, id) DO UPDATE SET
+         budget = EXCLUDED.budget,
+         budget_total = EXCLUDED.budget_total,
+         soft_limit = COALESCE(EXCLUDED.soft_limit, budget_trees.soft_limit),
+         overdraft = COALESCE(EXCLUDED.overdraft, budget_trees.overdraft)`,
+      [kind, id, total, total, opts?.softLimit ?? null, opts?.overdraft ?? null],
+    )
+  }
+
+  /**
+   * 期中调整（设计说明 2026-08-26 §3）：总额**平移**到 `newTotal`——
+   * `remaining += newTotal − oldTotal`，因此 `used = total − remaining` 前后不变。
+   *
+   * 降额不追溯由此成为机制而非承诺：已发生消费既不回收（used 不变）也不豁免
+   * （降额后下一次 reserve 立即按新总额判态，`used ≥ total` 即 hard）。
+   *
+   * 旧模式行（`budget_total` NULL）拒绝——把「只有剩余」的旧行剩余当成总额去平移是
+   * 错的，显式拒绝并给修复指引（先 `setBudget` 重配）；不存在的树同样拒绝。
+   */
+  async adjustBudget(
+    kind: 'user' | 'project', id: string, newTotal: number,
+    opts?: { softLimit?: number; overdraft?: number },
+  ): Promise<void> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const row = await client.query<BudgetTreeRow>(
+        'SELECT budget, budget_total, soft_limit FROM budget_trees WHERE kind = $1 AND id = $2 FOR UPDATE',
+        [kind, id],
+      )
+      const r = row.rows[0]
+      if (!r) {
+        await client.query('ROLLBACK')
+        throw new Error(`要调整的预算树不存在（${kind}:${id}）—— 先用 setBudget 建树`)
+      }
+      if (r.budget_total == null) {
+        await client.query('ROLLBACK')
+        throw new Error(
+          `旧模式树没有总额，无法调整（${kind}:${id}）—— 先用 setBudget 重配为总额模式`,
+        )
+      }
+      const storedSoft = r.soft_limit == null ? undefined : Number(r.soft_limit)
+      const storedOd = r.overdraft == null ? undefined : Number(r.overdraft)
+      // 合并后的配置必须自洽——存量软限额超过新总额时在配置处拒绝。
+      // 注意：这里只校验；写入用 COALESCE 保持「没给就保留存储值」——把默认值写进列
+      // 会把「NULL=跟随总额」静默变成显式配置，之后再降额就会误判为用户配置的自洽性。
+      resolveLimits(newTotal, {
+        softLimit: opts?.softLimit ?? storedSoft,
+        overdraft: opts?.overdraft ?? storedOd,
+      })
+      const oldTotal = Number(r.budget_total)
+      const remaining = Number(r.budget) + (newTotal - oldTotal)
+      await client.query(
+        `UPDATE budget_trees
+           SET budget = $3, budget_total = $4,
+               soft_limit = COALESCE($5, budget_trees.soft_limit),
+               overdraft = COALESCE($6, budget_trees.overdraft)
+           WHERE kind = $1 AND id = $2`,
+        [kind, id, remaining, newTotal, opts?.softLimit ?? null, opts?.overdraft ?? null],
+      )
+      await client.query('COMMIT')
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw e
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
+   * 装配层默认预算种子（设计说明 2026-08-26 §4）。
+   *
+   * **仅当无行时插入**（`ON CONFLICT DO NOTHING`），且插入**旧模式**行（无总额 = 两态）
+   * ——「默认不限额」的既有语义是「很大的剩余」，不是「总额 1e9 的四态」；且种子不得
+   * 覆盖运维已配置的预算（旧实现每次启动无条件 upsert，运维的硬停/透支会被冲回默认值）。
+   */
+  async seedDefaultBudget(
+    kind: 'user' | 'project', id: string, defaultBudget: number,
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO budget_trees (kind, id, budget) VALUES ($1, $2, $3)
+       ON CONFLICT (kind, id) DO NOTHING`,
+      [kind, id, defaultBudget],
     )
   }
 
@@ -258,24 +370,41 @@ interface LedgerRow {
  * 发出方跨语言（连接器网关是 Go），因此约束是**表只有一个写入者**：Go 侧经 sink
  * 接口交事件，不直连这张表。
  */
-/** `budget_trees` 行。预算列是 BIGINT，pg 读成字符串。 */
-type BudgetTreeRow = { budget: string | number }
+/** `budget_trees` 行。BIGINT 列 pg 读成字符串；总额列可空（NULL = 旧模式）。 */
+type BudgetTreeRow = {
+  budget: string | number
+  budget_total: string | number | null
+  soft_limit: string | number | null
+  overdraft: string | number | null
+}
 
 /**
  * 某棵树对「一次 need 大小的调用」的投影状态（口径见契约 `MeterResult.state`）。
  *
- * **为什么只可能返回 within / hard**：`budget_trees.budget` 存的是**剩余**（每 commit
- * 扣减，可为负），不是总额。没有总额就算不出「已用」，二态里的软限额 / 透支额度也就
- * 无从计算——这三态需要「本期配额」模型（`setBudget(总额)` + 每期重置），超出本任务
- * Step 3 范围，记入 §7 相似的不做清单。
+ * **两种模式，两个边界，用 `budget_total` 是否为空显式区分**（设计说明 2026-08-26 §2）：
  *
- * 因此这里的投影退化为旧判据的表述：**这棵树还能不能放下这一次调用**。没有行的树
- * 没有预算可用（旧实现即「无行即拒」），同样 `hard`——统一由
- * `state === 'hard'` 裁决，而不是散落两个分支各判一遍。
+ * - 旧模式（NULL）：只存剩余，退化为旧判据——**这棵树还能不能放下这一次调用**。
+ *   边界与既有行为一致：`remaining === need` 仍放行（旧语义是「还有就一定够?」不是，
+ *   它是「< 才拒」）。历史行不回填假数据，所以这个模式必须保留。
+ * - 总额模式：`used = (total − remaining) + need`，四态由纯策略 `budgetState` 判定，
+ *   左闭右开（`used === total` 已越界）。存储空值 = 策略层缺省（softLimit=total、
+ *   overdraft=0），由 `resolveLimits` 补齐。
+ *
+ * 没有行的树没有预算可用（旧实现即「无行即拒」），统一 `hard`——由
+ * `state === 'hard'` 单一裁决，而不是散落两个分支各判一遍。
  */
 function stateOfTree(row: BudgetTreeRow | undefined, need: number): BudgetState {
   if (!row) return 'hard'
-  return Number(row.budget) < need ? 'hard' : 'within'
+  if (row.budget_total == null) {
+    return Number(row.budget) < need ? 'hard' : 'within'
+  }
+  const total = Number(row.budget_total)
+  const remaining = Number(row.budget)
+  return budgetState(total - remaining + need, {
+    budget: total,
+    softLimit: row.soft_limit == null ? undefined : Number(row.soft_limit),
+    overdraft: row.overdraft == null ? undefined : Number(row.overdraft),
+  })
 }
 
 async function insertLedger(client: pg.PoolClient, e: CostEvent): Promise<void> {

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { PgMeteringSeam, METERING_DDL } from '../src/pg-meter.ts'
 import { schemaDsn } from './pg-schema.ts'
 import { assertMeteringContract } from '../../../shared/seam-contracts/metering.ts'
+import type { BudgetLimits } from '../../../shared/seam-contracts/budget-policy.ts'
 
 /**
  * 契约对**真 PG** 跑。
@@ -32,8 +33,23 @@ describe('metering 契约 —— 对真 PG', () => {
       const assert = (cond: boolean, msg: string) => expect(cond, msg).toBe(true)
       await assertMeteringContract(seam, assert, async (user, project) => {
         await seam.raw(`TRUNCATE usage_ledger, budget_trees`)
-        await seam.setBudget('user', 'u1', user)
-        await seam.setBudget('project', 'p1', project)
+        // number = 旧行两态（**不能走 setBudget**——那是期初重配为总额模式，左闭边界
+        // 会让「场景5 无预估：remaining==need 放行」翻转）；BudgetLimits = setBudget 重配
+        const seeded = async (kind: 'user' | 'project', c: number | BudgetLimits): Promise<void> => {
+          if (typeof c === 'number') {
+            await seam.raw(
+              `INSERT INTO budget_trees (kind, id, budget) VALUES ($1,$2,$3)
+               ON CONFLICT (kind, id) DO UPDATE SET budget = EXCLUDED.budget`,
+              [kind, kind === 'user' ? 'u1' : 'p1', c],
+            )
+          } else {
+            await seam.setBudget(kind, kind === 'user' ? 'u1' : 'p1', c.budget, {
+              softLimit: c.softLimit, overdraft: c.overdraft,
+            })
+          }
+        }
+        await seeded('user', user)
+        await seeded('project', project)
       })
     } finally {
       await seam.close()
