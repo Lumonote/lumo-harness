@@ -893,6 +893,18 @@ ORM:     Ent (PG)
 部署:    Docker → Kubernetes + Helm
 ```
 
+> **实现状态（2026-08-26，LLM 网关首切片已落地，P2a 起始项）**：
+> `platform/control-plane/llm-gateway`（8088，standalone 清单）——OpenAI 兼容
+> `/v1/chat/completions`（流式逐 chunk 背压转发 + 非流式）；provider 注册表（model→上游+**费率**，
+> costUsd 网关算）；**计量单截面跨网**（emitter=`llm-gateway`：归因取 X-Lumo-* 头，usage 从流末
+> chunk 扫描——网关给上游注入 `stream_options.include_usage`，完整性不依赖调用方善意；缺 usage
+> 计 0 + 告警不静默）；**双树预算执法 Go 镜像**（reserve 双树四态取严者 → 402 reason 区分树；
+> commit 单事务无条件扣减 + outbox 事件——与 TS `pg-meter.ts` 逐语义镜像，测试同矩阵锁漂移）。
+> **全链联测已收账**：网关 → outbox → usage-ledger publisher → RocketMQ → consumer →
+> `usage_ledger`（emitter=llm-gateway）——seam 远程形态设计 §2.1 点名的联测项，真 broker 实测。
+> 限流（Redis 令牌桶）/batch/模型路由/Vault key/OTel/集群形态显式外（设计说明
+> `docs/superpowers/specs/2026-08-26-llm-gateway-design.md` §6）。
+
 **Rust 仅用于极端计算热点与无成熟 Go 实现的协议内核**（自研 tokenizer、超大 batch 调度内核、向量近邻检索、**CRDT 合并内核 y-crdt**——Yjs 生态无生产级 Go 实现，此处走 FFI 是该条款的正当适用而非破例），以 sidecar/FFI 形态存在；服务主体仍是 Go。理由：瓶颈在 LLM 推理 + 网络 I/O（等 I/O 场景 Go goroutine 教科书级匹配），Rust 无 GC 优势收益有限却付出开发速度/人才成本；需快速 hook OPA/Vault/Redis/RocketMQ/PG/Doris/Nacos，Go 客户端最成熟。
 
 ---

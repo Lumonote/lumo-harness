@@ -145,6 +145,22 @@ services:
       postgres:
         condition: service_healthy
 
+  # llm-gateway：模型访问面（§12 网关四门之一，P2a 起始项）——OpenAI 兼容入口 +
+  # 计量单截面跨网（emitter=llm-gateway：写 usage_event_outbox，由 usage-ledger
+  # 传输进台账）+ 双树预算执法镜像（reserve 四态 402 / commit 同事务扣减）。
+  # 上游 provider 表按需 seed（指向本集群推理或外部 API）；预算树随 metering 建表。
+  llm-gateway:
+    build:
+      context: ../control-plane/llm-gateway
+    environment:
+      LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_LISTEN: ":8088"
+    ports:
+      - "18088:8088"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # flows：第五类制品（用户自定义流程）——生命周期/FlowReview/定向分发/版本回滚
   #（§11 后半，制品层；执行是 FlowEngine P2）。只读 projects 服务的
   # project_members 表做成员判定（同库跨表，无服务间调用）。
