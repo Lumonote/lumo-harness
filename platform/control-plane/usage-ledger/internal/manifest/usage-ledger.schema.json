@@ -1,0 +1,25 @@
+{
+  "title": "usage_ledger 唯一列清单（跨语言单一真相源）",
+  "description": "2026-08-26。列序 = INSERT 列序 = DDL 生成序。本文件是 usage_ledger 的 schema 唯一来源：TS 侧（metering 的 DDL 与批量 INSERT 由此生成）；Go 侧（usage-ledger 消费服务，P2）将 go:embed 同一文件生成 INSERT。加列流程 = 只改本文件 → 两侧生成即失效 → 显式决定两侧代码：杜绝「加一列只改一处、另一处静默过期」。既有库的增量迁移（METERING_MIGRATIONS 的 ALTER）是历史动作，保留；新增列一律以本清单为源。",
+  "columns": [
+    { "name": "id",           "pgType": "BIGSERIAL",   "notNull": true, "primaryKey": true },
+    { "name": "ts",           "pgType": "TIMESTAMPTZ", "notNull": true, "default": "now()" },
+    { "name": "user_id",      "pgType": "TEXT",        "notNull": true },
+    { "name": "dept_id",      "pgType": "TEXT",        "notNull": true },
+    { "name": "role",         "pgType": "TEXT",        "notNull": true },
+    { "name": "project_id",   "pgType": "TEXT",        "notNull": true },
+    { "name": "agent_id",     "pgType": "TEXT",        "notNull": true },
+    { "name": "component_id", "pgType": "TEXT",        "notNull": true },
+    { "name": "feature",      "pgType": "TEXT",        "notNull": true },
+    { "name": "session_ref",  "pgType": "TEXT",        "notNull": true },
+    { "name": "model",        "pgType": "TEXT",        "notNull": false },
+    { "name": "tokens",       "pgType": "INTEGER",     "notNull": true },
+    { "name": "cost_type",    "pgType": "TEXT",        "notNull": true },
+    { "name": "cost_usd",     "pgType": "NUMERIC(18,6)", "notNull": true, "default": "0" },
+    { "name": "trace_id",     "pgType": "TEXT",        "notNull": false },
+    { "name": "emitter",      "pgType": "TEXT",        "notNull": false },
+    { "name": "qty",          "pgType": "NUMERIC(20,6)", "notNull": false },
+    { "name": "unit",         "pgType": "TEXT",        "notNull": false },
+    { "name": "event_key",    "pgType": "TEXT",        "notNull": false }
+  ]
+}
