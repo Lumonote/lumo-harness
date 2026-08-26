@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { PgMeteringSeam } from '../src/pg-meter.ts'
+import { PgMeteringSeam, USAGE_LEDGER_COLUMNS } from '../src/pg-meter.ts'
 import { schemaDsn } from './pg-schema.ts'
 import { assertCostEventDrainContract } from '../../../shared/seam-contracts/metering.ts'
 import { unitFor, type CostEvent, type CostType } from '../../../shared/seam-contracts/cost-events.ts'
@@ -166,4 +166,18 @@ describe(`drainOnce 批量入账 —— 对真 PG（需 METERING_TEST_DSN，当�
     })
   })
 
+})
+
+describe('usage_ledger 单一真相源（常跑，不依赖 DSN）', () => {
+  it('清单锁：列名与 19 列基线一致（改 SQL 不改清单、或改清单不更新基线 → 红）', () => {
+    // DDL 与 INSERT 的列清单都由 shared/manifests/usage-ledger.schema.json 生成，
+    // 这里锁的是「清单本身没被手改坏」。改清单加列时：TS 侧 INSERT 参数数与清单
+    // 自动脱节会以「参数数量不匹配」响亮失败；本基线要求同时显式更新（并同步 Go
+    // 消费侧 usage-ledger）——杜绝「加一列只改一处、另一处静默过期」。
+    expect(USAGE_LEDGER_COLUMNS).toEqual([
+      'id', 'ts', 'user_id', 'dept_id', 'role', 'project_id', 'agent_id',
+      'component_id', 'feature', 'session_ref', 'model', 'tokens',
+      'cost_type', 'cost_usd', 'trace_id', 'emitter', 'qty', 'unit', 'event_key',
+    ])
+  })
 })

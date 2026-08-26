@@ -7,6 +7,7 @@
  * 树扣减原子性：本实现以 PG 事务完成；分布式的 RocketMQ 事务消息在 P2 接入（铁律 5）。
  */
 import pg from 'pg'
+import ledgerSchema from '../../../shared/manifests/usage-ledger.schema.json' with { type: 'json' }
 import {
   COST_TYPES,
   assertCostEvent,
@@ -26,22 +27,22 @@ import type {
   MeteringSeam,
 } from '../../../shared/seam-contracts/metering.ts'
 
+type LedgerSchema = typeof ledgerSchema & {
+  columns: Array<{ name: string; pgType: string; notNull: boolean; default?: string; primaryKey?: boolean }>
+}
+
+/** usage_ledger 列名（唯一真相源：shared/manifests/usage-ledger.schema.json）。
+ * DDL 与批量 INSERT 的列清单都从这里生成——加列只改清单，两侧生成同源失效即红。 */
+export const USAGE_LEDGER_COLUMNS: string[] = (ledgerSchema as LedgerSchema).columns.map((c) => c.name)
+
+/** 由清单生成的 DDL 列段（幂等 CREATE 与清单同步——不再有第二份列清单字符串）。 */
+const USAGE_LEDGER_DDL_COLUMNS = (ledgerSchema as LedgerSchema).columns.map((c) =>
+  `  ${c.name} ${c.pgType}${c.primaryKey ? ' PRIMARY KEY' : ''}${c.notNull ? ' NOT NULL' : ''}${c.default ? ` DEFAULT ${c.default}` : ''}`,
+).join(',\n')
+
 export const METERING_DDL = `
 CREATE TABLE IF NOT EXISTS usage_ledger (
-  id          BIGSERIAL PRIMARY KEY,
-  ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  user_id     TEXT NOT NULL,
-  dept_id     TEXT NOT NULL,
-  role        TEXT NOT NULL,
-  project_id  TEXT NOT NULL,
-  agent_id    TEXT NOT NULL,
-  component_id TEXT NOT NULL,
-  feature     TEXT NOT NULL,
-  session_ref TEXT NOT NULL,
-  model       TEXT NULL,
-  tokens      INTEGER NOT NULL,
-  cost_type   TEXT NOT NULL,
-  cost_usd    NUMERIC(18,6) NOT NULL DEFAULT 0
+${USAGE_LEDGER_DDL_COLUMNS}
 );
 
 CREATE TABLE IF NOT EXISTS budget_trees (
@@ -454,6 +455,9 @@ interface LedgerRow {
  * 发出方跨语言（连接器网关是 Go），因此约束是**表只有一个写入者**：Go 侧经 sink
  * 接口交事件，不直连这张表。
  */
+/** INSERT 列（不含 self 主键 id）；列清单由清单生成（单一真相源）。 */
+const INSERT_COLUMNS = USAGE_LEDGER_COLUMNS.filter((n) => n !== 'id').join(', ')
+
 async function batchInsertLedger(
   client: pg.PoolClient,
   rows: Array<{ e: CostEvent; eventKey: string; ts: Date }>,
@@ -468,6 +472,8 @@ async function batchInsertLedger(
       `$${params.length + 13},$${params.length + 14},$${params.length + 15},$${params.length + 16},` +
       `$${params.length + 17},$${params.length + 18})`,
     )
+    // 每一行固定 18 个参数：列数每变一次，这里必须有意识改一次（生成列数与
+    // this push 数不符会在插入时以「参数数量不匹配」响亮失败——不会被静默错过）
     params.push(
       ts,   // 事件时刻（outbox.ts），不是投影时刻（不变式②）
       e.context.userId, e.context.deptId, e.context.role, e.context.projectId,
@@ -481,8 +487,7 @@ async function batchInsertLedger(
   }
   await client.query(
     `INSERT INTO usage_ledger
-       (ts, user_id, dept_id, role, project_id, agent_id, component_id, feature,
-        session_ref, model, tokens, cost_type, cost_usd, trace_id, emitter, qty, unit, event_key)
+       (${INSERT_COLUMNS})
      VALUES ${values.join(',')}
      ON CONFLICT (event_key) DO NOTHING`,
     params,

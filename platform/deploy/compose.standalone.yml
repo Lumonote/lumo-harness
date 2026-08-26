@@ -1,32 +1,143 @@
 # Standalone 形态：与集群完全相同的引擎，单节点拓扑。承诺可在线升级到 Cluster（architecture §13.2）。
-# 启动：docker compose -f compose.standalone.yml up
-# 注：镜像由阶段 1+ 产出后填充 build:/image: 字段；当前为拓扑骨架。
-# 隔离：显式项目名（默认名会是目录名 deploy，与其它项目容器撞名）+ 容器名前缀 lumo-platform-*。
+# 启动：docker compose -f compose.standalone.yml up -d
+# 说明：2026-08-26 起为可启动拓扑（RocketMQ namesrv+broker 单容器、Nacos 单机、MinIO、
+#       PG+pgvector、Redis；平台 Go 服务单实例）。Milvus 除外——其官方单容器 standalone
+#       需伴生 etcd 与该清单共用 MinIO 需自配配置，故留注释块，对应能力 seam 明确不可用
+#       （铁律 21：能力缺失显式拒绝，不得以别的库模拟）。
+# 隔离：显式项目名（默认名会是目录名 deploy，与其它项目容器撞名）。
 name: lumo-platform-standalone
 version: "3.9"
 
 services:
   # ---- 数据引擎（同引擎单实例）----
-  postgres:      # pgvector 亦需此处（Standalone 向量走 Milvus，PG 为 OLTP 主库）
-    image: postgres:16
-  redis:         # 热共享态/信箱/限流
-    image: redis:7
+  postgres:      # pgvector 一处同理：Standalone 向量走 Milvus，PG 为 OLTP 主库
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: lumo
+      POSTGRES_PASSWORD: lumo
+      POSTGRES_DB: lumo
+    ports:
+      - "15432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lumo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:         # 热共享态/信箱读穿/限流（信箱持久性在 PG，铁律 8）
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "16379:6379"
+    volumes:
+      - redisdata:/data
+
   minio:         # 对象存储：日志冷层/制品/知识库原文
     image: minio/minio:latest
-  milvus:        # 向量（standalone 部署模式）
-    image: milvusdb/milvus:latest
-  rocketmq:      # 单 broker（namesrv + broker）
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: lumo
+      MINIO_ROOT_PASSWORD: lumo-minio-123
+    ports:
+      - "19000:9000"    # S3 API
+      - "19001:9001"    # 控制台
+    volumes:
+      - miniodata:/data
+
+  rocketmq:      # 单容器跑 namesrv + broker（RocketMQ 5.3.1）
+    #
+    # brokerIP1 必须写 127.0.0.1：容器网络里 broker 默认注册自己的 br 网段 IP，
+    # 而 Docker Desktop(macOS) 上宿主机不可达容器 IP——客户端经 published port 得到
+    # 的 broker 地址是 172.x，会连不上。dev broker.conf（rocketmq-broker-dev.conf）
+    # 就是为此存在（生产 K8s hostNetwork 形态不需要它，见 helm 阶段 5）。
     image: apache/rocketmq:5.3.1
+    command: ["sh", "-c", "sh mqnamesrv & sleep 3; sh mqbroker -c /rocketmq-broker-dev.conf & wait"]
+    environment:
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m -Xmn128m"
+    ports:
+      - "19876:9876"    # namesrv
+      - "10911:10911"   # broker remoting
+      - "10909:10909"   # broker fast remoting
+    volumes:
+      - ./rocketmq-broker-dev.conf:/rocketmq-broker-dev.conf:ro
+      - rocketmqdata:/home/rocketmq/store
+
   nacos:         # 注册/配置中心（docs/README 三·补：Standalone 组成含 Nacos）
     image: nacos/nacos-server:v2.4.0
     environment:
-      - MODE=standalone
-  # 可选（按 requires 校验）：doris 单节点、nebula 单节点 —— 未齐备时对应 seam 显式不可用
+      MODE: standalone
+      JVM_XMS: 512m
+      JVM_XMX: 512m
+      JVM_XMN: 256m
+    ports:
+      - "18848:8848"    # 控制台/客户端 HTTP
+      - "19848:9848"    # 2.x gRPC（nacos-client 必需；只开 8848 客户端会超时）
+    volumes:
+      - nacosdata:/home/nacos/data
 
-  # ---- 平台编排（本地 compose 为单实例；装配层差异，业务代码无 if(standalone)）----
-  # 自研 Go 服务（阶段 2+ 填充）：edge-gateway / scheduler / collaborator / usage-ledger
-  # dsh-node：dsh 容器 + @lumo/* 插件（阶段 1+ 填充）
+  # 可选（需人工启用，见文件头说明）：milvus 单实例 —— 依赖伴生 etcd + 本清单 MinIO
+  # 的自配 config；未启用时 ctx.knowledge.vector 侧 seam 显式不可用（铁律 21）。
+  # milvus:
+  #   image: milvusdb/milvus:latest
+  #   command: ["milvus", "run", "standalone"]
+
+  # ---- 平台编排（单实例；装配层差异，业务代码无 if(standalone)）----
+  # —— 自研 Go 服务（与 compose.local.yml 同镜像，仅拓扑不同 —— 铁则：一套配置只换清单）——
+  collaborator:         # 知识库文档实时协作（§5.4.7）
+    build:
+      context: ../control-plane/collaborator
+    environment:
+      LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_REDIS_ADDR: redis:6379
+      LUMO_LISTEN: ":8081"
+      LUMO_INSTANCE: collaborator-0
+    ports:
+      - "18081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  connector-gateway:    # 外部连接器网关（§10.1）
+    build:
+      context: ../control-plane/connector-gateway
+    environment:
+      LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_REDIS_ADDR: redis:6379
+      LUMO_LISTEN: ":8082"
+      LUMO_ADMIN_ROLES: admin
+      LUMO_CRED_PREFIX: LUMO_CRED_
+    ports:
+      - "18082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  scheduler-0:          # 全局任务调度 §6.2/§7.4.1（单节点；子实例多副本场景见 cluster）
+    build:
+      context: ../control-plane/scheduler
+    environment:
+      LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_LISTEN: ":8083"
+      LUMO_INSTANCE: scheduler-0
+    ports:
+      - "18083:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # dsh-node：dsh 容器 + @lumo/* 插件（阶段 1+ 填充；本形态单节点）
+  # 用例：cd .. && pnpm --filter @lumo/platform run local（本地裸进程）或
+  #       docker build -t lumo/dsh-node dev 后以本清单运行
 
 volumes:
   pgdata:
   miniodata:
+  redisdata:
+  nacosdata:
+  rocketmqdata:

@@ -5,7 +5,7 @@
 | 文件 | 形态 | 载体 | 用途 |
 |------|------|------|------|
 | `compose.local.yml` | Local-lite | 本地 | 开发、CI 快速用例；1 PG（pgvector）+ 进程内队列/文件 |
-| `compose.standalone.yml` | Standalone | 本地/单机 | 同引擎单节点，**承诺可在线升级到 Cluster** |
+| `compose.standalone.yml` | Standalone | 本地/单机 | 同引擎单节点，**承诺可在线升级到 Cluster**；2026-08-26 起**可启动**（PG+pgvector / Redis / MinIO / RocketMQ 单容器 namesrv+broker / Nacos 单机 + 平台 Go 服务单实例；Milvus 需伴生 etcd、按文件头注释手动启用） |
 | `compose.cluster.yml` | Cluster（缩微） | 本地 | **自研服务多实例 + 中间件单实例**；分布式行为与故障注入调试 |
 | `helm/` | Cluster | 生产 | 生产部署（阶段 5 前为占位） |
 | `migrate/` | — | — | Standalone → Cluster 迁移工具（一等交付物，阶段 5） |
