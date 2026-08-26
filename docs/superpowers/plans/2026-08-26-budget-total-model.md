@@ -32,7 +32,7 @@
 - Modify: `platform/shared/seam-contracts/budget-policy.ts`
 - Modify: `platform/shared/seam-contracts/__tests__/budget-policy.spec.ts`
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 `budget-policy.spec.ts` 加一组用例（纯函数）：
 
@@ -41,7 +41,7 @@
 - `softLimit > budget` 抛错；负数 / NaN / Infinity 抛错（`budget`/`softLimit`/`overdraft` 三路）
 - `budgetState` 经 `resolveLimits` 之后行为不变：既有 22 例全绿（重构守护网）
 
-- [ ] **Step 2: 实现（绿）**
+- [x] **Step 2: 实现（绿）**
 
 `budget-policy.ts` 抽出并导出：
 
@@ -51,7 +51,7 @@ export function resolveLimits(budget: number, opts?: BudgetLimits): Required<Bud
 
 `budgetState` 内部改调 `resolveLimits`（错误文案保持一字不差，既有断言依赖它们）。
 
-- [ ] **Step 3: 跑测试并提交**
+- [x] **Step 3: 跑测试并提交**
 
 ```
 refactor(budget-policy): limits 校验抽为 resolveLimits——判态与配置写入共用同一份
@@ -65,7 +65,7 @@ refactor(budget-policy): limits 校验抽为 resolveLimits——判态与配置�
 - Modify: `platform/shared/seam-contracts/metering.ts`
 - Modify: `platform/shared/seam-contracts/__tests__/metering.contract.spec.ts`
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 `assertMeteringContract` 拓宽 `resetBudgets` 签名为
 `(user: number | BudgetLimits, project: number | BudgetLimits) => Promise<void>`；
@@ -84,7 +84,7 @@ await resetBudgets({ budget: 1000 }, 10_000)
 场景 6/7 断言结构：`check()` 的 `approved === (state !== 'hard')` + 具体 state 值 + 精确
 `balance`。
 
-- [ ] **Step 2: 实现接口与 stub（绿）**
+- [x] **Step 2: 实现接口与 stub（绿）**
 
 `MeteringSeam` 增：
 
@@ -101,7 +101,7 @@ remaining += (newTotal − oldTotal)、limits.budget 更新（soft/overdraft 保
 
 `resetBudgets` 返回数字时走旧路径（stub 直接设 remaining、清 limits——旧模式）。
 
-- [ ] **Step 3: 跑测试并提交**
+- [x] **Step 3: 跑测试并提交**
 
 ```
 feat(metering): 四态与期中调整进共享契约——stub 与 PG 被同一把尺子量（场景6/7）
@@ -115,7 +115,7 @@ feat(metering): 四态与期中调整进共享契约——stub 与 PG 被同一�
 - Modify: `platform/dsh-plugins/metering/src/pg-meter.ts`
 - Create: `platform/dsh-plugins/metering/__tests__/pg-budget.spec.ts`
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 `pg-budget.spec.ts`（own schema `metering_budget_test`，skip 可见）：
 
@@ -131,7 +131,7 @@ feat(metering): 四态与期中调整进共享契约——stub 与 PG 被同一�
 - **DDL**：`init()` 后 `budget_total/soft_limit/overdraft` 列存在（`LIMIT 0` 查不报错）；
   `init()` 两次幂等
 
-- [ ] **Step 2: 实现（绿）**
+- [x] **Step 2: 实现（绿）**
 
 `pg-meter.ts`：
 
@@ -145,13 +145,13 @@ feat(metering): 四态与期中调整进共享契约——stub 与 PG 被同一�
   `seedDefaultBudget`（`ON CONFLICT DO NOTHING`，直插旧模式行，不改 total 列）
 - 复用 `resolveLimits` 做校验（不写第三份）
 
-- [ ] **Step 3: pg-contract.spec.ts 接上（绿）**
+- [x] **Step 3: pg-contract.spec.ts 接上（绿）**
 
 `resetBudgets` 助手：number → 旧模式直插：`INSERT INTO budget_trees (kind,id,budget)
 VALUES … ON CONFLICT (kind,id) DO UPDATE SET budget = EXCLUDED.budget`（**不能用
 setBudget** —— 它会把行变成新模式、左闭边界）；`BudgetLimits` → `seam.setBudget(…)`。
 
-- [ ] **Step 4: 跑测试并提交**
+- [x] **Step 4: 跑测试并提交**
 
 ```
 feat(metering): PG 总额模型——旧行两态不变，新行四态可达（B2 偏离收账）
@@ -165,17 +165,17 @@ feat(metering): PG 总额模型——旧行两态不变，新行四态可达（B
 - Modify: `platform/dsh-plugins/metering/src/index.ts`
 - Modify: `platform/dsh-plugins/metering/__tests__/pg-budget.spec.ts`
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 pg-budget.spec.ts 加：已有新模式行（setBudget 配置过）→ `seedDefaultBudget(1e9)` **不动它**
 （total/remaining 原样）；无行 → 插入旧模式行（total NULL、remaining=defaultBudget）。
 
-- [ ] **Step 2: 实现（绿）**
+- [x] **Step 2: 实现（绿）**
 
 `index.ts` 的 `setBudget(…, defaultBudget)` 改 `seedDefaultBudget(…, defaultBudget)`；
 注释「仅当未显式配置时生效」与实现终于对齐。
 
-- [ ] **Step 3: 跑测试并提交**
+- [x] **Step 3: 跑测试并提交**
 
 ```
 fix(metering): 装配层默认预算只做种子——不再把运维配置冲回 1e9（注释与实现不符）
@@ -190,13 +190,13 @@ fix(metering): 装配层默认预算只做种子——不再把运维配置冲�
 - Modify: `docs/design-review.md`（B2 落地状态）
 - Modify: `docs/README.md`（已定案 metering 行：总额模型划钩，RocketMQ/Doris 留待补）
 
-- [ ] **Step 1: §6.4**：预算状态表加一句：总额模型落地情况（PG 已按 total+remaining 实现；
+- [x] **Step 1: §6.4**：预算状态表加一句：总额模型落地情况（PG 已按 total+remaining 实现；
   旧行 total NULL 两态；装配层种子语义）。
-- [ ] **Step 2: B2 落地状态**：原「PG 无 total → 三态退化二态」偏离 → 已收账，改锁
+- [x] **Step 2: B2 落地状态**：原「PG 无 total → 三态退化二态」偏离 → 已收账，改锁
   seedDefaultBudget 修复与「配置写入即校验」；剩余偏离（RocketMQ 进程内、fail-open
   balance、CI 无 PG skip、Doris）不动。
-- [ ] **Step 3: README**：已定案 metering 行待补三者划掉「PG 侧本期配额总额模型」。
-- [ ] **Step 4: 校验 + 提交**
+- [x] **Step 3: README**：已定案 metering 行待补三者划掉「PG 侧本期配额总额模型」。
+- [x] **Step 4: 校验 + 提交**
 
 ```
 docs(metering): 总额模型落地状态——B2 偏离收账，PG 四态在执法点可达
@@ -206,20 +206,20 @@ docs(metering): 总额模型落地状态——B2 偏离收账，PG 四态在执�
 
 ## 收尾：第一铁律合规校验（不可跳过）
 
-- [ ] **Step 1**
+- [x] **Step 1**
 
 ```bash
 git -C deepseek-harness describe --tags --dirty   # 必须 dsh-v0.1.1-rc.2，无 -dirty
 git -C deepseek-harness status --porcelain -uno   # 必须无输出
 ```
 
-- [ ] **Step 2: 全量测试 + typecheck**
+- [x] **Step 2: 全量测试 + typecheck**
 
 ```bash
 cd platform && ./node_modules/.bin/vitest run && ./node_modules/.bin/tsc -b --noEmit
 ```
 
-- [ ] **Step 3: 对照设计说明 §7 的 8 条验收判据**逐条指到具体用例名
+- [x] **Step 3: 对照设计说明 §7 的 8 条验收判据**逐条指到具体用例名
 
 ---
 
