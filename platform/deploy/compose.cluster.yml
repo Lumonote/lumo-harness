@@ -2,6 +2,8 @@
 # 目的：验证我们自己的代码在多实例下的行为（R1/R2/A1/N1/CRDT 归属转移），而非中间件自身的 HA。
 # 启动：docker compose -f compose.cluster.yml up
 # 故障注入场景见同目录 README.md。当前为拓扑骨架，镜像由阶段 2–3 填充。
+# 隔离：显式项目名（默认名会是目录名 deploy，与其它项目容器撞名）+ 容器名前缀 lumo-platform-*。
+name: lumo-platform-cluster
 version: "3.9"
 
 services:

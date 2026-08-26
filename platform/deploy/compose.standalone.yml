@@ -1,6 +1,8 @@
 # Standalone 形态：与集群完全相同的引擎，单节点拓扑。承诺可在线升级到 Cluster（architecture §13.2）。
 # 启动：docker compose -f compose.standalone.yml up
 # 注：镜像由阶段 1+ 产出后填充 build:/image: 字段；当前为拓扑骨架。
+# 隔离：显式项目名（默认名会是目录名 deploy，与其它项目容器撞名）+ 容器名前缀 lumo-platform-*。
+name: lumo-platform-standalone
 version: "3.9"
 
 services:
@@ -15,6 +17,10 @@ services:
     image: milvusdb/milvus:latest
   rocketmq:      # 单 broker（namesrv + broker）
     image: apache/rocketmq:5.3.1
+  nacos:         # 注册/配置中心（docs/README 三·补：Standalone 组成含 Nacos）
+    image: nacos/nacos-server:v2.4.0
+    environment:
+      - MODE=standalone
   # 可选（按 requires 校验）：doris 单节点、nebula 单节点 —— 未齐备时对应 seam 显式不可用
 
   # ---- 平台编排（本地 compose 为单实例；装配层差异，业务代码无 if(standalone)）----

@@ -24,7 +24,8 @@ services:
       retries: 10
 
   embedding:            # TEI 文本嵌入（bge-m3, 1024 维；LLM embedding 的独立 Provider，§5.4.4 版本化）
-    image: ghcr.io/huggingface/text-embeddings-inference:1.6
+    # CPU 变体：默认 1.6 是 CUDA 构建，本机（Local-lite 开发机）无 GPU 会缺 libcuda.so.1
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.6
     container_name: lumo-platform-tei
     environment:
       MODEL_ID: BAAI/bge-m3
