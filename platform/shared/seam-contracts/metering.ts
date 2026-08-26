@@ -3,7 +3,7 @@
  * 并行预算树模型（评审 N3）：一次调用同时扣「用户树」与「项目树」，任一超限即拒。
  * 明细落 PG（强一致溯源），限流额度前置拦截；本契约不关心具体存储，只断言语义。
  */
-import type { BudgetState } from './budget-policy.ts'
+import type { BudgetLimits, BudgetState } from './budget-policy.ts'
 
 export interface MeterContext {
   userId: string
@@ -82,13 +82,44 @@ export interface MeteringSeam {
   commit(record: MeterRecord): Promise<void>
   /** 预算树余额查询（维度: user/project）。**可为负数**——负数即透支量。 */
   balance(key: { kind: 'user' | 'project'; id: string }): Promise<number>
+  /**
+   * 期初/重配：本期配额设为 `total`，剩余**重置为 total**（从头花）——周期开始、
+   * 全量重配的入口。
+   *
+   * 预算三态（soft/overdraft）只在**有总额**的树上可达（见 `MeterResult.state` 的
+   * 投影语义）；没有总额的树退化为两态（within/hard）。opts 不给时保留存储的
+   * 软限额/透支（新行即缺省：softLimit=total、overdraft=0）。
+   */
+  setBudget(
+    kind: 'user' | 'project', id: string, total: number,
+    opts?: Omit<BudgetLimits, 'budget'>,
+  ): Promise<void>
+  /**
+   * 期中调整：总额**平移**到 `newTotal`（remaining += newTotal − oldTotal），
+   * 因此已用 `total − remaining` 不变——
+   * - 降额不追溯：已发生的消费既不回收（used 不变）也不豁免（降额后下一次 reserve
+   *   即按新总额判态，used ≥ total 即 hard）；
+   * - 提额同样平移，已用不抹零。
+   *
+   * 旧行（无总额，两态语义）拒绝：先 `setBudget` 重配为总额模式——把「只有剩余」的
+   * 旧行剩余当成总额去平移，结果是错的，不让它被隐式迁移。
+   */
+  adjustBudget(
+    kind: 'user' | 'project', id: string, newTotal: number,
+    opts?: Omit<BudgetLimits, 'budget'>,
+  ): Promise<void>
 }
 
 /** 意图：树扣减原子性由上层（RocketMQ 事务消息）保证；本 seam 不引分布式事务（铁律 5） */
 export async function assertMeteringContract(
   seam: MeteringSeam,
   assert: (cond: boolean, msg: string) => void,
-  resetBudgets: (user: number, project: number) => Promise<void>,
+  /**
+   * `number` = 只设剩余（旧行两态语义，既有行为）；`BudgetLimits` = 期初重配为
+   * 总额模式（remaining=budget、限额入列，**四态在契约里对两实现都验证**——不能学
+   * 上个切片的残次品「四态只在 stub 上证明过」，那是「契约只跑 stub」的同形问题）。
+   */
+  resetBudgets: (user: number | BudgetLimits, project: number | BudgetLimits) => Promise<void>,
 ) {
   const ctx: MeterContext = {
     userId: 'u1', deptId: 'd1', role: 'viewer', projectId: 'p1',
@@ -169,4 +200,48 @@ export async function assertMeteringContract(
   await resetBudgets(1, 10000)
   const noEstimate = check(await seam.reserve(ctx), '场景5 无预估')
   assert(noEstimate.approved, '不传 estimate 时余额为正即通过（保持既有调用方行为）')
+
+  // —— 场景 6：四态投影 ——
+  //
+  // 上个切片的教训：四态只在 stub 上被证明过（stub 照契约写、PG 另外写，都「通过」），
+  // 而 soft/overdraft 恰好是最可能写错的两态。这条正是把它拽回共享契约——两个实现
+  // 被同一把尺子量，PG 没有总额模型也过不了这关。
+  await resetBudgets({ budget: 1000, softLimit: 800, overdraft: 200 }, 10_000)
+  await seam.commit({ context: ctx, tokens: 900, model: 'deepseek', costType: 'llm', costUsd: 0.9 })
+  const sixSoft = check(await seam.reserve(ctx), '场景6 软限额')
+  assert(sixSoft.approved && sixSoft.state === 'soft', 'used=901 落在 [800,1000) → soft 且放行')
+
+  await seam.commit({ context: ctx, tokens: 200, model: 'deepseek', costType: 'llm', costUsd: 0.2 })
+  const sixOver = check(await seam.reserve(ctx), '场景6 透支中')
+  assert(sixOver.approved && sixOver.state === 'overdraft', 'used=1101 落在 [1000,1200) → overdraft 且放行')
+
+  await seam.commit({ context: ctx, tokens: 200, model: 'deepseek', costType: 'llm', costUsd: 0.2 })
+  const sixHard = check(await seam.reserve(ctx), '场景6 硬停')
+  assert(!sixHard.approved && sixHard.state === 'hard', 'used=1301 ≥ 1200 → hard 且拒绝')
+
+  // —— 场景 7：期中调整不追溯 ——
+  //
+  // 设计说明 §3：adjustBudget 的机制是「总额平移」，used = total − remaining 在调整前后
+  // 不变。用 balance 的**精确值**断言：若实现错把降额当重配（remaining=新总额），
+  // claimed used 会被抹零，这里立即红。
+  await resetBudgets({ budget: 1000 }, 10_000)
+  await seam.commit({ context: ctx, tokens: 900, model: 'deepseek', costType: 'llm', costUsd: 0.9 })
+  const sevenBefore = check(await seam.reserve(ctx), '场景7 调整前')
+  assert(sevenBefore.approved && sevenBefore.state === 'within', 'used=901 < 1000 → within 且放行')
+
+  await seam.adjustBudget('user', 'u1', 500)   // 降额：Δ=−500，remaining 100 → −400
+  assert(
+    (await seam.balance({ kind: 'user', id: 'u1' })) === -400,
+    '降额必须平移剩余（100 − 500 = −400），而不是把已用抹零',
+  )
+  const sevenLowered = check(await seam.reserve(ctx), '场景7 降额后')
+  assert(!sevenLowered.approved && sevenLowered.state === 'hard', 'used=901 ≥ 500 → 立即 hard，不回收也不豁免')
+
+  await seam.adjustBudget('user', 'u1', 2000)  // 提额：Δ=+1500，remaining −400 → 1100
+  assert(
+    (await seam.balance({ kind: 'user', id: 'u1' })) === 1100,
+    '提额同样平移（−400 + 1500 = 1100），已用不因提额抹零',
+  )
+  const sevenRaised = check(await seam.reserve(ctx), '场景7 提额后')
+  assert(sevenRaised.approved, '提额后放行（used 仍为 901 < 2000）')
 }

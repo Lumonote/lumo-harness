@@ -65,6 +65,40 @@ class MemoryMeteringSeam implements MeteringSeam {
   async balance(key: { kind: 'user' | 'project'; id: string }): Promise<number> {
     return key.kind === 'user' ? this.userBudget : this.projectBudget
   }
+
+  async setBudget(
+    kind: 'user' | 'project', _id: string, total: number,
+    opts?: Omit<BudgetLimits, 'budget'>,
+  ): Promise<void> {
+    this.limits[kind] = { budget: total, ...(opts ?? {}) }
+    this.setRemaining(kind, total)   // 期初重配：从头花
+  }
+
+  async adjustBudget(
+    kind: 'user' | 'project', _id: string, newTotal: number,
+    opts?: Omit<BudgetLimits, 'budget'>,
+  ): Promise<void> {
+    const limits = this.limits[kind]
+    if (!limits) {
+      throw new Error('旧模式树没有总额，无法调整：先用 setBudget 重配为总额模式')
+    }
+    const merged = { ...limits, budget: newTotal, ...(opts ?? {}) }
+    if (merged.softLimit !== undefined && merged.softLimit > newTotal) {
+      throw new Error(`softLimit(${merged.softLimit}) 不得大于 budget(${newTotal})`)
+    }
+    // 总额平移：remaining += Δ，used = total − remaining 不变（降额不追溯）
+    this.setRemaining(kind, this.remainingOf(kind) + (newTotal - limits.budget))
+    this.limits[kind] = merged
+  }
+
+  private remainingOf(kind: 'user' | 'project'): number {
+    return kind === 'user' ? this.userBudget : this.projectBudget
+  }
+
+  private setRemaining(kind: 'user' | 'project', v: number): void {
+    if (kind === 'user') this.userBudget = v
+    else this.projectBudget = v
+  }
 }
 
 describe('metering seam contract', () => {
@@ -72,8 +106,11 @@ describe('metering seam contract', () => {
     const seam = new MemoryMeteringSeam()
     const assert = (cond: boolean, msg: string) => expect(cond, msg).toBe(true)
     await assertMeteringContract(seam, assert, async (user, project) => {
-      seam.userBudget = user
-      seam.projectBudget = project
+      // number = 旧行两态（清掉额度配置）；BudgetLimits = 期初重配为总额模式
+      seam.userBudget = typeof user === 'number' ? user : user.budget
+      seam.projectBudget = typeof project === 'number' ? project : project.budget
+      seam.limits.user = typeof user === 'number' ? undefined : { ...user }
+      seam.limits.project = typeof project === 'number' ? undefined : { ...project }
     })
   })
 
