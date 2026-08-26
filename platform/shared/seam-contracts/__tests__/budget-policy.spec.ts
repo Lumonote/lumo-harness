@@ -4,6 +4,7 @@ import {
   BudgetAlerter,
   MAX_TRACKED_PERIODS,
   budgetState,
+  resolveLimits,
   worseOf,
   type BudgetAlert,
   type BudgetLimits,
@@ -110,6 +111,36 @@ describe('budgetState —— 四态边界', () => {
     expect(budgetState(used, { budget: 1000 })).toBe('within')
     expect(budgetState(used, { budget: 100 })).toBe('hard')
     expect(used).toBe(500)
+  })
+})
+
+/**
+ * `resolveLimits` —— 配置校验的单一来源（总额模型设计说明 §3）。
+ *
+ * `setBudget`/`adjustBudget` 的写入校验与 `budgetState` 的判态校验是同一件事：配置
+ * 不自洽时两个点都必须拒绝。分开写两份必然漂移（与「幂等白名单两张表」同型），所以
+ * 抽出来。判态路径已在上面 22 个用例锁死，这里断言的是配置路径。
+ */
+describe('resolveLimits —— 校验并补齐缺省（写入与判态共用）', () => {
+  it('缺省补齐：softLimit = budget、overdraft = 0 —— 与判态的一致', () => {
+    expect(resolveLimits(1000)).toEqual({ budget: 1000, softLimit: 1000, overdraft: 0 })
+  })
+
+  it('透传显式配置', () => {
+    expect(resolveLimits(1000, { softLimit: 800, overdraft: 200 }))
+      .toEqual({ budget: 1000, softLimit: 800, overdraft: 200 })
+  })
+
+  it('softLimit > budget 抛错 —— 与判态同一条错误理由', () => {
+    expect(() => resolveLimits(500, { softLimit: 1000 })).toThrow(/softLimit/)
+  })
+
+  it('负数与非有限值抛错 —— 三路各自报错', () => {
+    expect(() => resolveLimits(-1)).toThrow()
+    expect(() => resolveLimits(100, { overdraft: -1 })).toThrow()
+    expect(() => resolveLimits(100, { softLimit: -1 })).toThrow()
+    expect(() => resolveLimits(Number.NaN)).toThrow()
+    expect(() => resolveLimits(100, { overdraft: Number.POSITIVE_INFINITY })).toThrow()
   })
 })
 

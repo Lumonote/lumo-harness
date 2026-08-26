@@ -45,7 +45,8 @@ export interface BudgetLimits {
  * 必须已经越界——若 `used === budget` 仍判放行，那么预算为 1000 的树实际能用到 1001。
  */
 export function budgetState(used: number, limits: BudgetLimits): BudgetState {
-  const { budget, softLimit, overdraft } = normalize(used, limits)
+  finite('used', used)
+  const { budget, softLimit, overdraft } = resolveLimits(limits.budget, limits)
 
   if (used < softLimit) return 'within'
   if (used < budget) return 'soft'
@@ -68,33 +69,38 @@ export function isAllowed(state: BudgetState): boolean {
 }
 
 /**
- * 校验并补齐缺省值。
+ * 校验并补齐预算配置（不含 `used`）——**配置写入与判态的同一份校验**（总额模型设计
+ * 说明 §3）。
  *
- * 配置不自洽时**抛错而不是返回一个看起来合理的态**：`softLimit > budget` 时若放过，
+ * `setBudget`/`adjustBudget` 把配置落库前必须用它预检：配置不自洽时**在写入处拒绝**，
+ * 而不是让它延迟成 `reserve` 判态时的 run 时抛错——配置错误被延迟到线上才炸，比
+ * 配置时拒绝坏得多。判态侧的校验与写入侧分开写两份必然漂移（与「幂等白名单两张表」
+ * 同型），所以 `budgetState` 也走这里。
+ *
+ * 不自洽的另一种表现是「返回一个看起来合理的态」：`softLimit > budget` 时若放过，
  * `used=600 / budget=500 / softLimit=1000` 会被判成 `within` —— 已经超预算却显示预算
  * 内。一个错的态比抛错坏得多，因为它会被当成判据。
  */
-function normalize(
-  used: number,
-  limits: BudgetLimits,
-): { budget: number; softLimit: number; overdraft: number } {
-  finite('used', used)
-  finite('budget', limits.budget)
+export function resolveLimits(
+  budget: number,
+  opts?: Omit<BudgetLimits, 'budget'>,
+): Required<BudgetLimits> {
+  finite('budget', budget)
 
-  const overdraft = limits.overdraft ?? 0
+  const overdraft = opts?.overdraft ?? 0
   finite('overdraft', overdraft)
 
   // 缺省等于 budget：soft 区间为空 → 退化为今天的硬停
-  const softLimit = limits.softLimit ?? limits.budget
+  const softLimit = opts?.softLimit ?? budget
   finite('softLimit', softLimit)
-  if (softLimit > limits.budget) {
+  if (softLimit > budget) {
     throw new Error(
-      `softLimit(${softLimit}) 不得大于 budget(${limits.budget})：` +
+      `softLimit(${softLimit}) 不得大于 budget(${budget})：` +
       `否则已超预算的用量会被判成 within，而一个错的态会被当成判据`,
     )
   }
 
-  return { budget: limits.budget, softLimit, overdraft }
+  return { budget, softLimit, overdraft }
 }
 
 /** 有限非负校验。NaN 会让所有比较都为 false，从而静默落到最后一个分支。 */
@@ -166,7 +172,7 @@ export class BudgetAlerter {
     }
     perTree.set(tree, state)
 
-    const { budget, softLimit, overdraft } = normalize(used, limits)
+    const { budget, softLimit, overdraft } = resolveLimits(limits.budget, limits)
     this.onAlert?.({ period, tree, state, used, budget, softLimit, overdraft })
     return true
   }
