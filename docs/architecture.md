@@ -211,6 +211,20 @@ dsh 能远程化 filesystem/subprocess，是因为它专门造了 `ctx.e2b` 这�
 - 平台层扩展（不改 dsh 源码）：订阅 dsh 已广播的 `session/event`，把日志**按 segment 复制到集群**（Redis 热层 + **MinIO/Doris 冷层**），让 agent 可跨节点 resume/migrate，并让多智能体协同拥有共享的持久状态。
 - 收益：审计天然完备（「模型可见即日志」）；fork 升级为**跨节点 fork**；多端一致性唯一 reconcile 源。
 
+> **实现注记（2026-08-26，冷层收口）**：写路径（PG 真源 + fencing 写者租约 + 分叉防护）见
+> `platform/dsh-plugins/session-log`（评审 A1）。**冷层（§4.2 bucket 表第 2 行「热层 Redis → 冷转
+> MinIO」）已落地**：`ctx.coldLog`（`PgColdLogArchiver`，经 `ctx.objectStore`）把已提交的 PG 日志按
+> segment 幂等归档进 MinIO（段键 `<realm>/session-log/<session>/<start>-<end>.jsonl` + `.info`
+> 侧车，sha256+bytes 读回首验），保留期分级过期（`ctx.coldLog.sweep`）。冷层是**归档副本**，仅
+> 只读 PG 真源、只写 MinIO，**不占写者租约**；Doris 冷档（OLAP）仍为后续切片。
+> 契约 `shared/seam-contracts/cold-log.ts`；compose 冒烟见 `platform/dsh-plugins/session-log/smoke.ts`。
+> **Redis 热层已落地（2026-08-27）**：`RedisHotLog`（`shared/seam-contracts/hot-log.ts` 契约 +
+> `session-log/src/hot-log.ts`）——每会话尾部窗口缓存（单 LIST，RPUSH+LTRIM 裁剪+EXPIRE 续
+> TTL），写后透传（PG 提交为成功判据；Redis 失败**仅告警 fail-open**——只读加速，不参与写
+> 路径成败、绝不影响 fencing）；读路径 windowCovered 才用、否则回退 PG（正确性构造性
+> 保证：窗口序列化校验不连续即弃）；`ctx.sessionLogHot.read/head` 供「证据不够新」滞后探测
+> （§20.1 D-Refuse）。`hotCache` 缺省不配置时行为与无热层完全一致。
+
 ### 4.3 组件化契约 + 五类制品
 
 **插件 vs 组件**：plugin 是 Cordis 代码（service/event）；**组件是业务面的一等制品**——把若干 plugin / skill / seam 编排成带 manifest、可版本化、可分发、有标准 I/O 契约的整体，以 bundle 挂载，对内核零侵入。
@@ -295,8 +309,12 @@ spec:
 > **storage→sql KV（seam 远程形态设计 §1 第 12 行）**：`platform/dsh-plugins/storage` 的 PG KV 后端
 > （`PgStorageBackend implements StorageBackend`，镜像 storage-sqlite），`ctx.storage` 收敛到
 > `ctx.datastore.sql`（PG，schema 版本化）；与 sqlite 跑**同一份** dsh 契约套件（`storage/storage/tests/contract.ts`），
-> 真 PG 全绿。web→连接器网关（第 8 行）仍显式外（设计说明
-> `docs/superpowers/specs/2026-08-26-object-store-design.md` §1）。
+> 真 PG 全绿。**web→连接器网关（第 8 行）已落地（2026-08-27）**：
+> `@lumo/web-gateway` 注册 `WebFetchProvider(id=lumo-gateway)`，出向 fetch 走连接器网关
+> `POST /web/fetch`（公网放行+全局黑名单+仅公网+配额+PII 脱敏+审计；一次出向计量
+> `connector.call`，emitter=connector-gateway；既有 connector invoke 同法顺带计量——
+> 审计与计量同一 PG 事务）；装配以 `web.fetchProvider: lumo-gateway`（等效
+> `DSH_WEB_FETCH_PROVIDER`）选中。search 仍显式外（出向治理属后续「search 网关化」小切片）。
 
 ### 5.2 平台自身元数据 backing 推荐
 
@@ -920,6 +938,16 @@ ORM:     Ent (PG)
 > `usage_ledger`（emitter=llm-gateway）——seam 远程形态设计 §2.1 点名的联测项，真 broker 实测。
 > 限流（Redis 令牌桶）/batch/模型路由/Vault key/OTel/集群形态显式外（设计说明
 > `docs/superpowers/specs/2026-08-26-llm-gateway-design.md` §6）。
+>
+> **实现状态（2026-08-27，连接器网关注入 web 出向 + 计量）**：网关新增 `POST /web/fetch`
+> 通用 URL egress（scheme http/https、URL≤2048、响应上限、重定向不跟随、请求/响应 PII
+> 脱敏默认开、限速 realm/web/user、熔断 realm/web、全局黑名单优先——适用面非连接器，
+> 安全边界=「公网放行+黑名单+仅公网」，注释写明为何无 manifest 拼装）。**计量**：放行且
+> 拿到上游响应（含 4xx）才计一次 `connector.call`（qty=1、unit=call、costUsd=0 无费率
+> 表、emitter=connector-gateway、traceId=X-Lumo-Trace/correlationId）；传输错误/denied 不计
+> （审计照记）——审计+计量同 PG 事务（`audit.Sink.Write(ctx, rec, meter)`）；归因头族
+> 与 llm-gateway 同约定，缺省补 'unknown'/'system' + 告警（缺省而非 400 的原因：既有
+> 客户端只发四头，400 会破现有链）。
 
 **Rust 仅用于极端计算热点与无成熟 Go 实现的协议内核**（自研 tokenizer、超大 batch 调度内核、向量近邻检索、**CRDT 合并内核 y-crdt**——Yjs 生态无生产级 Go 实现，此处走 FFI 是该条款的正当适用而非破例），以 sidecar/FFI 形态存在；服务主体仍是 Go。理由：瓶颈在 LLM 推理 + 网络 I/O（等 I/O 场景 Go goroutine 教科书级匹配），Rust 无 GC 优势收益有限却付出开发速度/人才成本；需快速 hook OPA/Vault/Redis/RocketMQ/PG/Doris/Nacos，Go 客户端最成熟。
 

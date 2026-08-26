@@ -62,8 +62,8 @@ object_key, sha256, bytes, items, archived_at)`。作用：
 cd platform
 # 契约（纯函数，无依赖）
 npx vitest run shared/seam-contracts/__tests__/cold-log.spec.ts
-# archiver + 过期（需真 PG 15432 + 真 MinIO 19000）
-STORAGE_TEST_DSN='postgresql://lumo:lumo@127.0.0.1:15432/lumo' \
+# archiver + 过期（需真 PG 15432 + 真 MinIO 19000；archive 规约读 SESSION_LOG_TEST_DSN）
+SESSION_LOG_TEST_DSN='postgresql://lumo:lumo@127.0.0.1:15432/lumo' \
 OBJECT_STORE_TEST_ENDPOINT=127.0.0.1:19000 \
 OBJECT_STORE_TEST_CREDS=lumo:lumo-minio-123 \
 npx vitest run shared/seam-contracts/__tests__/cold-log.spec.ts dsh-plugins/session-log/__tests__/cold-archive.spec.ts
@@ -78,7 +78,7 @@ npx vitest run shared/seam-contracts/__tests__/cold-log.spec.ts dsh-plugins/sess
 
 ## Task 拆分
 
-- [ ] Task A：设计+计划提交（本文件）
-- [ ] Task B：契约 红→绿（段边界/序列化/保留期纯函数）
-- [ ] Task C：archiver + 过期 红→绿（PG→MinIO 幂等归档、侧车校验、过期清理；fail closed）
-- [ ] Task D：compose 冒烟 + 文档收账（architecture §4.2 实现注记 + README + seam 设计第 2/3 行 + 计划勾）
+- [x] Task A：设计+计划提交（本文件）
+- [x] Task B：契约 红→绿（段边界/序列化/保留期纯函数）
+- [x] Task C：archiver + 过期 红→绿（PG→MinIO 幂等归档、侧车校验、过期清理；fail closed）
+- [x] Task D：compose 冒烟 + 文档收账（architecture §4.2 实现注记 + seam 设计第 2 行 + 计划勾；compose 冒烟全绿见 cold-smoke.log）
