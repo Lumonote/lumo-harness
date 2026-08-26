@@ -113,6 +113,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS usage_ledger_event_key_idx ON usage_ledger (ev
 
 export class PgMeteringSeam implements MeteringSeam {
   private pool: pg.Pool
+  /** drainOnce 单实例内不并发重入（定时间隔小于一轮搬运时长时的压车），同 GraphProjector */
+  private running = false
 
   constructor(connectionString: string) {
     this.pool = new pg.Pool({ connectionString })
@@ -240,6 +242,61 @@ export class PgMeteringSeam implements MeteringSeam {
       `INSERT INTO usage_event_outbox (event_key, payload) VALUES (gen_random_uuid(), $1)`,
       [JSON.stringify(e)],
     )
+  }
+
+  /**
+   * 搬运一批未投影事件入台账（设计说明 2026-08-26 §5，本地 = 「PG 事务 outbox +
+   * 进程内调度器」的调度端；换 RocketMQ 时只换这个入口的调用者）。
+   *
+   * 四个跨传输不变式在此兑现：
+   * - **一次事件一账**：`ON CONFLICT (event_key) DO NOTHING`——至少一次投递/崩溃重跑
+   *   不重复入账（幂等键在写 outbox 时由 PG 生成，发出方不必协商键格式）；
+   * - **事件时刻保真**：`ts` 取 outbox 的事件时刻而非 `now()`——账单周期门按事件时刻判，
+   *   搬运用时哪怕跨了周期也不能改账的日期；
+   * - **顺序稳定**：按 `seq` 序搬，台账内 `(ts, id)` 排序语义不变；
+   * - **原子**：批量插入与标记 `projected_at` 同一事务——崩溃窗口只造成重放，不丢账。
+   *
+   * 毒丸（payload 被手工编辑坏）→ `assertCostEvent` 抛 → 整批回滚 → 下一轮重试；
+   * 已知不足：毒丸会阻塞其后的批次（同 knowledge 投影先例，设计说明 §6）。
+   */
+  async drainOnce(batchSize = 100): Promise<number> {
+    if (this.running) return 0
+    this.running = true
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const pending = await client.query<OutboxRow>(
+        `SELECT seq, ts, event_key, payload FROM usage_event_outbox
+         WHERE projected_at IS NULL
+         ORDER BY seq
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED`,
+        [Math.max(batchSize, 1)],
+      )
+      if (pending.rows.length === 0) {
+        await client.query('COMMIT')
+        return 0
+      }
+
+      const rows = pending.rows.map((r) => {
+        const e = r.payload as CostEvent
+        assertCostEvent(e)   // 写入口已验过；再验一次防手工编辑（毒丸整批回滚）
+        return { e, eventKey: r.event_key, ts: r.ts }
+      })
+      await batchInsertLedger(client, rows)
+      await client.query(
+        'UPDATE usage_event_outbox SET projected_at = now() WHERE seq = ANY($1::bigint[])',
+        [pending.rows.map((r) => r.seq)],
+      )
+      await client.query('COMMIT')
+      return pending.rows.length
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw e
+    } finally {
+      client.release()
+      this.running = false
+    }
   }
 
   /** 按 trace 取回一条因果链。顺序稳定（ts, id），否则「这次尖峰的构成」每次读都不同。 */
@@ -388,21 +445,65 @@ interface LedgerRow {
 }
 
 /**
- * `usage_ledger` 的**唯一写入方法**。
+ * `usage_ledger` 的**唯一写入方法**（批量版）。
  *
- * `commit()`（LLM 截面）与 `emit()`（其它成本类型）都走它。两条写路径各写一遍
- * INSERT 就是 schema 的第二份副本——加一列时只会改一处，另一处静默过期，而过期的
- * 方向是「新维度在某类成本上永远为空」，看起来像那类成本天生没有 trace。
+ * `drainOnce` 是它唯一的调用方（设计说明 2026-08-26 §2：写穿即见换有界最终一致，
+ * 台账只由搬运器写入）。多行单语句 INSERT 即削峰本体：一批事件一次事务，而不是
+ * 每事件的独立小 INSERT。
  *
  * 发出方跨语言（连接器网关是 Go），因此约束是**表只有一个写入者**：Go 侧经 sink
  * 接口交事件，不直连这张表。
  */
+async function batchInsertLedger(
+  client: pg.PoolClient,
+  rows: Array<{ e: CostEvent; eventKey: string; ts: Date }>,
+): Promise<void> {
+  const values: string[] = []
+  const params: unknown[] = []
+  for (const { e, eventKey, ts } of rows) {
+    values.push(
+      `($${params.length + 1},$${params.length + 2},$${params.length + 3},$${params.length + 4},` +
+      `$${params.length + 5},$${params.length + 6},$${params.length + 7},$${params.length + 8},` +
+      `$${params.length + 9},$${params.length + 10},$${params.length + 11},$${params.length + 12},` +
+      `$${params.length + 13},$${params.length + 14},$${params.length + 15},$${params.length + 16},` +
+      `$${params.length + 17},$${params.length + 18})`,
+    )
+    params.push(
+      ts,   // 事件时刻（outbox.ts），不是投影时刻（不变式②）
+      e.context.userId, e.context.deptId, e.context.role, e.context.projectId,
+      e.context.agentId, e.context.componentId, e.context.feature, e.context.sessionRef,
+      e.model ?? null,
+      // 非 token 类型的 tokens 列写 0 而不是 NULL：既有的 SUM(tokens) 报表遇到 NULL
+      // 会得到 NULL 而不是原来的数，那是一次静默的报表回归
+      e.tokens ?? 0,
+      e.costType, e.costUsd, e.traceId, e.emitter, e.qty, e.unit, eventKey,
+    )
+  }
+  await client.query(
+    `INSERT INTO usage_ledger
+       (ts, user_id, dept_id, role, project_id, agent_id, component_id, feature,
+        session_ref, model, tokens, cost_type, cost_usd, trace_id, emitter, qty, unit, event_key)
+     VALUES ${values.join(',')}
+     ON CONFLICT (event_key) DO NOTHING`,
+    params,
+  )
+}
+
 /** `budget_trees` 行。BIGINT 列 pg 读成字符串；总额列可空（NULL = 旧模式）。 */
 type BudgetTreeRow = {
   budget: string | number
   budget_total: string | number | null
   soft_limit: string | number | null
   overdraft: string | number | null
+}
+
+/** `usage_event_outbox` 行。`seq` 是 BIGINT（pg 读成字符串），`ts` 是事件时刻，
+ * `payload` 是已通过 assertCostEvent 的 CostEvent（jsonb 被 pg 解析为对象）。 */
+type OutboxRow = {
+  seq: string
+  ts: Date
+  event_key: string
+  payload: CostEvent
 }
 
 /**
@@ -432,24 +533,6 @@ function stateOfTree(row: BudgetTreeRow | undefined, need: number): BudgetState 
     softLimit: row.soft_limit == null ? undefined : Number(row.soft_limit),
     overdraft: row.overdraft == null ? undefined : Number(row.overdraft),
   })
-}
-
-async function insertLedger(client: pg.PoolClient, e: CostEvent): Promise<void> {
-  await client.query(
-    `INSERT INTO usage_ledger
-       (user_id, dept_id, role, project_id, agent_id, component_id, feature,
-        session_ref, model, tokens, cost_type, cost_usd, trace_id, emitter, qty, unit)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-    [
-      e.context.userId, e.context.deptId, e.context.role, e.context.projectId,
-      e.context.agentId, e.context.componentId, e.context.feature, e.context.sessionRef,
-      e.model ?? null,
-      // 非 token 类型的 tokens 列写 0 而不是 NULL：既有的 SUM(tokens) 报表遇到 NULL
-      // 会得到 NULL 而不是原来的数，那是一次静默的报表回归
-      e.tokens ?? 0,
-      e.costType, e.costUsd, e.traceId, e.emitter, e.qty, e.unit,
-    ],
-  )
 }
 
 function rowToEvent(r: LedgerRow): CostEvent {

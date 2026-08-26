@@ -97,3 +97,73 @@ describe(`事件先入 usage_event_outbox —— 对真 PG（需 METERING_TEST_D
     })
   })
 })
+
+describe(`drainOnce 批量入账 —— 对真 PG（需 METERING_TEST_DSN，当前${suffix}）`, () => {
+  t('drain 后行数 = 事件数；空批返回 0；已投影行不回收', async () => {
+    await withSeam(async (seam) => {
+      expect(await seam.drainOnce()).toBe(0)
+
+      await seam.emit(eventOf('job.compute'))
+      await seam.emit(eventOf('seam.query'))
+      expect(await seam.drainOnce()).toBe(2)
+      expect(await count(seam, 'usage_ledger')).toBe(2)
+      // 已投影行保留（部分索引只扫未投影尾）——同 knowledge_graph_outbox
+      expect(await count(seam, 'usage_event_outbox')).toBe(2)
+    })
+  })
+
+  t('批量上限生效——drainOnce(n) 至多搬 n 条', async () => {
+    await withSeam(async (seam) => {
+      for (let i = 0; i < 5; i++) await seam.emit(eventOf('job.compute', { qty: i }))
+
+      expect(await seam.drainOnce(2)).toBe(2)
+      expect(await count(seam, 'usage_ledger')).toBe(2)
+      expect(await seam.drainOnce(10)).toBe(3)
+      expect(await count(seam, 'usage_ledger')).toBe(5)
+      expect(await seam.drainOnce(10)).toBe(0)
+    })
+  })
+
+  t('事件时刻保真——ledger.ts = outbox.ts（事件时刻），非投影时刻', async () => {
+    await withSeam(async (seam) => {
+      await seam.emit(eventOf('job.compute'))
+      // 事件发生在 23:59:58、投影在 00:00:02：账单周期门按事件时刻判——
+      // 若搬运把 now() 写进账，跨期消费会被划进下一周期
+      await seam.raw(
+        `UPDATE usage_event_outbox SET ts = '2026-01-06 23:59:58+00'`,
+      )
+      await seam.drainOnce()
+      const [row] = await seam.raw<{ eq: boolean }>(
+        `SELECT ts = '2026-01-06 23:59:58+00'::timestamptz AS eq FROM usage_ledger`,
+      )
+      expect(row!.eq).toBe(true)
+    })
+  })
+
+  t('顺序稳定——同一时刻的两事件按 seq 破平，(ts,id) 顺着插入序', async () => {
+    await withSeam(async (seam) => {
+      await seam.emit(eventOf('seam.query', { qty: 500, traceId: 'tr-ord' }))
+      await seam.emit(eventOf('llm.tokens', { qty: 900, traceId: 'tr-ord' }))
+      // 两事件同刻：若搬运乱序，(ts, id) 破平会归到错误的一方
+      await seam.raw(`UPDATE usage_event_outbox SET ts = '2026-01-06 12:00:00+00'`)
+      await seam.drainOnce()
+
+      const got = await seam.byTrace('tr-ord')
+      expect(got.map((e) => e.costType)).toEqual(['seam.query', 'llm.tokens'])
+    })
+  })
+
+  t('重放幂等——projected_at 置回 NULL 再 drain，台账行数不变（一次事件一账）', async () => {
+    await withSeam(async (seam) => {
+      await seam.emit(eventOf('job.compute'))
+      await seam.emit(eventOf('seam.query'))
+      expect(await seam.drainOnce()).toBe(2)
+
+      // 模拟至少一次投递/崩溃重跑：投影标记丢了，同一批事件被重新搬运
+      await seam.raw(`UPDATE usage_event_outbox SET projected_at = NULL`)
+      await seam.drainOnce()
+
+      expect(await count(seam, 'usage_ledger')).toBe(2)
+    })
+  })
+})
