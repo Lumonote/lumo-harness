@@ -510,12 +510,42 @@ manifest 格式为 JSON 而非 YAML：签名覆盖的是上传的原始字节，
 
 > 所有 token 消耗**只在 `ctx.llm` 网关这一道截面被计量**；每笔消耗带从 request 透传到底层的 trace context（user / dept / role / agent / component / session），明细落 PG、聚合进 Doris、限流走 Redis、规则由 Nacos 下发。
 
+> **（2026-08-26 修订，评审 B2）** 上一句是 **token 截面**，不是成本模型：它保证「token 消耗有单一真相源」，但 token 成本 ≠ 总成本。连接器出向调用费、Doris/Nebula 查询算力、`ctx.jobs` 后台算力、复制日志存储增长、非 LLM 推理的 GPU 时间全都不在那道截面上。成本归因的目标不是「捕获全部成本」（不可能），而是**每个尖峰都能解释**，且**未捕获的部分显式命名**——未命名的缺口会让读账单的人以为账上就是全部。
+
+**成本类型闭集**（`cost_type`，`platform/shared/seam-contracts/cost-events.ts`）：未知取值**拒绝入账**，不记 `unknown`——`unknown` 桶会稳定增长到没人敢动它。`unit` 是各类型唯一合法单位，冗余入库但必须以校验保证一致（`assertCostEvent`）。
+
+| `cost_type` | `unit` | 发出方（`emitter`） |
+|---|---|---|
+| `llm.tokens` | `tokens` | 唯一 token 截面（恒定） |
+| `connector.call` | `call` | 连接器网关（Go）出向调用 |
+| `seam.query` | `rows`（**扫描行数**，非墙钟——墙钟含排队与邻居干扰，按它计费等于替他人付钱） | Seam Provider 自报 |
+| `job.compute` | `second` | `ctx.jobs` 后台算力 |
+| `storage.bytes` | `byte-day` | 复制日志 / 对象存储增长 |
+| `inference.gpu` | `second` | 非 LLM 推理的 GPU 时间 |
+
+**单一写入者**：`usage_ledger` 只有 `CostEventSink`（`PgMeteringSeam`）一个写入者。发出方跨语言（连接器网关是 Go，Provider/jobs 是 TS 插件），各自直连写台账就是 N 份 schema 副本，必然漂移——与「幂等白名单两张表」同型。事件经 `trace_id` 串成因果链，`emitter` 让出账争议定位到具体组件而不是组件类别。
+
+**预算树三态**（原「超预算即拒」扩展，`platform/shared/seam-contracts/budget-policy.ts`）：
+
+| 状态 | 条件 | 行为 |
+|---|---|---|
+| `within` | 已用 < 软限额 | 放行 |
+| `soft` | 软限额 ≤ 已用 < 预算 | 放行 + 结构化预警（同周期同树仅一次） |
+| `overdraft` | 预算 ≤ 已用 < 预算 + 透支额度 | 放行 + 预警升级；透支量事后结算 |
+| `hard` | 已用 ≥ 预算 + 透支额度 | 拒绝 |
+
+- **默认行为不变**：软限额缺省 = 预算、透支缺省 0 → 三种缺省下退化为今天的硬停；既有部署不受本项影响。
+- **降额不追溯**：`setBudget` 可提额可降额，降到低于已用时状态立即变 `overdraft`/`hard`，但不回收已发生消费——追溯回收等于把过去的合法调用变成违规。
+- **并行双树取更严者**（与 N3「任一超限即拒」一致）；`reserve` 返回 `state`，`hard` 才拒。
+
+**已知未计量**（显式列名——列名的目的是让读账单的人知道边界在哪，账上不是全部）：跨节点网络流量费、PG/Doris 存储的实际计费口径（本项只记字节·天，不含 IOPS）、控制面自身算力（Scheduler/registry 的开销不摊进业务账）、人工审批的人力成本。
+
 | 诉求 | 落地 |
 |------|------|
 | **功能级计数** | 每次 LLM 调用打 `feature` 标签（来自组件/skill manifest 或 agent preset），回答"知识库问答这个功能各部门花多少" |
 | **按人/部门/角色归因** | trace context（`user_id`/`dept_id`/`role`）随请求经 dsh 调用链 baggage 透传；组织树同步自 SSO 作权威来源 |
 | **平台级溯源** | `usage_ledger`（PG，append-only + 签名）一行串起 request→session→user→dept→role→agent→component→feature→seam→model→token→成本，与连接器审计/session 事件打通 |
-| **限流 + 限额度** | 限流：Redis 令牌桶按 `global/tenant/dept/role/user/feature` 多层级前置拦截；额度：平台→部门→角色→用户**单向耗尽**的预算树，超预算即拒/降级 |
+| **限流 + 限额度** | 限流：Redis 令牌桶按 `global/tenant/dept/role/user/feature` 多层级前置拦截；额度：平台→部门→角色→用户的预算树（三态表见上） |
 
 - **存储分工**：明细进 PG（强一致溯源）、聚合进 Doris（看板 cube）、限流/额度走 Redis（TTL 对齐周期）。
 - **异步削峰**：计量事件走 RocketMQ `usage.event.*`，不阻塞推理。

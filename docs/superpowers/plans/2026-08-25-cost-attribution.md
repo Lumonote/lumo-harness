@@ -32,7 +32,7 @@ Typecheck：`cd platform && ./node_modules/.bin/tsc -b --noEmit`。
 - Modify: `platform/dsh-plugins/metering/src/pg-meter.ts`
 - Modify: `platform/shared/seam-contracts/__tests__/metering.contract.spec.ts`
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 在契约里加三条断言，**对着 stub 也要成立**（这样 stub 与 PG 被同一把尺子量）：
 
@@ -42,7 +42,7 @@ Typecheck：`cd platform && ./node_modules/.bin/tsc -b --noEmit`。
 
 `MemoryMeteringSeam` 的 `reserve` 当前只判 `<= 0`，加 estimate 后要判 `budget < estimate`。
 
-- [ ] **Step 2: 契约加 estimate（绿）**
+- [x] **Step 2: 契约加 estimate（绿）**
 
 `MeterContext` 不动（它是归因维度，不该混进量）。改 `reserve` 签名：
 
@@ -52,20 +52,20 @@ reserve(context: MeterContext, estimate?: number): Promise<MeterResult>
 
 `estimate` 可选：缺省时按「余额 > 0」判（保持现有调用方不变），给了就按「余额 ≥ estimate」判。**可选而非必填**是因为 `llm/stream` 在首 token 前拿不到准确预估，硬要求会逼出一个假数字。
 
-- [ ] **Step 3: 改 PG 实现（绿）**
+- [x] **Step 3: 改 PG 实现（绿）**
 
 `commit` 的 `UPDATE` 去掉 `AND budget >= $2` —— 无条件扣减，允许负数。
 `reserve` 增加 estimate 判定。
 
 **注意**：`budget_trees.budget` 是 `BIGINT`，允许负数无需改类型。但 `balance()` 在无记录时返回 `+Infinity`（fail open），这与「未定级即拒绝」的精神相反——本 Task 不改它（改了会让未预置预算的既有部署全部停摆），但要在注释里写明这是显式选择的 fail-open 及其理由，并列入 Self-Review。
 
-- [ ] **Step 4: 跑测试**
+- [x] **Step 4: 跑测试**
 
 ```bash
 cd platform && ./node_modules/.bin/vitest run shared/seam-contracts/__tests__/metering.contract.spec.ts
 ```
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```
 fix(metering): 预算扣减不再在超限时静默跳过——封顶恰在最该生效时失效
@@ -78,22 +78,22 @@ fix(metering): 预算扣减不再在超限时静默跳过——封顶恰在最�
 **Files:**
 - Create: `platform/dsh-plugins/metering/__tests__/pg-contract.spec.ts`
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 对着 `PgMeteringSeam` 跑 `assertMeteringContract`，连接串取 `METERING_TEST_DSN`（或复用 registry 集成测试已有的环境变量约定，先读 registry 的 Go 集成测试怎么取的，TS 侧保持同名）。
 
 **skip 必须可见**：无 DSN 时用 `it.skip` 并在标题里写明原因，不得静默 `return`——静默 return 会让测试报告显示「通过」，那正是本项要修的元问题。
 
-- [ ] **Step 2: 建表与清理（绿）**
+- [x] **Step 2: 建表与清理（绿）**
 
 每个用例前 `TRUNCATE usage_ledger, budget_trees`。**不要 DROP**：DROP 会让并行跑的其它测试拿到不存在的表。
 
-- [ ] **Step 3: 跑测试**
+- [x] **Step 3: 跑测试**
 
 有库：`METERING_TEST_DSN=... ./node_modules/.bin/vitest run dsh-plugins/metering`
 无库：确认输出里 skip 可见。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```
 test(metering): 契约对真 PG 跑——只跑 stub 等于没跑
@@ -108,7 +108,7 @@ test(metering): 契约对真 PG 跑——只跑 stub 等于没跑
 - Create: `platform/shared/seam-contracts/__tests__/cost-events.spec.ts`
 - Modify: `platform/dsh-plugins/metering/src/pg-meter.ts`（DDL + insert）
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 `cost-events.spec.ts`：
 
@@ -118,7 +118,7 @@ test(metering): 契约对真 PG 跑——只跑 stub 等于没跑
 - `qty` 必须为有限非负数；负数/NaN/Infinity 被拒（负成本是记账错误，不是退款）
 - `traceId` / `emitter` 非空
 
-- [ ] **Step 2: 实现（绿）**
+- [x] **Step 2: 实现（绿）**
 
 ```ts
 export const COST_TYPES = {
@@ -148,7 +148,7 @@ export function unitFor(t: string): string   // 未知即抛
 
 `unit` 既在表里又能从 `costType` 推出 —— 冗余是刻意的：入库的行要能独立解读，不必回查代码里的映射表。但 `assertCostEvent` 必须校验两者一致，否则冗余就变成了第二个真相源。
 
-- [ ] **Step 3: DDL 加列（绿）**
+- [x] **Step 3: DDL 加列（绿）**
 
 `usage_ledger` 加 `trace_id TEXT`、`emitter TEXT`、`qty NUMERIC(20,6)`、`unit TEXT`。
 
@@ -156,7 +156,7 @@ export function unitFor(t: string): string   // 未知即抛
 
 加索引：`(trace_id)` —— 判据 6 要按 trace 取回因果链，无索引会随台账增长退化成全表扫。
 
-- [ ] **Step 4: 跑测试并提交**
+- [x] **Step 4: 跑测试并提交**
 
 ```
 feat(metering): cost_type 闭集与 trace 维度——自由文本列撑不起「解释一次尖峰」
@@ -171,7 +171,7 @@ feat(metering): cost_type 闭集与 trace 维度——自由文本列撑不起�
 - Modify: `platform/dsh-plugins/metering/src/pg-meter.ts`（实现）
 - Create: `platform/dsh-plugins/metering/__tests__/sink.spec.ts`
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 - 六类事件各落一行，字段完整
 - 同 `traceId` 的多行可按 trace 取回，且顺序稳定（按 ts, id）
@@ -179,7 +179,7 @@ feat(metering): cost_type 闭集与 trace 维度——自由文本列撑不起�
 - 非 `llm.tokens` 事件的 `tokens` 列为 0/NULL，`qty`/`unit` 承载量
 - 未知 `cost_type` 在 sink 层就被拒，**不落任何行**（不能先写再校验）
 
-- [ ] **Step 2: 实现（绿）**
+- [x] **Step 2: 实现（绿）**
 
 ```ts
 export interface CostEventSink {
@@ -190,7 +190,7 @@ export interface CostEventSink {
 
 `PgMeteringSeam` 实现它。**`usage_ledger` 的写入集中到一个私有方法**，`commit()` 与 `emit()` 都走它——两条写路径各写一遍 INSERT 就是 schema 的第二份副本。
 
-- [ ] **Step 3: 跑测试并提交**
+- [x] **Step 3: 跑测试并提交**
 
 ```
 feat(metering): 成本事件单一写入者——发出方跨语言，schema 不能有第二份
@@ -205,7 +205,7 @@ feat(metering): 成本事件单一写入者——发出方跨语言，schema 不
 - Create: `platform/shared/seam-contracts/__tests__/budget-policy.spec.ts`
 - Modify: `platform/dsh-plugins/metering/src/pg-meter.ts`
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 被测对象是纯函数 + 一个去重器：
 
@@ -229,15 +229,15 @@ export function worseOf(a: BudgetState, b: BudgetState): BudgetState
 - 降额不追溯：`budget` 从 1000 降到 100 而 `used=500` → 状态 `hard`，但**不产生任何回收动作**（断言 `used` 不变）
 - 预警去重：同 (周期, 树, 状态) 只回调一次；换周期或状态升级则再发一次（升级要发——`soft`→`overdraft` 是新信息）
 
-- [ ] **Step 2: 实现（绿）**
+- [x] **Step 2: 实现（绿）**
 
 去重器复用闸 C 的形状（`TurnCallBudget` 的 warned 集合 + 有界淘汰）。**同一个坑要防两次**：周期键只增不减，去重集合必须有界。
 
-- [ ] **Step 3: 接进 reserve（绿）**
+- [x] **Step 3: 接进 reserve（绿）**
 
 `reserve` 返回值加 `state: BudgetState`，`hard` 才拒。`reason` 保留现有取值以不破坏调用方，新增 `denied-hard-limit`。
 
-- [ ] **Step 4: 跑测试并提交**
+- [x] **Step 4: 跑测试并提交**
 
 ```
 feat(metering): 预算三态与透支——只有硬停时运维会把预算设成无穷大
@@ -252,21 +252,21 @@ feat(metering): 预算三态与透支——只有硬停时运维会把预算设�
 - Modify: `docs/design-review.md`（B2 落地状态 + 汇总表行）
 - Modify: `docs/README.md`（已定案表加一行；**待拍板 #3 不动**）
 
-- [ ] **Step 1: §6.4 改写**
+- [x] **Step 1: §6.4 改写**
 
 保留「所有 token 消耗只在 `ctx.llm` 这一道截面」——**这句是对的，B2 也明确要求保留**。在它后面加一句限定：那是 **token** 截面，不是成本模型的全部；并加 `cost_type` 闭集表、三态表、单一写入者约束、已知未计量清单。
 
-- [ ] **Step 2: B2 落地状态**
+- [x] **Step 2: B2 落地状态**
 
 格式同 T1/R1。要点：闭集而非自由文本的理由、三态里「软限额缺失导致功能被绕过」这条因果、预算扣减缺陷的发现与修复、契约只跑 stub 的元问题、`fs`-式的显式偏离记账（RocketMQ 未进拓扑）。
 
-- [ ] **Step 3: 汇总表 B2 行**
+- [x] **Step 3: 汇总表 B2 行**
 
-- [ ] **Step 4: README 已定案加一行，并确认待拍板 #3 仍在**
+- [x] **Step 4: README 已定案加一行，并确认待拍板 #3 仍在**
 
 设计说明 §9 说明本项在既成事实上继续但不构成拍板。README 的待拍板 #3 **不能删** —— 删了就等于偷偷拍板。
 
-- [ ] **Step 5: 校验 + 提交**
+- [x] **Step 5: 校验 + 提交**
 
 ```bash
 file docs/architecture.md docs/design-review.md docs/README.md
@@ -282,20 +282,20 @@ docs(metering): §6.4 成本类型闭集与预算三态、评审 B2 落地状态
 
 ## 收尾：第一铁律合规校验（不可跳过）
 
-- [ ] **Step 1**
+- [x] **Step 1**
 
 ```bash
 git -C deepseek-harness describe --tags --dirty   # 必须 dsh-v0.1.1-rc.2，无 -dirty
 git -C deepseek-harness status --porcelain -uno   # 必须无输出
 ```
 
-- [ ] **Step 2: 全量测试 + typecheck**
+- [x] **Step 2: 全量测试 + typecheck**
 
 ```bash
 cd platform && ./node_modules/.bin/vitest run && ./node_modules/.bin/tsc -b --noEmit
 ```
 
-- [ ] **Step 3: 对照 9 条验收判据**（设计说明 §10），逐条指到具体用例名
+- [x] **Step 3: 对照 9 条验收判据**（设计说明 §10），逐条指到具体用例名
 
 ---
 
