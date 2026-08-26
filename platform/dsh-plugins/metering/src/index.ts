@@ -35,9 +35,13 @@ export const inject = ['llm']
 export function apply(ctx: Context, config: MeteringConfig): void {
   const meter = new PgMeteringSeam(config.connectionString)
   void meter.init().then(async () => {
-    // 默认预算种子：幂等 upsert（仅当未显式配置 budget_trees 行时生效，§6.4 预算树）
-    await meter.setBudget('user', config.userId, config.defaultBudget)
-    await meter.setBudget('project', config.projectId, config.defaultBudget)
+    // 默认预算种子：**仅当无行时插入**（§6.4 预算树）。
+    // 此处曾调用 setBudget——那是一年期初重配语义（remaining=total），每次插件重启都会
+    // 把运维配置的总额/硬停冲回 defaultBudget（1e9）；且哪怕旧语义也覆盖了运维在
+    // budget_trees 上的显式配置（注释写「仅当未显式配置时生效」，实现却是无条件 upsert，
+    // 注释与实现不符）。seedDefaultBudget 用 DO NOTHING + 旧模式行，两者都对齐。
+    await meter.seedDefaultBudget('user', config.userId, config.defaultBudget)
+    await meter.seedDefaultBudget('project', config.projectId, config.defaultBudget)
   })
 
   const context = {
