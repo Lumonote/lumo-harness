@@ -84,6 +84,10 @@ interface ObjectStoreSeam {
 6. MinIO 不可达 → put/saveText 抛 capabilityUnavailable（fail closed），不静默降级；
 7. compose MinIO 冒烟：真实 19000 端点全链跑通。
 
+> **判据 → 用例**：1—`__tests__/object-store.spec.ts`「put/get 往返」；2—「realm 隔离」+「键含越狱段被拒」；
+> 3—「putContent：同内容同键幂等」；4—「delete 幂等；get/stat 缺对象 undefined」；5—`__tests__/spill.spec.ts`
+> 「saveText…经 objectStore 可取回」；6—两文件「后端不可达」；7—`smoke.ts`（compose 冒烟全链）。
+
 ## 6. 风险与取舍
 
 - **`minio` SDK 是新依赖**：平台首个对象存储客户端。选官方 SDK 而非裸 S3 REST：签名/

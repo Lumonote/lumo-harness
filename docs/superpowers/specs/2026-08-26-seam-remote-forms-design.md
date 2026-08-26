@@ -22,7 +22,7 @@
 | 8 | `ctx.web` | unary | **连接器网关**：出流量默认经网关（PII 过滤、egress 白名单、配额）；「绕开网关」是治理漏洞不是性能选择——远程 web = 网关代理的出向调用 | 连接器网关（Go，§12） | `ctx.web` 与连接器 seam 共用网关的调用链与审计；单次调用计量 `connector.call` |
 | 9 | `ctx.skills` | unary | **本地化优先**：技能经 provisioner 安装到本地再读——「模型可见即日志可重放」要求技能目录在本地是既定的（远端目录状态随时间变化会破坏重放）；远程形态 = 无远程，只有「装没装好」 | 制品注册表 + provisioner（§6.1/§6.5） | 装配层方案：技能目录声明为依赖；本设计的实现责任 = provisioner 确保本地现状 |
 | 10 | `ctx.attachments` | unary | **对象存储侧**：附件 = 对象（内容寻址）；模型上下文拿引用，正文按需取 | `ctx.datastore.object`（MinIO，§5.1） | 契约：附件引用一律对象键；禁止「逐次代理到某节点」——那是第二条真相源 |
-| 11 | `ctx.spillStore` | unary | **同对象存储**：溢出内容对象化（引用 = 对象键，TLS 内取回）——跨节点 resume 需要任意节点可取回 | `ctx.datastore.object`（§5.1） | 生命周期：过期 TTL 由对象生命周期管理；与附件同桶隔离（realm 前缀） |
+| 11 | `ctx.spillStore` | unary | **同对象存储**：溢出内容对象化（引用 = 对象键，TLS 内取回）——跨节点 resume 需要任意节点可取回 | `ctx.datastore.object`（§5.1） | 生命周期：过期 TTL 由对象生命周期管理；与附件同桶隔离（realm 前缀）。**已落地（2026-08-26）**：`@lumo/object-store` 的 MinIO 版 SpillStore（键 `realm/spill/<session>/<sanitized>-<sha256前8>`；saveText 全文 verbatim / bytes 精确 / locator=对象键；`ctx.objectStore` 任一节点按同键取回；不可达 `capabilityUnavailable`） |
 | 12 | `ctx.storage` | unary | **收敛到平台数据 seam**：非会话 KV 面划归 `ctx.datastore.sql` 语义（PG）——不设「直连存储」第二路径；组件不得直连数据库（硬规矩） | `ctx.datastore.sql`（§5.1） | 契约：dsh 的 storage API 包装为 sql 数据 seam 的 KV 子集；只读/写语义一一映射 |
 | 13 | `ctx.workflowEngine` | handle | **FlowEngine 控制面 + 扇出走 subagents**：工作流引擎是控制面进程（独立 Go 服务 §9.2）；其 agent() 调用经 §1 第 5 行的 subagents 路径——引擎跨节点 = 控制面扩容，不是代理 | FlowEngine（§9.2）+ Scheduler | 无独立远程契约；实现依赖第 5 行（subagents）先行 |
 
