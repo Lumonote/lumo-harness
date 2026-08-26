@@ -2,7 +2,8 @@
  * MeteringSeam 的 PostgreSQL 实现（§6.4 + 评审 N3 并行预算树）。
  * 语义与契约（shared/seam-contracts/metering.ts）一致：
  *   - reserve：双树预算检查，任一超限即拒
- *   - commit：落 usage_ledger 明细（归因链 user/dept/role/project/agent/component/feature）
+ *   - commit：预算树扣减 + 事件入 usage_event_outbox（同一事务，设计说明 2026-08-26）；
+ *     台账写穿即见换有界最终一致——usage_ledger 由 drainOnce 批量搬入
  * 树扣减原子性：本实现以 PG 事务完成；分布式的 RocketMQ 事务消息在 P2 接入（铁律 5）。
  */
 import pg from 'pg'
@@ -58,6 +59,21 @@ CREATE TABLE IF NOT EXISTS budget_trees (
 CREATE TABLE IF NOT EXISTS budget_commit_seq (
   id BIGSERIAL PRIMARY KEY
 );
+
+-- 计量事件 outbox（设计说明 2026-08-26 §2）：commit/emit 只写意图，台账由 drain
+-- 器批量搬入 —— 扣减 + 事件同事务（原子配套），写穿即见换有界最终一致（§4）。
+-- 幂等键由 PG 生成（事件在管线内唯一；重放/至少一次投递靠 event_key 去重）。
+CREATE TABLE IF NOT EXISTS usage_event_outbox (
+  seq          BIGSERIAL PRIMARY KEY,
+  event_key    TEXT NOT NULL UNIQUE,
+  payload      JSONB NOT NULL,
+  ts           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  projected_at TIMESTAMPTZ
+);
+
+-- 部分索引：只扫未投影的尾巴，已投影历史不拖慢轮询（同 knowledge_graph_outbox）
+CREATE INDEX IF NOT EXISTS idx_usage_outbox_pending
+  ON usage_event_outbox (seq) WHERE projected_at IS NULL;
 `
 
 /**
@@ -87,6 +103,12 @@ CREATE INDEX IF NOT EXISTS usage_ledger_type_ts_idx ON usage_ledger (cost_type, 
 ALTER TABLE budget_trees ADD COLUMN IF NOT EXISTS budget_total BIGINT;
 ALTER TABLE budget_trees ADD COLUMN IF NOT EXISTS soft_limit   BIGINT;
 ALTER TABLE budget_trees ADD COLUMN IF NOT EXISTS overdraft    BIGINT;
+
+-- 事件幂等键（设计说明 2026-08-26 §2）：存量行 NULL 不迁移——历史行不用假数据回填；
+-- UNIQUE 允许多个 NULL，既有行不受约束。unique index 而非列级 UNIQUE，便于
+-- ON CONFLICT (event_key) 唯一地命中。
+ALTER TABLE usage_ledger ADD COLUMN IF NOT EXISTS event_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS usage_ledger_event_key_idx ON usage_ledger (event_key);
 `
 
 export class PgMeteringSeam implements MeteringSeam {
@@ -176,7 +198,7 @@ export class PgMeteringSeam implements MeteringSeam {
       const upd = `UPDATE budget_trees SET budget = budget - $2 WHERE kind = $1 AND id = $3`
       await client.query(upd, ['user', record.tokens, record.context.userId])
       await client.query(upd, ['project', record.tokens, record.context.projectId])
-      await insertLedger(client, {
+      const event: CostEvent = {
         context: record.context,
         costType: 'llm.tokens',
         qty: record.tokens,
@@ -189,7 +211,14 @@ export class PgMeteringSeam implements MeteringSeam {
         costUsd: record.costUsd,
         tokens: record.tokens,
         model: record.model,
-      })
+      }
+      // 事件经 assertCostEvent 后与扣减**同事务**入 outbox（设计说明 §3 不变式④：
+      // 原子配套——本地由 PG 事务满足，集群版由事务消息满足，同一个不变式）。
+      assertCostEvent(event)
+      await client.query(
+        `INSERT INTO usage_event_outbox (event_key, payload) VALUES (gen_random_uuid(), $1)`,
+        [JSON.stringify(event)],
+      )
       await client.query('COMMIT')
     } catch (e) {
       await client.query('ROLLBACK')
@@ -207,12 +236,10 @@ export class PgMeteringSeam implements MeteringSeam {
    */
   async emit(e: CostEvent): Promise<void> {
     assertCostEvent(e)
-    const client = await this.pool.connect()
-    try {
-      await insertLedger(client, e)
-    } finally {
-      client.release()
-    }
+    await this.pool.query(
+      `INSERT INTO usage_event_outbox (event_key, payload) VALUES (gen_random_uuid(), $1)`,
+      [JSON.stringify(e)],
+    )
   }
 
   /** 按 trace 取回一条因果链。顺序稳定（ts, id），否则「这次尖峰的构成」每次读都不同。 */
