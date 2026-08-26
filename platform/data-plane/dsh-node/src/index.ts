@@ -24,6 +24,7 @@ const meteringEntry = resolve(platformRoot, 'dsh-plugins/metering/src/index.ts')
 const controlEntry = resolve(platformRoot, 'dsh-plugins/control/src/index.ts')
 const projectEntry = resolve(platformRoot, 'dsh-plugins/project/src/index.ts')
 const connectorEntry = resolve(platformRoot, 'dsh-plugins/connector/src/index.ts')
+const webGatewayEntry = resolve(platformRoot, 'dsh-plugins/web-gateway/src/index.ts')
 const recoveryEntry = resolve(platformRoot, 'dsh-plugins/recovery/src/index.ts')
 const sessionLogEntry = resolve(platformRoot, 'dsh-plugins/session-log/src/index.ts')
 const mailboxEntry = resolve(platformRoot, 'dsh-plugins/mailbox/src/index.ts')
@@ -85,6 +86,10 @@ writeFileSync(
         connectionString: postgres://lumo:lumo@localhost:55432/lumo
         holder: ${JSON.stringify(nodeHolder)}
         leaseTtlMs: 30000
+        # 热层（§4.2 只读热缓存）：本机 Redis；realm 与身份一致（键身份段）
+        hotCache:
+          url: redis://localhost:6379
+          realm: dev
     - id: lumo-mailbox
       name: ${JSON.stringify(mailboxEntry)}
       inject: [tools]
@@ -109,6 +114,19 @@ writeFileSync(
         userId: dev-user
         roles: [operator, admin]
         projectId: dev-project
+    - id: lumo-web-gateway
+      name: ${JSON.stringify(webGatewayEntry)}
+      inject: [web]
+      config:
+        gatewayUrl: http://localhost:58082
+        realm: dev
+        userId: dev-user
+        roles: [operator, admin]
+        projectId: dev-project
+        deptId: dev-dept
+        agentId: dev-agent
+        componentId: dev-component
+        feature: web.fetch
 `,
 )
 

@@ -12,6 +12,11 @@ export interface ConnectorClientConfig {
   userId: string
   roles: string[]
   projectId?: string
+  /** 计量归因（X-Lumo-Dept 等）——optional 语义见网关 buildMeter：缺省补 'unknown' 并告警 */
+  deptId?: string
+  agentId?: string
+  componentId?: string
+  feature?: string
   timeoutMs?: number
 }
 
@@ -93,6 +98,10 @@ export class ConnectorClient {
       'X-Lumo-Realm': config.realm,
       'X-Lumo-Roles': config.roles.join(','),
       ...(config.projectId ? { 'X-Lumo-Project': config.projectId } : {}),
+      ...(config.deptId ? { 'X-Lumo-Dept': config.deptId } : {}),
+      ...(config.agentId ? { 'X-Lumo-Agent': config.agentId } : {}),
+      ...(config.componentId ? { 'X-Lumo-Component': config.componentId } : {}),
+      ...(config.feature ? { 'X-Lumo-Feature': config.feature } : {}),
     }
   }
 
@@ -118,11 +127,37 @@ export class ConnectorClient {
     return (await res.json()) as InvokeResult
   }
 
-  private async fetch(path: string, init: RequestInit): Promise<Response> {
-    const signal = AbortSignal.timeout(this.timeoutMs)
+  /**
+   * 通用 URL 出站取回（POST /web/fetch，seam 远程形态 §1 第 8 行）。
+   *
+   * 与 invoke 的区别：目标 URL 由调用方给出（ctx.web 是运行时选定目标的通用能力，
+   * 不存在 manifest 可拼装——安全边界由网关闸门链保证）。透传头与网关 allowlist
+   * 同谱（content-type/accept），其余头不放行——那是把 PII/凭证带出网关的洞。
+   */
+  async webFetch(req: { url: string; headers?: Record<string, string> }, signal?: AbortSignal): Promise<InvokeResult> {
+    const safeHeaders: Record<string, string> = {}
+    for (const [k, v] of Object.entries(req.headers ?? {})) {
+      const lower = k.toLowerCase()
+      if (lower === 'content-type' || lower === 'accept') safeHeaders[k] = v
+    }
+    const res = await this.fetch('/web/fetch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: req.url,
+        ...(Object.keys(safeHeaders).length > 0 ? { headers: safeHeaders } : {}),
+      }),
+    }, signal)
+    return (await res.json()) as InvokeResult
+  }
+
+  private async fetch(path: string, init: RequestInit, signal?: AbortSignal): Promise<Response> {
+    // 网关拒绝走 GatewayError；外部 signal 与客户端超时合并，谁先触发谁生效
+    const timeout = AbortSignal.timeout(this.timeoutMs)
+    const combined = signal ? AbortSignal.any([timeout, signal]) : timeout
     const res = await fetch(this.base + path, {
       ...init,
-      signal,
+      signal: combined,
       headers: { ...this.identity, ...(init.headers as Record<string, string> | undefined) },
     })
     if (!res.ok) {

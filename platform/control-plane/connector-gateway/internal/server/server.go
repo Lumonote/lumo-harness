@@ -42,6 +42,9 @@ type Options struct {
 	Logger      *slog.Logger
 	MaxBodyByte int64
 	AdminRoles  []string
+	// WebEgress 通用 web 出站配置（POST /web/fetch）。server 是配置汇合点：
+	// 零值时补 DefaultWebEgress()，随后下发给网关（SetWebEgress）。
+	WebEgress domain.WebEgress
 }
 
 func New(o Options) *Server {
@@ -50,6 +53,12 @@ func New(o Options) *Server {
 	}
 	if len(o.AdminRoles) == 0 {
 		o.AdminRoles = []string{"admin"}
+	}
+	if o.WebEgress == (domain.WebEgress{}) {
+		o.WebEgress = domain.DefaultWebEgress()
+	}
+	if o.Gateway != nil {
+		o.Gateway.SetWebEgress(o.WebEgress)
 	}
 	return &Server{
 		gw: o.Gateway, reg: o.Registry, brk: o.Breakers,
@@ -65,6 +74,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("PUT /connectors/{id}", s.handleRegister)
 	mux.HandleFunc("DELETE /connectors/{id}", s.handleDisable)
 	mux.HandleFunc("POST /connectors/{id}/invoke", s.handleInvoke)
+	mux.HandleFunc("POST /web/fetch", s.handleWebFetch)
 	return mux
 }
 
@@ -175,6 +185,46 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// handleWebFetch 通用 URL 出站（ctx.web fetch 的网关截面）。
+// 与 handleInvoke 同构：鉴权 → 解析/校验 → 网关闸门链 → classify 错误。
+// 成功响应在 InvokeResult 形状上加 url 回显（WebFetchResult.url 需要它）。
+func (s *Server) handleWebFetch(w http.ResponseWriter, r *http.Request) {
+	caller, err := s.auth.Authenticate(r)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	var spec domain.WebFetchSpec
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.maxBody)).Decode(&spec); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求解析失败: "+err.Error())
+		return
+	}
+	if err := domain.ValidateWebFetch(spec); err != nil {
+		status, code := classify(err)
+		writeJSON(w, status, map[string]any{"error": err.Error(), "code": code})
+		return
+	}
+
+	result, err := s.gw.WebFetch(r.Context(), caller, spec)
+	if err != nil {
+		status, code := classify(err)
+		s.log.Info("web 出站被拒绝或失败", "url", spec.URL, "user", caller.UserID, "code", code, "err", err)
+		writeJSON(w, status, map[string]any{"error": err.Error(), "code": code})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":      result.Status,
+		"url":         spec.URL,
+		"headers":     result.Headers,
+		"body":        result.Body,
+		"encoding":    result.Encoding,
+		"contentType": result.ContentType,
+		"redacted":    result.Redacted,
+		"durationMs":  result.DurationMS,
+	})
 }
 
 // classify 把闸门错误映射成 HTTP 语义。每个闸都有自己的状态码，

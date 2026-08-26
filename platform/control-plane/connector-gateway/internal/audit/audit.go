@@ -76,9 +76,31 @@ type Record struct {
 	BreakerState  string
 }
 
-// Sink 审计落点。
+// MeterEvent 计量事件（connector.call 出向）。JSON 字段形状与
+// shared/seam-contracts/cost-events.ts 的 CostEvent 逐字段同构 —— 消费侧
+// assertCostEvent 会拒缺字段（context 八维全必填、traceId/emitter 必填）。
+//
+// 计量口径（已裁定）：
+//   - 只有拿到上游响应（含 4xx）才计一次：qty=1、unit=call、costUsd=0
+//     （本网关无费率表 —— 费率/汇率/折扣属计费系统）；
+//   - 传输错误/超时（响应缺失）不计（审计照记）；
+//   - denied 一律不计（审计已记）。
+type MeterEvent struct {
+	CostType string            `json:"costType"`
+	Qty      float64           `json:"qty"`
+	Unit     string            `json:"unit"`
+	TraceID  string            `json:"traceId"`
+	Emitter  string            `json:"emitter"`
+	CostUSD  float64           `json:"costUsd"`
+	Context  map[string]string `json:"context"`
+}
+
+// Sink 审计落点（审计与计量同事务）。
 type Sink interface {
-	Write(ctx context.Context, r Record) error
+	// Write 落一条审计；meter 非 nil 时与计量事件在**同一 PG 事务**内双 INSERT
+	// （connector_audit + usage_event_outbox）。meter 为 nil 时只写 connector_audit
+	// —— 现有只审不量的调用路径不变。
+	Write(ctx context.Context, r Record, meter *MeterEvent) error
 }
 
 // PgSink PG 实现。
@@ -91,22 +113,47 @@ func (s *PgSink) Init(ctx context.Context) error {
 	return err
 }
 
-func (s *PgSink) Write(ctx context.Context, r Record) error {
+// usage_event_outbox 的 DDL 真相源在 TS pg-meter（与 llm-gateway store 同规）——
+// 本服务不建表不迁表。表缺失时计量 INSERT 报 42P01，与审计同事务失败并响亮告警：
+// metering 未初始化属于启动配置错误，绝不能静默变成「只审不量」。
+func (s *PgSink) Write(ctx context.Context, r Record, meter *MeterEvent) error {
 	redactions, err := json.Marshal(orEmpty(r.Redactions))
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx,
-		`INSERT INTO connector_audit
-		   (correlation_id, realm, project_id, session_id, user_id, connector_id, operation,
-		    method, target_host, decision, deny_reason, status, duration_ms,
-		    request_bytes, response_bytes, redactions, breaker_state)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+	insert := `INSERT INTO connector_audit
+	   (correlation_id, realm, project_id, session_id, user_id, connector_id, operation,
+	    method, target_host, decision, deny_reason, status, duration_ms,
+	    request_bytes, response_bytes, redactions, breaker_state)
+	 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`
+	args := []any{
 		nullable(r.CorrelationID), r.Realm, nullable(r.ProjectID), nullable(r.SessionID),
 		r.UserID, r.ConnectorID, r.Operation, r.Method, r.TargetHost,
 		string(r.Decision), nullable(r.DenyReason), r.Status, r.Duration.Milliseconds(),
-		r.RequestBytes, r.ResponseBytes, redactions, nullable(r.BreakerState))
-	return err
+		r.RequestBytes, r.ResponseBytes, redactions, nullable(r.BreakerState),
+	}
+	if meter == nil {
+		_, err = s.pool.Exec(ctx, insert, args...)
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, insert, args...); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(meter)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO usage_event_outbox (event_key, payload) VALUES (gen_random_uuid(), $1)`,
+		payload); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func nullable(s string) any {

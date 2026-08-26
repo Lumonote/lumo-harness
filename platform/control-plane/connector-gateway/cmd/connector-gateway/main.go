@@ -10,10 +10,12 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -53,6 +55,15 @@ func (headerAuth) Authenticate(r *http.Request) (domain.Caller, error) {
 		ProjectID: r.Header.Get("X-Lumo-Project"),
 		// 审批结论由终端网关在人工批准后带入；连接器网关只认这一个来源
 		Approved: r.Header.Get("X-Lumo-Approved") == "true",
+		// 计量归因元数据头：可空 —— 缺省在网关 buildMeter 处补（'unknown'/'system' + 告警），
+		// 而不是在这里 400。理由：既有 TS 客户端今天只发 User/Realm/Roles/Project 已在跑，
+		// 把归因改成必填会立刻打破现有链路。
+		DeptID:      r.Header.Get("X-Lumo-Dept"),
+		Role:        r.Header.Get("X-Lumo-Role"),
+		AgentID:     r.Header.Get("X-Lumo-Agent"),
+		ComponentID: r.Header.Get("X-Lumo-Component"),
+		Feature:     r.Header.Get("X-Lumo-Feature"),
+		TraceID:     r.Header.Get("X-Lumo-Trace"),
 	}, nil
 }
 
@@ -65,6 +76,15 @@ func main() {
 		adminRoles = flag.String("admin-roles", envOr("LUMO_ADMIN_ROLES", "admin"), "可注册/停用连接器的角色（逗号分隔）")
 		failOpen   = flag.Bool("limiter-fail-open", envOr("LUMO_LIMITER_FAIL_OPEN", "") == "true",
 			"限流器不可用时放行（默认拒绝）")
+
+		// ── 通用 web 出站（POST /web/fetch）──
+		webRPM    = flag.Int("web-rpm", envOrInt("LUMO_WEB_RPM", 60), "web 出站每用户每分钟配额（0=不限）")
+		webBurst  = flag.Int("web-burst", envOrInt("LUMO_WEB_BURST", 10), "web 出站突发配额")
+		webMaxRes = flag.Int64("web-max-resp-bytes", envOrInt64("LUMO_WEB_MAX_RESP_BYTES", 8<<20), "web 出站响应上限（≤0 用 8MiB）")
+		webPriv   = flag.Bool("web-allow-private", envOr("LUMO_WEB_ALLOW_PRIVATE", "") == "true",
+			"web 出站允许内网/环回目标（默认 false=仅公网）")
+		webNoRedact = flag.Bool("web-no-redact", envOr("LUMO_WEB_NO_REDACT", "") == "true",
+			"关闭 web 响应 PII 脱敏（默认开）")
 	)
 	flag.Parse()
 
@@ -112,6 +132,17 @@ func main() {
 	})
 	gw.FailOpenOnLimiterError = *failOpen
 
+	// web 出站配置：缺省值从 DefaultWebEgress() 来（响应脱敏默认开），
+	// 命令行/环境变量只能显式覆盖 —— server 是配置汇合点，下发给网关。
+	webEgress := domain.DefaultWebEgress()
+	webEgress.RequestsPerMinute = *webRPM
+	webEgress.Burst = *webBurst
+	webEgress.MaxResponseBytes = *webMaxRes
+	webEgress.AllowPrivateNetwork = *webPriv
+	if *webNoRedact {
+		webEgress.RedactResponse = false
+	}
+
 	srv := &http.Server{
 		Addr: *listen,
 		Handler: server.New(server.Options{
@@ -121,13 +152,17 @@ func main() {
 			Auth:       headerAuth{},
 			Logger:     log,
 			AdminRoles: splitCSV(*adminRoles),
+			WebEgress:  webEgress,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {
 		log.Info("连接器网关启动", "listen", *listen,
-			"credentials", "env:"+*credPrefix, "limiterFailOpen", *failOpen)
+			"credentials", "env:"+*credPrefix, "limiterFailOpen", *failOpen,
+			"webEgress", fmt.Sprintf("rpm=%d burst=%d maxResp=%d allowPrivate=%t redact=%t",
+				webEgress.RequestsPerMinute, webEgress.Burst, webEgress.MaxResponseBytes,
+				webEgress.AllowPrivateNetwork, webEgress.RedactResponse))
 		log.Warn("当前为 Local-lite 形态：凭证读环境变量、策略走进程内规则",
 			"remedy", "Standalone+ 换 Vault Store 与 OPA Policy 实现同一接口（architecture §13.2）")
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -163,6 +198,24 @@ func splitCSV(s string) []string {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envOrInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func envOrInt64(key string, fallback int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
+		}
 	}
 	return fallback
 }

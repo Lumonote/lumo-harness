@@ -24,6 +24,13 @@ type Request struct {
 	Host string
 }
 
+// WebPolicyRequest 通用 web 出站评估的输入（POST /web/fetch）。
+type WebPolicyRequest struct {
+	Caller domain.Caller
+	// Host 实际将要连接的主机名（含端口）。
+	Host string
+}
+
 // Decision 评估结论。Allow=false 时 Reason 必须可读 —— 它会进审计与错误响应。
 type Decision struct {
 	Allow           bool
@@ -34,6 +41,7 @@ type Decision struct {
 // Policy 策略点。
 type Policy interface {
 	Evaluate(ctx context.Context, req Request) (Decision, error)
+	EvaluateWeb(ctx context.Context, req WebPolicyRequest) (Decision, error)
 }
 
 // RuleSet 进程内规则实现。
@@ -88,6 +96,23 @@ func (r *RuleSet) Evaluate(_ context.Context, req Request) (Decision, error) {
 	if r.RequireApprovalForHighWrite && req.Operation.Write && req.Operation.Sensitivity == "high" && !req.Caller.Approved {
 		return Decision{Allow: true, RequireApproval: true,
 			Reason: "高敏感外部写操作需人工批准"}, nil
+	}
+	return Decision{Allow: true}, nil
+}
+
+// EvaluateWeb 通用 web 出站策略：只做全局黑名单（host 归一化后精确比对）。
+//
+// 为什么不放 realm/roles 闸：web 是通用能力（ctx.web），不是某个 realm 注册的
+// 连接器 —— 调用者身份由 Authenticator 在上游（边缘网关）完成，realm 只用于
+// 限速/计量归因，不做「谁能上网」的授权。授权细分属于出站代理策略（OPA），
+// 当前形态没有针对 web 的按-realm 规则集，硬造一个空规则等于假装有授权。
+// 黑名单复用 DefaultRules 的 GlobalDenyHosts（云元数据端点等），不可被覆盖。
+func (r *RuleSet) EvaluateWeb(_ context.Context, req WebPolicyRequest) (Decision, error) {
+	host := strings.ToLower(hostOnly(req.Host))
+	for _, deny := range r.GlobalDenyHosts {
+		if host == strings.ToLower(deny) {
+			return Decision{Reason: fmt.Sprintf("目标主机 %s 在平台全局黑名单内", host)}, nil
+		}
 	}
 	return Decision{Allow: true}, nil
 }
