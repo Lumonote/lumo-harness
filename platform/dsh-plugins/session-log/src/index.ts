@@ -22,11 +22,16 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-session'
 
 import { PgSessionLog } from './pg-log.ts'
+import { PgColdLogArchiver } from './cold-log.ts'
+import { RedisHotLog } from './hot-log.ts'
 import {
   FencedOutError,
   LogForkError,
+  type LogRecord,
   type SessionLogSeam,
 } from '../../../shared/seam-contracts/session-log.ts'
+import type { ColdLogSeam } from '../../../shared/seam-contracts/cold-log.ts'
+import type { HotLogSeam } from '../../../shared/seam-contracts/hot-log.ts'
 
 export interface SessionLogConfig {
   connectionString: string
@@ -34,11 +39,33 @@ export interface SessionLogConfig {
   holder: string
   /** 租约时长（毫秒）。过短会在 GC 停顿时误判失活，过长会拖慢故障接管。 */
   leaseTtlMs?: number
+  /**
+   * 冷层（冷转 MinIO，§4.2）。缺省不启动归档——冷层是可选加速，不是写路径依赖。
+   * `realm` 与 object-store 给定的节点 realm 一致（对象键身份前缀）。
+   */
+  coldLog?: {
+    realm: string
+    maxItems?: number
+  }
+  /**
+   * 热层（每会话 Redis LIST 尾部窗口缓存，§4.2）。缺省不配置时行为与无热层完全相同
+   * （读直连 PG）；配置后读路径先查窗口、未覆盖回退 PG，写路径在 PG 提交后透传镜像
+   * （镜像失败只 warn——Redis 绝不参与写路径成败判定，fail-open / D-Continue）。
+   * `realm` 与对象层一致（身份段，热键前缀隔离）。
+   */
+  hotCache?: {
+    url: string
+    realm: string
+    ttlMs?: number
+    maxLen?: number
+  }
 }
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
     sessionLog: SessionLogSeam
+    coldLog: ColdLogSeam
+    sessionLogHot?: HotLogSeam
   }
 }
 
@@ -47,10 +74,12 @@ export const Config: z<SessionLogConfig> = z.object({
   connectionString: z.string(),
   holder: z.string(),
   leaseTtlMs: z.number(),
+  coldLog: z.object({ realm: z.string(), maxItems: z.number() }),
+  hotCache: z.object({ url: z.string(), realm: z.string(), ttlMs: z.number(), maxLen: z.number() }),
 })
 
-/** 工具服务须先挂载（本插件在其执行瀑布上装急停闸） */
-export const inject = ['tools']
+/** 工具服务须先挂载（本插件在其执行瀑布上装急停闸）；冷层还要对象存储 seam */
+export const inject = ['tools', 'objectStore']
 
 /** 默认租约 30s：够长以容忍常规 GC 停顿，够短以让故障接管在一分钟内完成。 */
 const DEFAULT_LEASE_TTL_MS = 30_000
@@ -61,7 +90,59 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
   const holder = config.holder
 
   void log.init()
-  ctx.provide('sessionLog', log)
+
+  // 热层：每会话 Redis LIST 尾部窗口（§4.2 热 Redis）。配置了才启用。
+  // 真相源始终是 PG——热层故障绝不放大为日志故障（fail-open / D-Continue）。
+  const hot = config.hotCache
+    ? new RedisHotLog({
+        url: config.hotCache.url,
+        realm: config.hotCache.realm,
+        maxLen: config.hotCache.maxLen,
+        ttlMs: config.hotCache.ttlMs,
+        onWarn: (message) => ctx.logger.warn('session-log: %s', message),
+      })
+    : undefined
+
+  if (hot) {
+    // adapter：acquire/release/append/lease 直通 PG；read = 热窗口命中 ?? PG 兜底。
+    // 用 undefined 判定而非 ||——覆盖窗口里 fromSeq 切空的空数组是合法结果，
+    // || 会把它也吞掉再打一次 PG（仍正确，但空转）。热层 read 抛错同样回退 PG。
+    ctx.provide('sessionLog', {
+      acquire: (sessionRef, leaseHolder, leaseTtlMs) => log.acquire(sessionRef, leaseHolder, leaseTtlMs),
+      release: (sessionRef, leaseHolder) => log.release(sessionRef, leaseHolder),
+      append: (record, token) => log.append(record, token),
+      read: async (sessionRef, fromSeq = 0) => {
+        try {
+          const fromHot = await hot.read(sessionRef, fromSeq)
+          if (fromHot !== undefined) return fromHot
+        } catch (error) {
+          // fail-open：热层故障绝不放大为读失败——回退 PG 真相源
+          ctx.logger.warn('session-log: 会话 %s 热层读取失败，回退 PG：%s',
+            sessionRef, error instanceof Error ? error.message : String(error))
+        }
+        return log.read(sessionRef, fromSeq)
+      },
+      lease: (sessionRef) => log.lease(sessionRef),
+    })
+    ctx.provide('sessionLogHot', hot)
+    // 停机时断开热层连接（与冷层、主连接池的 effect 异步段各自独立）
+    ctx.effect(() => () => void hot.close())
+  } else {
+    ctx.provide('sessionLog', log)
+  }
+
+  // 冷层：只读 PG 真源 → 段归档进 ctx.objectStore（MinIO），不占写者租约。
+  // 缺省不启动（冷层是可选项）；配置了 coldLog 才初始化并提供 ctx.coldLog。
+  if (config.coldLog) {
+    const cold = new PgColdLogArchiver(
+      { connectionString: config.connectionString, realm: config.coldLog.realm, maxItems: config.coldLog.maxItems },
+      ctx.objectStore,
+    )
+    void cold.init()
+    ctx.provide('coldLog', cold)
+    // 停机时关闭冷层连接池（与下方主连接池的 effect 异步段各自独立）
+    ctx.effect(() => () => void cold.close())
+  }
 
   /** 每会话的写入队列尾（保序：`session/event` 是同步回调，append 是异步的） */
   const tails = new Map<string, Promise<void>>()
@@ -105,13 +186,23 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
         return
       }
       try {
-        await log.append({
+        const record: LogRecord = {
           sessionRef,
           seq: event.seq,
           type: event.type,
           payload: event,
           time: event.time,
-        }, token)
+        }
+        const result = await log.append(record, token)
+        // 热层透传：PG 已提交（append resolve）之后才发起镜像；重投 duplicate 不镜像。
+        // mirror 失败只 warn——绝不 fence、绝不改 AppendResult、绝不阻塞队列尾
+        // （void + catch，fire-and-forget；单连接命令有序 ⇒ 镜像序 == append 序）。
+        if (hot !== undefined && result.status === 'appended') {
+          void hot.mirror(record).catch((error: unknown) => {
+            ctx.logger.warn('session-log: 会话 %s seq=%d 热层镜像失败（不影响写路径）：%s',
+              sessionRef, record.seq, error instanceof Error ? error.message : String(error))
+          })
+        }
       } catch (error) {
         if (error instanceof FencedOutError) {
           fence(sessionRef, error.message)
