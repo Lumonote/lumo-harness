@@ -245,3 +245,53 @@ export async function assertMeteringContract(
   const sevenRaised = check(await seam.reserve(ctx), '场景7 提额后')
   assert(sevenRaised.approved, '提额后放行（used 仍为 901 < 2000）')
 }
+
+/**
+ * 台账管线不变式的共享尺子（设计说明 2026-08-26 §7）。
+ *
+ * 任何「事件 → 台账」搬运器——本地 outbox drain，以及将来把最后一步换成 RocketMQ
+ * 消费侧的形态——都必须过同一套断言：防止「幂等只在 PG 直写下偶然成立」重演「四态
+ * 只在 stub 上被证明过」。属性不在共享契约里，每个实现就会各写各的。
+ *
+ * 上层不变式（预算场景）由 {@link assertMeteringContract} 管；这里是**搬运输**的尺子。
+ */
+export interface DrainEnv {
+  sink: CostEventSink
+  /** 搬运一批，返回条数。测试内直接调用；生产由调度器轮询。 */
+  drainOnce(): Promise<number>
+  /** 台账行数（`usage_ledger`）。 */
+  ledgerRows(): Promise<number>
+  /** 模拟至少一次投递：所有事件的投影标记被撤掉，事件将被重新搬运。 */
+  redeliverAll(): Promise<void>
+}
+
+export async function assertCostEventDrainContract(
+  env: DrainEnv,
+  events: Array<import('./cost-events.ts').CostEvent>,
+  assert: (cond: boolean, msg: string) => void,
+): Promise<void> {
+  // —— D1 事件先入管线、drain 后入账 ——
+  // 「写穿即见」已不是语义：emit 返回时行在事件管线（outbox/消息流），不在台账
+  // （设计说明 §4：有界最终一致，事件时刻保真——延迟影响看到多晚，不改账单日期）。
+  for (const e of events) await env.sink.emit(e)
+  assert(
+    (await env.ledgerRows()) === 0,
+    'D1：emit 后台账必须是 0 行——写穿即见已不是语义，行先入管线',
+  )
+  assert(
+    (await env.drainOnce()) === events.length,
+    'D1：drain 条数必须等于事件数',
+  )
+  assert(
+    (await env.ledgerRows()) === events.length,
+    'D1：drain 后台账行数必须等于事件数',
+  )
+
+  // —— D2 重放幂等：至少一次投递下重放不重复入账 ——
+  await env.redeliverAll()
+  await env.drainOnce()
+  assert(
+    (await env.ledgerRows()) === events.length,
+    'D2：重放后台账行数不变——一次事件一账（event_key 去重）',
+  )
+}

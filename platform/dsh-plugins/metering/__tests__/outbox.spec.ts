@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { PgMeteringSeam } from '../src/pg-meter.ts'
 import { schemaDsn } from './pg-schema.ts'
+import { assertCostEventDrainContract } from '../../../shared/seam-contracts/metering.ts'
 import { unitFor, type CostEvent, type CostType } from '../../../shared/seam-contracts/cost-events.ts'
 import type { MeterContext } from '../../../shared/seam-contracts/metering.ts'
 
@@ -99,16 +100,28 @@ describe(`事件先入 usage_event_outbox —— 对真 PG（需 METERING_TEST_D
 })
 
 describe(`drainOnce 批量入账 —— 对真 PG（需 METERING_TEST_DSN，当前${suffix}）`, () => {
-  t('drain 后行数 = 事件数；空批返回 0；已投影行不回收', async () => {
+  t('共享契约 D1/D2 —— 管线形态与重放幂等，对真 PG 跑', async () => {
+    await withSeam(async (seam) => {
+      const assert = (cond: boolean, msg: string) => expect(cond, msg).toBe(true)
+      await assertCostEventDrainContract(
+        {
+          sink: seam,
+          drainOnce: () => seam.drainOnce(),
+          ledgerRows: () => count(seam, 'usage_ledger'),
+          redeliverAll: () => seam.raw(`UPDATE usage_event_outbox SET projected_at = NULL`),
+        },
+        [eventOf('job.compute'), eventOf('seam.query')],
+        assert,
+      )
+    })
+  })
+
+  t('空批 drainOnce 返回 0；已投影行不回收（部分索引只扫未投影尾）', async () => {
     await withSeam(async (seam) => {
       expect(await seam.drainOnce()).toBe(0)
-
       await seam.emit(eventOf('job.compute'))
-      await seam.emit(eventOf('seam.query'))
-      expect(await seam.drainOnce()).toBe(2)
-      expect(await count(seam, 'usage_ledger')).toBe(2)
-      // 已投影行保留（部分索引只扫未投影尾）——同 knowledge_graph_outbox
-      expect(await count(seam, 'usage_event_outbox')).toBe(2)
+      await seam.drainOnce()
+      expect(await count(seam, 'usage_event_outbox')).toBe(1)
     })
   })
 
@@ -153,17 +166,4 @@ describe(`drainOnce 批量入账 —— 对真 PG（需 METERING_TEST_DSN，当�
     })
   })
 
-  t('重放幂等——projected_at 置回 NULL 再 drain，台账行数不变（一次事件一账）', async () => {
-    await withSeam(async (seam) => {
-      await seam.emit(eventOf('job.compute'))
-      await seam.emit(eventOf('seam.query'))
-      expect(await seam.drainOnce()).toBe(2)
-
-      // 模拟至少一次投递/崩溃重跑：投影标记丢了，同一批事件被重新搬运
-      await seam.raw(`UPDATE usage_event_outbox SET projected_at = NULL`)
-      await seam.drainOnce()
-
-      expect(await count(seam, 'usage_ledger')).toBe(2)
-    })
-  })
 })
