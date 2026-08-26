@@ -38,7 +38,7 @@ Local-lite 等价 = **PG 事务 outbox + 进程内调度器**（PG 事务天然�
 - Modify: `platform/dsh-plugins/metering/src/pg-meter.ts`
 - Create: `platform/dsh-plugins/metering/__tests__/outbox.spec.ts`
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 `outbox.spec.ts`（own schema `metering_outbox_test`，skip 可见；`withSeam` 后 TRUNCATE
 `usage_ledger, budget_trees, usage_event_outbox`）：
@@ -52,7 +52,7 @@ it('坏事件既不入台账也不入 outbox——outbox 不是绕过校验的�
   → emit({...costType:'made.up'}) rejects → outbox 0 行 + ledger 0 行
 ```
 
-- [ ] **Step 2: 实现（绿）**
+- [x] **Step 2: 实现（绿）**
 
 `pg-meter.ts`：
 
@@ -65,7 +65,7 @@ it('坏事件既不入台账也不入 outbox——outbox 不是绕过校验的�
 - `emit`：`assertCostEvent`（既有）+ 单句 INSERT outbox。
 - 两路径的事件先 `assertCostEvent`（ledger 直写旧代码以注释保留于 `batchInsertLedger` 内）。
 
-- [ ] **Step 3: 跑测试并提交**
+- [x] **Step 3: 跑测试并提交**
 
 ```
 feat(metering): 事件先入 usage_event_outbox——扣减与事件同事务，台账从请求路径拿掉
@@ -82,7 +82,7 @@ feat(metering): 事件先入 usage_event_outbox——扣减与事件同事务，
 - Modify: `platform/dsh-plugins/metering/src/pg-meter.ts`
 - Modify: `platform/dsh-plugins/metering/__tests__/outbox.spec.ts`
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 `outbox.spec.ts` 加（`drainOnce` 尚不存在 → 红）：
 
@@ -102,7 +102,7 @@ it('重放幂等——projected_at 置回 NULL 再 drain，台账行数不变')
   → emit ×2 → drainOnce → 2 行 → raw UPDATE outbox SET projected_at = NULL → drainOnce → 仍 2 行
 ```
 
-- [ ] **Step 2: 实现（绿）**
+- [x] **Step 2: 实现（绿）**
 
 `pg-meter.ts`：
 
@@ -115,7 +115,7 @@ it('重放幂等——projected_at 置回 NULL 再 drain，台账行数不变')
   `UPDATE ... SET projected_at = now() WHERE seq = ANY($1)` → `COMMIT` → 返回条数。
 - `insertLedger` 改 `batchInsertLedger`（唯一写入者——schema 只在一条 SQL 里）。
 
-- [ ] **Step 3: 跑测试并提交**
+- [x] **Step 3: 跑测试并提交**
 
 ```
 feat(metering): drainOnce 批量入账——event_key 幂等、事件时刻保真、seq 序稳定
@@ -129,7 +129,7 @@ feat(metering): drainOnce 批量入账——event_key 幂等、事件时刻保�
 - Modify: `platform/shared/seam-contracts/metering.ts`
 - Modify: `platform/dsh-plugins/metering/__tests__/outbox.spec.ts`（改跑共享契约）
 
-- [ ] **Step 1: 先写测试（红）**
+- [x] **Step 1: 先写测试（红）**
 
 `metering.ts` 增（先写断言场景，未实现 → 编译错/红）：
 
@@ -149,7 +149,7 @@ export async function assertCostEventDrainContract(env: DrainEnv, assert: (c: bo
 
 `outbox.spec.ts` 的「重放幂等」与「drain 后行数」用例改为调用共享契约（真 PG）。
 
-- [ ] **Step 2: 实现（绿）**
+- [x] **Step 2: 实现（绿）**
 
 按上面接口实现 `assertCostEventDrainContract`（纯编排，不含存储知识）；
 `outbox.spec.ts` 通过 `withSeam` 装配 `DrainEnv` 跑它。
@@ -157,7 +157,7 @@ export async function assertCostEventDrainContract(env: DrainEnv, assert: (c: bo
 > 取舍：D1 的「drain 前 ledger 0 行」要求测试环境无后台轮询——契约只在测试内
 > 装配（无 interval），成立。
 
-- [ ] **Step 3: 跑测试并提交**
+- [x] **Step 3: 跑测试并提交**
 
 ```
 feat(metering): 搬运输不变式进共享契约——D1/D2 对第二个实现就位尺子
@@ -180,19 +180,19 @@ feat(metering): 搬运输不变式进共享契约——D1/D2 对第二个实现�
   `seedDefaultBudget` 与 outbox 无关的防回归——若未来有人把种子改回走 commit/emit
   会污染 outbox 断言；或不必——注释说明即可）
 
-- [ ] **Step 1: 断言迁移（红 → 绿）**
+- [x] **Step 1: 断言迁移（红 → 绿）**
 
 sink.spec 既有 10 用例按语义迁移（直写断言 → drain 后断言）+ 新增：
 「未知 cost_type 被拒时不落 outbox」已并入 Task 1，此处删除其 ledger-only 旧断言。
 pg-budget / pg-contract TRUNCATE 三表；跑全量 metering 确认全部恢复绿。
 
-- [ ] **Step 2: 插件轮询**
+- [x] **Step 2: 插件轮询**
 
 `index.ts`：`meter.init()` 的 `.then` 里（`ready` promise + disposed 守卫，照知识库）
 起轮询；失败 warn；effect 清理。interval 逻辑为薄壳（仓库先例无 interval 测试，
 drainOnce 已全覆盖）；可用注释记该行为仅由集成验证。
 
-- [ ] **Step 3: 跑测试并提交**
+- [x] **Step 3: 跑测试并提交**
 
 ```
 feat(metering): 进程内调度器——轮询 drainOnce，失败下轮重放（sink 用例接 outbox 语义）
@@ -211,10 +211,10 @@ feat(metering): 进程内调度器——轮询 drainOnce，失败下轮重放（
   拆为「本地 outbox 等价已落地 / RocketMQ 传输待拓扑」，Doris 聚合保持待补）
 - Modify: 本计划 + 设计说明勾选
 
-- [ ] **Step 1: §6.4** 异步削峰一句扩为两形态表（Local / Cluster）。
-- [ ] **Step 2: B2** 偏离①原文保留，加「2026-08-26：本地等价落地」行（不视为收账）。
-- [ ] **Step 3: README** 措辞更新 + 设计说明/计划勾选。
-- [ ] **Step 4: 校验 + 提交**
+- [x] **Step 1: §6.4** 异步削峰一句扩为两形态表（Local / Cluster）。
+- [x] **Step 2: B2** 偏离①原文保留，加「2026-08-26：本地等价落地」行（不视为收账）。
+- [x] **Step 3: README** 措辞更新 + 设计说明/计划勾选。
+- [x] **Step 4: 校验 + 提交**
 
 ```
 docs(metering): 异步削峰本地等价落地——B2 偏离①记账更新（传输仍待拓扑）
@@ -224,20 +224,20 @@ docs(metering): 异步削峰本地等价落地——B2 偏离①记账更新（�
 
 ## 收尾：第一铁律合规校验（不可跳过）
 
-- [ ] **Step 1**
+- [x] **Step 1**
 
 ```bash
 git -C deepseek-harness describe --tags --dirty   # 必须 dsh-v0.1.1-rc.2，无 -dirty
 git -C deepseek-harness status --porcelain -uno   # 必须无输出
 ```
 
-- [ ] **Step 2: 全量测试 + typecheck**
+- [x] **Step 2: 全量测试 + typecheck**
 
 ```bash
 cd platform && METERING_TEST_DSN=... ./node_modules/.bin/vitest run && ./node_modules/.bin/tsc -b --noEmit
 ```
 
-- [ ] **Step 3: 对照设计说明 §9 的 9 条验收判据**逐条指到具体用例名
+- [x] **Step 3: 对照设计说明 §9 的 9 条验收判据**逐条指到具体用例名
 
 ---
 
