@@ -457,6 +457,10 @@ query ──▶ ctx.knowledge.vector: top-k 语义召回(带 realm 过滤)
 
 ### 6.1 Nacos 注册 / 配置中心（收敛 etcd + NATS + ConfigDistributor）
 
+> 制品注册与分发的治理设计（provisioner / OPA scope 评估 / 密钥轮换与吊销）见
+> `docs/superpowers/specs/2026-08-26-registry-governance-design.md`；needs-design
+> seam 13 项的远程形态见 `docs/superpowers/specs/2026-08-26-seam-remote-forms-design.md`。
+
 | 能力 | 原三件套 | **Nacos** |
 |------|----------|-----------|
 | 服务发现 + 健康 | etcd lease + 自研心跳 | **Naming**：ephemeral 实例 + 心跳 + 自动摘流 |
@@ -553,6 +557,9 @@ manifest 格式为 JSON 而非 YAML：签名覆盖的是上传的原始字节，
 - **调度联动**：Scheduler 放置时读预算余量，预算将尽的任务降优先级/suspend。
 
 ### 6.5 分发自动安装 Provisioner（声明式 reconcile）
+
+> 状态机与装配边界（控制面 Go + 节点插件行、验签重解析双保险、MCP 归连接器子形态、
+> 密钥轮换与吊销列表）见 `docs/superpowers/specs/2026-08-26-registry-governance-design.md` §1/§3。
 
 Agent manifest 声明 `deps`（components/skills/mcps + 版本），**Provisioner 把节点拉到期望态**：
 

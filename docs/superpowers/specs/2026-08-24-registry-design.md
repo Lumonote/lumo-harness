@@ -5,6 +5,7 @@
 - 连带闭合：`README.md` §四 待拍板 #4（§6.1 manifest 存储写法需修订）
 - 状态：设计待评审
 - 落地位置：`platform/control-plane/registry`（Go 服务）+ `platform/shared/manifests`（五类 schema）+ `docs/architecture.md` §4.3/§6.1 修订
+- **后续项（2026-08-26）**：§1「不在范围」三件（provisioner / OPA scope 评估 / 密钥轮换与吊销）已出设计说明：[`2026-08-26-registry-governance-design.md`](./2026-08-26-registry-governance-design.md)；§9「已知不覆盖」的私钥保管与轮换随之收账为吊销/宽限期机制。
 
 ## 0. 决策背景
 
