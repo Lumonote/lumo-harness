@@ -85,6 +85,21 @@ export class PgSessionLog implements SessionLogSeam {
     await this.pool.query(SESSION_LOG_DDL)
   }
 
+  /**
+   * 测试专用逃生口（TRUNCATE / 断言用查询 / 租约时钟拨弄）。
+   *
+   * 显式给一个窄口，而不是让测试去碰私有 `pool`：碰私有字段的测试会在下一次重构
+   * 时坏掉，而坏掉的方式是「测试自己报错」而非「被测行为变了」，很难判断。
+   * （同 pg-meter.ts 的 raw——两处同一理由，同一形状。）
+   */
+  async raw<T extends pg.QueryResultRow = pg.QueryResultRow>(
+    sql: string,
+    params: unknown[] = [],
+  ): Promise<T[]> {
+    const r = await this.pool.query<T>(sql, params)
+    return r.rows
+  }
+
   async acquire(sessionRef: string, holder: string, ttlMs: number): Promise<WriterLease | undefined> {
     // 建租 / 续租 / 接管三种情形一条语句完成：分开写会在两条语句之间留出竞态窗口，
     // 让两个节点都判定「无人持租」而各自建租。
