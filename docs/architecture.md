@@ -535,7 +535,8 @@ manifest 格式为 JSON 而非 YAML：签名覆盖的是上传的原始字节，
 | `hard` | 已用 ≥ 预算 + 透支额度 | 拒绝 |
 
 - **默认行为不变**：软限额缺省 = 预算、透支缺省 0 → 三种缺省下退化为今天的硬停；既有部署不受本项影响。
-- **降额不追溯**：`setBudget` 可提额可降额，降到低于已用时状态立即变 `overdraft`/`hard`，但不回收已发生消费——追溯回收等于把过去的合法调用变成违规。
+- **降额不追溯**：`adjustBudget`（期中调整）可提额可降额，降额只平移总额（`used = total − remaining` 不变），降到低于已用时状态立即变 `overdraft`/`hard`，但不回收已发生消费——追溯回收等于把过去的合法调用变成违规；`setBudget` 是**期初重配**（remaining = total），两个操作不混用。
+- **PG 落点（总额模型，2026-08-26）**：`budget_trees` 存 `budget_total`/`soft_limit`/`overdraft` 三个**可空**列——空 = **旧模式**（只认剩余，仅 `within`/`hard`，`remaining < need` 才拒；既有库历史行不回填假数据，加列即兼容），非空 = 四态（`used = (total − remaining) + need`，左闭右开）。配置在校验在写入时做：`softLimit > total`、负值、NaN 在 `setBudget`/`adjustBudget` 处拒绝，不延迟成 `reserve` 判态抛错。装配层默认预算只做种子（无行才插入），不再覆盖运维配置。
 - **并行双树取更严者**（与 N3「任一超限即拒」一致）；`reserve` 返回 `state`，`hard` 才拒。
 
 **已知未计量**（显式列名——列名的目的是让读账单的人知道边界在哪，账上不是全部）：跨节点网络流量费、PG/Doris 存储的实际计费口径（本项只记字节·天，不含 IOPS）、控制面自身算力（Scheduler/registry 的开销不摊进业务账）、人工审批的人力成本。
