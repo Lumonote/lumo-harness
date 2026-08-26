@@ -59,14 +59,21 @@ services:
     # 而 Docker Desktop(macOS) 上宿主机不可达容器 IP——客户端经 published port 得到
     # 的 broker 地址是 172.x，会连不上。dev broker.conf（rocketmq-broker-dev.conf）
     # 就是为此存在（生产 K8s hostNetwork 形态不需要它，见 helm 阶段 5）。
+    # mqproxy（CLUSTER 模式，RocketMQ 5.x）：对 gRPC 客户端（v5 协议——usage-ledger
+    # 的传输、§8.3 A2A）暴露 8081，经 namesrv 路由到 broker。同容器跑省一个容器；
+    # broker 注册 127.0.0.1，proxy 与 broker 同 netns 故直连无碍。宿主机 8081 空闲时
+    # 直接映射同名端口：proxy 宣告地址与 brokerIP1 同思路，客户端经 published port 即达。
+    # （试过 mqbroker --enable-proxy 的 LOCAL 模式：ProxyStartup 不接受 broker conf 的
+    # namesrvAddr，启动即「NamesrvAddr is not configured」退出，故用独立 proxy。）
     image: apache/rocketmq:5.3.1
-    command: ["sh", "-c", "sh mqnamesrv & sleep 3; sh mqbroker -c /rocketmq-broker-dev.conf & wait"]
+    command: ["sh", "-c", "sh mqnamesrv & sleep 3; sh mqbroker -c /rocketmq-broker-dev.conf & sleep 8; sh mqproxy -n localhost:9876 & wait"]
     environment:
       JAVA_OPT_EXT: "-Xms512m -Xmx512m -Xmn128m"
     ports:
-      - "19876:9876"    # namesrv
+      - "19876:9876"    # namesrv（remoting 客户端/运维）
       - "10911:10911"   # broker remoting
       - "10909:10909"   # broker fast remoting
+      - "8081:8081"     # proxy gRPC（v5 客户端——usage-ledger publisher/consumer）
     volumes:
       - ./rocketmq-broker-dev.conf:/rocketmq-broker-dev.conf:ro
       - rocketmqdata:/home/rocketmq/store

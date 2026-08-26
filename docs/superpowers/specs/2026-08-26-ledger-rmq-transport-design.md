@@ -81,3 +81,22 @@ control-plane/usage-ledger/
 - **不做消费侧顺序事务**——broker 顺 offset 消费,已够;跨 topic 序不承诺(每 topic 顺序)。
 - **不做 rocketmq 全 cluster 规模化调优/HA**——那就是 §13.2 自己的事,本切片 Standalone 单 broker。
 - **不做 Go 侧限流/预算执法**——执法留在 PG 树与 Redis(§6.4),ledger 只是账。
+## 8. 实测补记（2026-08-26 实现，真 broker 逮出的偏差）
+
+落地时真机验证推翻/补正了本设计的三处假设，全部已在代码注释中固化：
+
+1. **`mqbroker --enable-proxy`（LOCAL 模式）走不通**：ProxyStartup 不接受 broker
+   conf 的 `namesrvAddr`，启动即「NamesrvAddr is not configured」退出。改为同容器
+   独立 `mqproxy -n localhost:9876`（CLUSTER 模式），compose 映射 8081。
+2. **v5 客户端（golang v5.1.4）两个坑**：① producer 必须以 `WithTopics`（全闭集
+   topic）构造——零 topic 的生产者 `Start()` 永远卡在 wait for sync settings
+   （telemetry 目标集来自 topic 路由表）；② topic 必须先于 `Start()` 存在——
+   `autoCreateTopicEnable` 只救发送，不救启动期路由查询（TOPIC_NOT_FOUND）。
+   因此 6 个 topic 是**部署期预建物**（mqadmin），不靠运行时自建。
+3. **消费组语义**：新消费组会**重放全部保留历史**（实测）；空批次有两种错误形态
+   （`MESSAGE_NOT_FOUND` 与 awaitDuration 到期的 `DEADLINE_EXCEEDED`），都不是
+   故障。e2e 测试的隔离因此改为：独立 schema + 独立消费组 + 断言按本运行唯一
+   event_key 前缀过滤（历史重放的外键事件属预期噪音）。
+
+验收判据 1–6 已由 `internal/integration/rmq_e2e_test.go` 在真 PG（15432）+ 真
+broker/proxy（8081）上全绿；判据 7（装配互斥）与判据 8（文档同步）在 Task 4/5。
