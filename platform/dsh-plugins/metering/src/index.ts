@@ -31,10 +31,24 @@ export interface MeteringConfig {
   drainIntervalMs?: number
   /** 单轮搬运条数上限（缺省 100） */
   drainBatchSize?: number
+  /**
+   * 台账搬运装配形态（设计说明 2026-08-26 §2 互斥装配，缺省 'local'）：
+   * - 'local'：本插件 drainOnce 轮询直搬（Local-lite，无 RocketMQ）；
+   * - 'rmq'：搬运交给 usage-ledger Go 服务（outbox → RocketMQ → usage_ledger），
+   *   本插件只写 outbox 与扣预算——两条路径**绝不并存**（台账单一写入者）。
+   * 误配双开不是数据错误（幂等键兜底）而是双重搬运的资源浪费与指标假象，
+   * 因此互斥在装配层裁决，不靠运维自觉。
+   */
+  ledgerTransport?: 'local' | 'rmq'
 }
 
 /** 依赖注入：llm 服务须先 mount（计量挂在 llm/stream 瀑布） */
 export const inject = ['llm']
+
+/** 装配裁决（导出为纯函数供装配测试）：仅 local 形态由本插件起 drain 轮询。 */
+export function shouldRunLocalDrain(config: MeteringConfig): boolean {
+  return (config.ledgerTransport ?? 'local') === 'local'
+}
 
 export function apply(ctx: Context, config: MeteringConfig): void {
   const meter = new PgMeteringSeam(config.connectionString)
@@ -59,6 +73,13 @@ export function apply(ctx: Context, config: MeteringConfig): void {
       await meter.seedDefaultBudget('user', config.userId, config.defaultBudget)
       await meter.seedDefaultBudget('project', config.projectId, config.defaultBudget)
       if (disposed) return
+      // 互斥装配（设计说明 §2）：rmq 形态下 drain 轮询不起——台账搬运归
+      // usage-ledger Go 服务（publisher/consumer）。此处继续留着的 init/种子
+      // 与预算扣减在两种形态下都需要（outbox 写入路径不变）。
+      if (!shouldRunLocalDrain(config)) {
+        ctx.logger.info('metering: ledgerTransport=rmq —— 台账搬运由 usage-ledger Go 服务负责，本插件不起 drain 轮询')
+        return
+      }
       timer = setInterval(() => {
         meter.drainOnce(drainBatchSize).catch((e: unknown) => {
           ctx.logger.warn('metering: 台账搬运失败（将在下一轮重放）: %s', e)

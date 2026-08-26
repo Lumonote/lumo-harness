@@ -10,6 +10,7 @@ package rmqpublish
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -17,6 +18,7 @@ import (
 
 	rmq "github.com/apache/rocketmq-clients/golang/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/lumo-harness/platform/usage-ledger/internal/manifest"
@@ -60,6 +62,9 @@ type Publisher struct {
 	topicPrefix string
 	batchSize   int
 	log         *slog.Logger
+	// waitedOutbox：42P01（outbox 未建）只提示一次——表由 TS 侧 metering 插件
+	// 首启建（DDL 真相源在 pg-meter.ts，Go 不重复建表：第二真相源比晚几秒更贵）。
+	waitedOutbox bool
 }
 
 func New(pool *pgxpool.Pool, producer rmq.Producer, topicPrefix string, log *slog.Logger) *Publisher {
@@ -104,6 +109,16 @@ func (p *Publisher) PublishOnce(ctx context.Context) (int, error) {
 		LIMIT $1
 		FOR UPDATE SKIP LOCKED`, p.batchSize)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			// outbox 表尚未存在（拓扑未齐：TS 侧 metering 插件未首启）。等表
+			// 而不是建表——见 Publisher.waitedOutbox 注释。
+			if !p.waitedOutbox {
+				p.waitedOutbox = true
+				p.log.Info("usage_event_outbox 尚未创建（TS 侧 metering 插件首启时建表），publisher 待命")
+			}
+			return 0, nil
+		}
 		return 0, fmt.Errorf("取未发布批次失败: %w", err)
 	}
 	batch, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (outboxRow, error) {

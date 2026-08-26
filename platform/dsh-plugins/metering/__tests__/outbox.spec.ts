@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { PgMeteringSeam, USAGE_LEDGER_COLUMNS } from '../src/pg-meter.ts'
+import { shouldRunLocalDrain } from '../src/index.ts'
 import { schemaDsn } from './pg-schema.ts'
 import { assertCostEventDrainContract } from '../../../shared/seam-contracts/metering.ts'
 import { unitFor, type CostEvent, type CostType } from '../../../shared/seam-contracts/cost-events.ts'
@@ -166,6 +167,27 @@ describe(`drainOnce 批量入账 —— 对真 PG（需 METERING_TEST_DSN，当�
     })
   })
 
+  t('published_at 列就位——Go publisher 主查询路径可用（差分防漂移）', async () => {
+    await withSeam(async (seam) => {
+      await seam.emit(eventOf('job.compute'))
+      // 与 Go 侧 rmqpublish.PublishOnce 同形状的锁批查询必须不报错且取到行：
+      // TS 侧 DDL 若与 Go publisher 的列依赖漂移（缺 published_at），Go 侧会以
+      // 「列不存在」在生产炸——这里提前在 TS 测试内红。
+      const rows = await seam.raw<{ event_key: string }>(
+        `SELECT event_key FROM usage_event_outbox
+         WHERE published_at IS NULL ORDER BY seq LIMIT 100 FOR UPDATE SKIP LOCKED`,
+      )
+      expect(rows).toHaveLength(1)
+      // 标记后不再被锁批选中（publisher 的推进语义在 TS 侧的最小镜像）
+      await seam.raw(`UPDATE usage_event_outbox SET published_at = now()`)
+      const after = await seam.raw<{ event_key: string }>(
+        `SELECT event_key FROM usage_event_outbox
+         WHERE published_at IS NULL ORDER BY seq LIMIT 100 FOR UPDATE SKIP LOCKED`,
+      )
+      expect(after).toHaveLength(0)
+    })
+  })
+
 })
 
 describe('usage_ledger 单一真相源（常跑，不依赖 DSN）', () => {
@@ -179,5 +201,25 @@ describe('usage_ledger 单一真相源（常跑，不依赖 DSN）', () => {
       'component_id', 'feature', 'session_ref', 'model', 'tokens',
       'cost_type', 'cost_usd', 'trace_id', 'emitter', 'qty', 'unit', 'event_key',
     ])
+  })
+})
+
+describe('ledgerTransport 装配互斥（常跑，不依赖 DSN）', () => {
+  // 设计说明 2026-08-26 §2 判据 7：rmq 时 TS 不起 drain；local（含缺省）现状不动。
+  // 装配裁决收敛在 shouldRunLocalDrain 纯函数——apply 内部同一函数决定定时器生死，
+  // 这里锁的是语义不是实现细节。
+  const base = {
+    connectionString: 'postgres://x/x',
+    userId: 'u', deptId: 'd', role: 'r', projectId: 'p', agentId: 'a',
+    componentId: 'c', feature: 'f', defaultBudget: 1,
+  }
+
+  it('缺省与显式 local 都由本插件搬运', () => {
+    expect(shouldRunLocalDrain(base)).toBe(true)
+    expect(shouldRunLocalDrain({ ...base, ledgerTransport: 'local' })).toBe(true)
+  })
+
+  it('rmq 时本插件不起 drain——搬运归 usage-ledger Go 服务', () => {
+    expect(shouldRunLocalDrain({ ...base, ledgerTransport: 'rmq' })).toBe(false)
   })
 })

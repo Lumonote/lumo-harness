@@ -3,15 +3,15 @@ package integration_test
 // RocketMQ 传输端到端（真 PG + 真 broker + 真 proxy gRPC，skip 可见——同仓库惯例）。
 //
 // 前置（2026-08-26 实测链路）：
-//   - LUMO_TEST_PG_DSN：真 PG（standalone 拓扑 55432）；
+//   - LUMO_TEST_PG_DSN：真 PG（standalone 拓扑 15432）；
 //   - LUMO_TEST_RMQ_ENDPOINT：proxy gRPC 端点（standalone 拓扑 8081——注意不是
 //     namesrv 9876/19876：v5 客户端走 gRPC，broker 须以 mqproxy -n 起代理）；
-//   - 6 个 usage-events-* topic 已预建（broker autoCreateTopicEnable 只救发送，
-//     不救启动期路由查询——topic 必须先于 producer.Start 存在）。
+//   - 6 个 usage-events-* topic 已预建（TestMain 会清空重建；broker
+//     autoCreateTopicEnable 只救发送，不救启动期路由查询——topic 必须先于
+//     producer.Start 存在）。
 //
-// 隔离策略（新消费组会重放全部保留历史，实测实证）：每测试独立 PG schema +
-// 独立消费组 + 断言按本运行唯一 event_key 前缀过滤。历史重放带来的外键事件可能
-// 落进本 schema 的台账，属预期噪音，不影响按前缀的断言。
+// 隔离策略：TestMain 清空重建闭集 topic（历史不跨运行累积）+ 每测试独立 PG schema +
+// 独立消费组 + 断言按本运行唯一 event_key 前缀过滤。
 
 import (
 	"context"
@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +33,35 @@ import (
 	"github.com/lumo-harness/platform/usage-ledger/internal/rmqconsume"
 	"github.com/lumo-harness/platform/usage-ledger/internal/rmqpublish"
 )
+
+// TestMain：e2e 前清空重建闭集 topic。**为什么必须**：broker 保留全部历史，而新
+// 消费组会重放全部保留历史（实测，设计说明 §8.3）——不清则历史随每轮测试单调
+// 累积，新组的重放预算线性膨胀，套件最终必然超时（红过两次才认清）。经 docker
+// exec mqadmin（standalone 拓扑在跑的 broker 容器）；不可用则警告降级（套件变慢
+// 但语义不变）。LUMO_TEST_RMQ_RESET=0 可显式关闭。
+func TestMain(m *testing.M) {
+	if os.Getenv("LUMO_TEST_RMQ_ENDPOINT") != "" && os.Getenv("LUMO_TEST_RMQ_RESET") != "0" {
+		container := os.Getenv("LUMO_TEST_RMQ_CONTAINER")
+		if container == "" {
+			container = "lumo-platform-standalone-rocketmq-1"
+		}
+		for _, topic := range []string{
+			"usage-events-llm-tokens", "usage-events-connector-call", "usage-events-seam-query",
+			"usage-events-job-compute", "usage-events-storage-bytes", "usage-events-inference-gpu",
+		} {
+			for _, args := range [][]string{
+				{"deleteTopic", "-n", "localhost:9876", "-c", "DefaultCluster", "-t", topic},
+				{"updateTopic", "-n", "localhost:9876", "-c", "DefaultCluster", "-t", topic},
+			} {
+				cmd := exec.Command("docker", append([]string{"exec", container, "sh", "mqadmin"}, args...)...)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					fmt.Fprintf(os.Stderr, "警告: topic 重置失败（%s %s）: %v\n%s", topic, args[0], err, out)
+				}
+			}
+		}
+	}
+	os.Exit(m.Run())
+}
 
 func rmqEndpoint(t *testing.T) string {
 	t.Helper()

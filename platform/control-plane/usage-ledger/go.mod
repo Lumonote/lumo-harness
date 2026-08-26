@@ -1,6 +1,6 @@
 module github.com/lumo-harness/platform/usage-ledger
 
-go 1.25
+go 1.24
 
 require (
 	github.com/apache/rocketmq-clients/golang/v5 v5.1.4
@@ -27,7 +27,7 @@ require (
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/natefinch/lumberjack v2.0.0+incompatible // indirect
 	github.com/pierrec/lz4 v2.6.1+incompatible // indirect
-	github.com/rogpeppe/go-internal v1.16.0 // indirect
+	github.com/rogpeppe/go-internal v1.13.1 // indirect
 	github.com/valyala/fastrand v1.1.0 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect

@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS usage_event_outbox (
   event_key    TEXT NOT NULL UNIQUE,
   payload      JSONB NOT NULL,
   ts           TIMESTAMPTZ NOT NULL DEFAULT now(),
-  projected_at TIMESTAMPTZ
+  projected_at TIMESTAMPTZ,
+  published_at TIMESTAMPTZ
 );
 
 -- 部分索引：只扫未投影的尾巴，已投影历史不拖慢轮询（同 knowledge_graph_outbox）
@@ -110,6 +111,14 @@ ALTER TABLE budget_trees ADD COLUMN IF NOT EXISTS overdraft    BIGINT;
 -- ON CONFLICT (event_key) 唯一地命中。
 ALTER TABLE usage_ledger ADD COLUMN IF NOT EXISTS event_key TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS usage_ledger_event_key_idx ON usage_ledger (event_key);
+
+-- RocketMQ 传输形态（设计说明 2026-08-26 §2/§8）：rmq 装配下搬运由 usage-ledger
+-- Go 服务负责（outbox → RocketMQ → usage_ledger），TS 侧 drain 不启动。published_at
+-- 与 projected_at 平行、互不清零——同一行双通道各自推进，切换形态不重搬历史。
+ALTER TABLE usage_event_outbox ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ;
+-- publisher 批处理主查询路径（FOR UPDATE SKIP LOCKED 只扫未发布尾巴）
+CREATE INDEX IF NOT EXISTS idx_usage_outbox_unpublished
+  ON usage_event_outbox (seq) WHERE published_at IS NULL;
 `
 
 export class PgMeteringSeam implements MeteringSeam {
