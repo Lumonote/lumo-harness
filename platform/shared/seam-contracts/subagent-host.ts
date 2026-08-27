@@ -107,11 +107,39 @@ function requireString(obj: Record<string, unknown>, key: string, scope: string)
   return val
 }
 
-/** 可选字符串字段：缺省合法，存在则必须是字符串。 */
+/** 可选字符串字段：缺省合法，存在则必须是非空字符串（可缺席但不可空串，与 requireString 同训）。 */
 function stringOrUndefined(obj: Record<string, unknown>, key: string, scope: string): void {
   const val = obj[key]
-  if (val !== undefined && typeof val !== 'string') {
-    throw invalid(`subagent-host: ${scope}.${key} 必须是字符串，收到 ${JSON.stringify(val)}`)
+  if (val !== undefined && (typeof val !== 'string' || val === '')) {
+    throw invalid(`subagent-host: ${scope}.${key} 必须是非空字符串，收到 ${JSON.stringify(val)}`)
+  }
+}
+
+/** http(s) 绝对 URL 守卫（终审 F3 最小面）：回执 POST 目的地只认可解析的绝对 URL，协议也只认 http/https。 */
+function assertHttpUrl(raw: string, scope: string): void {
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    throw invalid(`subagent-host: ${scope} 必须是 http(s) 绝对 URL: ${JSON.stringify(raw)}`)
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw invalid(`subagent-host: ${scope} 必须是 http(s) 绝对 URL: ${JSON.stringify(raw)}`)
+  }
+}
+
+/**
+ * realm 段守卫（assert 与 runKeyOf 共用 —— 两处同训：坏段的 realm 必须入口闸住，
+ * 绝不让 runKeyOf 在 assert 之后才炸；穿越段/保留分隔符均拒）。
+ */
+export function assertValidRealm(realm: string, scope: string): void {
+  if (!validRealmKey(realm)) {
+    throw invalid(
+      `subagent-host: ${scope} 段不合法（须非空单段、不含 / 与 \\）：${JSON.stringify(realm)}`,
+    )
+  }
+  if (realm.includes(RUN_KEY_SEP)) {
+    throw invalid(`subagent-host: ${scope} 含保留分隔符 ${RUN_KEY_SEP}：${JSON.stringify(realm)}`)
   }
 }
 
@@ -149,7 +177,9 @@ export function assertStartChildRequest(v: unknown): asserts v is StartChildRequ
     throw invalid('subagent-host: StartChildRequest 必须是对象')
   }
   const req = v as Record<string, unknown>
-  requireString(req, 'callbackUrl', 'StartChildRequest')
+  // 回执目标是 child 输出的 POST 目的地：无形态校验的话，共享令牌持有者能把 child
+  // 输出投到任意内网端点（终审 F3 最小面——只认 http(s) 绝对 URL）。
+  assertHttpUrl(requireString(req, 'callbackUrl', 'StartChildRequest'), 'StartChildRequest.callbackUrl')
   const childId = requireString(req, 'childId', 'StartChildRequest')
   // childId 与 realm 同训：含 :: 的 childId 会在 assert 之后令 runKeyOf 抛 invalid
   // （（realm='a', childId='b::c'）与（realm='a::b', childId='c'）同键），
@@ -161,12 +191,7 @@ export function assertStartChildRequest(v: unknown): asserts v is StartChildRequ
   }
   // realm 与 runKeyOf 同训：坏段的 realm 会在 assert 之后令 runKeyOf 抛 invalid，
   // 必须在入口闸住（500 前先 400）。
-  const realm = requireString(req, 'realm', 'StartChildRequest')
-  if (!validRealmKey(realm) || realm.includes(RUN_KEY_SEP)) {
-    throw invalid(
-      `subagent-host: StartChildRequest.realm 段不合法（须非空单段、不含 /、\\ 与 ${RUN_KEY_SEP}）：${JSON.stringify(realm)}`,
-    )
-  }
+  assertValidRealm(requireString(req, 'realm', 'StartChildRequest'), 'StartChildRequest.realm')
   if (req.label !== undefined && typeof req.label !== 'string') {
     throw invalid(`subagent-host: StartChildRequest.label 必须是字符串，收到 ${JSON.stringify(req.label)}`)
   }
@@ -175,6 +200,11 @@ export function assertStartChildRequest(v: unknown): asserts v is StartChildRequ
   }
   if (!('descriptor' in req) || req.descriptor === undefined) {
     throw invalid('subagent-host: StartChildRequest 缺必填字段 descriptor')
+  }
+  if (req.descriptor === null) {
+    // null 属结构非等价：200 放行会把 null 送抵承载侧，attachDescriptorAppend 以
+    // SubagentDescriptorData 解析时失真（评审 Minor 1 钉死）。
+    throw invalid('subagent-host: StartChildRequest.descriptor 必须是描述对象，收到 null')
   }
   assertParent(req.parent)
 }
@@ -212,14 +242,7 @@ export function assertChildResultBody(v: unknown): asserts v is ChildResultBody 
  * 没有 realm 前缀的话，一个 realm 的取消/回执请求真会命中另一个 realm 的同名 run。
  */
 export function runKeyOf(realm: string, childId: string): string {
-  if (!validRealmKey(realm)) {
-    throw invalid(
-      `subagent-host: runKeyOf realm 段不合法（须非空单段、不含 / 与 \\）：${JSON.stringify(realm)}`,
-    )
-  }
-  if (realm.includes(RUN_KEY_SEP)) {
-    throw invalid(`subagent-host: runKeyOf realm 含保留分隔符 ${RUN_KEY_SEP}：${JSON.stringify(realm)}`)
-  }
+  assertValidRealm(realm, 'runKeyOf realm')
   if (childId === '') {
     throw invalid('subagent-host: runKeyOf childId 为空（父侧必须 mint）')
   }

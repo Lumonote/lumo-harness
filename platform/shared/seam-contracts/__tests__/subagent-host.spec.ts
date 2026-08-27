@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   assertChildResultBody,
   assertStartChildRequest,
+  assertValidRealm,
   childDepthOf,
   isResultStopReason,
   runKeyOf,
@@ -98,6 +99,30 @@ describe('assertStartChildRequest —— 承载侧始建请求的结构校验', 
     }
   })
 
+  it('拒绝非 http(s) 绝对 callbackUrl（终审 F3 最小面：回执 POST 目的地只认 http/https 绝对 URL）', () => {
+    // 相对 URL / 非 http(s) 协议 / 不可解析串 —— 无形态校验的话共享令牌持有者能把
+    // child 输出投到任意内网端点（SSRF 面收敛的契约形态）
+    for (const bad of ['/relative/path', 'ftp://host/result', 'javascript:alert(1)', 'not a url']) {
+      const req = validRequest()
+      req.callbackUrl = bad
+      expect(() => assertStartChildRequest(req), `callbackUrl=${JSON.stringify(bad)} 必须被拒`).toThrow(/callbackUrl/)
+    }
+  })
+
+  it('拒绝 descriptor null（null 属结构非等价：200 放行会把 null 送到承载侧）', () => {
+    const req = validRequest()
+    req.descriptor = null
+    expect(() => assertStartChildRequest(req)).toThrow(/descriptor/)
+  })
+
+  it('拒绝 parent 可选字段的空串（可缺席但不可空串 —— 与 requireString 同训）', () => {
+    for (const key of ['cwd', 'provider', 'model', 'sandboxMode']) {
+      const req = validRequest()
+      ;(req.parent as Record<string, unknown>)[key] = ''
+      expect(() => assertStartChildRequest(req), `parent.${key}='' 必须被拒`).toThrow(new RegExp(key))
+    }
+  })
+
   it('拒绝越狱段 realm（与 runKeyOf 同训：绝不让 runKeyOf 在 assert 之后才炸）', () => {
     for (const realm of ['a/b', 'a\\b', 'a::b', '.', '..']) {
       const req = validRequest()
@@ -183,6 +208,15 @@ describe('childDepthOf —— child 深度 = 父深度 + 1', () => {
     ]
     for (const { d, label } of cases) {
       expect(() => childDepthOf({ sessionId: 's', delegationDepth: d }), `${label} 必须被拒`).toThrow(/delegationDepth/)
+    }
+  })
+})
+
+describe('assertValidRealm —— 共享 realm 守卫（assert 与 runKeyOf 同剖，导出供外部复用）', () => {
+  it('接受合法单段 realm；拒绝坏段与保留分隔符（两处调用同训）', () => {
+    expect(() => assertValidRealm('dev', 'X.realm')).not.toThrow()
+    for (const realm of ['', 'a/b', 'a\\b', '.', '..', 'a::b']) {
+      expect(() => assertValidRealm(realm, 'X.realm'), `realm=${JSON.stringify(realm)} 必须被拒`).toThrow(/X\.realm/)
     }
   })
 })
