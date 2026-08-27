@@ -8,6 +8,10 @@
  *
  * 用法：pnpm --filter @lumo/dsh-node start  [-- <dsh CLI 附加参数>]
  * 例：  pnpm --filter @lumo/dsh-node start -- --profile headless "测试任务"
+ *
+ * 双角色（LUMO_ROLE=node|agent，默认 node —— 行 5 装配面）：
+ *   node  承载节点 —— patch 追加 lumo-subagent-host（放置面，子代理落本节点执行）
+ *   agent 父节点   —— patch 追加 lumo-subagent-remote（子代理经 Scheduler 放置到承载节点）
  */
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
@@ -28,12 +32,51 @@ const webGatewayEntry = resolve(platformRoot, 'dsh-plugins/web-gateway/src/index
 const recoveryEntry = resolve(platformRoot, 'dsh-plugins/recovery/src/index.ts')
 const sessionLogEntry = resolve(platformRoot, 'dsh-plugins/session-log/src/index.ts')
 const mailboxEntry = resolve(platformRoot, 'dsh-plugins/mailbox/src/index.ts')
+const subagentHostEntry = resolve(platformRoot, 'dsh-plugins/subagent-host/src/index.ts')
+const subagentRemoteEntry = resolve(platformRoot, 'dsh-plugins/subagent-remote/src/index.ts')
 const patchPath = resolve(here, '..', 'lumo.patch.yml')
 
 // 节点标识：必须能区分同机重启，否则重启后的进程会被租约当成「本人续租」，
 // 白捡走上一代进程的写权（§A1 fencing 的前提是持有者身份唯一）。
 const nodeHolder = process.env['LUMO_NODE_ID']
   ?? `${hostname()}:${process.pid}:${Date.now().toString(36)}`
+
+// 双角色（行 5 装配面）：node = 承载节点（挂 lumo-subagent-host,子代理放这里执行）；
+// agent = 父节点（挂 lumo-subagent-remote,子代理经 Scheduler 放置到承载节点执行）。
+// 默认 node —— 兼容既有「单机全插件」用法,不改变既有行为。
+const role = process.env['LUMO_ROLE'] ?? 'node'
+if (role !== 'node' && role !== 'agent') {
+  console.error(`dsh-node: LUMO_ROLE 只能是 node|agent,收到 ${JSON.stringify(role)}`)
+  process.exit(1)
+}
+
+const subagentRealm = process.env['LUMO_SUBAGENT_REALM'] ?? 'dev'
+/** 承载侧放置面与会话日志 holder(§A1 同训:重启换号)。 */
+const hostToken = process.env['LUMO_SUBAGENT_HOST_TOKEN'] ?? 'dev-subagent-token'
+
+// 行 5 的下发段:角色不同,只挂对应一侧(承载节点不需要 remote,父节点不需要 host)。
+const roleRows = role === 'node'
+  ? `    - id: lumo-subagent-host
+      name: ${JSON.stringify(subagentHostEntry)}
+      inject: [agents]
+      config:
+        host: 127.0.0.1
+        port: ${process.env['LUMO_SUBAGENT_HOST_PORT'] ?? '8091'}
+        tokens:
+          ${JSON.stringify(subagentRealm)}: ${JSON.stringify(hostToken)}
+`
+  : `    - id: lumo-subagent-remote
+      name: ${JSON.stringify(subagentRemoteEntry)}
+      inject: [subagents]
+      config:
+        schedulerUrl: ${JSON.stringify(process.env['LUMO_SCHEDULER_URL'] ?? 'http://localhost:8083')}
+        nodeUrls: ${JSON.stringify(JSON.parse(process.env['LUMO_SUBAGENT_NODE_URLS'] ?? '{"N1":"http://localhost:8091"}'))}
+        hostTokens: ${JSON.stringify(JSON.parse(process.env['LUMO_SUBAGENT_HOST_TOKENS'] ?? '{"N1":"dev-subagent-token"}'))}
+        realm: ${JSON.stringify(subagentRealm)}
+        callbackPort: ${process.env['LUMO_SUBAGENT_CALLBACK_PORT'] ?? '8092'}
+        callbackHost: ${JSON.stringify(process.env['LUMO_SUBAGENT_CALLBACK_HOST'] ?? '127.0.0.1')}
+`
+
 
 // 平台插件 patch（官方 patch 语法：insert 数组 = 追加条目）
 writeFileSync(
@@ -127,6 +170,7 @@ writeFileSync(
         agentId: dev-agent
         componentId: dev-component
         feature: web.fetch
+${roleRows}
 `,
 )
 

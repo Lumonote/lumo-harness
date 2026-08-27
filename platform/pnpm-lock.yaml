@@ -367,6 +367,12 @@ importers:
       '@deepseek-ai/dsh-agent':
         specifier: link:../../../deepseek-harness/packages/core/agent
         version: link:../../../deepseek-harness/packages/core/agent
+      '@deepseek-ai/dsh-agent-loop':
+        specifier: link:../../../deepseek-harness/packages/core/agent-loop
+        version: link:../../../deepseek-harness/packages/core/agent-loop
+      '@deepseek-ai/dsh-llm':
+        specifier: link:../../../deepseek-harness/packages/llm/llm
+        version: link:../../../deepseek-harness/packages/llm/llm
       '@deepseek-ai/dsh-session':
         specifier: link:../../../deepseek-harness/packages/core/session
         version: link:../../../deepseek-harness/packages/core/session
@@ -376,9 +382,16 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: link:../../../deepseek-harness/vendor/schemastery
         version: link:../../../deepseek-harness/vendor/schemastery
+      pg:
+        specifier: ^8.13.0
+        version: 8.23.0
       tsx:
         specifier: 4.22.4
         version: 4.22.4
+    devDependencies:
+      '@deepseek-ai/dsh-agent-loop-testkit':
+        specifier: link:../../../deepseek-harness/packages/test-support/agent-loop-testkit
+        version: link:../../../deepseek-harness/packages/test-support/agent-loop-testkit
 
   dsh-plugins/web-gateway:
     dependencies:
