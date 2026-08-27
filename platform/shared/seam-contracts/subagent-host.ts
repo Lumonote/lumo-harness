@@ -27,6 +27,10 @@
  *
  * 范围外（契约为其留位）：fork/continuable 的 seed 传输（Task 3 明示不传）、
  * 取消经行 6 控制信号通道（本切片用承载侧直连 stop）。
+ *
+ * 失败归因分族（调用方义务）：父侧 provider 必须双族处理 —— Scheduler 域外语义
+ * （放置/排队/终态，含其基础设施）走 dsh `SubagentError`；承载节点 wire 失败
+ * （HTTP 状态与传输/超时）走 `SeamError`（归因分界见 subagent-remote/src/client.ts）。
  */
 import { invalid } from './errors.ts'
 import { validRealmKey } from './object-store.ts'

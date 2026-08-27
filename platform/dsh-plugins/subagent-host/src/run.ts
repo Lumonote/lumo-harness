@@ -13,8 +13,9 @@
  * 4. 驱动方法照 driver:`followup` + `whenIdle`,取消经运行表 entry.cancel →
  *    `child.cancel({ kind: 'parent' })`(register 之后等价的 in-process 语义);
  * 5. 结果读取在 tturn.ts(闭集词表 + `finalAssistantOutput` 规范选择);
- * 6. 回执 `deliverCallback`:200ms 退避重试 1 次;失败不重投 —— child 事件流已在
- *    会话日志,运行表照常结集(审计在日志,不赌网络)。
+ * 6. 回执 `deliverCallback`:2s 超时封顶(AbortSignal.timeout)+ 200ms 退避重试 1 次;
+ *    两次都失败不重投 —— child 事件流已在会话日志,运行表照常结集(审计在日志,
+ *    不赌网络;挂起的回执不再滞留运行表)。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -151,8 +152,13 @@ function attachDescriptorAppend(childCtx: Context, descriptor: unknown): void {
   })
 }
 
+/** 回执单次尝试的超时上限(轻量 finalize:2s 契约;与 client.ts 出站 30s 不同 —— 那条是放长线等健康节点)。 */
+const CALLBACK_TIMEOUT_MS = 2000
+
 /**
- * 回执:200ms 退避重试 1 次;两次都失败返回 false(调用方记 unsettled,不重投)。
+ * 回执:每次尝试 2s 超时封顶(AbortSignal.timeout)+ 200ms 退避重试 1 次;
+ * 两次都失败返回 false(调用方记 unsettled,不重投)。挂起不回执没有正确性损失
+ * —— 只是运行表条目滞留,2s 封顶让最坏滞留 ≈4.2s(评审 Minor ⑦ 钉死)。
  */
 async function deliverCallback(url: string, body: ChildResultBody): Promise<boolean> {
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -161,10 +167,11 @@ async function deliverCallback(url: string, body: ChildResultBody): Promise<bool
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(CALLBACK_TIMEOUT_MS),
       })
       if (res.ok) return true
     } catch {
-      /* 网络错 —— 落在退避重试 */
+      /* 网络错/超时 —— 落在退避重试 */
     }
     if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 200))
   }

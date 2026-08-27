@@ -178,6 +178,15 @@ async function waitChild(h: Harness, childId: string): Promise<void> {
   }
 }
 
+/** 等待运行表结集摘空（回执到表与 finally 摘表之间存在毫秒级窗口,不能直接断言 0）。 */
+async function waitRunDrained(h: Harness, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (h.runs.size > 0) {
+    if (Date.now() > deadline) throw new Error('运行表未摘除(结集竞态)')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
 describe('subagent-host —— 承载节点子代理面', () => {
   it('身份与契约:缺/错令牌 403,坏 JSON 400,realm 载荷越身份 403', async () => {
     const h = await setup(textOnlyAdapter('child 答复'))
@@ -233,8 +242,9 @@ describe('subagent-host —— 承载节点子代理面', () => {
     expect(header.origin).toBe('subagent')
     expect(header.delegationDepth).toBe(1)
     expect(child!.session.events.some((event) => event.type === 'subagent/descriptor')).toBe(true)
-    // 运行表结集:完成即从表上摘除
-    expect(h.runs.size).toBe(0)
+    // 运行表结集:完成即从表上摘除(waitUntil —— 回执到表与 finally 摘表之间有毫秒级
+    // 窗口,直接断言 0 是竞态;评审 Minor ① 钉死)
+    await waitRunDrained(h)
   })
 
   it('已结集重放拒绝:同 childId 二次 start → 400 invalid,新 childId 不受误伤', async () => {
@@ -310,6 +320,39 @@ describe('subagent-host —— 承载节点子代理面', () => {
     await waitCallback(h, 1)
     expect(h.callbackBodies[0]).toMatchObject({ runId: 'child-2', ok: true, stopReason: 'completed' })
   })
+
+  it('回执完全挂起:2s 超时封顶(AbortSignal),两次尝试后放弃,host 保持健康', async () => {
+    const h = await setup(textOnlyAdapter('child 答复'))
+    // 挂起回调 server:收下请求但永不响应。无超时的话 fetch 会挂到 undici 默认上限
+    // (回执失败路径的运行表条目滞留 ≤10min);2s 超时必须用「真挂起」证明 ——
+    // ECONNREFUSED 不走超时路径。真实耗时 ≈4.2s(2 次 × 2s + 200ms 退避),
+    // 测试标注:真跑,不与 fake timers 组合(AbortSignal.timeout 不支持)。
+    const hanging = createServer(() => { /* 收下请求,不响应 */ })
+    await new Promise<void>((resolve) => hanging.listen(0, '127.0.0.1', resolve))
+    const hangingPort = (hanging.address() as AddressInfo).port
+    try {
+      const began = Date.now()
+      const reply = await h.post('/subagent/start', startRequest(h, {
+        callbackUrl: `http://127.0.0.1:${hangingPort}/result`,
+      }))
+      expect(reply.status).toBe(200)
+
+      // 两次超时尝试后放弃回执并结集(不是一直挂到 undici 默认上限)
+      const deadline = Date.now() + 8000
+      while (h.runs.size > 0) {
+        if (Date.now() > deadline) throw new Error('回执挂起未被超时封顶(运行表滞留)')
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      const elapsed = Date.now() - began
+      // 首试已走满 2s 超时(非 ECONNREFUSED 的即时失败),两试+退避 ≈4.2s
+      expect(elapsed).toBeGreaterThanOrEqual(1800)
+      expect(elapsed).toBeLessThan(7000)
+      expect(h.callbackBodies.length).toBe(0)
+    } finally {
+      hanging.closeAllConnections?.()
+      await new Promise<void>((resolve) => hanging.close(() => resolve()))
+    }
+  }, 10_000)
 
   it('create 必败:寄出 ok:false 回执(runId=childId),运行表照常摘除', async () => {
     const h = await setup(textOnlyAdapter('child 答复'))

@@ -27,18 +27,30 @@ export const Config: z<RemoteConfig> = z.object({
   callbackHost: z.string(),
 })
 
-export function registerSubagentRemote(ctx: Context, config: RemoteConfig): void {
+export async function registerSubagentRemote(ctx: Context, config: RemoteConfig): Promise<void> {
   const assembly = assembleRemote(config)
   const host = config.callbackHost ?? '127.0.0.1'
 
+  // EADDRINUSE 等监听失败必须 fail-fast:apply 拒绝 = 节点装配失败。只 log 的形态
+  // 是"节点活着却收不到回执"—— 比死节点更糟,所有委派永久挂起(评审 Minor ③ 钉死)。
+  // 顺序保证:listen 成功之后才 registerProvider —— 回调面未就绪前不接任何委派。
+  await new Promise<void>((resolve, reject) => {
+    const onError = (e: unknown) => {
+      assembly.server.removeListener('listening', onListening)
+      reject(e instanceof Error ? e : new Error(String(e)))
+    }
+    const onListening = () => {
+      assembly.server.removeListener('error', onError)
+      resolve()
+    }
+    assembly.server.once('error', onError)
+    assembly.server.once('listening', onListening)
+    assembly.server.listen(config.callbackPort, host)
+  })
+  ctx.logger.info('subagent-remote: 回调监听 %s:%d(realm=%s)', host, config.callbackPort, config.realm)
+
   ctx.effect(() => {
-    assembly.server.on('error', (e: unknown) => {
-      // 端口占用等致命错误:必须响亮,否则节点看着活着却收不到回执,所有委派永久挂起
-      ctx.logger.error('subagent-remote: 回调监听 %s:%d 失败: %s', host, config.callbackPort, e)
-    })
-    assembly.server.listen(config.callbackPort, host, () => {
-      ctx.logger.info('subagent-remote: 回调监听 %s:%d(realm=%s)', host, config.callbackPort, config.realm)
-    })
+    // listen 已在 apply 内告成:effect 只负责归还(HMR 停机与插件移除共用)。
     return () => {
       assembly.server.closeAllConnections?.()
       assembly.server.close()

@@ -67,17 +67,19 @@ export class RemoteSubagentProvider implements SubagentProvider {
   private readonly hostTokens: Readonly<Record<string, string>>
   private readonly realm: string
   private readonly callbackHost: string
-  private readonly callbackPort: number
+  /** 装配配置引用:callbackPort 在 assembleRemote 之后、start() 之前可能被回填
+   * (listen(0) 内核分配 → 回填,消除 freePort TOCTOU)—— 所以每次 start 现读,不复制。 */
+  private readonly config: RemoteConfig
 
   constructor(config: RemoteConfig, pending: Map<string, PendingEntry>, name = 'lumo-remote') {
     this.name = name
     this.pending = pending
+    this.config = config
     this.scheduler = config.schedulerUrl.replace(/\/+$/, '')
     this.nodeUrls = config.nodeUrls
     this.hostTokens = config.hostTokens
     this.realm = config.realm
     this.callbackHost = config.callbackHost ?? '127.0.0.1'
-    this.callbackPort = config.callbackPort
   }
 
   async start(request: ResolvedSubagentStartRequest): Promise<SubagentRun> {
@@ -97,7 +99,7 @@ export class RemoteSubagentProvider implements SubagentProvider {
       prompt: request.prompt,
       descriptor: request.descriptor,
       parent,
-      callbackUrl: `http://${this.callbackHost}:${this.callbackPort}/subagent/result/${childId}/${secret}`,
+      callbackUrl: `http://${this.callbackHost}:${this.config.callbackPort}/subagent/result/${childId}/${secret}`,
     }
 
     // 登记先行 + 失败滚回:host 的 200 与回执是两个独立请求,没有顺序保证;

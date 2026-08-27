@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { createServer as createNetServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
 
 import { Context } from '@deepseek-ai/cordis'
@@ -11,6 +10,7 @@ import type { ResolvedSubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import { SeamError } from '../../../shared/seam-contracts/errors.ts'
 import { assertStartChildRequest } from '../../../shared/seam-contracts/subagent-host.ts'
 import type { ChildResultBody, StartChildRequest } from '../../../shared/seam-contracts/subagent-host.ts'
+import { registerSubagentRemote } from '../src/index.ts'
 import { assembleRemote } from '../src/provider.ts'
 import type { RemoteConfig, RemoteSubagentProvider } from '../src/provider.ts'
 
@@ -111,16 +111,20 @@ async function setup(opts: SetupOptions = {}): Promise<Harness> {
   })
   await listen(host, 0)
 
+  // TOCTOU 消除(评审 Minor ④):不再 freePort → 再 listen 的放开窗口 —— listen(0)
+  // 由内核直接分配端口;provider 现读 config.callbackPort(见 RemoteSubagentProvider),
+  // listen 之后回填真实端口,回调 server 与 provider 的 callbackPort 两处同源。
   const config: RemoteConfig = {
     schedulerUrl: baseOf(sched),
     nodeUrls: { N1: baseOf(host) },
     hostTokens: opts.nodeTokens ?? { N1: 't0k' },
     realm: 'dev',
-    callbackPort: await freePort(),
+    callbackPort: 0,
     callbackHost: '127.0.0.1',
   }
   const assembly = assembleRemote(config)
-  await listen(assembly.server, config.callbackPort)
+  await listen(assembly.server, 0)
+  config.callbackPort = (assembly.server.address() as AddressInfo).port
   const provider = assembly.provider
 
   const h: Harness = {
@@ -156,11 +160,12 @@ async function postCallback(h: Harness, body: ChildResultBody, url = callbackUrl
   return res.status
 }
 
-/** 150ms 内未结集视为 pending(「run 不 resolve」语义断言共用)。 */
+/** 1000ms 内未结集视为 pending(「run 不 resolve」语义断言共用;150ms 在慢机上
+ * 是"足够久才叫 pending"的脆弱假设 —— 评审 Minor ⑥ 放宽至 1s)。 */
 function settleVerdict(result: Promise<unknown>): Promise<string> {
   return Promise.race([
     result.then(() => 'resolved', () => 'rejected'),
-    new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 150)),
+    new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 1000)),
   ])
 }
 
@@ -174,17 +179,6 @@ function waitFor<T>(read: () => T | undefined, label: string, timeoutMs = 5000):
       setTimeout(tick, 10)
     }
     tick()
-  })
-}
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const net = createNetServer()
-    net.listen(0, '127.0.0.1', () => {
-      const { port } = net.address() as AddressInfo
-      net.close((err) => (err ? reject(err) : resolve(port)))
-    })
-    net.on('error', reject)
   })
 }
 
@@ -389,5 +383,27 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
       `http://127.0.0.1:${port}/subagent/result/never-minted/fake-secret`)
     expect(status).toBe(404)
     expect(await settleVerdict(run.result)).toBe('pending')
+  })
+
+  it('回调端口被占:EADDRINUSE fail-fast,apply 拒绝(不再"活着却收不到回执")', async () => {
+    // 占住端口后 apply 的 listen 必然失败:只 log 不抛的实现会把 node 装配成
+    // "活着却收不回执"的状态 —— 所有委派永久挂起(评审 Minor ③ 钉死)。
+    const occupier = createServer()
+    await listen(occupier, 0)
+    const busyPort = (occupier.address() as AddressInfo).port
+    try {
+      const ctx = new Context()
+      // schedulerUrl/hostTokens 不参与:listen 失败先于任何出站调用,也先于 registerProvider
+      await expect(registerSubagentRemote(ctx, {
+        schedulerUrl: 'http://127.0.0.1:9',
+        nodeUrls: { N1: 'http://127.0.0.1:9' },
+        hostTokens: { N1: 't0k' },
+        realm: 'dev',
+        callbackPort: busyPort,
+        callbackHost: '127.0.0.1',
+      })).rejects.toThrow(/EADDRINUSE/)
+    } finally {
+      await closeServer(occupier)
+    }
   })
 })
