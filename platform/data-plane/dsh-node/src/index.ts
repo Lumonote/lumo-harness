@@ -18,6 +18,7 @@ import { dirname, resolve } from 'node:path'
 import { writeFileSync, rmSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { spawnSync } from 'node:child_process'
+import { workflowEngineOverlay } from './workflow.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const platformRoot = resolve(here, '..', '..', '..')
@@ -182,6 +183,7 @@ writeFileSync(
         componentId: dev-component
         feature: web.fetch
 ${roleRows}
+${workflowEngineOverlay(role)}
 `,
 )
 
