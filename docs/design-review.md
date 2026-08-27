@@ -55,6 +55,17 @@
 2. 对工具/连接器做**幂等性分类**。非幂等外部写必须携带幂等键透传到外部系统；无法幂等的，resume 时强制 HITL 二次确认。
 3. 明确声明**句柄型 seam 的会话不可跨节点恢复**——这类会话钉在节点上，节点丢失即会话终止，并给出优雅降级路径。
 
+> **状态（2026-08-27）**：turn 级恢复契约已定稿并落地（本条建议三项闭环）。
+>
+> - **turn 级恢复契约（WAL）**：工具调用边界 + 写前意图记录——`tools/pre-execute` 先落 intent（`idempotencyKey = (session, turn, tool, argsFingerprint)`，turn 取 dsh 原生 `turn/start`），执行后 `tools/post-execute` 落 outcome；「有 intent 无 outcome」= 孤儿（崩溃危险区），resume 按幂等分类裁决。契约 `shared/seam-contracts/recovery.ts`（`CallIntent`/`CallOutcome`/`ResumeVerdict`/`RecoverySeam`/`adjudicateIntent`），实现 `@lumo/recovery`（`PgRecoveryJournal`；intent 独立事务**先于执行**提交，杜绝「与执行同事务回滚致意图消失」）。
+> - **工具幂等分类**：`BUILTIN_IDEMPOTENCY`（纯读/覆盖写 → idempotent；增量改写 → non-idempotent；bash/subprocess → unknown）＋ `overrides`/`prefixes` 两级覆盖；**未分类一律按 non-idempotent（fail closed）**。非幂等已完成的重放 → 拒绝；孤儿 → `adjudicateIntent`：唯一自动放行条件为 idempotent，否则 `require-confirmation`（HITL `recovery.confirm(key, actor)`）。
+> - **句柄型 seam 不可跨节点恢复**：见 `architecture.md` §7.1——模型可见状态可日志重建，句柄（PTY/进程树/fd/job）钉在节点上不迁移；节点丢失即会话终止，优雅降级为标记 `failed`、不无限重投。
+> - **turn 口径修正**：`recovery` 曾数 `user/message` 条数当 turn 号，`agent.inject()` 中途 +1 即令幂等键失配（保护静默失效）；已改用原生 `turn/start`，与 provenance 同口径（`turn.spec.ts` 回归守护），契约注释同步更正。
+> - **`ctx.jobs` 重判**：`belongsTo` 由「待 R2 定稿后重判」更新为「控制信号通道（§7.4）+ Scheduler；恢复语义随 R2 turn 级恢复契约」。
+> - **`ctx.jobs` 句柄虚拟化形态定稿（行 6，2026-08-27）**：`(job) → (sessionRef, node, jobId)` 的 `JobRef` 映射、job 级控制闭集（`kill/timeout/status`）、结果事件闭集（`job/started|output|finished`）、控制通道 seam（`JobControlSeam`）与契约断言锁在 `shared/seam-contracts/job-virtualization.ts`。契约测试 `shared/seam-contracts/__tests__/job-virtualization.spec.ts` 11 项全绿（内存 stub 通过断言 + JobRef/闭集/事件流 reduce 纯函数覆盖），`tsc -b --noEmit` 干净。超时重派 / resume 到何节点仍随本节 turn 级恢复契约（如上），不单独另起状态机。
+>
+> 核验：`pnpm typecheck` 无错；`dsh-plugins/recovery/tests/turn.spec.ts` 3 项全绿。全量套件仅 `storage` PG KV 契约 5 项因本机未设 `STORAGE_TEST_DSN`（需真 PG）失败，为既有环境约束、与本条无关。
+
 ### R3【技术】自研边缘网关是全案风险最集中的一件，须以能力清单与验收门槛兜底 —— §12
 
 §12 决定边缘、终端、连接器、LLM 四类网关 + 东西向 Seam Proxy **全部 Go 自研，零外部网关中间件**。
@@ -161,6 +172,17 @@ Nebula 按分区 Raft，**跨分区无原子性、无多语句事务**。标注�
 2. **计量单截面**（§6.4）依赖「所有 LLM 调用都经 `ctx.llm`」。若某插件绕过 `ctx.llm` 直连模型，计量即被旁路。**约定不是强制手段**，需在网络层加出向策略强制。
 
 **建议**：新增一节「**零侵入可行性核验清单**」，逐条平台能力 → 对应 dsh 扩展点 → 在锁定版本（当前 `dsh-v0.1.1-rc.2`）中确认存在。这是当前性价比最高的一次验证动作。
+
+> **状态（2026-08-27，行 5 dsh fork 公开面审计）**：A5 第 1 条「跨节点 fork」已核验落地（第 2 条计量单截面已在 `extension-points.md` A2 落地）。结论：**公开面成立——无需改 dsh、无需重实现会话投影**，解锁 5（`ctx.subagents`）/ 13（`ctx.workflowEngine`）进入实现。
+>
+> 核验事实（`deepseek-harness/` @ `dsh-v0.1.1-rc.2`，只读、源码直读）：
+>
+> - **`fork()` 本体进程内，跨节点不可直接调用**：`SessionStore.fork`（`packages/core/session/src/index.ts:1080`）经 `_resolveForkSource`（`:1139-1152`）要求源是**本 store 的 live 实例**（`live === source`）。跨节点源不在目标 store。但这不是障碍——它底下的 replay/fork 入口是公开的。
+> - **公开的 replay/fork 入口 = `create(id, { seed })`**：`SessionStore.create`（`:830`）→ `Session` 构造（`:499-548`）接受 `seed: readonly SessionEvent[]`（`types.ts` `CreateSessionOptions.seed`，「initial replay or fork history」）。seed 入日志前走与 `append` 相同的校验（losslessly-JSON 可序列化、`seq` 从 0 连续、surface 元数据有效）后 `deepFreeze`。跨节点 fork = 源 `Session.events`（`:559`，公开只读快照）全量事件序列 → 目标节点 `ctx.sessions.create(child, { seed, meta: { parentSession, seedLength } })`。
+> - **投影已公开导出，漂移风险证伪**：A5 原文担心「dsh 之外重实现会话投影 + 与 `deriveMessages()` 漂移」。核验发现投影**本就在公开面**——`surface.ts` 全量导出 `deriveEventMessage`/`foldSurface`/`isSurfaceEvent`/`isAppendSurfaceEvent`/`isReplacementSurfaceEvent`/`isSurfaceEligibleType`（`surface.ts:26-114,387`），并从包 root 再导出（`index.ts:32-33`）；`Session.deriveMessages`（`:726`）即折叠公开 `surface`（`:431`）的公开投影。平台**作为依赖复用 dsh 唯一的投影规则**，不存在第二套实现，无漂移面。
+> - **交付面需保留的语义**：`meta.seedLength`（fork 亲缘边界，resume 的 seed 是**全量 log** 而非仅继承前缀）、`Session.firstLiveSeq`（`:472`）、`session/end-seed` 标记（`:545-547`）、`SESSION_FORMAT_VERSION = 0`（`types.ts:56`，未发布即 no-compat，冷层 schema 须字节兼容）。
+>
+> 实现路径收敛为「§2.2.2 日志重放 + fencing」，投影复用公开导出；`ctx.subagents`（行 5）与 `ctx.workflowEngine`（行 13，其 `agent()` 经行 5 扇出）的跨节点 fork 前置解除。
 
 ---
 

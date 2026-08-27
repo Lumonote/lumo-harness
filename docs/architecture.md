@@ -178,7 +178,7 @@ dsh 能远程化 filesystem/subprocess，是因为它专门造了 `ctx.e2b` 这�
 | `ctx.skills` | 制品注册表 + provisioner（§6.1） |
 | `ctx.lsp` | E2B 式专用沙箱路径（连同 fs / subprocess 整体搬走工作区） |
 | `ctx.web` | 连接器网关（§12） |
-| `ctx.jobs` | R2 的 turn 级恢复契约定稿后重判 |
+| `ctx.jobs` | 控制信号通道（§7.4）+ Scheduler；恢复语义随 R2 turn 级恢复契约 |
 
 > `ctx.web` 判 `needs-design` 是**治理决定不是技术决定**：它技术上完全可远程化（一元、无句柄、幂等），但出平台流量必须过网关做 PII 与配额，绕开网关的远程 web 是治理漏洞。
 >
@@ -635,6 +635,9 @@ deploy(agent, realm):
 ### 7.1 Worker 模型
 
 - **AgentSlot** 是无状态的：只承载 `agentLoop` 执行，会话状态全在复制式 SessionEvent 日志里。崩溃后任务被重投，由任意空闲 Slot 从日志 resume（`ctx.sessions.fork` 的跨节点版）。
+
+> **句柄型 seam 的会话不可跨节点恢复（评审 R2）**：复制日志只含**模型可见**状态；`ctx.terminals`/`ctx.subprocess`/`ctx.jobs`（及本地 `ctx.fs`）等句柄型 seam 交出的是有生命周期的 OS 引用（PTY、进程树、fd、job），钉在节点上、不住在日志里。节点丢失 = 这类会话/句柄作废，跨节点 resume 不成立。优雅降级 = 终止会话并标记 `failed`（结果事件落日志），**绝不无限重投**——把「不可恢复」误判成「可重试」会放大外部副作用。模型可见状态仍可重建到最近检查点，句柄本身不迁移；工具级幂等由 turn 级恢复契约（R2，`@lumo/recovery` WAL + 幂等分类）兜底。
+
 - Worker Loop 完全复用 dsh `agent/*` / `tools/*` 瀑布，只是 `ctx.llm` 与 `ctx.tools` 的 Provider 经 Seam Proxy 落远端：
 
 ```text
