@@ -70,13 +70,14 @@ type Lease struct {
 	ExpiresAt    int64
 }
 
-// Placement 一次放置决策的结果。
+// Placement 一次放置决策的结果（API 面，wire 按全仓 snake_case 约定输出 ——
+// 任务侧消费端断言 node_id，Task/Node 同训）。
 type Placement struct {
-	TaskID       string
-	NodeID       string
-	Attempt      int
-	State        TaskState
-	FencingToken int64
+	TaskID       string    `json:"task_id"`
+	NodeID       string    `json:"node_id"`
+	Attempt      int       `json:"attempt"`
+	State        TaskState `json:"state"`
+	FencingToken int64     `json:"fencing_token"`
 }
 
 // ErrNotAcquired 租约被他人持有（未过期），本节点不是 leader。调用方不应等待。
