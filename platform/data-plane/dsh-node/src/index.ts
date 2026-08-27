@@ -19,6 +19,7 @@ import { writeFileSync, rmSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { workflowEngineOverlay } from './workflow.ts'
+import { localSkillSnapshotAssembly } from './skills.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const platformRoot = resolve(here, '..', '..', '..')
@@ -36,6 +37,7 @@ const jobControlEntry = resolve(platformRoot, 'dsh-plugins/job-control/src/index
 const mailboxEntry = resolve(platformRoot, 'dsh-plugins/mailbox/src/index.ts')
 const subagentHostEntry = resolve(platformRoot, 'dsh-plugins/subagent-host/src/index.ts')
 const subagentRemoteEntry = resolve(platformRoot, 'dsh-plugins/subagent-remote/src/index.ts')
+const skillLocalEntry = resolve(platformRoot, 'dsh-plugins/skill-local/src/index.ts')
 const patchPath = resolve(here, '..', 'lumo.patch.yml')
 
 // 节点标识：必须能区分同机重启，否则重启后的进程会被租约当成「本人续租」，
@@ -58,6 +60,28 @@ if (role !== 'node' && role !== 'agent') {
 const subagentRealm = process.env['LUMO_SUBAGENT_REALM'] ?? 'dev'
 /** 承载侧放置面与会话日志 holder(§A1 同训:重启换号)。 */
 const hostToken = process.env['LUMO_SUBAGENT_HOST_TOKEN'] ?? 'dev-subagent-token'
+
+// P3: a Provisioner (or a deployment operator during the first slice) pins a
+// complete local skill snapshot. The child process only sees verified bytes;
+// the stock filesystem provider is disabled below so project/user roots cannot
+// silently override that snapshot.
+const skillSnapshotRoot = process.env['LUMO_SKILL_SNAPSHOT_ROOT']
+let skillLocalRows = ''
+let skillFilesystemOverlay = ''
+try {
+  const assembled = localSkillSnapshotAssembly(
+    skillSnapshotRoot,
+    process.env['LUMO_SKILL_SNAPSHOT'],
+    skillLocalEntry,
+  )
+  skillLocalRows = assembled.rows
+  skillFilesystemOverlay = assembled.filesystemOverlay
+} catch (error: unknown) {
+  if (skillSnapshotRoot !== undefined) {
+    console.error(`dsh-node: 本地技能快照配置非法：${error instanceof Error ? error.message : String(error)}`)
+    process.exit(1)
+  }
+}
 
 // 行 5 的下发段:角色不同,只挂对应一侧(承载节点不需要 remote,父节点不需要 host)。
 const roleRows = role === 'node'
@@ -183,7 +207,9 @@ writeFileSync(
         componentId: dev-component
         feature: web.fetch
 ${roleRows}
+${skillLocalRows}
 ${workflowEngineOverlay(role)}
+${skillFilesystemOverlay}
 `,
 )
 
