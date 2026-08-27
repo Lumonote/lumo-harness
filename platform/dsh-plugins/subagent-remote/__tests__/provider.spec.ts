@@ -324,15 +324,22 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
     expect((error as SubagentError).code).toBe('REMOTE_PLACEMENT_QUEUED')
     expect(h.hostCalls.starts).toHaveLength(0)
     expect(h.schedCalls.placements).toHaveLength(1)
+    // 202 = 槽位未落账(域外排队):没有 FAILED 上报(F1a 只覆盖「已放置后失败」)
+    expect(h.schedCalls.results).toHaveLength(0)
   })
 
-  it('令牌错 host 403:reject SeamError,code 透传 forbidden', async () => {
+  it('令牌错 host 403:reject SeamError,code 透传 forbidden;placement 已落账 → FAILED 终态上报', async () => {
     const h = await setup({ nodeTokens: { N1: 'wrong' } })
     const error = await h.provider.start(startRequest()).then(() => undefined, (e: unknown) => e)
     expect(error).toBeInstanceOf(SeamError)
     expect((error as SeamError).code).toBe('forbidden')
     expect(h.schedCalls.placements).toHaveLength(1)
     expect(h.hostCalls.starts).toHaveLength(1)
+    // F1a:placement 201 已把 childId 计入 scheduler PLACED 容量(无任务级 GC),
+    // start 失败不报终态 = 槽位永久泄漏 —— best-effort FAILED 上报必须发生
+    const failedReport = await waitFor(() => h.schedCalls.results[0], 'start 失败后的 FAILED 终态上报')
+    expect(failedReport.headers['x-lumo-realm']).toBe('dev')
+    expect(failedReport.body).toEqual({ state: 'FAILED' })
   })
 
   it('dispose → host stop 收到;dispose 幂等(两次调用只一次 fetch);回调 aborted 结集', async () => {

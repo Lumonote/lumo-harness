@@ -5,7 +5,7 @@
  * (subagent-in-process-driver/src/index.ts),但按本切片的回执形状简化:
  * child 成功发布过,本切片一律按 `ok: true` 寄出 —— 结局由 stopReason 承载
  * (completed/aborted/error/max-tokens/refusal 闭集);`ok: false`(基础设施故障、
- * child 从未发布)留位给后续切片,当前只留日志。
+ * child 从未发布)由 run.ts 的失败路径寄出(本文件只承担成功侧映射与读取)。
  *
  * 切片 1 无 seed:读到的是 child 全量 events(boundary = 0)。
  */

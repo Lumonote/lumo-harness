@@ -107,8 +107,12 @@ export class RemoteSubagentProvider implements SubagentProvider {
       this.pending.set(childId, { secret, settler: settleOf(childId, resolve, reject) })
     })
 
+    // placement 是否已落 scheduler 账:201 之后失败必须回报终态(F1a),
+    // 否则 PLACED 槽位无任务级 GC、永久泄漏;202/放置失败则从未占用,无需上报。
+    let placed = false
     try {
       const nodeId = await postPlacement({ base: this.scheduler, realm: this.realm, childId })
+      placed = true
       const nodeUrl = this.nodeUrls[nodeId]
       if (nodeUrl === undefined) {
         throw new SubagentError(`nodeUrls 无节点 ${nodeId} 的登记地址`, 'NODE_URL_UNKNOWN')
@@ -120,6 +124,15 @@ export class RemoteSubagentProvider implements SubagentProvider {
     } catch (e) {
       // 未被承载侧接受的 child 不存在可结集回执:摘表,不给 mock host 留幽灵
       this.pending.delete(childId)
+      if (placed) {
+        // F1a:placement 201 已把 childId 计入 scheduler 容量(start 失败 403/超时/
+        // 不可达均不释放,且无任务级 GC —— 4 次即耗尽节点槽位)。fire-and-forget
+        // best-effort:上报失败只记影子,不吞原错(原错照抛)。
+        // 注:超时歧义场景可能误报 —— child 实际已在承载侧跑完,其回执对已摘表的
+        // pending 以 404 被拒;仍优于永久占槽:以 FAILED 结账,scheduler 才能重派。
+        void postTerminalState({ base: this.scheduler, realm: this.realm, childId, state: 'FAILED' })
+          .catch(() => { /* best-effort:终态上报失败仅留审计,不遮蔽 start 原错 */ })
+      }
       throw e
     }
   }

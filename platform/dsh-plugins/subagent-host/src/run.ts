@@ -65,6 +65,10 @@ export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunR
     cancel: () => {},
   }
   runs?.set(key, entry)
+  // 每个 run 恰好一次回执(成功 completed / 失败 ok:false):成功回执一经寄出(或
+  // 经投递决策)即置位,失败路径只覆盖「create 及之后尚未出回执」的失败 ——
+  // 两者互斥,不会双发。
+  let receiptSettled = false
   try {
     const depth = childDepthOf(req.parent)
     // 远程形态无 cap(行 5 明示);公开件仍校验字面值(undefined = 无上限)。
@@ -105,9 +109,26 @@ export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunR
     await child.whenIdle()
 
     const body = readChildResult(child, req.childId)
+    receiptSettled = true
     if (!await deliverCallback(req.callbackUrl, body)) {
       // 两次尝试都没送到:事件流已在 child 会话日志,不重投 —— 父侧审计以日志为准。
       ctx.logger.warn('subagent-host: 子代理 %s 回执失败(两次尝试),运行结束但回调未达', req.childId)
+    }
+  } catch (e) {
+    ctx.logger.error('subagent-host: 子代理 %s 运行失败: %s', req.childId, e instanceof Error ? e.message : String(e))
+    if (!receiptSettled) {
+      // 200 StartChildOk 已寄出:create/驱动失败若只 log,父侧 result 永久挂起
+      // (pending 条目无终态信号,永不结集)。寄一封 ok:false 把契约闭掉 ——
+      // code 'internal' 是基础设施词表(不是 child 结局,stopReason 承载不了它)。
+      const delivered = await deliverCallback(req.callbackUrl, {
+        runId: req.childId,
+        ok: false,
+        code: 'internal',
+        message: `子代理运行失败于承载节点(runId=${req.childId})`,
+      })
+      if (!delivered) {
+        ctx.logger.warn('subagent-host: 子代理 %s 失败回执未送达(两次尝试),运行结束但回调未达', req.childId)
+      }
     }
   } finally {
     runs?.delete(key)

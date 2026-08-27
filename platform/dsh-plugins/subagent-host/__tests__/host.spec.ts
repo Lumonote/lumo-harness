@@ -9,7 +9,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { assertChildResultBody } from '../../../shared/seam-contracts/subagent-host.ts'
-import type { ChildResultBody } from '../../../shared/seam-contracts/subagent-host.ts'
+import type { ChildResultBody, StartChildRequest } from '../../../shared/seam-contracts/subagent-host.ts'
 import { createSubagentHost, type SubagentHostOptions } from '../src/server.ts'
 import { runChild, type RunRegistry } from '../src/run.ts'
 
@@ -309,5 +309,23 @@ describe('subagent-host —— 承载节点子代理面', () => {
     expect(second.status).toBe(200)
     await waitCallback(h, 1)
     expect(h.callbackBodies[0]).toMatchObject({ runId: 'child-2', ok: true, stopReason: 'completed' })
+  })
+
+  it('create 必败:寄出 ok:false 回执(runId=childId),运行表照常摘除', async () => {
+    const h = await setup(textOnlyAdapter('child 答复'))
+    // 真实注入路径:agents.create 必败的 stub ctx(runChild 只消费 agents/logger 两个面;
+    // 真实 ctx 上 create 必败需要监听器干预,stub 是契约面的最小真实注入)
+    const failingCtx = {
+      agents: { create: () => { throw new Error('ctx.agents.create 注入必败') } },
+      logger: { info() {}, warn() {}, error() {} },
+    } as unknown as Context
+    await runChild(failingCtx, startRequest(h) as StartChildRequest, h.runs)
+
+    // 200 已寄出,回执是唯一结集信号:ok:false 必须到达,runId = childId(幂等键)
+    await waitCallback(h, 1)
+    expect(h.callbackBodies[0]).toMatchObject({ runId: 'child-1', ok: false, code: 'internal' })
+    expect(h.callbackBodies[0]!.message).toBeTruthy()
+    // 回执发出后运行表照常摘除(server 的重复启动检测以它为准)
+    expect(h.runs.size).toBe(0)
   })
 })

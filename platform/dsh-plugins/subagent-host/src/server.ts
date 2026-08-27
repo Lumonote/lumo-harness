@@ -95,8 +95,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: Subage
       }
       // assert 已闸住 realm/childId 两段,runKeyOf 不会再抛
       // 已结集重放闸:运行表条目已因整体结集摘除,但 child 会话仍发布在 ctx.agents。
-      // 放行后 create 会撞注册冲突抛错 → 200 已寄出、回执迟迟不达,父侧永远等不到;
-      // 契约明确 childId 是幂等键(已存在 → invalid),这里是显式拒绝。
+      // 放行后 create 会撞注册冲突抛错 → 200 已寄出、父侧只能收 ok:false 结集(run.ts
+      // 失败回执),远不如契约把 childId 定为幂等键(已存在 → invalid)的显式拒绝。
       // 放 runs.has 之前:in-flight(child 在 create 内,尚未发布)只由运行表段判,不回退现行为。
       if (options.sessionExists(payload.childId)) {
         throw invalid(`subagent-host: StartChildRequest.childId 会话已存在,禁止重放: ${payload.childId}`)
