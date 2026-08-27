@@ -307,6 +307,34 @@ importers:
         specifier: 4.22.4
         version: 4.22.4
 
+  dsh-plugins/session-title-gw:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: link:../../../deepseek-harness/vendor/cordis
+        version: link:../../../deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: link:../../../deepseek-harness/packages/core/agent
+        version: link:../../../deepseek-harness/packages/core/agent
+      '@deepseek-ai/dsh-agent-loop':
+        specifier: link:../../../deepseek-harness/packages/core/agent-loop
+        version: link:../../../deepseek-harness/packages/core/agent-loop
+      '@deepseek-ai/dsh-llm':
+        specifier: link:../../../deepseek-harness/packages/llm/llm
+        version: link:../../../deepseek-harness/packages/llm/llm
+      '@deepseek-ai/dsh-session':
+        specifier: link:../../../deepseek-harness/packages/core/session
+        version: link:../../../deepseek-harness/packages/core/session
+      '@deepseek-ai/dsh-session-title':
+        specifier: link:../../../deepseek-harness/packages/session/session-title
+        version: link:../../../deepseek-harness/packages/session/session-title
+      '@deepseek-ai/dsh-session-title-first-prompt-llm':
+        specifier: link:../../../deepseek-harness/packages/session/session-title-first-prompt-llm
+        version: link:../../../deepseek-harness/packages/session/session-title-first-prompt-llm
+    devDependencies:
+      '@deepseek-ai/dsh-agent-loop-testkit':
+        specifier: link:../../../deepseek-harness/packages/test-support/agent-loop-testkit
+        version: link:../../../deepseek-harness/packages/test-support/agent-loop-testkit
+
   dsh-plugins/storage:
     dependencies:
       '@deepseek-ai/cordis':

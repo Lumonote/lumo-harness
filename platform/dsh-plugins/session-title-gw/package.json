@@ -1,0 +1,21 @@
+{
+  "name": "@lumo/session-title-gw",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "link:../../../deepseek-harness/vendor/cordis",
+    "@deepseek-ai/dsh-agent-loop": "link:../../../deepseek-harness/packages/core/agent-loop",
+    "@deepseek-ai/dsh-agent": "link:../../../deepseek-harness/packages/core/agent",
+    "@deepseek-ai/dsh-llm": "link:../../../deepseek-harness/packages/llm/llm",
+    "@deepseek-ai/dsh-session": "link:../../../deepseek-harness/packages/core/session",
+    "@deepseek-ai/dsh-session-title": "link:../../../deepseek-harness/packages/session/session-title",
+    "@deepseek-ai/dsh-session-title-first-prompt-llm": "link:../../../deepseek-harness/packages/session/session-title-first-prompt-llm"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-agent-loop-testkit": "link:../../../deepseek-harness/packages/test-support/agent-loop-testkit"
+  }
+}
