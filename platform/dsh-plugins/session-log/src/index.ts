@@ -31,6 +31,10 @@ import {
   type LogRecord,
   type SessionLogSeam,
 } from '../../../shared/seam-contracts/session-log.ts'
+import {
+  stalenessOf,
+  type SessionLogQuerySeam,
+} from '../../../shared/seam-contracts/session-query.ts'
 import type { ColdLogSeam } from '../../../shared/seam-contracts/cold-log.ts'
 import type { HotLogSeam } from '../../../shared/seam-contracts/hot-log.ts'
 
@@ -67,6 +71,7 @@ declare module '@deepseek-ai/cordis' {
     sessionLog: SessionLogSeam
     coldLog: ColdLogSeam
     sessionLogHot?: HotLogSeam
+    sessionLogQuery: SessionLogQuerySeam
   }
 }
 
@@ -131,6 +136,35 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
   } else {
     ctx.provide('sessionLog', log)
   }
+
+  /**
+   * 读面缺省落后阈值：8 个事件。
+   *
+   * 出处：§21「复制日志读面保鲜」——容量无关的纯读面参数，与热层窗口/租约 TTL
+   * 无关。取 8 的理由：足够小以让跨节点读方及时察觉投影落后（staleness 的意义
+   * 在于显式暴露而不是掩盖），又足够大以吸收同库 standalone 场景下毫秒级的常规
+   * 复制抖动（回填队列在途的几条事件），避免无意义的 stale 抖动。
+   */
+  const DEFAULT_QUERY_MAX_LAG = 8
+
+  // 读面（行 3）：查询永远查「已复制到本地」的段。replicaHead 恒取 PG read() 的
+  // 最大 seq——PG 是真相源、读面与 resume 同源；热层窗口是加速器，不作判别基准。
+  ctx.provide('sessionLogQuery', {
+    async queryWithStaleness(sessionRef, opts = {}) {
+      const records = await log.read(sessionRef)
+      const replicaHead = records.length > 0 ? records[records.length - 1]!.seq : 0
+      if (opts.liveHead === undefined) {
+        // v1 诚实边界：standalone 共库时本地读恒一致；liveHead 未供 ⇒ 无判别基准，
+        // 恒 fresh 全量返回。绝不发明新的滞后探测基础设施——跨节点的下界探测归
+        // 「投影库」后续切片，liveHead 由调用方显式供给。
+        return { kind: 'fresh', records }
+      }
+      const verdict = stalenessOf(opts.liveHead, replicaHead, opts.maxLag ?? DEFAULT_QUERY_MAX_LAG)
+      return verdict.fresh
+        ? { kind: 'fresh', records }
+        : { kind: 'stale', reason: 'replication-lag', replicaHead, liveHead: opts.liveHead, lag: verdict.lag }
+    },
+  })
 
   // 冷层：只读 PG 真源 → 段归档进 ctx.objectStore（MinIO），不占写者租约。
   // 缺省不启动（冷层是可选项）；配置了 coldLog 才初始化并提供 ctx.coldLog。
@@ -336,3 +370,8 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
 export default apply
 export { PgSessionLog } from './pg-log.ts'
 export type { SessionLogSeam }
+export type {
+  SessionLogQuerySeam,
+  SessionQueryEnvelope,
+  SessionQueryOptions,
+} from '../../../shared/seam-contracts/session-query.ts'
