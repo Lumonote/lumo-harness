@@ -11,6 +11,7 @@
  * (那需要一个活 parent),而是直接 `ctx.agents.create`(公开件)重建 child。
  */
 import { Context } from '@deepseek-ai/cordis'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import z from '@deepseek-ai/schemastery'
 import type { Server } from 'node:http'
 import { isIP } from 'node:net'
@@ -71,6 +72,8 @@ export function registerSubagentHost(ctx: Context, config: SubagentHostConfig): 
     maxBodyBytes: config.maxBodyBytes ?? DEFAULT_MAX_BODY,
     tokens,
     runs,
+    // 已发布会话 = 已结集(运行表条目已摘)或他处占用的幂等键:重放闸(见 server.ts)
+    sessionExists: (childId) => ctx.agents.get(SessionId(childId)) !== undefined,
     start: (req) => {
       void runChild(ctx, req, runs).catch((e: unknown) => {
         ctx.logger.error('subagent-host: 子代理运行失败: %s', e)

@@ -60,6 +60,8 @@ export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunR
   const entry: RunCanceller = {
     // 发布前窗口的取消是 no-op:create 未决时 followup 未发,无可中止的 turn。
     // 窗口=一次本地 create;行 5 后续经信号通道收紧到「创建期也可取消」。
+    // 发布前窗口:child 还在一次本地 create 内,stop 是 no-op——child 照常跑完并
+    // 回执 completed;该窗口的取消语义随行 6 控制信号通道(JobControlSeam),本切片不做。
     cancel: () => {},
   }
   runs?.set(key, entry)

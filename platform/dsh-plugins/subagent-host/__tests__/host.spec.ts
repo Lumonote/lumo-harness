@@ -105,6 +105,8 @@ async function setup(adapter: LlmAdapter): Promise<Harness> {
     maxBodyBytes: 1 << 20,
     tokens: new Map([['dev', 't0k']]),
     runs,
+    // 与 index.ts 同款接线:已发布会话 = 已结集(或他处占用的幂等键)→ 重放闸
+    sessionExists: (childId) => ctx.agents.get(SessionId(childId)) !== undefined,
     start: (req) => {
       void runChild(ctx, req, runs).catch((e: unknown) => {
         ctx.logger.error('subagent-host: 子代理运行失败: %s', e)
@@ -235,11 +237,34 @@ describe('subagent-host —— 承载节点子代理面', () => {
     expect(h.runs.size).toBe(0)
   })
 
+  it('已结集重放拒绝:同 childId 二次 start → 400 invalid,新 childId 不受误伤', async () => {
+    const h = await setup(textOnlyAdapter('child 答复'))
+    const first = await h.post('/subagent/start', startRequest(h))
+    expect(first.status).toBe(200)
+    await waitCallback(h, 1)
+    expect(h.callbackBodies[0]).toMatchObject({ runId: 'child-1', ok: true, stopReason: 'completed' })
+
+    // 已结集:运行表条目已摘,final 后 child 仍发布在 ctx.agents —— 再 start 必须
+    // 显式 invalid(此前 200 放行 → create 撞注册冲突 → 父侧永远等不到回执)
+    const replay = await h.post('/subagent/start', startRequest(h))
+    expect(replay.status).toBe(400)
+    expect(replay.body).toMatchObject({ ok: false, code: 'invalid' })
+    expect(String(replay.body.message)).toContain('child-1')
+
+    // 新 childId:同一承载侧继续可用,没被重放检查误伤
+    const fresh = await h.post('/subagent/start', startRequest(h, { childId: 'child-2' }))
+    expect(fresh.status).toBe(200)
+    await waitCallback(h, 2)
+    expect(h.callbackBodies[1]).toMatchObject({ runId: 'child-2', ok: true, stopReason: 'completed' })
+  })
+
   it('stop:即刻取消 → 回调 aborted;重复 stop 仍 200 且不产生第二次回调', async () => {
     const h = await setup(hangingTextAdapter('child 部分答复'))
     const reply = await h.post('/subagent/start', startRequest(h))
     expect(reply.status).toBe(200)
 
+    // 本用例的 stop 落在发布后相位(waitChild 后);发布前窗口在毫秒级且为 no-op
+    // 设计,不做时序脆弱的复现测试(行 6 接管取消)。
     await waitChild(h, 'child-1')
     const stopped = await h.post('/subagent/stop', { childId: 'child-1' })
     expect(stopped.status).toBe(200)

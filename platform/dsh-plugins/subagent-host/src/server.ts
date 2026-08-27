@@ -49,6 +49,12 @@ export interface SubagentHostOptions {
   tokens: ReadonlyMap<string, string>
   /** 承载侧运行表:`key = runKeyOf(realm, childId)`。host 读,run.ts 写。 */
   runs: RunRegistry
+  /**
+   * child 会话是否已发布(在 ctx.agents 里)。已发布 + 运行表无键 = 已结集重放 →
+   * 契约把 childId 定为幂等键(已存在 → invalid);in-flight(create 未完成)的
+   * child 尚未发布,该相位仍由 runs.has 判 invalid,两检查互不重叠。
+   */
+  sessionExists: (childId: string) => boolean
   /** 启动一个通过校验的子代理 run(后台生命周期,完成/失败经回执送达父侧)。 */
   start: (req: StartChildRequest) => void
   logger: SubagentHostLogger
@@ -88,6 +94,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: Subage
         throw forbidden(`调用方 realm=${caller.realm} 不得启动 realm=${payload.realm} 的子代理`)
       }
       // assert 已闸住 realm/childId 两段,runKeyOf 不会再抛
+      // 已结集重放闸:运行表条目已因整体结集摘除,但 child 会话仍发布在 ctx.agents。
+      // 放行后 create 会撞注册冲突抛错 → 200 已寄出、回执迟迟不达,父侧永远等不到;
+      // 契约明确 childId 是幂等键(已存在 → invalid),这里是显式拒绝。
+      // 放 runs.has 之前:in-flight(child 在 create 内,尚未发布)只由运行表段判,不回退现行为。
+      if (options.sessionExists(payload.childId)) {
+        throw invalid(`subagent-host: StartChildRequest.childId 会话已存在,禁止重放: ${payload.childId}`)
+      }
       const key = runKeyOf(payload.realm, payload.childId)
       if (options.runs.has(key)) {
         throw invalid(`subagent-host: childId ${payload.childId} 已在运行(幂等键冲突)`)
@@ -102,6 +115,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: Subage
       throw invalid('subagent-host: stop 需要非空字符串 childId')
     }
     // stop 幂等:未知/已结集 run 也是 200 no-op(行 6 kill 同款,取消不是查询)
+    // 发布前窗口:child 还在一次本地 create 内,stop 是 no-op——child 照常跑完并
+    // 回执 completed;该窗口的取消语义随行 6 控制信号通道(JobControlSeam),本切片不做。
     options.runs.get(runKeyOf(caller.realm, childId))?.cancel()
     respondOk(res, { ok: true })
   } catch (e) {
