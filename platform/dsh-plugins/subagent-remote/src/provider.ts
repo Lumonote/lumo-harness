@@ -33,7 +33,7 @@ import { randomUUID } from 'node:crypto'
 import type { Server } from 'node:http'
 
 import { createCallbackServer } from './callback.ts'
-import type { ChildResultSettler } from './callback.ts'
+import type { ChildResultSettler, PendingEntry } from './callback.ts'
 import {
   postChildStart,
   postChildStop,
@@ -61,7 +61,7 @@ export class RemoteSubagentProvider implements SubagentProvider {
   readonly capabilities = NO_START_CAPABILITIES
   readonly inheritsParentContext = false
 
-  private readonly pending: Map<string, ChildResultSettler>
+  private readonly pending: Map<string, PendingEntry>
   private readonly scheduler: string
   private readonly nodeUrls: Readonly<Record<string, string>>
   private readonly hostTokens: Readonly<Record<string, string>>
@@ -69,7 +69,7 @@ export class RemoteSubagentProvider implements SubagentProvider {
   private readonly callbackHost: string
   private readonly callbackPort: number
 
-  constructor(config: RemoteConfig, pending: Map<string, ChildResultSettler>, name = 'lumo-remote') {
+  constructor(config: RemoteConfig, pending: Map<string, PendingEntry>, name = 'lumo-remote') {
     this.name = name
     this.pending = pending
     this.scheduler = config.schedulerUrl.replace(/\/+$/, '')
@@ -82,6 +82,10 @@ export class RemoteSubagentProvider implements SubagentProvider {
 
   async start(request: ResolvedSubagentStartRequest): Promise<SubagentRun> {
     const childId = SessionId(randomUUID())
+    // per-run 鉴权能力段(评审 Important):secret 随 callbackUrl 下达,承载节点
+    // 原样 POST 回执即落地 —— 回调接口网络开放、无调用方认证,能力段即最小鉴权;
+    // secret 每次 start 重新 mint(重放另一次 run 的 secret 无效)。
+    const secret = randomUUID()
 
     // 父描述在第一个 await 前同步采集:父切换/策略变更属于父的未来,不属于这个 child
     // (child-agent.ts 同训;captureDelegatedPolicyOverrides 需活 parent,本处即父进程)。
@@ -93,14 +97,14 @@ export class RemoteSubagentProvider implements SubagentProvider {
       prompt: request.prompt,
       descriptor: request.descriptor,
       parent,
-      callbackUrl: `http://${this.callbackHost}:${this.callbackPort}/subagent/result`,
+      callbackUrl: `http://${this.callbackHost}:${this.callbackPort}/subagent/result/${childId}/${secret}`,
     }
 
     // 登记先行 + 失败滚回:host 的 200 与回执是两个独立请求,没有顺序保证;
     // 回执表不提前登记的话,host 的回执可能先于 start 返回(200 已寄出、child 已跑完)
     // 撞上「未注册 → 404」,父侧将永远等不到结集。
     const result = new Promise<SubagentResult>((resolve, reject) => {
-      this.pending.set(childId, settleOf(childId, resolve, reject))
+      this.pending.set(childId, { secret, settler: settleOf(childId, resolve, reject) })
     })
 
     try {
@@ -185,7 +189,7 @@ export interface RemoteAssembly {
 }
 
 export function assembleRemote(config: RemoteConfig): RemoteAssembly {
-  const pending = new Map<string, ChildResultSettler>()
+  const pending = new Map<string, PendingEntry>()
   const server = createCallbackServer({
     pending,
     reportTerminal: (body) => {

@@ -140,15 +140,28 @@ async function setup(opts: SetupOptions = {}): Promise<Harness> {
   return h
 }
 
+/** 从 recorded StartChildRequest 取回调 URL(真 host 行为:deliverCallback 原样 POST)。 */
+function callbackUrlOf(h: Harness): string {
+  const start = h.hostCalls.starts[0]!
+  return (start.body as StartChildRequest).callbackUrl
+}
+
 /** 向 provider 的回调 server POST 一枚 ChildResultBody(承载侧 deliverCallback 同款)。 */
-async function postCallback(h: Harness, body: ChildResultBody): Promise<number> {
-  const port = (h.assembly.server.address() as AddressInfo).port
-  const res = await fetch(`http://127.0.0.1:${port}/subagent/result`, {
+async function postCallback(h: Harness, body: ChildResultBody, url = callbackUrlOf(h)): Promise<number> {
+  const res = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
   return res.status
+}
+
+/** 150ms 内未结集视为 pending(「run 不 resolve」语义断言共用)。 */
+function settleVerdict(result: Promise<unknown>): Promise<string> {
+  return Promise.race([
+    result.then(() => 'resolved', () => 'rejected'),
+    new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 150)),
+  ])
 }
 
 function waitFor<T>(read: () => T | undefined, label: string, timeoutMs = 5000): Promise<T> {
@@ -273,7 +286,16 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
     })
     expect(req.prompt).toEqual([{ type: 'text', text: 'child 任务' }])
     expect(req.descriptor).toEqual({ version: 2, mode: 'one-shot', provider: 'lumo-remote', label: 'child task' })
-    expect(req.callbackUrl).toBe(`http://127.0.0.1:${(h.assembly.server.address() as AddressInfo).port}/subagent/result`)
+    // callbackUrl 带 per-run secret 能力段(评审 Important:回调面最小鉴权;
+    // host 原样 POST,secret 不重写不剥离)
+    const cb = new URL(req.callbackUrl)
+    expect(cb.origin).toBe(`http://127.0.0.1:${(h.assembly.server.address() as AddressInfo).port}`)
+    expect(cb.pathname.split('/').filter(Boolean)).toEqual([
+      'subagent',
+      'result',
+      String(run.id),
+      expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
+    ])
 
     // 句柄:远端 run,localAgent undefined
     expect(run.localAgent).toBeUndefined()
@@ -326,15 +348,39 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
     expect((await run.result).stopReason).toBe('aborted')
   })
 
+  it('伪造 secret:回执 → 404 且 run 不 resolve;注册条目不销毁,真回调照常结集', async () => {
+    const h = await setup()
+    const run = await h.provider.start(startRequest())
+    const forged = new URL(callbackUrlOf(h))
+    forged.pathname = forged.pathname.replace(/\/[^/]+$/, '') + '/wrong-secret'
+    const status = await postCallback(h, { runId: String(run.id), ok: true, output: [], stopReason: 'completed' }, forged.toString())
+    expect(status).toBe(404)
+    expect(await settleVerdict(run.result)).toBe('pending')
+    // 伪造请求被拒后条目必须仍在(错 secret 不摘表,否则攻击者可 DoS 挂起中的 run)
+    const ok = await postCallback(h, { runId: String(run.id), ok: true, output: [{ type: 'text', text: '真回执' }], stopReason: 'completed' })
+    expect(ok).toBe(200)
+    expect(await run.result).toEqual({ output: [{ type: 'text', text: '真回执' }], stopReason: 'completed' })
+  })
+
+  it('plain /subagent/result/{runId} 无 secret 段 → 404,run 不 resolve', async () => {
+    const h = await setup()
+    const run = await h.provider.start(startRequest())
+    const port = (h.assembly.server.address() as AddressInfo).port
+    const status = await postCallback(h,
+      { runId: String(run.id), ok: true, output: [], stopReason: 'completed' },
+      `http://127.0.0.1:${port}/subagent/result/${String(run.id)}`)
+    expect(status).toBe(404)
+    expect(await settleVerdict(run.result)).toBe('pending')
+  })
+
   it('回执体 runId 未注册 → 404,已注册 run 不被 resolve', async () => {
     const h = await setup()
     const run = await h.provider.start(startRequest())
-    const status = await postCallback(h, { runId: 'never-minted', ok: true, output: [], stopReason: 'completed' })
+    const port = (h.assembly.server.address() as AddressInfo).port
+    const status = await postCallback(h,
+      { runId: 'never-minted', ok: true, output: [], stopReason: 'completed' },
+      `http://127.0.0.1:${port}/subagent/result/never-minted/fake-secret`)
     expect(status).toBe(404)
-    const verdict = await Promise.race([
-      run.result.then(() => 'resolved', () => 'rejected'),
-      new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 150)),
-    ])
-    expect(verdict).toBe('pending')
+    expect(await settleVerdict(run.result)).toBe('pending')
   })
 })
