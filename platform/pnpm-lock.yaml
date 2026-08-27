@@ -325,6 +325,40 @@ importers:
         specifier: 4.22.4
         version: 4.22.4
 
+  dsh-plugins/subagent-host:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: link:../../../deepseek-harness/vendor/cordis
+        version: link:../../../deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: link:../../../deepseek-harness/packages/core/agent
+        version: link:../../../deepseek-harness/packages/core/agent
+      '@deepseek-ai/dsh-agent-loop':
+        specifier: link:../../../deepseek-harness/packages/core/agent-loop
+        version: link:../../../deepseek-harness/packages/core/agent-loop
+      '@deepseek-ai/dsh-llm':
+        specifier: link:../../../deepseek-harness/packages/llm/llm
+        version: link:../../../deepseek-harness/packages/llm/llm
+      '@deepseek-ai/dsh-sandbox':
+        specifier: link:../../../deepseek-harness/packages/sandbox/sandbox
+        version: link:../../../deepseek-harness/packages/sandbox/sandbox
+      '@deepseek-ai/dsh-session':
+        specifier: link:../../../deepseek-harness/packages/core/session
+        version: link:../../../deepseek-harness/packages/core/session
+      '@deepseek-ai/dsh-subagent':
+        specifier: link:../../../deepseek-harness/packages/subagent/subagent
+        version: link:../../../deepseek-harness/packages/subagent/subagent
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../deepseek-harness/vendor/schemastery
+        version: link:../../../deepseek-harness/vendor/schemastery
+      tsx:
+        specifier: 4.22.4
+        version: 4.22.4
+    devDependencies:
+      '@deepseek-ai/dsh-agent-loop-testkit':
+        specifier: link:../../../deepseek-harness/packages/test-support/agent-loop-testkit
+        version: link:../../../deepseek-harness/packages/test-support/agent-loop-testkit
+
   dsh-plugins/web-gateway:
     dependencies:
       '@deepseek-ai/cordis':
