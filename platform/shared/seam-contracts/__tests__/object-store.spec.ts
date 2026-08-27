@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  assertNoLocalSpill,
   contentKeyOf,
   joinRealmKey,
   validRealmKey,
@@ -69,5 +70,16 @@ describe('contentKeyOf —— 内容寻址键派生', () => {
     const dirty = Buffer.from([0x00, 0x01, 0xff, 0x00])
     expect(contentKeyOf(dirty)).toBe(contentKeyOf(Buffer.from([0x00, 0x01, 0xff, 0x00])))
     expect(contentKeyOf(dirty)).not.toBe(contentKeyOf(Buffer.from([0x00, 0x01, 0xff])))
+  })
+})
+
+describe('assertNoLocalSpill —— spill 装配互斥（本地 spill 与对象化溢出不共存）', () => {
+  it('已注册 spillStore（spill-local）→ 显式拒绝，消息含「spill-local」与「装配」', () => {
+    expect(() => assertNoLocalSpill(true)).toThrow(/spill-local/)
+    expect(() => assertNoLocalSpill(true)).toThrow(/装配/)
+  })
+
+  it('未注册 spillStore → 不抛（平台节点仅对象化 spill，装配合法）', () => {
+    expect(() => assertNoLocalSpill(false)).not.toThrow()
   })
 })

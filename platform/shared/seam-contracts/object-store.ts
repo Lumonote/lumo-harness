@@ -67,6 +67,16 @@ export function joinRealmKey(realm: string, key: string): string {
   return `${realm}/${key}`
 }
 
+/** 装配互斥：平台节点的 spill 必须是对象化（跨节点可取回，行 11）；本地 spill 共存=错误装配。 */
+export function assertNoLocalSpill(spillAlreadyRegistered: boolean): void {
+  if (spillAlreadyRegistered) {
+    throw new Error(
+      'object-store: 检测到已注册的 spillStore（spill-local）——与平台对象化溢出互斥；'
+      + '装配须禁用 spill-local（见 dsh bundle base 的 spill-local 行与 §5.1 行 11）',
+    )
+  }
+}
+
 /** 内容寻址键派生：`content/<sha256-hex>`。字符串与 Buffer 同内容同键。 */
 export function contentKeyOf(body: Buffer | string): string {
   const buf = typeof body === 'string' ? Buffer.from(body, 'utf8') : body
