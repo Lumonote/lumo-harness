@@ -212,7 +212,9 @@ dsh 能远程化 filesystem/subprocess，是因为它专门造了 `ctx.e2b` 这�
 > 的跨节点不可序列化由可传输快照 `ChildParentDescriptor` 替代，wire 契约
 > `shared/seam-contracts/subagent-host.ts`）。承载节点语义按本表 `handle` 判据与 §7.1：child 会话
 > **单写者**经 §4.2 复制日志（session-log + fencing 租约）；节点丢失 = child 会话作废——运行结局已
-> 落日志、绝不无限重投（§7.1），跨节点 resume 不成立；fork/continuable 的 seed 传输随后续切片
+> 落日志、绝不无限重投（§7.1），跨节点 resume 不成立；父侧 dispose 已接入 `@lumo/job-control`：
+> 以 `(parentSession, node, childId)` 的 `JobRef` 投递 kill，由承载侧 local child handle 取消并以同一
+> 结果事件流结算；fork/continuable 的 seed 传输仍受 dsh continuable manager 的本地物化边界约束，需单独扩展路径
 > （跨节点 seed 重放路径见 seam-remote-forms 设计 §2.2；其公开面核验结论随行 6 收账落地）。
 
 ### 4.2 复制式 SessionEvent 日志（共享真相）

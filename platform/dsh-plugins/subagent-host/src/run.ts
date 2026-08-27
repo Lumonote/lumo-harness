@@ -38,12 +38,13 @@ import {
   type StartChildRequest,
   type ChildResultBody,
 } from '../../../shared/seam-contracts/subagent-host.ts'
+import type { JobControlRuntime, JobRef, LocalJobRegistration } from '../../../shared/seam-contracts/job-virtualization.ts'
 import { readChildResult } from './tturn.ts'
 
 /** 运行表条目:一个承载 child 的取消面。 */
 export interface RunCanceller {
   /** 取消该运行(child.cancel({ kind: 'parent' }));重复调用按 dsh cancel 语义幂等。 */
-  cancel(): void
+  cancel(reason?: string): void
 }
 
 /**
@@ -58,14 +59,24 @@ export type RunRegistry = Map<string, RunCanceller>
 /** 运行一个校验通过的远端子代理(childId 由父侧 mint,是幂等键)。 */
 export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunRegistry): Promise<void> {
   const key = runKeyOf(req.realm, req.childId)
+  let cancelRequested = false
   const entry: RunCanceller = {
-    // 发布前窗口的取消是 no-op:create 未决时 followup 未发,无可中止的 turn。
-    // 窗口=一次本地 create;行 5 后续经信号通道收紧到「创建期也可取消」。
-    // 发布前窗口:child 还在一次本地 create 内,stop 是 no-op——child 照常跑完并
-    // 回执 completed;该窗口的取消语义随行 6 控制信号通道(JobControlSeam),本切片不做。
-    cancel: () => {},
+    // 创建窗口没有 OS/Agent 句柄，但控制意图不能丢：job-control 注册的
+    // cancel 会置位，create 成功后立即交给真实 child.cancel。
+    cancel: () => { cancelRequested = true },
   }
   runs?.set(key, entry)
+  const jobStartedAt = Date.now()
+  const jobLabel = req.label ?? 'remote subagent'
+  const jobRuntime = (ctx as Context & { jobControlRuntime?: JobControlRuntime }).jobControlRuntime
+  let jobRef: JobRef | undefined
+  if (jobRuntime) {
+    jobRef = await jobRuntime.register(
+      { sessionRef: req.parent.sessionId, jobId: req.childId },
+      { kind: 'subagent', label: jobLabel, status: 'running', startedAt: jobStartedAt },
+      (reason) => entry.cancel(reason),
+    )
+  }
   // 每个 run 恰好一次回执(成功 completed / 失败 ok:false):成功回执一经寄出(或
   // 经投递决策)即置位,失败路径只覆盖「create 及之后尚未出回执」的失败 ——
   // 两者互斥,不会双发。
@@ -104,12 +115,17 @@ export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunR
 
     const child = handle.agent
     entry.cancel = () => child.cancel({ kind: 'parent' })
+    // A control command may arrive during ctx.agents.create. Its earlier
+    // registration records intent; apply it as soon as an actual local handle
+    // exists instead of silently losing the creation-window cancellation.
+    if (cancelRequested) entry.cancel()
 
     // 驱动单 turn(与 in-process driver 同公开模式:followup + whenIdle)。
     child.followup(createUserMessage({ content: req.prompt as ContentBlock[], source: { kind: 'user' } }))
     await child.whenIdle()
 
     const body = readChildResult(child, req.childId)
+    await settleJob(jobRuntime, jobRef, jobLabel, jobStartedAt, childStateOf(body.stopReason), body.diagnostic)
     receiptSettled = true
     if (!await deliverCallback(req.callbackUrl, body)) {
       // 两次尝试都没送到:事件流已在 child 会话日志,不重投 —— 父侧审计以日志为准。
@@ -117,6 +133,7 @@ export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunR
     }
   } catch (e) {
     ctx.logger.error('subagent-host: 子代理 %s 运行失败: %s', req.childId, e instanceof Error ? e.message : String(e))
+    await settleJob(jobRuntime, jobRef, jobLabel, jobStartedAt, 'failed', 'subagent host failure')
     if (!receiptSettled) {
       // 200 StartChildOk 已寄出:create/驱动失败若只 log,父侧 result 永久挂起
       // (pending 条目无终态信号,永不结集)。寄一封 ok:false 把契约闭掉 ——
@@ -134,6 +151,28 @@ export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunR
   } finally {
     runs?.delete(key)
   }
+}
+
+function childStateOf(reason: ChildResultBody['stopReason']): 'completed' | 'killed' | 'failed' {
+  if (reason === 'completed') return 'completed'
+  if (reason === 'aborted') return 'killed'
+  return 'failed'
+}
+
+async function settleJob(
+  runtime: JobControlRuntime | undefined,
+  ref: JobRef | undefined,
+  label: string,
+  startedAt: number,
+  status: 'completed' | 'killed' | 'failed',
+  detail?: string,
+): Promise<void> {
+  if (!runtime || !ref) return
+  const snapshot: LocalJobRegistration = {
+    kind: 'subagent', label, status, startedAt, finishedAt: Date.now(),
+    ...(detail !== undefined ? { detail } : {}),
+  }
+  await runtime.settle(ref, snapshot)
 }
 
 /**

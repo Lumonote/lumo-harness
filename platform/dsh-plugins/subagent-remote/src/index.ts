@@ -4,8 +4,8 @@
  * 挂在**父节点**上(挂 dsh 的 ctx.subagents —— SubagentTable 的 Provider 角色):
  * `start()` 经 Scheduler 放置选承载节点、POST 承载节点 `/subagent/start`(Task 3 的
  * wire),把 child 放远地跑;本进程回调 server 结集回执,返回远端 `SubagentRun`
- * (`localAgent: undefined`)。取消经承载侧 `/subagent/stop` 直连(行 6 控制信号通道
- * 未到,本切片不做)。
+ * (`localAgent: undefined`)。取消经行 6 `JobControlSeam` 投递到持有 child handle
+ * 的承载节点；未装配该 seam 的独立 provider 测试/旧装配才回退 `/subagent/stop`。
  *
  * 回调 server 与本 provider 同**进程**起停:插件 `apply` 里 `ctx.effect`
  * (disposable)听 `callbackPort`;无认证(只受进程外网络形态约束 —— 生产经边缘
@@ -28,7 +28,8 @@ export const Config: z<RemoteConfig> = z.object({
 })
 
 export async function registerSubagentRemote(ctx: Context, config: RemoteConfig): Promise<void> {
-  const assembly = assembleRemote(config)
+  // jobControl is a process-local seam service, not patch-file configuration.
+  const assembly = assembleRemote({ ...config, jobControl: ctx.jobControl })
   const host = config.callbackHost ?? '127.0.0.1'
 
   // EADDRINUSE 等监听失败必须 fail-fast:apply 拒绝 = 节点装配失败。只 log 的形态

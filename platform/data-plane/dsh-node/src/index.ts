@@ -31,6 +31,7 @@ const connectorEntry = resolve(platformRoot, 'dsh-plugins/connector/src/index.ts
 const webGatewayEntry = resolve(platformRoot, 'dsh-plugins/web-gateway/src/index.ts')
 const recoveryEntry = resolve(platformRoot, 'dsh-plugins/recovery/src/index.ts')
 const sessionLogEntry = resolve(platformRoot, 'dsh-plugins/session-log/src/index.ts')
+const jobControlEntry = resolve(platformRoot, 'dsh-plugins/job-control/src/index.ts')
 const mailboxEntry = resolve(platformRoot, 'dsh-plugins/mailbox/src/index.ts')
 const subagentHostEntry = resolve(platformRoot, 'dsh-plugins/subagent-host/src/index.ts')
 const subagentRemoteEntry = resolve(platformRoot, 'dsh-plugins/subagent-remote/src/index.ts')
@@ -40,6 +41,9 @@ const patchPath = resolve(here, '..', 'lumo.patch.yml')
 // 白捡走上一代进程的写权（§A1 fencing 的前提是持有者身份唯一）。
 const nodeHolder = process.env['LUMO_NODE_ID']
   ?? `${hostname()}:${process.pid}:${Date.now().toString(36)}`
+// Job control addresses the Scheduler's stable node id, not the session-log
+// lease holder (which intentionally changes on every restart).
+const jobControlNodeId = process.env['LUMO_NODE_ID'] ?? hostname()
 
 // 双角色（行 5 装配面）：node = 承载节点（挂 lumo-subagent-host,子代理放这里执行）；
 // agent = 父节点（挂 lumo-subagent-remote,子代理经 Scheduler 放置到承载节点执行）。
@@ -58,7 +62,7 @@ const hostToken = process.env['LUMO_SUBAGENT_HOST_TOKEN'] ?? 'dev-subagent-token
 const roleRows = role === 'node'
   ? `    - id: lumo-subagent-host
       name: ${JSON.stringify(subagentHostEntry)}
-      inject: [agents]
+      inject: [agents, jobControl]
       config:
         host: 127.0.0.1
         port: ${process.env['LUMO_SUBAGENT_HOST_PORT'] ?? '8091'}
@@ -67,7 +71,7 @@ const roleRows = role === 'node'
 `
   : `    - id: lumo-subagent-remote
       name: ${JSON.stringify(subagentRemoteEntry)}
-      inject: [subagents]
+      inject: [subagents, jobControl]
       config:
         schedulerUrl: ${JSON.stringify(process.env['LUMO_SCHEDULER_URL'] ?? 'http://localhost:8083')}
         nodeUrls: ${JSON.stringify(JSON.parse(process.env['LUMO_SUBAGENT_NODE_URLS'] ?? '{"N1":"http://localhost:8091"}'))}
@@ -133,6 +137,13 @@ writeFileSync(
         hotCache:
           url: redis://localhost:6379
           realm: dev
+    - id: lumo-job-control
+      name: ${JSON.stringify(jobControlEntry)}
+      inject: [jobs]
+      config:
+        connectionString: postgres://lumo:lumo@localhost:55432/lumo
+        nodeId: ${JSON.stringify(jobControlNodeId)}
+        pollIntervalMs: ${process.env['LUMO_JOB_CONTROL_POLL_MS'] ?? '250'}
     - id: lumo-mailbox
       name: ${JSON.stringify(mailboxEntry)}
       inject: [tools]

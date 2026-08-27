@@ -121,6 +121,26 @@ export interface JobControlSeam {
   snapshot(ref: JobRef): Promise<JobSnapshotView | undefined>
 }
 
+/** Local execution projection registered by a handle-owning node. */
+export interface LocalJobRegistration {
+  kind: string
+  label: string
+  status: JobLifecycleStatus
+  detail?: string
+  startedAt: number
+  finishedAt?: number
+}
+
+/**
+ * Node-local counterpart to JobControlSeam. Only providers that own a local
+ * handle receive it; callers can never use it to act on another node.
+ */
+export interface JobControlRuntime {
+  readonly nodeId: string
+  register(ref: Omit<JobRef, 'node'>, snapshot: LocalJobRegistration, cancel: (reason?: string) => void): Promise<JobRef>
+  settle(ref: JobRef, snapshot: LocalJobRegistration): Promise<void>
+}
+
 /** 句柄虚拟化映射：把本地 job 钉回 (sessionRef, node, jobId)。 */
 export function jobRefOf(sessionRef: string, node: string, jobId: string): JobRef {
   return { sessionRef, node, jobId }

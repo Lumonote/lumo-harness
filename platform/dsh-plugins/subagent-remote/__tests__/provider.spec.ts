@@ -10,6 +10,7 @@ import type { ResolvedSubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import { SeamError } from '../../../shared/seam-contracts/errors.ts'
 import { assertStartChildRequest } from '../../../shared/seam-contracts/subagent-host.ts'
 import type { ChildResultBody, StartChildRequest } from '../../../shared/seam-contracts/subagent-host.ts'
+import type { JobControlSeam } from '../../../shared/seam-contracts/job-virtualization.ts'
 import { registerSubagentRemote } from '../src/index.ts'
 import { assembleRemote } from '../src/provider.ts'
 import type { RemoteSubagentProvider } from '../src/provider.ts'
@@ -43,6 +44,8 @@ interface SetupOptions {
   hostExpects?: string
   /** provider 的 hostTokens 表;缺省 { N1: 't0k' }。 */
   nodeTokens?: Record<string, string>
+  /** Present means dispose must use the global job-control mailbox, not HTTP stop. */
+  jobControl?: JobControlSeam
 }
 
 const all: Array<{ close(): Promise<void> }> = []
@@ -124,6 +127,7 @@ async function setup(opts: SetupOptions = {}): Promise<Harness> {
     realm: 'dev',
     callbackPort: 0,
     callbackHost: '127.0.0.1',
+    jobControl: opts.jobControl,
   }
   const assembly = assembleRemote(config)
   await listen(assembly.server, 0)
@@ -350,6 +354,29 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
     const status = await postCallback(h, { runId: String(run.id), ok: true, output: [], stopReason: 'aborted' })
     expect(status).toBe(200)
     expect((await run.result).stopReason).toBe('aborted')
+  })
+
+  it('装配 job-control 时 dispose 投递 JobRef，不绕回承载 stop HTTP', async () => {
+    const dispatched: unknown[] = []
+    const control: JobControlSeam = {
+      async dispatch(request) {
+        dispatched.push(request)
+        return { allowed: true, effect: 'requested' }
+      },
+      async events() { return [] },
+      async snapshot() { return undefined },
+    }
+    const h = await setup({ jobControl: control })
+    const run = await h.provider.start(startRequest())
+
+    await run.dispose()
+
+    expect(h.hostCalls.stops).toHaveLength(0)
+    expect(dispatched).toEqual([expect.objectContaining({
+      ref: { sessionRef: 'parent-sess', node: 'N1', jobId: String(run.id) },
+      command: 'kill', actor: 'subagent-parent', role: 'operator', reason: 'parent disposed',
+      correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    })])
   })
 
   it('伪造 secret:回执 → 404 且 run 不 resolve;注册条目不销毁,真回调照常结集', async () => {

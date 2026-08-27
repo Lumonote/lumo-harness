@@ -42,6 +42,7 @@ import {
   terminalStateOf,
 } from './client.ts'
 import type { ChildParentDescriptor, StartChildRequest } from '../../../shared/seam-contracts/subagent-host.ts'
+import type { JobControlSeam } from '../../../shared/seam-contracts/job-virtualization.ts'
 
 export interface RemoteConfig {
   /** Scheduler base(经 X-Lumo-Realm 头信任注入;生产经边缘网关,§6.3 转 mTLS)。 */
@@ -54,6 +55,10 @@ export interface RemoteConfig {
   /** 回调接收端口(provider 进程内 createServer)。 */
   readonly callbackPort: number
   readonly callbackHost?: string
+  /** Injected control channel; absent only in focused provider tests/legacy wiring. */
+  readonly jobControl?: JobControlSeam
+  readonly controlActor?: string
+  readonly controlRole?: string
 }
 
 export class RemoteSubagentProvider implements SubagentProvider {
@@ -121,8 +126,21 @@ export class RemoteSubagentProvider implements SubagentProvider {
       }
       const token = this.hostTokens[nodeId]
       await postChildStart({ base: nodeUrl.replace(/\/+$/, ''), realm: this.realm, token, request: body })
-      return remoteRunHandle(childId, result, () =>
-        postChildStop({ base: nodeUrl.replace(/\/+$/, ''), realm: this.realm, token, childId }))
+      const directStop = () => postChildStop({ base: nodeUrl.replace(/\/+$/, ''), realm: this.realm, token, childId })
+      const stop = this.config.jobControl === undefined
+        ? directStop
+        : async () => {
+          const decision = await this.config.jobControl!.dispatch({
+            ref: { sessionRef: String(parent.sessionId), node: nodeId, jobId: String(childId) },
+            command: 'kill', actor: this.config.controlActor ?? 'subagent-parent',
+            role: this.config.controlRole ?? 'operator', reason: 'parent disposed',
+            correlationId: randomUUID(),
+          })
+          if (!decision.allowed) {
+            throw new SubagentError(`远端子代理取消被控制通道拒绝: ${decision.reason}`, 'CONTROL_DENIED')
+          }
+        }
+      return remoteRunHandle(childId, result, stop)
     } catch (e) {
       // 未被承载侧接受的 child 不存在可结集回执:摘表,不给 mock host 留幽灵
       this.pending.delete(childId)
