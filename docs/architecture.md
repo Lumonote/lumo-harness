@@ -205,6 +205,16 @@ dsh 能远程化 filesystem/subprocess，是因为它专门造了 `ctx.e2b` 这�
 
 闸 C 在 `seam-proxy` 客户端，**默认 `warn` 而非 `enforce`**：超预算是性能回归，不是安全事故；默认拒绝会把「某个组件写得太碎」升级成「用户这一轮直接失败」。但告警是结构化的 `{seam, turn, count, budget}`，可进 CI 断言——否则它退化成纸面要求。
 
+> **实现注记（2026-08-27，行 5 切片 1 落地）**：`ctx.subagents`（`handle` 行）的跨节点形态由一对
+> 插件落地——承载节点 `@lumo/subagent-host`（真 cordis 树挂 HTTP 放置面 `POST /subagent/start|stop`，
+> child 以公开件 `ctx.agents.create` 重建、depth+1、单 turn 驱动、结果经回调结集）+ 父节点
+> `@lumo/subagent-remote`（Scheduler 放置（§6.2）→ 承载 start → 回调结集 → 终态上报；`parent: Agent`
+> 的跨节点不可序列化由可传输快照 `ChildParentDescriptor` 替代，wire 契约
+> `shared/seam-contracts/subagent-host.ts`）。承载节点语义按本表 `handle` 判据与 §7.1：child 会话
+> **单写者**经 §4.2 复制日志（session-log + fencing 租约）；节点丢失 = child 会话作废——运行结局已
+> 落日志、绝不无限重投（§7.1），跨节点 resume 不成立；fork/continuable 的 seed 传输随后续切片
+> （§2.2 已核验的 seed 重放路径）。
+
 ### 4.2 复制式 SessionEvent 日志（共享真相）
 
 - 原生：`core/session` 是 append-only 日志，`deriveMessages()` 投影历史，`ctx.sessions.fork()` 复制会话。
