@@ -106,6 +106,22 @@ describe('assertStartChildRequest —— 承载侧始建请求的结构校验', 
     }
   })
 
+  it('拒绝含运行键分隔符的 childId（与 realm 同训：绝不让 runKeyOf 在 assert 之后才炸）', () => {
+    for (const childId of ['a::b', 'b::c']) {
+      const req = validRequest()
+      req.childId = childId
+      expect(() => assertStartChildRequest(req), `childId=${JSON.stringify(childId)} 必须被拒`).toThrow(/childId/)
+    }
+  })
+
+  it('合法 childId（连字符/下划线/数字/点）与合法 realm 不被误拒（收紧面仅限分隔符）', () => {
+    for (const childId of ['child-1', 'child_42', 'b.123.c']) {
+      const req = validRequest()
+      req.childId = childId
+      expect(() => assertStartChildRequest(req), `childId=${JSON.stringify(childId)} 不应被拒`).not.toThrow()
+    }
+  })
+
   it('拒绝 parent 坏形状：非对象 / 缺 sessionId / 空 sessionId', () => {
     const notObject = validRequest()
     notObject.parent = 'nope'

@@ -149,8 +149,15 @@ export function assertStartChildRequest(v: unknown): asserts v is StartChildRequ
     throw invalid('subagent-host: StartChildRequest 必须是对象')
   }
   const req = v as Record<string, unknown>
-  for (const key of ['childId', 'callbackUrl'] as const) {
-    requireString(req, key, 'StartChildRequest')
+  requireString(req, 'callbackUrl', 'StartChildRequest')
+  const childId = requireString(req, 'childId', 'StartChildRequest')
+  // childId 与 realm 同训：含 :: 的 childId 会在 assert 之后令 runKeyOf 抛 invalid
+  // （（realm='a', childId='b::c'）与（realm='a::b', childId='c'）同键），
+  // 必须在入口闸住（500 前先 400）。
+  if (childId.includes(RUN_KEY_SEP)) {
+    throw invalid(
+      `subagent-host: StartChildRequest.childId 含运行键分隔符 ${RUN_KEY_SEP}（平台签发 id 不含 ${RUN_KEY_SEP}）：${JSON.stringify(childId)}`,
+    )
   }
   // realm 与 runKeyOf 同训：坏段的 realm 会在 assert 之后令 runKeyOf 抛 invalid，
   // 必须在入口闸住（500 前先 400）。
