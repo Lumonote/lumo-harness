@@ -19,7 +19,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
-import type {} from '@deepseek-ai/dsh-session'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 import { PgSessionLog } from './pg-log.ts'
 import { PgColdLogArchiver } from './cold-log.ts'
@@ -172,9 +172,47 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
     ctx.logger.error('session-log: 会话 %s 已被 fence —— %s', sessionRef, reason)
   }
 
+  /**
+   * 回填入队(created 触发与首 sight 兜底共用同一依赖组)。
+   * snapshot 由调用方先取(created 时刻 / 首 sight 时刻的 events 快照)。
+   */
+  const backfill = (sessionRef: string, snapshot: readonly SessionEvent[]): void => {
+    queueBackfill(sessionRef, snapshot, {
+      tails,
+      isFenced: (ref) => fenced.has(ref),
+      ensureToken,
+      append: (record, token) => log.append(record, token),
+      onMirror: hot === undefined ? undefined : (record) => {
+        // 复用 firehose 写路径的镜像形态:PG 提交后 fire-and-forget,失败只 warn
+        // ——绝不 fence、绝不阻塞队列尾(单连接命令有序 ⇒ 镜像序 == append 序)。
+        void hot.mirror(record).catch((error: unknown) => {
+          ctx.logger.warn('session-log: 会话 %s seq=%d 热层镜像失败(不影响写路径):%s',
+            sessionRef, record.seq, error instanceof Error ? error.message : String(error))
+        })
+      },
+      logger: ctx.logger,
+    })
+  }
+
+  /** 已做过首 sight 补缺的会话(每会话一次;重复触发幂等吸收,防队列膨胀) */
+  const sightSeen = new Set<string>()
+
   ctx.on('session/event', (session, event) => {
     const sessionRef = String(session.id)
     if (fenced.has(sessionRef)) return
+
+    // 首 sight 补缺兜底(终审 I1 竞态收敛):created 时刻与构造/发布窗口存在时序
+    // 双向竞态(承载 child 实测 seq 覆盖三形态 13/14/20 行)。firehose 首个发布
+    // 事件必然到达,而此刻 session.events 已含全部构造期事件——全量快照经同一
+    // 写者队列补拷,(session,seq) 幂等吸收与 firehose 的重复;与 created 触发
+    // 共存(先到者先补,后到者 duplicate 吸收)。
+    if (!sightSeen.has(sessionRef)) {
+      sightSeen.add(sessionRef)
+      // 真实会话必然带 events;对外部 emit 的极简形状(如测试直发)防御——无
+      // events 即无构造期可补,跳过。
+      const live = session as { events?: readonly SessionEvent[] }
+      if (live.events !== undefined) backfill(sessionRef, live.events.slice())
+    }
 
     // 串到本会话队列尾：dsh 的 seq 已定序，但 append 是异步的，
     // 并发发起会让先到的事件后落库，read() 出来的顺序就不再是 seq 顺序。

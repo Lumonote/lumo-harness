@@ -234,6 +234,15 @@ dsh 能远程化 filesystem/subprocess，是因为它专门造了 `ctx.e2b` 这�
 > 路径成败、绝不影响 fencing）；读路径 windowCovered 才用、否则回退 PG（正确性构造性
 > 保证：窗口序列化校验不连续即弃）；`ctx.sessionLogHot.read/head` 供「证据不够新」滞后探测
 > （§20.1 D-Refuse）。`hotCache` 缺省不配置时行为与无热层完全一致。
+> **构造期事件回填已落地（2026-08-27，评审 I1）**：dsh `session/event` firehose 只发布已 attach
+> 会话的 append；构造窗口内（store attach 前）的事件——种子/`session/end-seed`、preset/permission、
+> sandbox/mode、`subagent/descriptor` 等——从不发布，复制日志会留下**永久缺失**（承载 child
+> 会话实测 seq 0..N）。`@lumo/session-log` 现在在 `session/created`（announce 时快照）与
+> **firehose 首个发布事件（sight 兜底——覆盖 created 与构造窗的时序竞态，终审确定性收敛）**
+> 两个触发点上把该会话 live `events` 全量经既有写者队列补拷入 PG（`(session,seq)` 主键幂等，
+> 与 firehose 写路径任意顺序共存；fenced 跳过、失败不 fence 不抛——与写路径同语义）。
+> 边界：冷启动恢复旧会话无 created/首个 sight 不触发 live 补缺（恢复会话的缺口检测归
+> 「首 sight 缺口检测」后续切片）；契约与实现见 `session-log/src/backfill.ts`。
 
 ### 4.3 组件化契约 + 五类制品
 
