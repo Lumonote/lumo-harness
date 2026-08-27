@@ -31,7 +31,9 @@ export interface CallIntent {
    */
   idempotencyKey: string
   sessionRef: string
-  /** Turn 序号，取会话日志中 `user/message` 的条数（`seed` 重放后可重建） */
+  /** Turn 序号，取 dsh 原生 `turn/start` 事件的 turn 号（`seed` 重放后可重建）。
+   *  不得数 `user/message` 条数——它含 `agent.inject()` 合成消息，turn 中途一次
+   *  inject 即让计数 +1，同参重放算出不同幂等键，重放识别随之失效。 */
   turn: number
   toolName: string
   /** 参数指纹（不存原文——参数可能含敏感数据，§6.3 凭证不落日志） */

@@ -257,7 +257,7 @@ export const SEAM_GRADES: Readonly<Record<string, SeamGrade>> = {
     class: 'needs-design',
     shape: 'handle',
     why: '句柄型：kill 一个远端 job 需要句柄虚拟化与重连语义',
-    belongsTo: 'R2 的 turn 级恢复契约定稿后重判',
+    belongsTo: '控制信号通道（§7.4）+ Scheduler；恢复语义（超时重派/resume 到何节点）随 R2 turn 级恢复契约',
   },
   'ctx.lsp': {
     class: 'needs-design',
