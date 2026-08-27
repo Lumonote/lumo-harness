@@ -41,6 +41,12 @@ export async function registerSubagentRemote(ctx: Context, config: RemoteConfig)
     }
     const onListening = () => {
       assembly.server.removeListener('error', onError)
+      // listen 期 fail-fast 语义已结,换常驻 log-only 监听:运行时 'error'(accept 期
+      // EMFILE 等)若无监听会以 uncaught 崩掉整个节点 —— 回调面不该因一次 accept
+      // 错误带崩 parent(终审 M2;与 listen 期 fail-fast 不冲突)。
+      assembly.server.on('error', (e: unknown) => {
+        ctx.logger.error('subagent-remote: 回调 server 运行时错误: %s', e instanceof Error ? e.message : String(e))
+      })
       resolve()
     }
     assembly.server.once('error', onError)

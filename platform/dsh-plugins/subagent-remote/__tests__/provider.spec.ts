@@ -12,7 +12,7 @@ import { assertStartChildRequest } from '../../../shared/seam-contracts/subagent
 import type { ChildResultBody, StartChildRequest } from '../../../shared/seam-contracts/subagent-host.ts'
 import { registerSubagentRemote } from '../src/index.ts'
 import { assembleRemote } from '../src/provider.ts'
-import type { RemoteConfig, RemoteSubagentProvider } from '../src/provider.ts'
+import type { RemoteSubagentProvider } from '../src/provider.ts'
 
 /**
  * 三 mock server 全真 HTTP(不 mock fetch):
@@ -114,7 +114,10 @@ async function setup(opts: SetupOptions = {}): Promise<Harness> {
   // TOCTOU 消除(评审 Minor ④):不再 freePort → 再 listen 的放开窗口 —— listen(0)
   // 由内核直接分配端口;provider 现读 config.callbackPort(见 RemoteSubagentProvider),
   // listen 之后回填真实端口,回调 server 与 provider 的 callbackPort 两处同源。
-  const config: RemoteConfig = {
+  // 契约面 RemoteConfig.callbackPort 是 readonly(装配完不该被外部写)—— 回填属
+  // 装配中段,故先以可变底稿构造、交 assembleRemote 时按契约只读;provider 持同一
+  // 引用,回填即生效(终审 M1:消除 TS2540 的 readonly 赋值)。
+  const config = {
     schedulerUrl: baseOf(sched),
     nodeUrls: { N1: baseOf(host) },
     hostTokens: opts.nodeTokens ?? { N1: 't0k' },
