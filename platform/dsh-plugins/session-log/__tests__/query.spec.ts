@@ -12,6 +12,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 
 import type { LogRecord } from '../../../shared/seam-contracts/session-log.ts'
+import { SeamError, seamErrorCode } from '../../../shared/seam-contracts/errors.ts'
 import { apply, PgSessionLog } from '../src/index.ts'
 import { schemaDsn } from './pg-schema.ts'
 
@@ -140,6 +141,19 @@ describe(`读面 staleness 信封 —— 对真 PG（需 SESSION_LOG_TEST_DSN，
       const past = await ctx.sessionLogQuery.queryWithStaleness('sess-e', { liveHead: 11 }) // lag=9
       expect(past.kind).toBe('stale')
       if (past.kind === 'stale') expect(past.lag).toBe(9)
+    })
+  })
+
+  t('seam 入口守卫穿透：非法 liveHead 经 seam 直接拒绝（纯函数守卫在装配路径同样生效）', async () => {
+    await withBoot(async (ctx) => {
+      let caught: unknown
+      try {
+        await ctx.sessionLogQuery.queryWithStaleness('sess-guard', { liveHead: -1 })
+      } catch (error) {
+        caught = error
+      }
+      expect(caught).toBeInstanceOf(SeamError)
+      expect(seamErrorCode(caught)).toBe('invalid')
     })
   })
 })

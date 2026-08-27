@@ -87,6 +87,11 @@ export function assertSessionQueryEnvelope(v: unknown): asserts v is SessionQuer
     return
   }
   if (env['kind'] === 'stale') {
+    // 头注不变量「stale 信封不携带 records」在此执法：生产方漂移后夹带半截记录
+    // 的形状必须在校验器出口即拒，不能靠消费方自觉。
+    if (Object.hasOwn(env, 'records')) {
+      throw invalid('session-query: stale 信封不得携带 records（显式 stale 绝不返回半截结果）')
+    }
     const reason = env['reason']
     if (typeof reason !== 'string' || !(STALE_REASONS as readonly string[]).includes(reason)) {
       throw invalid(
