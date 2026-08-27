@@ -435,10 +435,12 @@ async function main(): Promise<void> {
     process.exit(0)
   } catch (error) {
     console.error('跨节点子代理委派双进程冒烟失败:', error instanceof Error ? error.stack : error)
-    // 承载进程可能仍在跑:清掉;数据目录默认保留做取证(除非 KEEP 标志同语义)
+    // 承载进程可能仍在跑:清掉;失败取证按 LUMO_SMOKE_KEEP——1=保留 DSH_HOME,默认删除
+    // (与头部注释语义一致:早期版本的 KEEP 分支曾反相,KEEP=1 反而删除,已在评审修正)
     await killCarrier(carrier)
     await teardownScheduler()
-    if (!keepOnFailure) {
+    if (keepOnFailure) {
+      // LUMO_SMOKE_KEEP=1:保留临时 DSH_HOME 供失败取证(进程已清,tmp 目录存证据)
       console.log(`  [取证] 承载 DSH_HOME 保留在 ${home}(判据失败原因在上一行)`)
     } else {
       rmSync(home, { recursive: true, force: true })
