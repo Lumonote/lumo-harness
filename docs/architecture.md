@@ -241,8 +241,10 @@ dsh 能远程化 filesystem/subprocess，是因为它专门造了 `ctx.e2b` 这�
 > **firehose 首个发布事件（sight 兜底——覆盖 created 与构造窗的时序竞态，终审确定性收敛）**
 > 两个触发点上把该会话 live `events` 全量经既有写者队列补拷入 PG（`(session,seq)` 主键幂等，
 > 与 firehose 写路径任意顺序共存；fenced 跳过、失败不 fence 不抛——与写路径同语义）。
-> 边界：冷启动恢复旧会话无 created/首个 sight 不触发 live 补缺（恢复会话的缺口检测归
-> 「首 sight 缺口检测」后续切片）；契约与实现见 `session-log/src/backfill.ts`。
+> 边界：恢复路径（dsh agent-loop `setupAndPublish` → `announce`）同样触发 `session/created`，
+> 其构造种子 = 全量持久历史——回填全量重拷、`(session,seq)` 幂等吸收（已存段纯写放大，
+> crash 尾缺口顺带从内存 `events` 补齐）；只写缺失段（水位判别/`firstLiveSeq` 界定构造
+> 前缀）与针对性缺口检测归后续切片。契约与实现见 `session-log/src/backfill.ts`。
 
 ### 4.3 组件化契约 + 五类制品
 

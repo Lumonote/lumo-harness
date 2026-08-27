@@ -12,9 +12,11 @@
  * ① 该会话已被本节点 fence → 跳过回填(本节点已停手,不再动他人写权)。
  * ② 回填失败(库故障等)→ 只 error 日志,不 fence、不抛——与 firehose 写路径同语义;
  *    重试的语义留给上层(本切片不做重试)。
- * ③ 冷启动恢复旧会话不触发 `session/created`(无 create 事件)——本切片只覆盖
- *    live create(承载/child 场景);恢复/持久化会话的缺口检测归「首 sight 缺口检测」
- *    后续切片,不在本切片范围。
+ * ③ 恢复路径(dsh agent-loop `setupAndPublish` → `announce`)**同样触发**
+ *    `session/created`,其构造种子 = 全量持久化历史——本回填会全量重拷、
+ *    `(session,seq)` 幂等吸收(已存段纯写放大;crash 尾缺口顺带从内存 events 补齐)。
+ *    只写缺失段(水位判别/`firstLiveSeq` 界定构造前缀)与针对性缺口检测归
+ *    「首 sight 缺口检测」后续切片,不在本切片范围。
  *
  * 刻意不做:**firstLiveSeq / end-seed 交互逻辑**。回填是「created 时刻 events 全量」
  * 的忠实拷贝——含种子事件与本进程构造期补的 end-seed 标记;截断、恢复重标是种子/

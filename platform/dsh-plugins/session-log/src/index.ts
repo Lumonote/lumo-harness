@@ -272,24 +272,8 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
     try {
       const sessionRef = String(session.id)
       if (fenced.has(sessionRef)) return
-      // 先取快照再入队:events 是不可变快照,但队列任务的执行时刻可能晚于更多
-      // append——快照补的是「created 时刻」的构造期全量,之后的事件走 firehose。
-      const snapshot = session.events.slice()
-      queueBackfill(sessionRef, snapshot, {
-        tails,
-        isFenced: (ref) => fenced.has(ref),
-        ensureToken,
-        append: (record, token) => log.append(record, token),
-        onMirror: hot === undefined ? undefined : (record) => {
-          // 复用 firehose 写路径的镜像形态:PG 提交后 fire-and-forget,失败只 warn
-          // ——绝不 fence、绝不阻塞队列尾(单连接命令有序 ⇒ 镜像序 == append 序)。
-          void hot.mirror(record).catch((error: unknown) => {
-            ctx.logger.warn('session-log: 会话 %s seq=%d 热层镜像失败(不影响写路径):%s',
-              sessionRef, record.seq, error instanceof Error ? error.message : String(error))
-          })
-        },
-        logger: ctx.logger,
-      })
+      // 快照与依赖组复用 backfill()(与首 sight 兜底同一实现,无漂移面)。
+      backfill(sessionRef, session.events.slice())
     } catch (error) {
       ctx.logger.error('session-log: 会话 %s created 回填入队失败:%s',
         String(session.id), error instanceof Error ? error.message : String(error))
@@ -304,6 +288,7 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
       tails.delete(sessionRef)
       tokens.delete(sessionRef)
       fenced.delete(sessionRef)
+      sightSeen.delete(sessionRef)
     })
   })
 
