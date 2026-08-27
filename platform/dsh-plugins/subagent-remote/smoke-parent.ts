@@ -347,7 +347,9 @@ async function main(): Promise<void> {
       || parent.session.header.delegationDepth === 0, 'parent 深度=根(0/缺省)')
 
     const callbackPort = await freePort()
-    registerSubagentRemote(ctx, {
+    // T7(M118):registerSubagentRemote 变 async——listen 成功后才注册 provider;
+    // 此处必须 await,否则 start 会撞"provider 未注册"。
+    await registerSubagentRemote(ctx, {
       schedulerUrl,
       nodeUrls: { ['N1']: nodeUrl },
       hostTokens: { ['N1']: hostToken },
