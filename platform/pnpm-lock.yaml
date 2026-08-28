@@ -21,6 +21,8 @@ importers:
         specifier: ^4.1.8
         version: 4.1.11(@types/node@26.2.0)(vite@8.2.2(@types/node@26.2.0)(esbuild@0.28.2)(tsx@4.23.12))
 
+  console: {}
+
   data-plane/dsh-node:
     dependencies:
       '@deepseek-ai/cordis':
@@ -44,6 +46,9 @@ importers:
       '@lumo/control':
         specifier: link:../../dsh-plugins/control
         version: link:../../dsh-plugins/control
+      '@lumo/dsh-platform-ui':
+        specifier: link:../../dsh-plugins/lumo-ui
+        version: link:../../dsh-plugins/lumo-ui
       '@lumo/knowledge':
         specifier: link:../../dsh-plugins/knowledge
         version: link:../../dsh-plugins/knowledge
@@ -165,6 +170,37 @@ importers:
       tsx:
         specifier: 4.22.4
         version: 4.22.4
+
+  dsh-plugins/lumo-ui:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: link:../../../deepseek-harness/vendor/cordis
+        version: link:../../../deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-client-runtime':
+        specifier: link:../../../deepseek-harness/packages/client/runtime
+        version: link:../../../deepseek-harness/packages/client/runtime
+      '@deepseek-ai/dsh-client-ui-layout':
+        specifier: link:../../../deepseek-harness/packages/client/ui-layout
+        version: link:../../../deepseek-harness/packages/client/ui-layout
+      '@deepseek-ai/dsh-client-ui-slots':
+        specifier: link:../../../deepseek-harness/packages/client/ui-slots
+        version: link:../../../deepseek-harness/packages/client/ui-slots
+      '@deepseek-ai/dsh-host-webserver':
+        specifier: link:../../../deepseek-harness/packages/host/webserver
+        version: link:../../../deepseek-harness/packages/host/webserver
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../deepseek-harness/vendor/schemastery
+        version: link:../../../deepseek-harness/vendor/schemastery
+      react:
+        specifier: link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react
+        version: link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react
+    devDependencies:
+      '@types/node':
+        specifier: link:../../../deepseek-harness/node_modules/@types/node
+        version: link:../../../deepseek-harness/node_modules/@types/node
+      '@types/react':
+        specifier: link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/@types/react
+        version: link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/@types/react
 
   dsh-plugins/mailbox:
     dependencies:

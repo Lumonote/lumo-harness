@@ -48,9 +48,16 @@ func TestHTTPNoLeaderFastFailAndFullFlow(t *testing.T) {
 		return resp, string(b)
 	}
 
-	get := func(path string) (*http.Response, string) {
+	get := func(path, realm string) (*http.Response, string) {
 		t.Helper()
-		resp, err := http.DefaultClient.Get(ts.URL + path)
+		req, err := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+		if err != nil {
+			t.Fatalf("构造请求失败: %v", err)
+		}
+		if realm != "" {
+			req.Header.Set("X-Lumo-Realm", realm)
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("请求失败: %v", err)
 		}
@@ -64,7 +71,7 @@ func TestHTTPNoLeaderFastFailAndFullFlow(t *testing.T) {
 	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(body, "no-leader") {
 		t.Fatalf("无 leader 应 503 no-leader: %d %s", resp.StatusCode, body)
 	}
-	resp, body = post("/v1/reconcile", "", `{"entries":[{"entry_id":"e1","task_id":"t9","cluster_id":"c1","state":"RUNNING"}]}`)
+	resp, body = post("/v1/reconcile", "r1", `{"entries":[{"entry_id":"e1","task_id":"t9","cluster_id":"c1","state":"RUNNING"}]}`)
 	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(body, "no-leader") {
 		t.Fatalf("无 leader 对账应 503 no-leader: %d %s", resp.StatusCode, body)
 	}
@@ -76,7 +83,7 @@ func TestHTTPNoLeaderFastFailAndFullFlow(t *testing.T) {
 	waitFor(t, 2*time.Second, elec.IsLeader)
 
 	// 全流程：注册节点 → 放置 → 查询 → 回报终态
-	resp, body = post("/v1/nodes", "", `{"node_id":"N1","cluster_id":"c1","capacity":2,"capabilities":["llm"]}`)
+	resp, body = post("/v1/nodes", "r1", `{"node_id":"N1","cluster_id":"c1","capacity":2,"capabilities":["llm"]}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("注册节点失败: %d %s", resp.StatusCode, body)
 	}
@@ -92,31 +99,31 @@ func TestHTTPNoLeaderFastFailAndFullFlow(t *testing.T) {
 		t.Fatalf("放置响应不符: %+v", p)
 	}
 
-	resp, body = get("/v1/placements/t1")
+	resp, body = get("/v1/placements/t1", "r1")
 	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "PLACED") {
 		t.Fatalf("查询放置失败: %d %s", resp.StatusCode, body)
 	}
 
 	// 回报终态（幂等：二次回报同样成功）
 	for i := 0; i < 2; i++ {
-		resp, body = post("/v1/tasks/t1/result", "", `{"state":"COMPLETED"}`)
+		resp, body = post("/v1/tasks/t1/result", "r1", `{"state":"COMPLETED"}`)
 		if resp.StatusCode != http.StatusOK || !strings.Contains(body, "COMPLETED") {
 			t.Fatalf("回报终态失败: %d %s", resp.StatusCode, body)
 		}
 	}
 
 	// leader 观测
-	resp, body = get("/v1/leader")
+	resp, body = get("/v1/leader", "")
 	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "node-test") {
 		t.Fatalf("leader 应为本测试节点: %d %s", resp.StatusCode, body)
 	}
 
 	// 对账：leader 就位后入库 + 幂等去重
-	resp, body = post("/v1/reconcile", "", `{"entries":[{"entry_id":"e1","task_id":"t9","cluster_id":"c1","state":"RUNNING"}]}`)
+	resp, body = post("/v1/reconcile", "r1", `{"entries":[{"entry_id":"e1","task_id":"t9","cluster_id":"c1","state":"RUNNING"}]}`)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"recorded":1`) {
 		t.Fatalf("对账应记录 1 条: %d %s", resp.StatusCode, body)
 	}
-	resp, body = post("/v1/reconcile", "", `{"entries":[{"entry_id":"e1","task_id":"t9","cluster_id":"c1","state":"RUNNING"}]}`)
+	resp, body = post("/v1/reconcile", "r1", `{"entries":[{"entry_id":"e1","task_id":"t9","cluster_id":"c1","state":"RUNNING"}]}`)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"recorded":0`) {
 		t.Fatalf("重复对账应去重记录 0 条: %d %s", resp.StatusCode, body)
 	}

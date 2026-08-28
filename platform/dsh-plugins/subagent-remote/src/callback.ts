@@ -33,12 +33,13 @@ export type ChildResultSettler = (body: ChildResultBody) => void
  * 的信息量忽略不计,无需 timingSafeEqual(常量时间在「猜不中」面前无增益)。
  */
 export interface PendingEntry {
-  readonly secret: string
-  readonly settler: ChildResultSettler
+	readonly secret: string
+	readonly settler: ChildResultSettler
+	attempt?: number
 }
 
 /** 已注册回执结集后的 best-effort 终态上报钩子。 */
-export type ReportTerminal = (body: ChildResultBody) => void
+export type ReportTerminal = (body: ChildResultBody, attempt?: number) => void
 
 export interface CallbackServerOptions {
   /** runId → 条目。server 只读查询 + 首次结算后摘除;登记/删除由 provider.start 做。 */
@@ -92,7 +93,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: Callba
     }
     options.pending.delete(childId)
     entry.settler(body)
-    options.reportTerminal(body)
+		options.reportTerminal(body, entry.attempt)
     respond(res, 200, { ok: true })
   } catch (e) {
     respond(res, seamErrorCode(e) === 'internal' ? 500 : 400, { ok: false, code: seamErrorCode(e), message: e instanceof Error ? e.message : String(e) })

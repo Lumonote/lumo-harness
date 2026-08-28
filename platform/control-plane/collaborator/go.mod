@@ -2,6 +2,10 @@ module github.com/lumo-harness/platform/collaborator
 
 go 1.24
 
+require github.com/lumo-harness/platform/observability v0.0.0
+
+replace github.com/lumo-harness/platform/observability => ../observability
+
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.7.2

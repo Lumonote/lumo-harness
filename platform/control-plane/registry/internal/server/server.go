@@ -10,9 +10,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
+	"github.com/lumo-harness/platform/observability"
+	"github.com/lumo-harness/platform/registry/internal/bundle"
 	"github.com/lumo-harness/platform/registry/internal/manifest"
 	"github.com/lumo-harness/platform/registry/internal/objstore"
 	"github.com/lumo-harness/platform/registry/internal/plan"
@@ -37,11 +40,67 @@ func New(s *store.Store, ts *trust.Store, objs objstore.Store) http.Handler {
 	a := &api{store: s, trust: ts, objs: objs}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", a.healthz)
+	mux.HandleFunc("/metrics", metrics)
 	mux.HandleFunc("/v1/artifacts", a.artifacts)
 	mux.HandleFunc("/v1/artifacts/", a.artifactPath)
+	mux.HandleFunc("/v1/blobs", a.blobs)
+	mux.HandleFunc("/v1/blobs/", a.blob)
 	mux.HandleFunc("/v1/resolve", a.resolve)
 	mux.HandleFunc("/v1/plan", a.plan)
 	return mux
+}
+
+func (a *api) blobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "registry: 只支持 POST")
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 64<<20+1))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "registry: 读取 bundle 失败")
+		return
+	}
+	if len(raw) > 64<<20 {
+		writeErr(w, http.StatusRequestEntityTooLarge, "registry: bundle 超过 64 MiB")
+		return
+	}
+	if _, err := bundle.Decode(raw); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	digest := objstore.Digest(raw)
+	if err := a.objs.Put(r.Context(), digest, raw); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"digest": digest})
+}
+
+// blob 返回已经通过内容寻址校验的原始制品字节。
+// Provisioner 只应从这里取 bytes，再按 /v1/plan 的 digest 二次校验后安装。
+func (a *api) blob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "registry: 只支持 GET")
+		return
+	}
+	digest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/blobs/"), "/")
+	if !objstore.ValidDigest(digest) {
+		writeErr(w, http.StatusBadRequest, "registry: digest 格式非法")
+		return
+	}
+	raw, err := a.objs.Get(r.Context(), digest)
+	if err != nil {
+		if errors.Is(err, objstore.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Content-Digest", digest)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -76,6 +135,10 @@ func fail(w http.ResponseWriter, err error) {
 
 func (a *api) healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func metrics(w http.ResponseWriter, _ *http.Request) {
+	observability.Handler(w, nil)
 }
 
 type publishEnvelope struct {

@@ -517,6 +517,8 @@ query ──▶ ctx.knowledge.vector: top-k 语义召回(带 realm 过滤)
 > 制品注册与分发的治理设计（provisioner / OPA scope 评估 / 密钥轮换与吊销）见
 > `docs/superpowers/specs/2026-08-26-registry-governance-design.md`；needs-design
 > seam 13 项的远程形态见 `docs/superpowers/specs/2026-08-26-seam-remote-forms-design.md`。
+> Cluster 专属的组织治理、PC 桌面节点与制品分发契约见
+> `docs/superpowers/specs/2026-08-28-cluster-organization-desktop-and-artifact-distribution-design.md`。
 
 | 能力 | 原三件套 | **Nacos** |
 |------|----------|-----------|
@@ -1458,7 +1460,10 @@ SessionEvent 日志 append-only、每会话单调序号（§8.2）——这让�
 | Standalone → Cluster | **单向在线升级**（§13.2；**不可回退为并行**） | ① 配置面先行：Nacos 接管配置与注册（`cordis.patch.yml` 迁移到 Nacos 规则）；② 数据面复制：在**周期边界**冻结预算（setBudget 语义：一行即本期，冻结=停止重配），明细/日志增量迁移；③ 切流：灰度 + §19.3 演练断言。**旧单机保留 N 天作为冷备，不做双写并行**——双写是分布式一致性问题的来源，一个向前的方向不值得背 |
 | 本地缩微 ↔ 云 | 同镜像/同配置换编排 | 铁律 21：本地缩微 = 自研服务多实例 + 中间件单实例，**同接口语义**（契约测试是前提） |
 
-**helms 尚未存在**（阶段 5）：K8s 部署与迁移/回滚预案（含 helm rollback 演练）必须随 helm 交付，作为 helm 的验收条款——plan 阶段 5 已留位。
+**Helm 已存在**（阶段 5）：`platform/deploy/helm/lumo-platform` 提供控制面服务
+Deployment/Service、依赖配置、健康探针、可选 DSH 承载节点池和 HPA；生产仍需在
+目标集群完成 `helm rollback`、Secret、metrics-server/Prometheus Adapter 与完整
+中间件联合演练。
 
 ### 22.3 Schema 演进规范（固化自本仓库四次实践）
 

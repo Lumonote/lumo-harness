@@ -25,6 +25,7 @@ import {
 export interface WebGatewayConfig {
   /** 连接器网关地址（Local-lite: http://localhost:58082 / compose standalone: :18082） */
   gatewayUrl: string
+  controlPlaneToken?: string
   /** 本节点身份（装配层固定；模型不可改——同 connector 插件） */
   realm: string
   userId: string
@@ -44,6 +45,7 @@ export interface WebGatewayConfig {
 /** Schemastery validation for {@link WebGatewayConfig} */
 export const Config: z<WebGatewayConfig> = z.object({
   gatewayUrl: z.string(),
+  controlPlaneToken: z.string(),
   realm: z.string(),
   userId: z.string(),
   roles: z.array(z.string()),

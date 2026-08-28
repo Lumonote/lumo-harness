@@ -1,0 +1,17 @@
+# The upstream dsh build embeds its source commit. Keep only the metadata
+# needed to resolve HEAD; never send the full Git history in the build context.
+.git
+**/.git/**
+!deepseek-harness/.git/
+!deepseek-harness/.git/HEAD
+!deepseek-harness/.git/refs/
+!deepseek-harness/.git/refs/heads/
+!deepseek-harness/.git/refs/heads/**
+!deepseek-harness/.git/packed-refs
+.codegraph
+**/node_modules
+**/target
+**/.cache
+**/coverage
+**/dist
+**/.turbo

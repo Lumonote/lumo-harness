@@ -50,6 +50,7 @@ services:
     container_name: lumo-platform-collaborator
     environment:
       LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       LUMO_REDIS_ADDR: redis:6379
       LUMO_LISTEN: ":8081"
       LUMO_INSTANCE: collaborator-0
@@ -67,6 +68,7 @@ services:
     container_name: lumo-platform-connector-gateway
     environment:
       LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       LUMO_REDIS_ADDR: redis:6379
       LUMO_LISTEN: ":8082"
       LUMO_ADMIN_ROLES: admin
@@ -88,6 +90,7 @@ services:
     container_name: lumo-platform-scheduler-0
     environment:
       LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       LUMO_LISTEN: ":8083"
       LUMO_INSTANCE: scheduler-0
     ports:
@@ -102,6 +105,7 @@ services:
     container_name: lumo-platform-scheduler-1
     environment:
       LUMO_PG_DSN: postgres://lumo:lumo@postgres:5432/lumo
+      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       LUMO_LISTEN: ":8083"
       LUMO_INSTANCE: scheduler-1
     ports:

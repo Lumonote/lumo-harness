@@ -20,17 +20,24 @@ import type { RemoteConfig } from './provider.ts'
 /** Schemastery validation for {@link RemoteConfig}(仅加载器形态;程序化调用走 assembleRemote)。 */
 export const Config: z<RemoteConfig> = z.object({
   schedulerUrl: z.string().required(),
+  controlPlaneToken: z.string(),
   nodeUrls: z.dict(z.string()).required(),
   hostTokens: z.dict(z.string()).required(),
+  nacosUrl: z.string(),
+  nacosService: z.string(),
+  nacosGroup: z.string(),
+  defaultHostToken: z.string(),
+  clusterId: z.string(),
   realm: z.string().required(),
   callbackPort: z.number().required(),
   callbackHost: z.string(),
+  callbackBindHost: z.string(),
 })
 
 export async function registerSubagentRemote(ctx: Context, config: RemoteConfig): Promise<void> {
   // jobControl is a process-local seam service, not patch-file configuration.
   const assembly = assembleRemote({ ...config, jobControl: ctx.jobControl })
-  const host = config.callbackHost ?? '127.0.0.1'
+  const host = config.callbackBindHost ?? config.callbackHost ?? '127.0.0.1'
 
   // EADDRINUSE 等监听失败必须 fail-fast:apply 拒绝 = 节点装配失败。只 log 的形态
   // 是"节点活着却收不到回执"—— 比死节点更糟,所有委派永久挂起(评审 Minor ③ 钉死)。

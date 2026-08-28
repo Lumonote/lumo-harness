@@ -18,6 +18,7 @@ import (
 	"github.com/lumo-harness/platform/llm-gateway/internal/domain"
 	"github.com/lumo-harness/platform/llm-gateway/internal/gateway"
 	"github.com/lumo-harness/platform/llm-gateway/internal/store"
+	"github.com/lumo-harness/platform/observability"
 )
 
 // Emitter 计量事件发出方标识（§6.4：发出方命名显式化）。
@@ -42,6 +43,11 @@ func (s *Server) Register(mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+	mux.HandleFunc("GET /metrics", metrics)
+}
+
+func metrics(w http.ResponseWriter, _ *http.Request) {
+	observability.Handler(w, nil)
 }
 
 // attribution 归因解析：必填五头缺一 400（带缺哪个——调用方能自修）；可选五头带

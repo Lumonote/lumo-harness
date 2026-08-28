@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/lumo-harness/platform/registry/internal/bundle"
+	"github.com/lumo-harness/platform/registry/internal/objstore"
 	"github.com/lumo-harness/platform/registry/internal/server"
 )
 
@@ -59,6 +61,45 @@ func TestMethodNotAllowed(t *testing.T) {
 		if w.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("%s %s 应 405，得到 %d", tc.method, tc.path, w.Code)
 		}
+	}
+}
+
+func TestBlobUploadAcceptsOnlyVerifiedBundles(t *testing.T) {
+	payload := []byte("skill")
+	raw, parsed, err := bundle.Create(bundle.Header{SchemaVersion: bundle.SchemaVersion, Bundle: "demo-skill", Version: "1.0.0"}, nil, []bundle.Entry{{
+		Path: "skills/demo-skill/SKILL.md", Encoding: "utf8", SHA256: objstore.Digest(payload), Data: string(payload),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := server.New(nil, nil, objstore.NewFileStore(t.TempDir()))
+	req := httptest.NewRequest(http.MethodPost, "/v1/blobs", bytes.NewReader(raw))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("上传 bundle 应为 201，得到 %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Digest string `json:"digest"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Digest != parsed.CompressedDigest {
+		t.Fatalf("digest = %q, want %q", body.Digest, parsed.CompressedDigest)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/v1/blobs/"+body.Digest, nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !bytes.Equal(w.Body.Bytes(), raw) {
+		t.Fatalf("下载 bundle 失败: code=%d body=%q", w.Code, w.Body.Bytes())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/blobs", bytes.NewBufferString("not a bundle"))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("非法 bundle 应为 400，得到 %d", w.Code)
 	}
 }
 

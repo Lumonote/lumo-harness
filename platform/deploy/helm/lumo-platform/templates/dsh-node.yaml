@@ -1,0 +1,267 @@
+{{- if .Values.dshNode.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lumo-platform.name" . }}-dsh-node
+  labels:
+    lumo.dev/service: dsh-node
+spec:
+  replicas: {{ .Values.dshNode.replicas }}
+  selector:
+    matchLabels: { lumo.dev/service: dsh-node }
+  template:
+    metadata:
+      labels: { lumo.dev/service: dsh-node }
+    spec:
+      terminationGracePeriodSeconds: 30
+      {{- if .Values.provisioner.enabled }}
+      initContainers:
+        - name: provisioner-bootstrap
+          image: {{ .Values.provisioner.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: REGISTRY_URL
+              value: {{ printf "http://%s-registry:%v" (include "lumo-platform.name" .) .Values.services.registry.port | quote }}
+            - name: PROVISIONER_ARTIFACT_NAME
+              value: {{ required "provisioner.artifactName is required when provisioner is enabled" .Values.provisioner.artifactName | quote }}
+            - name: PROVISIONER_ARTIFACT_VERSION
+              value: {{ required "provisioner.artifactVersion is required when provisioner is enabled" .Values.provisioner.artifactVersion | quote }}
+            - name: PROVISIONER_INTERVAL
+              value: 0s
+            - name: PROVISIONER_SHAPE
+              value: {{ .Values.provisioner.shape | quote }}
+            - name: PROVISIONER_INSTALL_DIR
+              value: {{ .Values.provisioner.installDir | quote }}
+            - name: LUMO_CONTROL_PLANE_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ .Values.controlPlaneAuth.tokenSecret }}, key: {{ .Values.controlPlaneAuth.tokenKey }}, optional: false } }
+          volumeMounts:
+            - name: artifacts
+              mountPath: {{ .Values.provisioner.installDir | quote }}
+      {{- end }}
+      containers:
+        - name: dsh-node
+          image: {{ .Values.dshNode.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports: [{ name: subagent, containerPort: {{ .Values.dshNode.port }} }]
+          env:
+            - name: LUMO_NODE_ID
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: LUMO_NODE_ADVERTISE_HOST
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: LUMO_NODE_CAPACITY
+              value: {{ .Values.dshNode.capacity | quote }}
+            - name: LUMO_NODE_CAPABILITIES
+              value: {{ .Values.dshNode.capabilities | quote }}
+            - name: LUMO_NODE_RESIDENCY
+              value: {{ .Values.dshNode.residency | quote }}
+            - name: LUMO_CLUSTER_ID
+              value: {{ .Values.dshNode.clusterId | quote }}
+            - name: LUMO_REALM
+              value: {{ .Values.dshNode.realm | quote }}
+            - name: LUMO_ROLE
+              value: node
+            - name: LUMO_SUBAGENT_HOST_BIND
+              value: 0.0.0.0
+            - name: LUMO_SUBAGENT_HOST_PORT
+              value: {{ .Values.dshNode.port | quote }}
+            - name: LUMO_SUBAGENT_CALLBACK_ALLOWED_ORIGINS
+              value: {{ printf "http://%s-dsh-web:%v" (include "lumo-platform.name" .) .Values.dshWeb.callbackPort | quote }}
+            - name: LUMO_PG_DSN
+              value: {{ .Values.postgres.dsn | quote }}
+            - name: LUMO_REDIS_URL
+              value: {{ printf "redis://%s" .Values.redis.address | quote }}
+            - name: LUMO_NACOS_ADDR
+              value: {{ .Values.nacos.address | quote }}
+            - name: LUMO_NACOS_SERVICE
+              value: {{ .Values.nacos.service | quote }}
+            - name: LUMO_NACOS_GROUP
+              value: {{ .Values.nacos.group | quote }}
+            - name: LUMO_SCHEDULER_URL
+              value: {{ printf "http://%s-scheduler:%v" (include "lumo-platform.name" .) .Values.services.scheduler.port | quote }}
+            - name: LUMO_SUBAGENT_HOST_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ .Values.dshNode.hostTokenSecret }}, key: {{ .Values.dshNode.hostTokenKey }}, optional: false } }
+            - name: LUMO_CONTROL_PLANE_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ .Values.controlPlaneAuth.tokenSecret }}, key: {{ .Values.controlPlaneAuth.tokenKey }}, optional: false } }
+            {{- if .Values.provisioner.enabled }}
+            - name: LUMO_SKILL_SNAPSHOT_ROOT
+              value: {{ printf "%s/skills" .Values.provisioner.installDir | quote }}
+            - name: LUMO_SKILL_SNAPSHOT_FILE
+              value: {{ printf "%s/skill-snapshot.json" .Values.provisioner.installDir | quote }}
+            {{- end }}
+          {{- if .Values.provisioner.enabled }}
+          volumeMounts:
+            - name: artifacts
+              mountPath: {{ .Values.provisioner.installDir | quote }}
+              readOnly: true
+          {{- end }}
+          readinessProbe: { tcpSocket: { port: subagent }, initialDelaySeconds: 8, periodSeconds: 10 }
+          livenessProbe: { tcpSocket: { port: subagent }, initialDelaySeconds: 20, periodSeconds: 20 }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 2, memory: 2Gi }
+      {{- if .Values.provisioner.enabled }}
+        - name: provisioner
+          image: {{ .Values.provisioner.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: REGISTRY_URL
+              value: {{ printf "http://%s-registry:%v" (include "lumo-platform.name" .) .Values.services.registry.port | quote }}
+            - name: PROVISIONER_ARTIFACT_NAME
+              value: {{ required "provisioner.artifactName is required when provisioner is enabled" .Values.provisioner.artifactName | quote }}
+            - name: PROVISIONER_ARTIFACT_VERSION
+              value: {{ required "provisioner.artifactVersion is required when provisioner is enabled" .Values.provisioner.artifactVersion | quote }}
+            - name: PROVISIONER_INTERVAL
+              value: {{ .Values.provisioner.interval | quote }}
+            - name: PROVISIONER_SHAPE
+              value: {{ .Values.provisioner.shape | quote }}
+            - name: PROVISIONER_INSTALL_DIR
+              value: {{ .Values.provisioner.installDir | quote }}
+            - name: LUMO_CONTROL_PLANE_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ .Values.controlPlaneAuth.tokenSecret }}, key: {{ .Values.controlPlaneAuth.tokenKey }}, optional: false } }
+          volumeMounts:
+            - name: artifacts
+              mountPath: {{ .Values.provisioner.installDir | quote }}
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+      {{- end }}
+      {{- if .Values.provisioner.enabled }}
+      volumes:
+        - name: artifacts
+          emptyDir: {}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lumo-platform.name" . }}-dsh-node
+  labels:
+    lumo.dev/service: dsh-node
+spec:
+  clusterIP: None
+  selector: { lumo.dev/service: dsh-node }
+  ports: [{ name: subagent, port: {{ .Values.dshNode.port }}, targetPort: subagent }]
+{{- if .Values.dshNode.hpa.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "lumo-platform.name" . }}-dsh-node
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "lumo-platform.name" . }}-dsh-node
+  minReplicas: {{ .Values.dshNode.hpa.minReplicas }}
+  maxReplicas: {{ .Values.dshNode.hpa.maxReplicas }}
+  behavior:
+    scaleUp: { stabilizationWindowSeconds: 0 }
+    scaleDown: { stabilizationWindowSeconds: 300 }
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: {{ .Values.dshNode.hpa.targetCPUUtilizationPercentage }} }
+{{- end }}
+{{- end }}
+{{- if .Values.dshWeb.enabled }}
+{{- if and (not .Values.dshWeb.identityAssertion.secretName) (not .Values.dshWeb.identityAssertion.allowStaticIdentity) }}
+{{- fail "dshWeb.identityAssertion.secretName is required when dshWeb is enabled; set allowStaticIdentity=true only for development" }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lumo-platform.name" . }}-dsh-web
+  labels:
+    lumo.dev/service: dsh-web
+spec:
+  replicas: {{ .Values.dshWeb.replicas }}
+  selector:
+    matchLabels: { lumo.dev/service: dsh-web }
+  template:
+    metadata:
+      labels: { lumo.dev/service: dsh-web }
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: dsh-web
+          image: {{ .Values.dshWeb.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { name: web, containerPort: {{ .Values.dshWeb.port }} }
+            - { name: subagent-callback, containerPort: {{ .Values.dshWeb.callbackPort }} }
+          env:
+            - name: LUMO_DSH_PROFILE
+              value: web
+            - name: LUMO_WEB_PORT
+              value: {{ .Values.dshWeb.port | quote }}
+            - name: LUMO_NODE_ID
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: LUMO_CLUSTER_ID
+              value: {{ .Values.dshWeb.clusterId | quote }}
+            - name: LUMO_REALM
+              value: {{ .Values.dshWeb.realm | quote }}
+            - name: LUMO_ROLE
+              value: agent
+            - name: LUMO_USER_ID
+              value: {{ .Values.dshWeb.userId | quote }}
+            - name: LUMO_USER_ROLE
+              value: {{ .Values.dshWeb.userRole | quote }}
+            - name: LUMO_PROJECT_ID
+              value: {{ .Values.dshWeb.projectId | quote }}
+            - name: LUMO_DEPT_ID
+              value: {{ .Values.dshWeb.deptId | quote }}
+            - name: LUMO_CONTROL_PLANE_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ .Values.controlPlaneAuth.tokenSecret }}, key: {{ .Values.controlPlaneAuth.tokenKey }}, optional: false } }
+            {{- if .Values.dshWeb.identityAssertion.secretName }}
+            - name: LUMO_IDENTITY_ASSERTION_SECRET
+              valueFrom: { secretKeyRef: { name: {{ .Values.dshWeb.identityAssertion.secretName }}, key: {{ .Values.dshWeb.identityAssertion.secretKey }}, optional: false } }
+            {{- end }}
+            - name: LUMO_PG_DSN
+              value: {{ .Values.postgres.dsn | quote }}
+            - name: LUMO_REDIS_URL
+              value: {{ printf "redis://%s" .Values.redis.address | quote }}
+            - name: LUMO_SCHEDULER_URL
+              value: {{ .Values.dshWeb.schedulerUrl | quote }}
+            - name: LUMO_SCHEDULER_API_URL
+              value: {{ .Values.dshWeb.schedulerUrl | quote }}
+            - name: LUMO_PROJECTS_URL
+              value: {{ .Values.dshWeb.projectsUrl | quote }}
+            - name: LUMO_FLOWS_URL
+              value: {{ .Values.dshWeb.flowsUrl | quote }}
+            - name: LUMO_CONNECTOR_GATEWAY_URL
+              value: {{ .Values.dshWeb.connectorUrl | quote }}
+            - name: LUMO_NACOS_ADDR
+              value: {{ .Values.dshWeb.nacosAddress | quote }}
+            - name: LUMO_NACOS_SERVICE
+              value: {{ .Values.dshWeb.nacosService | quote }}
+            - name: LUMO_NACOS_GROUP
+              value: {{ .Values.dshWeb.nacosGroup | quote }}
+            - name: LUMO_SUBAGENT_CALLBACK_BIND_HOST
+              value: 0.0.0.0
+            - name: LUMO_SUBAGENT_CALLBACK_HOST
+              value: {{ include "lumo-platform.name" . }}-dsh-web
+            - name: LUMO_SUBAGENT_CALLBACK_PORT
+              value: {{ .Values.dshWeb.callbackPort | quote }}
+            - name: LUMO_SUBAGENT_HOST_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ .Values.dshNode.hostTokenSecret }}, key: {{ .Values.dshNode.hostTokenKey }}, optional: false } }
+          readinessProbe: { httpGet: { path: /, port: web }, initialDelaySeconds: 10, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /, port: web }, initialDelaySeconds: 30, periodSeconds: 20 }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 2, memory: 2Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lumo-platform.name" . }}-dsh-web
+  labels:
+    lumo.dev/service: dsh-web
+spec:
+  type: {{ .Values.service.type }}
+  selector: { lumo.dev/service: dsh-web }
+  ports:
+    - { name: web, port: {{ .Values.dshWeb.port }}, targetPort: web }
+    - { name: subagent-callback, port: {{ .Values.dshWeb.callbackPort }}, targetPort: subagent-callback }
+{{- end }}

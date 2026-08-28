@@ -18,6 +18,7 @@ import { isIP } from 'node:net'
 
 import { createSubagentHost } from './server.ts'
 import { runChild, type RunRegistry } from './run.ts'
+import { normalizeCallbackOrigins } from './callback-policy.ts'
 
 export interface SubagentHostConfig {
   /** 监听地址。默认回环 —— 对外暴露必须是显式动作 */
@@ -27,6 +28,8 @@ export interface SubagentHostConfig {
   maxBodyBytes?: number
   /** realm → 共享令牌。缺省即无认证,此时只允许绑回环 */
   tokens?: Record<string, string>
+  /** 允许接收结果的精确 http(s) origins；请求中的 callbackUrl 必须命中其中之一。 */
+  callbackOrigins?: string[]
   /** 显式承认「本端口无认证」。绑非回环地址时该开关无效(见下) */
   allowAnonymous?: boolean
 }
@@ -37,6 +40,7 @@ export const Config: z<SubagentHostConfig> = z.object({
   port: z.number(),
   maxBodyBytes: z.number(),
   tokens: z.dict(z.string()),
+  callbackOrigins: z.array(z.string()),
   allowAnonymous: z.boolean(),
 })
 
@@ -46,6 +50,7 @@ export function registerSubagentHost(ctx: Context, config: SubagentHostConfig): 
   const host = config.host ?? '127.0.0.1'
   const port = config.port ?? 8091
   const tokens = new Map(Object.entries(config.tokens ?? {}))
+  const callbackOrigins = normalizeCallbackOrigins(config.callbackOrigins ?? ['http://127.0.0.1:8092'])
 
   if (tokens.size === 0) {
     // 无认证 + 非回环 = 把跨租户子代理放置开放给整个网络。这不是「配置不当」,
@@ -71,6 +76,7 @@ export function registerSubagentHost(ctx: Context, config: SubagentHostConfig): 
     port,
     maxBodyBytes: config.maxBodyBytes ?? DEFAULT_MAX_BODY,
     tokens,
+    callbackOrigins,
     runs,
     // 已发布会话 = 已结集(运行表条目已摘)或他处占用的幂等键:重放闸(见 server.ts)
     sessionExists: (childId) => ctx.agents.get(SessionId(childId)) !== undefined,

@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/projects/internal/server"
 	"github.com/lumo-harness/platform/projects/internal/store"
 )
@@ -68,7 +69,7 @@ func main() {
 	srv.Register(mux)
 
 	log.Info("projects 启动", "addr", *listen)
-	if err := http.ListenAndServe(*listen, mux); err != nil {
+	if err := http.ListenAndServe(*listen, observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux))); err != nil {
 		log.Error("退出", "err", err)
 		os.Exit(1)
 	}

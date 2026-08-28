@@ -9,37 +9,39 @@ import pg from 'pg'
 
 export const PROJECT_DDL = `
 CREATE TABLE IF NOT EXISTS projects (
-  project_id  TEXT PRIMARY KEY,
+  id          TEXT PRIMARY KEY,
   realm       TEXT NOT NULL,
   name        TEXT NOT NULL,
-  state       TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','archived')),
+  status      TEXT NOT NULL DEFAULT 'active',
+  created_by  TEXT NOT NULL,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   archived_at TIMESTAMPTZ NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_projects_realm ON projects (realm, state);
+CREATE UNIQUE INDEX IF NOT EXISTS projects_realm_name_uq ON projects (realm, name);
 
 -- 成员与项目角色（owner/editor/viewer；与 realm RBAC 取交集，评审 N4）
 CREATE TABLE IF NOT EXISTS project_members (
-  project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   user_id    TEXT NOT NULL,
-  role       TEXT NOT NULL CHECK (role IN ('owner','editor','viewer')),
+  role       TEXT NOT NULL,
+  added_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (project_id, user_id)
 );
 
 -- 制品引用（专家/技能/连接器/组件/流程 —— 控制台「专家·技能·连接器」入口的挂载记录）
 CREATE TABLE IF NOT EXISTS project_artifacts (
-  project_id    TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
-  artifact_kind TEXT NOT NULL CHECK (artifact_kind IN ('component','skill','agent','connector','flow')),
-  artifact_name TEXT NOT NULL,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind       TEXT NOT NULL CHECK (kind IN ('component','skill','agent','connector','flow')),
+  name       TEXT NOT NULL,
   version       TEXT NOT NULL,
-  PRIMARY KEY (project_id, artifact_kind, artifact_name)
+  PRIMARY KEY (project_id, kind, name)
 );
 
 -- 知识空间（§5.4.7 协作单元；一个项目可含多个 Space，Space 不跨 realm）
 CREATE TABLE IF NOT EXISTS project_spaces (
-  space_id   TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+   space_id   TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   realm      TEXT NOT NULL,
   name       TEXT NOT NULL
 );
@@ -47,7 +49,7 @@ CREATE TABLE IF NOT EXISTS project_spaces (
 -- 自动化定义（§8.3 Trigger + §9.2 Flow 的项目侧登记，控制台「自动化」入口）
 CREATE TABLE IF NOT EXISTS project_automations (
   automation_id TEXT PRIMARY KEY,
-  project_id    TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+  project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   trigger_kind  TEXT NOT NULL CHECK (trigger_kind IN ('cron','webhook','event')),
   trigger_spec  TEXT NOT NULL,
   flow_ref      TEXT NOT NULL,
@@ -91,9 +93,9 @@ export class ProjectService {
     try {
       await client.query('BEGIN')
       await client.query(
-        `INSERT INTO projects (project_id, realm, name) VALUES ($1,$2,$3)
-         ON CONFLICT (project_id) DO NOTHING`,
-        [project.projectId, project.realm, project.name],
+        `INSERT INTO projects (id, realm, name, created_by) VALUES ($1,$2,$3,$4)
+         ON CONFLICT (id) DO NOTHING`,
+        [project.projectId, project.realm, project.name, owner],
       )
       await client.query(
         `INSERT INTO project_members (project_id, user_id, role) VALUES ($1,$2,'owner')
@@ -112,7 +114,7 @@ export class ProjectService {
   /** 归档是常态；删除是异常（§11.1 —— 删除须显式授权，此处不提供 delete API） */
   async archive(projectId: string): Promise<void> {
     await this.pool.query(
-      `UPDATE projects SET state = 'archived', archived_at = now() WHERE project_id = $1`,
+      `UPDATE projects SET status = 'archived', archived_at = now() WHERE id = $1`,
       [projectId],
     )
   }
@@ -137,9 +139,9 @@ export class ProjectService {
     projectId: string, kind: ArtifactKind, name: string, version: string,
   ): Promise<void> {
     await this.pool.query(
-      `INSERT INTO project_artifacts (project_id, artifact_kind, artifact_name, version)
+      `INSERT INTO project_artifacts (project_id, kind, name, version)
        VALUES ($1,$2,$3,$4)
-       ON CONFLICT (project_id, artifact_kind, artifact_name) DO UPDATE SET version = EXCLUDED.version`,
+       ON CONFLICT (project_id, kind, name) DO UPDATE SET version = EXCLUDED.version`,
       [projectId, kind, name, version],
     )
   }
@@ -168,8 +170,8 @@ export class ProjectService {
 
   /** 项目仪表板（控制台「项目」入口：成员/引用/空间/自动化/用量预算 一屏） */
   async dashboard(projectId: string): Promise<ProjectDashboard | undefined> {
-    const p = await this.pool.query<{ project_id: string; realm: string; name: string; state: 'active' | 'archived' }>(
-      'SELECT project_id, realm, name, state FROM projects WHERE project_id = $1',
+    const p = await this.pool.query<{ id: string; realm: string; name: string; status: 'active' | 'archived' }>(
+      'SELECT id, realm, name, status FROM projects WHERE id = $1',
       [projectId],
     )
     if (p.rows.length === 0) return undefined
@@ -177,8 +179,8 @@ export class ProjectService {
     const [members, artifacts, spaces, automations, usage, budget] = await Promise.all([
       this.pool.query<{ user_id: string; role: ProjectRole }>(
         'SELECT user_id, role FROM project_members WHERE project_id = $1', [projectId]),
-      this.pool.query<{ artifact_kind: ArtifactKind; artifact_name: string; version: string }>(
-        'SELECT artifact_kind, artifact_name, version FROM project_artifacts WHERE project_id = $1', [projectId]),
+      this.pool.query<{ kind: ArtifactKind; name: string; version: string }>(
+        'SELECT kind, name, version FROM project_artifacts WHERE project_id = $1', [projectId]),
       this.pool.query<{ space_id: string; name: string }>(
         'SELECT space_id, name FROM project_spaces WHERE project_id = $1', [projectId]),
       this.pool.query<{ automation_id: string; trigger_kind: string; flow_ref: string; enabled: boolean }>(
@@ -194,9 +196,9 @@ export class ProjectService {
 
     const row = p.rows[0]!
     return {
-      project: { projectId: row.project_id, realm: row.realm, name: row.name, state: row.state },
+      project: { projectId: row.id, realm: row.realm, name: row.name, state: row.status },
       members: members.rows.map((r) => ({ userId: r.user_id, role: r.role })),
-      artifacts: artifacts.rows.map((r) => ({ kind: r.artifact_kind, name: r.artifact_name, version: r.version })),
+      artifacts: artifacts.rows.map((r) => ({ kind: r.kind, name: r.name, version: r.version })),
       spaces: spaces.rows.map((r) => ({ spaceId: r.space_id, name: r.name })),
       automations: automations.rows.map((r) => ({
         automationId: r.automation_id, triggerKind: r.trigger_kind,

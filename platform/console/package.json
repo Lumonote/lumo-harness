@@ -1,0 +1,10 @@
+{
+  "name": "@lumo/console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "python3 -m http.server 4174",
+    "preview": "python3 -m http.server 4174"
+  }
+}

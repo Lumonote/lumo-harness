@@ -25,7 +25,7 @@ type Pg struct {
 
 func (p *Pg) List(ctx context.Context) ([]domain.Node, error) {
 	rows, err := p.Pool.Query(ctx, `
-		SELECT node_id, cluster_id, capacity, capabilities FROM scheduler_nodes`)
+		SELECT node_id, realm, cluster_id, capacity, capabilities, residency FROM scheduler_nodes`)
 	if err != nil {
 		return nil, fmt.Errorf("catalog: 列节点失败: %w", err)
 	}
@@ -34,7 +34,7 @@ func (p *Pg) List(ctx context.Context) ([]domain.Node, error) {
 	for rows.Next() {
 		var n domain.Node
 		var caps string
-		if err := rows.Scan(&n.NodeID, &n.ClusterID, &n.Capacity, &caps); err != nil {
+		if err := rows.Scan(&n.NodeID, &n.Realm, &n.ClusterID, &n.Capacity, &caps, &n.Residency); err != nil {
 			return nil, fmt.Errorf("catalog: 扫描节点失败: %w", err)
 		}
 		if err := json.Unmarshal([]byte(caps), &n.Capabilities); err != nil {
@@ -51,13 +51,14 @@ func (p *Pg) Upsert(ctx context.Context, n domain.Node) error {
 		return fmt.Errorf("catalog: 序列化 capabilities 失败: %w", err)
 	}
 	if _, err := p.Pool.Exec(ctx, `
-		INSERT INTO scheduler_nodes (node_id, cluster_id, capacity, capabilities, registered_at)
-		VALUES ($1, $2, $3, $4, (EXTRACT(EPOCH FROM now()) * 1000)::bigint)
+		INSERT INTO scheduler_nodes (node_id, realm, cluster_id, capacity, capabilities, residency, registered_at)
+		VALUES ($1, $2, $3, $4, $5, $6, (EXTRACT(EPOCH FROM now()) * 1000)::bigint)
 		ON CONFLICT (node_id) DO UPDATE SET
-			cluster_id = EXCLUDED.cluster_id, capacity = EXCLUDED.capacity,
+			realm = EXCLUDED.realm, cluster_id = EXCLUDED.cluster_id, capacity = EXCLUDED.capacity,
 			capabilities = EXCLUDED.capabilities,
+			residency = EXCLUDED.residency,
 			registered_at = EXCLUDED.registered_at`,
-		n.NodeID, n.ClusterID, n.Capacity, string(caps)); err != nil {
+		n.NodeID, n.Realm, n.ClusterID, n.Capacity, string(caps), n.Residency); err != nil {
 		return fmt.Errorf("catalog: 登记节点失败: %w", err)
 	}
 	return nil

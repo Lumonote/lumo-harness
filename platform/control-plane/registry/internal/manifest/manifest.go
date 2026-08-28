@@ -56,20 +56,22 @@ type Requires struct {
 
 // Manifest 制品清单。
 type Manifest struct {
-	APIVersion string   `json:"apiVersion"`
-	Kind       Kind     `json:"kind"`
-	Name       string   `json:"name"`
-	Version    string   `json:"version"`
-	Publisher  string   `json:"publisher"`
-	Scopes     []string `json:"scopes"`
-	Requires   Requires `json:"requires,omitempty"`
-	Deps       []Dep    `json:"deps,omitempty"`
+	APIVersion    string   `json:"apiVersion"`
+	Kind          Kind     `json:"kind"`
+	Name          string   `json:"name"`
+	Version       string   `json:"version"`
+	Publisher     string   `json:"publisher"`
+	Scopes        []string `json:"scopes"`
+	Requires      Requires `json:"requires,omitempty"`
+	Deps          []Dep    `json:"deps,omitempty"`
+	PayloadDigest string   `json:"payload_digest,omitempty"`
 }
 
 var (
 	nameRe    = regexp.MustCompile(`^[a-z][a-z0-9-]{2,63}$`)
 	versionRe = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 	scopeRe   = regexp.MustCompile(`^[a-z][a-z0-9-]*(:[a-z0-9*-]+){1,2}$`)
+	digestRe  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
 // RequiredFields 各类的必填字段名，供与 JSON Schema 的一致性用例比对。
@@ -115,6 +117,9 @@ func (m *Manifest) validate() error {
 	}
 	if len(m.Scopes) == 0 {
 		return fmt.Errorf("registry: scopes 不得为空（无声明权限的制品无法做子集检查）")
+	}
+	if m.PayloadDigest != "" && !digestRe.MatchString(m.PayloadDigest) {
+		return fmt.Errorf("registry: payload_digest %q 非法（应为 sha256:<64 位十六进制>）", m.PayloadDigest)
 	}
 	for _, s := range m.Scopes {
 		if !scopeRe.MatchString(s) {

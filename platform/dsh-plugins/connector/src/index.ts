@@ -17,6 +17,7 @@ import { defineConnectorTools } from './tools.ts'
 export interface ConnectorConfig {
   /** 连接器网关地址（Local-lite: http://localhost:58082） */
   gatewayUrl: string
+  controlPlaneToken?: string
   /** 本节点身份（装配层固定；模型不可改 —— 同知识库 realm 的处理） */
   realm: string
   userId: string
@@ -35,6 +36,7 @@ declare module '@deepseek-ai/cordis' {
 /** Schemastery validation for {@link ConnectorConfig} */
 export const Config: z<ConnectorConfig> = z.object({
   gatewayUrl: z.string(),
+  controlPlaneToken: z.string(),
   realm: z.string(),
   userId: z.string(),
   roles: z.array(z.string()),
@@ -47,6 +49,7 @@ export const inject = ['tools']
 export function apply(ctx: Context, config: ConnectorConfig): void {
   const client = new ConnectorClient({
     gatewayUrl: config.gatewayUrl,
+    controlPlaneToken: config.controlPlaneToken,
     realm: config.realm,
     userId: config.userId,
     roles: config.roles,

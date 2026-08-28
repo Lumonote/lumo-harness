@@ -1,0 +1,37 @@
+{
+  "name": "@lumo/dsh-platform-ui",
+  "description": "Lumo platform surfaces mounted inside the native DeepSeek Harness Web shell",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": { "types": "./lib/types/index.d.ts", "default": "./lib/index.js" },
+    "./client": { "types": "./lib/types/client/index.d.ts", "default": "./lib/client.js" },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-layout", "@deepseek-ai/dsh-client-ui-slots"],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "scripts": { "bundle": "../../../deepseek-harness/node_modules/.bin/tsc -p tsconfig.json && ../../../deepseek-harness/node_modules/.bin/tsdown --config tsdown.config.ts" },
+  "dependencies": {
+    "@deepseek-ai/cordis": "link:../../../deepseek-harness/vendor/cordis",
+    "@deepseek-ai/dsh-client-runtime": "link:../../../deepseek-harness/packages/client/runtime",
+    "@deepseek-ai/dsh-client-ui-layout": "link:../../../deepseek-harness/packages/client/ui-layout",
+    "@deepseek-ai/dsh-client-ui-slots": "link:../../../deepseek-harness/packages/client/ui-slots",
+    "@deepseek-ai/dsh-host-webserver": "link:../../../deepseek-harness/packages/host/webserver",
+    "@deepseek-ai/schemastery": "link:../../../deepseek-harness/vendor/schemastery",
+    "react": "link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react"
+  },
+  "devDependencies": {
+    "@types/node": "link:../../../deepseek-harness/node_modules/@types/node",
+    "@types/react": "link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/@types/react"
+  },
+  "files": ["lib/index.js", "lib/client.js", "lib/types/**/*.d.ts"]
+}

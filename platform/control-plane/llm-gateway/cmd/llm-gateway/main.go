@@ -17,6 +17,7 @@ import (
 	"github.com/lumo-harness/platform/llm-gateway/internal/gateway"
 	"github.com/lumo-harness/platform/llm-gateway/internal/server"
 	"github.com/lumo-harness/platform/llm-gateway/internal/store"
+	"github.com/lumo-harness/platform/observability"
 )
 
 func envOr(key, def string) string {
@@ -60,7 +61,7 @@ func main() {
 	srv.Register(mux)
 
 	log.Info("llm-gateway 启动", "addr", *listen)
-	if err := http.ListenAndServe(*listen, mux); err != nil {
+	if err := http.ListenAndServe(*listen, observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux))); err != nil {
 		log.Error("退出", "err", err)
 		os.Exit(1)
 	}

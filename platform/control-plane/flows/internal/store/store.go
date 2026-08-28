@@ -55,20 +55,74 @@ CREATE TABLE IF NOT EXISTS flow_reviews (
   comment TEXT,
   at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- TriggerBus 的持久入口：事件先落 outbox，再由投递 worker 发布到进程内 Bus。
+CREATE TABLE IF NOT EXISTS flow_trigger_outbox (
+  id          BIGSERIAL PRIMARY KEY,
+  realm       TEXT NOT NULL,
+  event_name  TEXT NOT NULL,
+  payload     JSONB NOT NULL,
+  claimed_by  TEXT,
+  claimed_at  BIGINT,
+  delivered_at BIGINT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_flow_trigger_pending
+  ON flow_trigger_outbox (id) WHERE delivered_at IS NULL;
+
+-- 每个 (trigger, automation) 只允许一个成功运行；失败重投可复用同一行，
+-- 避免 outbox 至少一次语义把幂等问题推给每个流程作者。
+CREATE TABLE IF NOT EXISTS flow_runs (
+  id            BIGSERIAL PRIMARY KEY,
+  trigger_id    BIGINT NOT NULL REFERENCES flow_trigger_outbox(id) ON DELETE CASCADE,
+  automation_id TEXT NOT NULL,
+  flow_id       TEXT NOT NULL,
+  flow_version  INT NOT NULL,
+  status        TEXT NOT NULL CHECK (status IN ('running','succeeded','failed')),
+  output        JSONB,
+  error         TEXT,
+  claimed_at    BIGINT,
+  started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at   TIMESTAMPTZ,
+  UNIQUE (trigger_id, automation_id)
+);
+ALTER TABLE flow_runs ADD COLUMN IF NOT EXISTS claimed_at BIGINT;
 `
 
 var (
-	ErrNotFound      = errors.New("流程不存在（或不可见）")
-	ErrNameTaken     = errors.New("同名流程已存在于本项目")
-	ErrNotAuthor     = errors.New("仅作者可操作草稿")
-	ErrOnlyDraft     = errors.New("仅 draft 态可改定义")
-	ErrSelfReview    = errors.New("作者不可自审（职责分离）")
-	ErrNotReviewer   = errors.New("审核须 manager/admin 角色")
-	ErrVersionGone   = errors.New("回滚目标版本不存在")
+	ErrNotFound    = errors.New("流程不存在（或不可见）")
+	ErrNameTaken   = errors.New("同名流程已存在于本项目")
+	ErrNotAuthor   = errors.New("仅作者可操作草稿")
+	ErrOnlyDraft   = errors.New("仅 draft 态可改定义")
+	ErrSelfReview  = errors.New("作者不可自审（职责分离）")
+	ErrNotReviewer = errors.New("审核须 manager/admin 角色")
+	ErrVersionGone = errors.New("回滚目标版本不存在")
 )
 
 type Store struct {
 	pool *pgxpool.Pool
+}
+
+type TriggerRecord struct {
+	ID      uint64          `json:"id"`
+	Realm   string          `json:"realm"`
+	Name    string          `json:"name"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+type EventBinding struct {
+	AutomationID string
+	FlowID       string
+	FlowVersion  int
+}
+
+type TriggerRun struct {
+	ID           int64
+	TriggerID    uint64
+	AutomationID string
+	FlowID       string
+	FlowVersion  int
+	Status       string
 }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
@@ -78,6 +132,127 @@ func (s *Store) Init(ctx context.Context) error {
 		return fmt.Errorf("建 flows 表失败: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) EnqueueTrigger(ctx context.Context, realm, name string, payload json.RawMessage) error {
+	if realm == "" || name == "" || name == "*" || len(payload) == 0 || !json.Valid(payload) {
+		return fmt.Errorf("非法 trigger：realm/name/payload 必填且 payload 必须是 JSON")
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO flow_trigger_outbox (realm, event_name, payload) VALUES ($1,$2,$3)`, realm, name, payload)
+	return err
+}
+
+// ClaimTriggers 使用 SKIP LOCKED 支持多个 worker 并行搬运；未 ack 的 claim 可回收。
+func (s *Store) ClaimTriggers(ctx context.Context, worker string, limit int) ([]TriggerRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, `
+		WITH picked AS (
+			SELECT id FROM flow_trigger_outbox
+			WHERE delivered_at IS NULL AND claimed_by IS NULL
+			ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED
+		), claimed AS (
+			UPDATE flow_trigger_outbox o SET claimed_by = $1, claimed_at = (EXTRACT(EPOCH FROM now()) * 1000)::bigint
+			FROM picked WHERE o.id = picked.id
+			RETURNING o.id, o.realm, o.event_name, o.payload
+		)
+		SELECT id, realm, event_name, payload FROM claimed ORDER BY id`, worker, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TriggerRecord{}
+	for rows.Next() {
+		var record TriggerRecord
+		if err := rows.Scan(&record.ID, &record.Realm, &record.Name, &record.Payload); err != nil {
+			return nil, err
+		}
+		out = append(out, record)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) AckTrigger(ctx context.Context, id uint64) error {
+	_, err := s.pool.Exec(ctx, `UPDATE flow_trigger_outbox SET delivered_at = (EXTRACT(EPOCH FROM now()) * 1000)::bigint, claimed_by = NULL WHERE id = $1 AND delivered_at IS NULL`, id)
+	return err
+}
+
+func (s *Store) RequeueStaleTriggers(ctx context.Context, olderThanMs int64) error {
+	if olderThanMs < 1000 {
+		olderThanMs = 1000
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE flow_trigger_outbox SET claimed_by = NULL, claimed_at = NULL WHERE delivered_at IS NULL AND claimed_by IS NOT NULL AND claimed_at < (EXTRACT(EPOCH FROM now()) * 1000)::bigint - $1`, olderThanMs)
+	return err
+}
+
+// ListEventBindings 读取项目自动化的事件绑定。只允许已发布快照进入运行面；
+// webhook 与 event 共用持久入口，cron 由外部调度器按同一入口投递。
+func (s *Store) ListEventBindings(ctx context.Context, realm, name string) ([]EventBinding, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT a.automation_id, a.flow_ref, f.version
+		FROM project_automations a
+		JOIN flows f ON f.id = a.flow_ref
+		WHERE f.realm = $1 AND a.trigger_kind IN ('event','webhook')
+		  AND a.trigger_spec = $2 AND a.enabled
+		  AND f.status IN ('published','targeted')
+		ORDER BY a.automation_id`, realm, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	bindings := []EventBinding{}
+	for rows.Next() {
+		var binding EventBinding
+		if err := rows.Scan(&binding.AutomationID, &binding.FlowID, &binding.FlowVersion); err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, binding)
+	}
+	return bindings, rows.Err()
+}
+
+// StartTriggerRun 以 trigger+automation 为幂等键开启运行。已成功的运行不会重复执行；
+// failed 或超时的 running 行可被 stale outbox 重投接管，并用原子 UPDATE 避免双 worker
+// 同时执行同一个自动化。
+func (s *Store) StartTriggerRun(ctx context.Context, triggerID uint64, automationID, flowID string, version int) (bool, error) {
+	if triggerID == 0 || automationID == "" || flowID == "" || version < 1 {
+		return false, fmt.Errorf("非法 flow run 标识")
+	}
+	var claimed int
+	err := s.pool.QueryRow(ctx, `
+		WITH claimed AS (
+			INSERT INTO flow_runs (trigger_id, automation_id, flow_id, flow_version, status, claimed_at)
+			VALUES ($1,$2,$3,$4,'running',(EXTRACT(EPOCH FROM now()) * 1000)::bigint)
+			ON CONFLICT (trigger_id, automation_id) DO UPDATE SET
+				flow_id = EXCLUDED.flow_id, flow_version = EXCLUDED.flow_version,
+				status = 'running', claimed_at = EXCLUDED.claimed_at,
+				error = NULL, output = NULL, started_at = now(), finished_at = NULL
+			WHERE flow_runs.status <> 'succeeded'
+			  AND (flow_runs.status <> 'running' OR flow_runs.claimed_at IS NULL OR flow_runs.claimed_at < (EXTRACT(EPOCH FROM now()) * 1000)::bigint - 300000)
+			RETURNING 1
+		)
+		SELECT count(*) FROM claimed`, triggerID, automationID, flowID, version).Scan(&claimed)
+	if err != nil {
+		return false, err
+	}
+	return claimed == 1, nil
+}
+
+func (s *Store) FinishTriggerRun(ctx context.Context, triggerID uint64, automationID, status string, output json.RawMessage, runErr error) error {
+	if status != "succeeded" && status != "failed" {
+		return fmt.Errorf("非法 flow run 终态 %q", status)
+	}
+	var errText *string
+	if runErr != nil {
+		value := runErr.Error()
+		errText = &value
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE flow_runs SET status = $3, output = $4, error = $5, finished_at = now()
+		WHERE trigger_id = $1 AND automation_id = $2`, triggerID, automationID, status, output, errText)
+	return err
 }
 
 // ProjectRole 只读查 project_members（表属 projects 服务 DDL 真相源）。
@@ -129,6 +304,31 @@ func (s *Store) GetFlow(ctx context.Context, id, realm string) (*domain.Flow, er
 		return nil, err
 	}
 	return f, nil
+}
+
+// Definition 取执行所需的当前发布快照，草稿定义不得直接执行。
+func (s *Store) Definition(ctx context.Context, id, realm string) (json.RawMessage, error) {
+	definition, _, err := s.DefinitionSnapshot(ctx, id, realm)
+	return definition, err
+}
+
+func (s *Store) DefinitionSnapshot(ctx context.Context, id, realm string) (json.RawMessage, int, error) {
+	var def json.RawMessage
+	var version int
+	err := s.pool.QueryRow(ctx, `
+		SELECT CASE WHEN f.version > 0 THEN v.definition ELSE NULL END, f.version
+		FROM flows f LEFT JOIN flow_versions v ON v.flow_id = f.id AND v.version = f.version
+		WHERE f.id = $1 AND f.realm = $2 AND f.status IN ('published','targeted')`, id, realm).Scan(&def, &version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, 0, ErrNotFound
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(def) == 0 {
+		return nil, 0, ErrNotFound
+	}
+	return def, version, nil
 }
 
 // getFlowByID 内部取流程（状态机/审核路径用——已通过 server 的 realm 边界）。

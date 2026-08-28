@@ -21,6 +21,7 @@ import { TeiClient } from './embedding.ts'
 import { PgGraphProvider } from './graph-provider.ts'
 import { GraphProjector } from './graph-projector.ts'
 import { defineGraphRagTool } from './graph-rag.ts'
+import { MilvusKnowledgeProvider, NebulaGraphProvider } from './remote-provider.ts'
 import type { KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
 import type { GraphSeam } from '../../../shared/seam-contracts/graph.ts'
 
@@ -57,6 +58,14 @@ export interface KnowledgeConfig {
   defaultTopK?: number
   /** 向量来源（默认 TEI/bge-m3） */
   embedding: EmbeddingConfig
+  /** Standalone/Cluster Milvus REST v2 地址；为空时使用 pgvector */
+  milvusUrl?: string
+  milvusCollection?: string
+  /** 发布源的全量回放接口；配置后 provider.rebuild 可执行。 */
+  milvusRebuildUrl?: string
+  /** Nebula graphd adapter 地址；为空时使用 PG recursive CTE */
+  nebulaUrl?: string
+  remoteApiKey?: string
   /** 图扩展参数（缺省 1 跳 / 50 节点） */
   graph?: GraphConfig
 }
@@ -73,6 +82,11 @@ export const Config: z<KnowledgeConfig> = z.object({
     dimension: z.number(),
     timeoutMs: z.number(),
   }),
+  milvusUrl: z.string(),
+  milvusCollection: z.string(),
+  milvusRebuildUrl: z.string(),
+  nebulaUrl: z.string(),
+  remoteApiKey: z.string(),
   graph: z.object({
     depth: z.number(),
     maxNodes: z.number(),
@@ -102,17 +116,15 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     dimension: config.embedding.dimension,
     timeoutMs: config.embedding.timeoutMs,
   })
-  const provider = new PgKnowledgeProvider({
-    connectionString: config.connectionString,
-    allowedRoles: roles,
-    embedding,
-    embeddingModel: config.embedding.model,
-  })
+  const provider: KnowledgeSeam = config.milvusUrl
+    ? new MilvusKnowledgeProvider({ baseUrl: config.milvusUrl, apiKey: config.remoteApiKey,
+      allowedRoles: roles, collection: config.milvusCollection ?? `knowledge_${config.embedding.model}`, embedding, embeddingModel: config.embedding.model,
+      dimension: config.embedding.dimension, rebuildUrl: config.milvusRebuildUrl })
+    : new PgKnowledgeProvider({ connectionString: config.connectionString, allowedRoles: roles, embedding, embeddingModel: config.embedding.model })
   // 图 Provider 自持连接池：两个 seam 生命周期独立，换 Nebula 时不牵动向量侧
-  const graph = new PgGraphProvider({
-    connectionString: config.connectionString,
-    allowedRoles: roles,
-  })
+  const graph: GraphSeam = config.nebulaUrl
+    ? new NebulaGraphProvider({ baseUrl: config.nebulaUrl, apiKey: config.remoteApiKey, allowedRoles: roles })
+    : new PgGraphProvider({ connectionString: config.connectionString, allowedRoles: roles })
   // outbox 投影器：把 ingest 写下的图投影意图异步搬进图（最终一致，见 graph-projector.ts）
   const projector = new GraphProjector(
     { connectionString: config.connectionString, batchSize: config.graph?.projectBatchSize },
@@ -120,8 +132,8 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   )
 
   ctx.effect(() => () => {
-    void provider.close()
-    void graph.close()
+    if ('close' in provider && typeof provider.close === 'function') void provider.close()
+    if ('close' in graph && typeof graph.close === 'function') void graph.close()
     void projector.close()
   })
 
@@ -150,7 +162,9 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
 
   // 幂等初始化（建表/索引）；失败即加载失败（响亮失败，§15）
   // 投影轮询必须等建表完成再起，否则前几轮全是「表不存在」噪音。
-  const ready = Promise.all([provider.init(), graph.init()])
+  const providerInit = (provider as KnowledgeSeam & { init?: () => Promise<void> }).init?.() ?? Promise.resolve()
+  const graphInit = (graph as GraphSeam & { init?: () => Promise<void> }).init?.() ?? Promise.resolve()
+  const ready = Promise.all([providerInit, graphInit])
 
   // unref 不阻塞进程退出；插件卸载时随 effect 一起清掉。
   // 投影失败只 warn 不抛 —— outbox 未标记 projected_at，下一轮自然重放。

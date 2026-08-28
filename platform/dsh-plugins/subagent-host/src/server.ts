@@ -32,6 +32,7 @@ import {
   type StartChildRequest,
 } from '../../../shared/seam-contracts/subagent-host.ts'
 import type { RunRegistry } from './run.ts'
+import { assertAllowedCallback } from './callback-policy.ts'
 
 export interface SubagentHostLogger {
   info(format: string, ...args: unknown[]): void
@@ -47,6 +48,8 @@ export interface SubagentHostOptions {
   maxBodyBytes: number
   /** realm → 共享令牌。为空表示匿名放行(仅回环形态,启动时已告警)。 */
   tokens: ReadonlyMap<string, string>
+  /** 归一化后的回调 origin 白名单；请求载荷不能扩张承载节点的出站面。 */
+  callbackOrigins: ReadonlySet<string>
   /** 承载侧运行表:`key = runKeyOf(realm, childId)`。host 读,run.ts 写。 */
   runs: RunRegistry
   /**
@@ -93,6 +96,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: Subage
       if (payload.realm !== caller.realm) {
         throw forbidden(`调用方 realm=${caller.realm} 不得启动 realm=${payload.realm} 的子代理`)
       }
+      assertAllowedCallback(payload.callbackUrl, payload.childId, options.callbackOrigins)
       // assert 已闸住 realm/childId 两段,runKeyOf 不会再抛
       // 已结集重放闸:运行表条目已因整体结集摘除,但 child 会话仍发布在 ctx.agents。
       // 放行后 create 会撞注册冲突抛错 → 200 已寄出、父侧只能收 ok:false 结集(run.ts

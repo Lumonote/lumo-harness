@@ -15,13 +15,17 @@ import (
 
 // Envelope 投递给执行节点的任务信封（outbox payload，JSON 文本）。
 type Envelope struct {
-	TaskID    string               `json:"task_id"`
-	Attempt   int                  `json:"attempt"`
-	NodeID    string               `json:"node_id"`
-	Realm     string               `json:"realm"`
-	ClusterID string               `json:"cluster_id"`
-	Priority  int                  `json:"priority"`
-	Requires  []domain.Requirement `json:"requires"`
+	TaskID     string               `json:"task_id"`
+	Attempt    int                  `json:"attempt"`
+	NodeID     string               `json:"node_id"`
+	Realm      string               `json:"realm"`
+	ClusterID  string               `json:"cluster_id"`
+	Priority   int                  `json:"priority"`
+	Requires   []domain.Requirement `json:"requires"`
+	DeadlineMS int64                `json:"deadline_ms,omitempty"`
+	Queue      string               `json:"queue,omitempty"`
+	Weight     int                  `json:"weight,omitempty"`
+	AvoidNodes []string             `json:"avoid_nodes,omitempty"`
 }
 
 // Sink 派发落点：必须在放置事务内写入，保证「放置 ⟺ 派发」原子。

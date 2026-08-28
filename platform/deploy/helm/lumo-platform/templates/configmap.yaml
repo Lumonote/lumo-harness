@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lumo-platform.name" . }}-config
+data:
+  LUMO_PG_DSN: {{ .Values.postgres.dsn | quote }}
+  REGISTRY_PG_DSN: {{ .Values.postgres.dsn | quote }}
+  LUMO_REDIS_ADDR: {{ .Values.redis.address | quote }}
+  LUMO_RMQ_ENDPOINT: {{ .Values.rocketmq.endpoint | quote }}
+  LUMO_NACOS_ADDR: {{ .Values.nacos.address | quote }}
+  LUMO_NACOS_SERVICE: {{ .Values.nacos.service | quote }}
+  LUMO_NACOS_GROUP: {{ .Values.nacos.group | quote }}
+  LUMO_OPA_ADDR: {{ .Values.opa.address | quote }}
+  LUMO_VAULT_ADDR: {{ .Values.vault.address | quote }}
+  LUMO_CORS_ORIGIN: {{ .Values.console.corsOrigin | quote }}
+  REGISTRY_TRUST_FILE: /etc/lumo/trust/registry-trust.json

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/lumo-harness/platform/collaborator/internal/ownership"
 	"github.com/lumo-harness/platform/collaborator/internal/server"
 	"github.com/lumo-harness/platform/collaborator/internal/store"
+	"github.com/lumo-harness/platform/observability"
 )
 
 // headerAuth 从网关注入的头解析身份。
@@ -78,16 +80,45 @@ func main() {
 	if *peers != "" {
 		ring.SetInstances(strings.Split(*peers, ","))
 	}
+	var peerSync *ownership.NacosPeerSync
+	if addr := os.Getenv("LUMO_NACOS_ADDR"); addr != "" && *peers == "" {
+		port := 8081
+		if configured := os.Getenv("LUMO_NACOS_PORT"); configured != "" {
+			if parsed, parseErr := strconv.Atoi(configured); parseErr == nil && parsed > 0 {
+				port = parsed
+			}
+		}
+		peerSync = ownership.NewNacosPeerSync(ownership.NacosPeerOptions{
+			BaseURL: addr, Service: os.Getenv("LUMO_NACOS_COLLABORATOR_SERVICE"),
+			Group: os.Getenv("LUMO_NACOS_GROUP"), Instance: *instance,
+			Host: envOr("LUMO_NODE_ADVERTISE_HOST", *instance), Port: port,
+		}, log)
+		go peerSync.Run(ctx, ring)
+	}
 
-	// CRDT 合并内核：FFI 内核就位前用占位实现，并显式告警（不静默降级）
-	var merger crdt.Merger = crdt.AppendOnlyMerger{}
-	log.Warn("CRDT 合并内核为占位实现，不可用于生产",
-		"kernel", merger.Name(),
-		"remedy", "接入 y-crdt (Rust) FFI —— 见 architecture §12.3 例外条款")
+	// 生产镜像把 yrs 语义内核放在同一容器内，通过 stdin/stdout 调用；本地未配置
+	// binary 时使用确定性更新集 fallback，且名称明确区分，避免把 fallback 当语义合并。
+	var merger crdt.Merger = crdt.UpdateSetMerger{}
+	if kernel := os.Getenv("LUMO_YRS_KERNEL"); kernel != "" {
+		if _, statErr := os.Stat(kernel); statErr != nil {
+			log.Error("配置的 yrs 内核不可执行", "path", kernel, "err", statErr)
+			os.Exit(1)
+		}
+		configuredMerger := crdt.NewYrsProcessMerger(kernel)
+		probeCtx, cancelProbe := context.WithTimeout(ctx, 5*time.Second)
+		probeErr := configuredMerger.CheckKernel(probeCtx)
+		cancelProbe()
+		if probeErr != nil {
+			log.Error("yrs 内核启动探针失败", "path", kernel, "err", probeErr)
+			os.Exit(1)
+		}
+		merger = configuredMerger
+	}
+	log.Info("CRDT 合并内核已启用", "kernel", merger.Name())
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           server.New(h, st, ring, headerAuth{}, log).Routes(),
+		Handler:           observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(server.New(h, st, ring, headerAuth{}, log).Routes())),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -137,6 +168,11 @@ func main() {
 	}
 	if err := srv.Shutdown(drainCtx); err != nil {
 		log.Error("关闭 HTTP 服务失败", "err", err)
+	}
+	if peerSync != nil {
+		if err := peerSync.Close(drainCtx); err != nil {
+			log.Warn("注销 collaborator Nacos 实例失败", "err", err)
+		}
 	}
 	log.Info("协作服务已停止")
 }

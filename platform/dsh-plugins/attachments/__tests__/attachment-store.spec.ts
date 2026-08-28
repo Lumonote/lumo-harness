@@ -6,6 +6,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { parseAttachmentKey } from '../../../shared/seam-contracts/attachment.ts'
 import { seamErrorCode } from '../../../shared/seam-contracts/errors.ts'
 import { MinioObjectStore } from '../../object-store/src/minio-store.ts'
+import { apply } from '../src/index.ts'
 import { MinioAttachmentStore } from '../src/minio-attachment-store.ts'
 import {
   attachmentStore,
@@ -36,6 +37,22 @@ function missingRef(store: MinioAttachmentStore): ImageAttachmentRef {
     height: 1,
   }
 }
+
+describe('MinioAttachmentStore plugin assembly', () => {
+  it('lets the Service constructor register attachments exactly once', () => {
+    const ctx = new Context()
+    ctx.provide('objectStore', new MinioObjectStore({
+      endPoint: '127.0.0.1',
+      port: 1,
+      useSSL: false,
+      accessKey: 'x',
+      secretKey: 'y',
+      bucket: 'assembly-only',
+    }))
+    expect(() => apply(ctx, { realm: 'assembly' })).not.toThrow()
+    expect(ctx.get('attachments')).toBeInstanceOf(MinioAttachmentStore)
+  })
+})
 
 describe(`MinioAttachmentStore —— 对真 MinIO（需 OBJECT_STORE_TEST_ENDPOINT，当前${suffix}）`, () => {
   t('save→ref 是对象键；同内容同键幂等；read 取回并 digest 校验', async () => {

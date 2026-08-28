@@ -40,6 +40,22 @@ function eventOf(sessionRef: string, seq: number, over: Partial<LogRecord> = {})
   }
 }
 
+describe(`schema initialization —— 对真 PG（当前${suffix}）`, () => {
+  t('多个节点首次启动时串行创建同一组表', async () => {
+    const dsn = await schemaDsn(DSN!, 'session_log_init_test')
+    const cleaner = new PgSessionLog(dsn)
+    await cleaner.raw('DROP TABLE IF EXISTS session_log, session_writer_lease')
+    await cleaner.close()
+
+    const logs = Array.from({ length: 8 }, () => new PgSessionLog(dsn))
+    try {
+      await expect(Promise.all(logs.map(log => log.init()))).resolves.toHaveLength(logs.length)
+    } finally {
+      await Promise.all(logs.map(log => log.close()))
+    }
+  })
+})
+
 describe(`写者租约 —— 对真 PG（需 SESSION_LOG_TEST_DSN，当前${suffix}）`, () => {
   t('无租约 → 建租 token=1；本人续租 token 不变且期限延长', async () => {
     await withLog(async (log) => {

@@ -8,6 +8,7 @@
 
 export interface ConnectorClientConfig {
   gatewayUrl: string
+  controlPlaneToken?: string
   realm: string
   userId: string
   roles: string[]
@@ -94,6 +95,7 @@ export class ConnectorClient {
     this.base = config.gatewayUrl.replace(/\/+$/, '')
     this.timeoutMs = config.timeoutMs ?? 30_000
     this.identity = {
+      ...(config.controlPlaneToken ? { Authorization: `Bearer ${config.controlPlaneToken}` } : {}),
       'X-Lumo-User': config.userId,
       'X-Lumo-Realm': config.realm,
       'X-Lumo-Roles': config.roles.join(','),

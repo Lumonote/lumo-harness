@@ -34,6 +34,7 @@ import type { Server } from 'node:http'
 
 import { createCallbackServer } from './callback.ts'
 import type { ChildResultSettler, PendingEntry } from './callback.ts'
+import { resolveNacosNode } from './nacos.ts'
 import {
   postChildStart,
   postChildStop,
@@ -46,15 +47,26 @@ import type { JobControlSeam } from '../../../shared/seam-contracts/job-virtuali
 
 export interface RemoteConfig {
   /** Scheduler base(经 X-Lumo-Realm 头信任注入;生产经边缘网关,§6.3 转 mTLS)。 */
-  readonly schedulerUrl: string
+	readonly schedulerUrl: string
+	readonly controlPlaneToken?: string
   /** 放置应答 node_id → 承载节点 base URL(静态表;节点自我登记后续切片)。 */
   readonly nodeUrls: Readonly<Record<string, string>>
   /** host 端点共享令牌(承载侧 `tokens` 同值)。 */
   readonly hostTokens: Readonly<Record<string, string>>
+  /** Optional Naming source used when nodeUrls has no entry for a scaled node. */
+  readonly nacosUrl?: string
+  readonly nacosService?: string
+  readonly nacosGroup?: string
+  /** Shared token fallback; individual hostTokens entries still take precedence. */
+  readonly defaultHostToken?: string
+  /** Restrict placement to the parent node's execution cluster when set. */
+  readonly clusterId?: string
   readonly realm: string
   /** 回调接收端口(provider 进程内 createServer)。 */
   readonly callbackPort: number
   readonly callbackHost?: string
+  /** Bind address for the callback listener; callbackHost remains the advertised DNS name. */
+  readonly callbackBindHost?: string
   /** Injected control channel; absent only in focused provider tests/legacy wiring. */
   readonly jobControl?: JobControlSeam
   readonly controlActor?: string
@@ -67,9 +79,15 @@ export class RemoteSubagentProvider implements SubagentProvider {
   readonly inheritsParentContext = false
 
   private readonly pending: Map<string, PendingEntry>
-  private readonly scheduler: string
+	private readonly scheduler: string
+	private readonly controlPlaneToken: string | undefined
   private readonly nodeUrls: Readonly<Record<string, string>>
   private readonly hostTokens: Readonly<Record<string, string>>
+	private readonly nacosUrl: string | undefined
+	private readonly nacosService: string
+	private readonly nacosGroup: string
+	private readonly defaultHostToken: string | undefined
+	private readonly clusterId: string
   private readonly realm: string
   private readonly callbackHost: string
   /** 装配配置引用:callbackPort 在 assembleRemote 之后、start() 之前可能被回填
@@ -80,9 +98,15 @@ export class RemoteSubagentProvider implements SubagentProvider {
     this.name = name
     this.pending = pending
     this.config = config
-    this.scheduler = config.schedulerUrl.replace(/\/+$/, '')
+		this.scheduler = config.schedulerUrl.replace(/\/+$/, '')
+		this.controlPlaneToken = config.controlPlaneToken
     this.nodeUrls = config.nodeUrls
-    this.hostTokens = config.hostTokens
+		this.hostTokens = config.hostTokens
+		this.nacosUrl = config.nacosUrl?.replace(/\/+$/, '')
+		this.nacosService = config.nacosService ?? 'lumo-dsh-node'
+		this.nacosGroup = config.nacosGroup ?? 'DEFAULT_GROUP'
+		this.defaultHostToken = config.defaultHostToken
+		this.clusterId = config.clusterId ?? ''
     this.realm = config.realm
     this.callbackHost = config.callbackHost ?? '127.0.0.1'
   }
@@ -110,21 +134,31 @@ export class RemoteSubagentProvider implements SubagentProvider {
     // 登记先行 + 失败滚回:host 的 200 与回执是两个独立请求,没有顺序保证;
     // 回执表不提前登记的话,host 的回执可能先于 start 返回(200 已寄出、child 已跑完)
     // 撞上「未注册 → 404」,父侧将永远等不到结集。
-    const result = new Promise<SubagentResult>((resolve, reject) => {
-      this.pending.set(childId, { secret, settler: settleOf(childId, resolve, reject) })
-    })
+	let resolveResult!: (value: SubagentResult) => void
+	let rejectResult!: (reason?: unknown) => void
+	const result = new Promise<SubagentResult>((resolve, reject) => {
+		resolveResult = resolve
+		rejectResult = reject
+	})
+	const pendingEntry: PendingEntry = { secret, settler: settleOf(childId, resolveResult, rejectResult) }
+	this.pending.set(childId, pendingEntry)
 
     // placement 是否已落 scheduler 账:201 之后失败必须回报终态(F1a),
     // 否则 PLACED 槽位无任务级 GC、永久泄漏;202/放置失败则从未占用,无需上报。
     let placed = false
     try {
-      const nodeId = await postPlacement({ base: this.scheduler, realm: this.realm, childId })
-      placed = true
-      const nodeUrl = this.nodeUrls[nodeId]
+		const placement = await postPlacement({ base: this.scheduler, realm: this.realm, childId, clusterId: this.clusterId, controlPlaneToken: this.controlPlaneToken })
+		pendingEntry.attempt = placement.attempt
+		placed = true
+		const nodeId = placement.nodeId
+	  const nodeUrl = await this.resolveNodeUrl(nodeId)
       if (nodeUrl === undefined) {
-        throw new SubagentError(`nodeUrls 无节点 ${nodeId} 的登记地址`, 'NODE_URL_UNKNOWN')
+	        throw new SubagentError(`未找到节点 ${nodeId} 的登记地址`, 'NODE_URL_UNKNOWN')
       }
-      const token = this.hostTokens[nodeId]
+	  const token = this.hostTokens[nodeId] ?? this.defaultHostToken
+	  if (token === undefined || token === '') {
+	    throw new SubagentError(`节点 ${nodeId} 未配置承载令牌`, 'HOST_TOKEN_UNKNOWN')
+	  }
       await postChildStart({ base: nodeUrl.replace(/\/+$/, ''), realm: this.realm, token, request: body })
       const directStop = () => postChildStop({ base: nodeUrl.replace(/\/+$/, ''), realm: this.realm, token, childId })
       const stop = this.config.jobControl === undefined
@@ -150,12 +184,31 @@ export class RemoteSubagentProvider implements SubagentProvider {
         // best-effort:上报失败只记影子,不吞原错(原错照抛)。
         // 注:超时歧义场景可能误报 —— child 实际已在承载侧跑完,其回执对已摘表的
         // pending 以 404 被拒;仍优于永久占槽:以 FAILED 结账,scheduler 才能重派。
-        void postTerminalState({ base: this.scheduler, realm: this.realm, childId, state: 'FAILED' })
+		void postTerminalState({ base: this.scheduler, realm: this.realm, childId, state: 'FAILED', attempt: pendingEntry.attempt, controlPlaneToken: this.controlPlaneToken })
           .catch(() => { /* best-effort:终态上报失败仅留审计,不遮蔽 start 原错 */ })
       }
       throw e
     }
   }
+
+	private async resolveNodeUrl(nodeId: string): Promise<string | undefined> {
+	  const configured = this.nodeUrls[nodeId]
+	  if (configured !== undefined && configured !== '') return configured
+	  if (this.nacosUrl === undefined) return undefined
+	  try {
+	    const endpoint = await resolveNacosNode({
+	      baseUrl: this.nacosUrl,
+	      serviceName: this.nacosService,
+	      groupName: this.nacosGroup,
+	    }, nodeId)
+	    return endpoint?.baseUrl
+	  } catch (error: unknown) {
+	    throw new SubagentError(
+	      `Nacos 节点查询失败(${nodeId}): ${error instanceof Error ? error.message : String(error)}`,
+	      'NODE_DISCOVERY_FAILED',
+	    )
+	  }
+	}
 }
 
 /** 父侧本地真实采集(dsh 公开件):session header + agent options + 委派策略快照。 */
@@ -225,12 +278,14 @@ export function assembleRemote(config: RemoteConfig): RemoteAssembly {
   const pending = new Map<string, PendingEntry>()
   const server = createCallbackServer({
     pending,
-    reportTerminal: (body) => {
-      void postTerminalState({
-        base: config.schedulerUrl.replace(/\/+$/, ''),
+		reportTerminal: (body, attempt) => {
+		void postTerminalState({
+		base: config.schedulerUrl.replace(/\/+$/, ''),
+		controlPlaneToken: config.controlPlaneToken,
         realm: config.realm,
         childId: body.runId,
-        state: terminalStateOf(body),
+			state: terminalStateOf(body),
+			attempt,
       }).catch(() => {
         // best-effort:终态上报失败不阻塞回执结集(审计在承载侧会话日志)
       })

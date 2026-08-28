@@ -15,6 +15,7 @@ import (
 	"github.com/lumo-harness/platform/connector-gateway/internal/domain"
 	"github.com/lumo-harness/platform/connector-gateway/internal/gateway"
 	"github.com/lumo-harness/platform/connector-gateway/internal/registry"
+	"github.com/lumo-harness/platform/observability"
 )
 
 // Authenticator 从请求解析已认证身份；生产实现校验网关签名/JWT。
@@ -70,12 +71,17 @@ func New(o Options) *Server {
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /metrics", handleMetrics)
 	mux.HandleFunc("GET /connectors", s.handleList)
 	mux.HandleFunc("PUT /connectors/{id}", s.handleRegister)
 	mux.HandleFunc("DELETE /connectors/{id}", s.handleDisable)
 	mux.HandleFunc("POST /connectors/{id}/invoke", s.handleInvoke)
 	mux.HandleFunc("POST /web/fetch", s.handleWebFetch)
 	return mux
+}
+
+func handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	observability.Handler(w, nil)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

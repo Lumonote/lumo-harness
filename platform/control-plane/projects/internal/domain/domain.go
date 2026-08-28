@@ -53,6 +53,32 @@ type Member struct {
 	AddedAt   time.Time `json:"addedAt"`
 }
 
+// Artifact 项目挂载的可发布制品。
+type Artifact struct {
+	ProjectID string `json:"projectId"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+}
+
+// Space 项目内知识协作空间。
+type Space struct {
+	ID        string `json:"spaceId"`
+	ProjectID string `json:"projectId"`
+	Realm     string `json:"realm"`
+	Name      string `json:"name"`
+}
+
+// Automation 项目绑定的触发器与流程。
+type Automation struct {
+	ID          string `json:"automationId"`
+	ProjectID   string `json:"projectId"`
+	TriggerKind string `json:"triggerKind"`
+	TriggerSpec string `json:"triggerSpec"`
+	FlowRef     string `json:"flowRef"`
+	Enabled     bool   `json:"enabled"`
+}
+
 // UsageItem 项目用量聚合的一行（usage_ledger 按 cost_type 聚合，仪表板最小后端）。
 type UsageItem struct {
 	CostType string  `json:"costType"`
@@ -62,11 +88,11 @@ type UsageItem struct {
 
 // BudgetSnapshot 项目树预算四态（读自 budget_trees，总额模型口径）。
 type BudgetSnapshot struct {
-	Remaining int64   `json:"remaining"`
-	Budget    int64   `json:"budget"`
-	SoftLimit int64   `json:"softLimit"`
-	Overdraft int64   `json:"overdraft"`
-	State     string  `json:"state"`
+	Remaining int64  `json:"remaining"`
+	Budget    int64  `json:"budget"`
+	SoftLimit int64  `json:"softLimit"`
+	Overdraft int64  `json:"overdraft"`
+	State     string `json:"state"`
 }
 
 // CanProject 角色能力矩阵（3×6 逐格，无默认放行分支）。闭集外报错——未知值是

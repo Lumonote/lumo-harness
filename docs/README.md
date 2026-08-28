@@ -8,13 +8,19 @@
 
 ---
 
-## 一、文档地图（共 3 篇）
+## 一、核心文档地图（共 3 篇）
 
 | 文档 | 内容 | 何时读 |
 |------|------|--------|
 | **[`architecture.md`](./architecture.md)** | **唯一权威技术规范**（§0–§22）：决策快照、约束、dsh 原生机制、分层与三平面、三大核心机制、数据层（含向量检索 §5.4 与知识库共享编辑 §5.4.7）、控制面、调度面（含多集群调度监控 §7.4）、协同面（含共享执行控制 §8.4）、连接器与 RBAC、**项目与协作工作区（§11.1，产品三入口：项目/专家·技能·连接器/自动化）**、网关与语言、选型总表、术语字典、20 条硬规矩、安全模型（§18）、测试与验证策略（§19）、故障模式目录与降级预案（§20）、SLO 与容量模型（§21）、迁移与回滚（§22） | 需要任何设计结论时 —— **以本篇为准** |
 | **[`roadmap.md`](./roadmap.md)** | 实施蓝图与端到端流程（§16–§17）：仓库布局、P0–P4 构建顺序、MVP 建议、五类端到端流程串联验证（含共享编辑 + 多集群监控） | 规划排期与验收时 |
 | **[`design-review.md`](./design-review.md)** | 独立评审意见：架构 / 技术选型 / 业务产品三维度，**5 条 P0 风险** + 对新增章节的评审 + 替代落地顺序 + 待补章节 | **实施前必读** |
+
+### 专题设计（实现相关能力时并读）
+
+| 文档 | 内容 |
+|------|------|
+| **[`2026-08-28-cluster-organization-desktop-and-artifact-distribution-design.md`](./superpowers/specs/2026-08-28-cluster-organization-desktop-and-artifact-distribution-design.md)** | Cluster 专属功能门禁、PC 桌面节点注册与运营、用户/角色/部门、技能分发与自定义技能、不可变 Bundle、Nacos 期望态与多 Agent 委派权限交集 |
 
 ## 二、阅读路径
 
@@ -71,14 +77,16 @@
 | 对象存储 | **MinIO**（`ctx.datastore.object`） | 桶按 realm 隔离、生命周期分级、纠删码多节点部署；**对象存储 seam + 附件 + storage→sql KV 已落地（P2b 项 10/11/12，2026-08-26）**——`@lumo/object-store` 插件注册 `ctx.objectStore`（realm 前缀隔离 / 内容寻址 sha256 / 缺对象 undefined / 不可达 fail-closed）+ `ctx.spillStore` 收敛（溢出内容对象化，跨节点 resume 任意节点取回）；**附件后端（项 10）**：`@lumo/attachments` 的 MinIO 版 `AttachmentStore`（save→ref 是 `<realm>/content/<sha256>` 对象键、同内容同键幂等、读回 digest 校验、NOT_FOUND/CORRUPT/INVALID/fail-closed，键规则锁在 `shared/seam-contracts/attachment.ts`）；**storage→sql KV（项 12）**：`@lumo/storage` 的 PG KV 后端（`PgStorageBackend implements StorageBackend`，`ctx.storage` 收敛到 `ctx.datastore.sql`，与 sqlite 跑同一份 dsh 契约套件，真 PG 全绿）（[`specs/2026-08-26-object-store-design.md`](./superpowers/specs/2026-08-26-object-store-design.md)） |
 | 网关 | **全栈 Go 自研**（边缘/LLM/连接器/终端 + Seam Proxy） | `review` R3 的能力清单（抗攻击/弹性/证书/热加载原子性）+ **压测、SLO、故障演练三项上线门槛**；**LLM 网关首切片已落地（P2a 起始项，2026-08-26）**——OpenAI 兼容流式/非流式、provider+费率表、计量单截面跨网（emitter=llm-gateway，与 RocketMQ 计量流全链联测真 broker 收账）、双树执法 Go 镜像（[`specs/2026-08-26-llm-gateway-design.md`](./superpowers/specs/2026-08-26-llm-gateway-design.md)）；限流/batch/路由链/集群形态显式外 |
 | 数据层构成 | **PG + Doris + Nebula + Milvus + MinIO + Redis** | `review` T3 的运维准入条件（专职人力 / 容量基线 / 备份恢复演练 / schema 演进 / 降级预案） |
-| 制品注册表 | **职责三分：原始字节→内容寻址对象存储、元数据/签名/依赖图→PG、灰度规则→Nacos**。硬约束是 **PG 是索引不是真相源**——执法只认按 digest 取回的原始字节，PG 元数据不得作为任何执法判断的输入 | `architecture` §6.1 已修订；实现见 `platform/control-plane/registry`，设计说明 [`specs/2026-08-24-registry-design.md`](./superpowers/specs/2026-08-24-registry-design.md)；**provisioner / OPA scope 评估 / 密钥轮换与吊销 已设计**（[`specs/2026-08-26-registry-governance-design.md`](./superpowers/specs/2026-08-26-registry-governance-design.md)，实现待 P2） |
-| Seam 可远程化边界 | **分级表是准入判据的唯一真相源，未定级即拒绝**。§4.1 原文「任意 seam 可远程化」已收窄：杠杆来自平台新增的能力 seam，不来自搬迁 dsh 原有 seam——白名单里没有一个 dsh 原生 seam，这是结论不是遗漏 | `architecture` §4.1.1–§4.1.2；实现见 `platform/shared/seam-contracts/remotability.ts` + 三道闸，设计说明 [`specs/2026-08-24-seam-remotability-design.md`](./superpowers/specs/2026-08-24-seam-remotability-design.md)，含实现顺序 P2a–P3；**行 5（`ctx.subagents` 跨节点委派）已落地（2026-08-27）**：one-shot spawn 切片——承载节点 `@lumo/subagent-host`（HTTP 放置面）+ 父节点 `@lumo/subagent-remote`（Scheduler 放置 → 承载 start → 回调结集 → 终态上报），真 dsh 双进程冒烟全绿（`dsh-plugins/subagent-remote/smoke-parent.ts`）；fork/continuable seed 传输、预算联动放置随后续切片（P2c）；**行 6（`ctx.jobs` 句柄虚拟化）已落地（2026-08-27）**：`@lumo/job-control` 把 `JobRef=(sessionRef,node,jobId)` 的授权/幂等 dispatch 落进共享 PG command mailbox，目标节点才消费并调用本地 `ctx.jobs.kill`；`job/started|finished` 同库 append-only 事件流是跨节点读侧真相，`status` 不触发本地动作。恢复的重派/resume 决策仍归 R2；**行 13 的扇出接线已落地（2026-08-27）**：agent 角色用 id-targeted patch 把既有 worker-thread FlowEngine 的 provider 改为 `lumo-remote`，真实 `agent()` 经 `ctx.subagents` 路由到 Scheduler/承载节点；独立 Go FlowEngine 的 DAG/断点续跑/TriggerBus 仍待实现；**行 9 本地快照切片已落地（2026-08-27）**：`@lumo/skill-local` 仅注册启动时路径/allow-list/frontmatter/digest 均校验通过的本地 SKILL.md 正文；启用快照后 `dsh-node` 关闭可变 filesystem provider，重放不读取远端或项目/用户目录。Provisioner 的下载、验签、reconcile、心跳仍待实现；**行 3/行 4 已收口（2026-08-27）**：复制日志读面 staleness 信封（`ctx.sessionLogQuery.queryWithStaleness`——显式 stale 不返半截）+ 辅助标题调用经 `ctx.llm` 与主循环同一路由面（title-route.spec 四断言），P2a 读面侧收官（行 2 全量 / 行 3 / 行 4 验证切片 / 行 5 切片一形态 / 行 6 实现） |
-| 成本归因与预算策略 | **单截面只保留为 token 截面**（B2 明确要求保留）；成本走并行事件流：`cost_type` 闭集 + trace 归因 + 单一写入者。预算树三档行为（软限额/透支/硬停），默认退化与今天一致 | `architecture` §6.4；实现见 `platform/shared/seam-contracts/{cost-events,budget-policy,metering}.ts` + `platform/dsh-plugins/metering`，设计说明 [`specs/2026-08-25-cost-attribution-design.md`](./superpowers/specs/2026-08-25-cost-attribution-design.md)；**PG 侧「本期配额」总额模型已落地**（[`specs/2026-08-26-budget-total-model-design.md`](./superpowers/specs/2026-08-26-budget-total-model-design.md)，2026-08-26）；**事件异步削峰本地等价已落地**（PG 事务 outbox + 进程内调度器，幂等键/事件时刻/批处理，[`specs/2026-08-26-metering-outbox-design.md`](./superpowers/specs/2026-08-26-metering-outbox-design.md)）；**台账列清单单源化**（`shared/manifests/usage-ledger.schema.json`——DDL 与 INSERT 同源生成；Go 消费侧（usage-ledger）将 go:embed 同一文件）；**Doris 聚合已设计**（[`specs/2026-08-26-doris-aggregation-design.md`](./superpowers/specs/2026-08-26-doris-aggregation-design.md)——日分区列式 cube、PG 单向重建、桶级幂等、缺 Doris 显式拒绝；实现随 Doris 进拓扑）；**RocketMQ 传输已落地（Standalone 形态，2026-08-26 实测）**——发布/消费都进 Go（npm 无可用 TS 客户端）：`platform/control-plane/usage-ledger`（publisher：outbox 锁批→broker；consumer：校验→幂等落账；四不变式真 broker e2e 全绿，[`specs/2026-08-26-ledger-rmq-transport-design.md`](./superpowers/specs/2026-08-26-ledger-rmq-transport-design.md)），与 TS 侧 `ledgerTransport` 互斥装配；cluster 多实例/HA 随 helm。待补：Doris 聚合实现 |
+| 制品注册表 | **职责三分：原始字节→内容寻址对象存储、元数据/签名/依赖图→PG、灰度规则→Nacos**。硬约束是 **PG 是索引不是真相源**——执法只认按 digest 取回的原始字节，PG 元数据不得作为任何执法判断的输入 | `architecture` §6.1 已修订；实现见 `platform/control-plane/registry`；**Provisioner 已落地**（plan → digest blob → 二次校验 → 原子安装 → install-state），OPA/Vault/Nacos 适配面已接入；实现边界与验证见 [`implementation-status.md`](./implementation-status.md) |
+| Seam 可远程化边界 | **分级表是准入判据的唯一真相源，未定级即拒绝**。§4.1 原文「任意 seam 可远程化」已收窄：杠杆来自平台新增的能力 seam，不来自搬迁 dsh 原有 seam——白名单里没有一个 dsh 原生 seam，这是结论不是遗漏 | `architecture` §4.1.1–§4.1.2；实现见 `platform/shared/seam-contracts/remotability.ts` + 三道闸，设计说明 [`specs/2026-08-24-seam-remotability-design.md`](./superpowers/specs/2026-08-24-seam-remotability-design.md)，含实现顺序 P2a–P3；**行 5（`ctx.subagents` 跨节点委派）已落地（2026-08-27）**：one-shot spawn 切片——承载节点 `@lumo/subagent-host`（HTTP 放置面）+ 父节点 `@lumo/subagent-remote`（Scheduler 放置 → 承载 start → 回调结集 → 终态上报），真 dsh 双进程冒烟全绿（`dsh-plugins/subagent-remote/smoke-parent.ts`）；fork/continuable seed 传输、预算联动放置随后续切片（P2c）；**行 6（`ctx.jobs` 句柄虚拟化）已落地（2026-08-27）**：`@lumo/job-control` 把 `JobRef=(sessionRef,node,jobId)` 的授权/幂等 dispatch 落进共享 PG command mailbox，目标节点才消费并调用本地 `ctx.jobs.kill`；`job/started|finished` 同库 append-only 事件流是跨节点读侧真相，`status` 不触发本地动作。恢复的重派/resume 决策仍归 R2；**行 13 的扇出接线已落地（2026-08-27）**：agent 角色用 id-targeted patch 把既有 worker-thread FlowEngine 的 provider 改为 `lumo-remote`，真实 `agent()` 经 `ctx.subagents` 路由到 Scheduler/承载节点；独立 Go FlowEngine 已补齐 DAG 拓扑执行、事件 outbox/TriggerBus 和运行幂等记录，断点续跑与跨服务 RocketMQ 仍是生产增强项；**行 9 本地快照切片已落地（2026-08-27）**：`@lumo/skill-local` 仅注册启动时路径/allow-list/frontmatter/digest 均校验通过的本地 SKILL.md 正文；启用快照后 `dsh-node` 关闭可变 filesystem provider，重放不读取远端或项目/用户目录。Provisioner 已补齐计划下载、digest 复核、原子安装和 install-state；签名策略、reconcile/心跳与发布环境接入仍待完成；**行 3/行 4 已收口（2026-08-27）**：复制日志读面 staleness 信封（`ctx.sessionLogQuery.queryWithStaleness`——显式 stale 不返半截）+ 辅助标题调用经 `ctx.llm` 与主循环同一路由面（title-route.spec 四断言），P2a 读面侧收官（行 2 全量 / 行 3 / 行 4 验证切片 / 行 5 切片一形态 / 行 6 实现） |
+| 成本归因与预算策略 | **单截面只保留为 token 截面**（B2 明确要求保留）；成本走并行事件流：`cost_type` 闭集 + trace 归因 + 单一写入者。预算树三档行为（软限额/透支/硬停），默认退化与今天一致 | `architecture` §6.4；实现见 `platform/shared/seam-contracts/{cost-events,budget-policy,metering}.ts` + `platform/dsh-plugins/metering`；PG 双树预算、outbox、台账列单源化、RocketMQ 发布/消费均已落地；`control-plane/usage-ledger/internal/doris` 已提供日 cube、Stream Load 和 replay 查询，生产接入仍需配置 Doris endpoint |
 
-| 第五类制品·用户自定义流程 | 用户在项目内定义私有流程（DAG + 防环护栏），FlowReview 审核提升（manager/admin 且非作者——职责分离），audience 定向分发（roles/depts/users，空集恒假），版本快照与回滚（approve 同事务快照，回滚=重指不改写） | `architecture` §11 后半；实现见 `platform/control-plane/flows` + 契约 `shared/seam-contracts/flows.ts`，设计说明 [`specs/2026-08-26-user-flows-design.md`](./superpowers/specs/2026-08-26-user-flows-design.md)；**制品层已落地**（生命周期/审核/定向/回滚，真 PG + compose 冒烟全绿）；执行（FlowEngine）、LLM 生成、Nacos 热下发随 P2 |
+| 第五类制品·用户自定义流程 | 用户在项目内定义私有流程（DAG + 防环护栏），FlowReview 审核提升（manager/admin 且非作者——职责分离），audience 定向分发（roles/depts/users，空集恒假），版本快照与回滚（approve 同事务快照，回滚=重指不改写） | `architecture` §11 后半；实现见 `platform/control-plane/flows` + 契约 `shared/seam-contracts/flows.ts`；**制品层与最小执行层已落地**（FlowEngine 拓扑执行、已发布快照运行 API、TriggerBus），LLM 流程生成与编辑器仍属于前端产品增强 |
 | 项目与预算树（N3 拍板） | **项目 = 并行预算树**（2026-08-26 定案）：一次调用同时扣用户树与项目树，任一超限即拒；双树同事务扣减为 TS metering 既有已测行为（口径升格），项目树治理面（创建即种子 `budget_trees kind='project'`）由 projects 服务承担 | `architecture` §6.4/§11.1/§22；实现见 `platform/control-plane/projects` + 契约 `shared/seam-contracts/projects.ts`，设计说明 [`specs/2026-08-26-project-workspace-design.md`](./superpowers/specs/2026-08-26-project-workspace-design.md)；**§11.1 首切片已落地**（项目实体/生命周期/成员角色/用量聚合，真 PG 全绿） |
 
 ### 仍待拍板
+
+> 2026-08-27 实现补充：FlowEngine 已包含已发布快照执行、事件入口、持久 outbox worker、自动化绑定和运行幂等记录；Provisioner、Vault/OPA、Nacos、Milvus/Nebula/Doris、项目控制面、yrs CRDT 内核、Helm/Cluster compose 与统一基础 Prometheus 指标也已进入仓库。生产级跨节点联合演练、Scheduler 高级公平/抢占策略、OTel 业务指标、供应商级 MCP/OAuth 和完整前端验收仍见 [`implementation-status.md`](./implementation-status.md)。
 
 | # | 议题 | 待决内容 | 出处 |
 |---|------|---------|------|
@@ -86,9 +94,9 @@
 | 2 | **是否引入 TiDB/CRDB** | 规范自标待决；视多集群联邦需求。**后加远比先加后拆便宜**，建议保持待决 | `architecture` §13.3 |
 
 
-## 五、待补章节（当前完全缺失）
+## 五、评审缺口补齐记录
 
-`design-review` §5.3 列出 5 项规范尚未覆盖、但落地前必须补齐的内容：**安全模型/威胁模型**（尤其提示注入）、**测试与验证策略**、**故障模式目录与降级预案**、**SLO 与容量模型**（全篇无任何数字）、**迁移与回滚**。
+`design-review` §5.3 曾列出 5 项规范缺口；以下记录保留原始评审出处，同时标明当前补齐状态：**安全模型/威胁模型**（尤其提示注入）、**测试与验证策略**、**故障模式目录与降级预案**、**SLO 与容量模型**、**迁移与回滚**。
 
 > **进度（2026-08-24）**：第 1 项**安全模型/威胁模型**已补为 [`architecture.md`](./architecture.md) **§18**（资产与信任边界、提示注入结构性防护三件套、明确不做的事、未覆盖清单），实现见 `platform/dsh-plugins/provenance`。
 > **进度（2026-08-26）**：其余 4 项已全部补齐——**§19 测试与验证策略**（契约双实现、会话日志确定性重放、混沌注入清单、压测规范）、**§20 故障模式目录与降级预案**（D-Refuse / D-Degrade / D-Continue 三姿态 × 18 行目录）、**§21 SLO 与容量模型**（首个数字化章节：并发/延迟/可用性/计量/恢复目标 + 三形态容量模型，目标值以压测与演练为校准）、**§22 迁移与回滚**（dsh 升级、形态迁移、schema 演进规范、不可逆清单）。原始清单保留不删，以便追溯评审出处。

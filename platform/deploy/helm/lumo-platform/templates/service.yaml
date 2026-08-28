@@ -1,0 +1,13 @@
+{{- range $name, $cfg := .Values.services }}
+{{- if $cfg.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lumo-platform.name" $ }}-{{ $name }}
+spec:
+  type: {{ $.Values.service.type }}
+  selector: { lumo.dev/service: {{ $name }} }
+  ports: [{ name: http, port: {{ $cfg.port }}, targetPort: http }]
+---
+{{- end }}
+{{- end }}

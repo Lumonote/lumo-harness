@@ -47,7 +47,7 @@ interface Harness {
   callbackBodies: ChildResultBody[]
   runs: RunRegistry
   post(path: string, payload: unknown, headers?: Record<string, string>): Promise<Reply>
-  callbackUrlOf(): Promise<string>
+  callbackUrlOf(childId?: string): string
 }
 
 interface Reply {
@@ -104,6 +104,7 @@ async function setup(adapter: LlmAdapter): Promise<Harness> {
     port: 0,
     maxBodyBytes: 1 << 20,
     tokens: new Map([['dev', 't0k']]),
+    callbackOrigins: new Set([`http://127.0.0.1:${callbackPort}`]),
     runs,
     // 与 index.ts 同款接线:已发布会话 = 已结集(或他处占用的幂等键)→ 重放闸
     sessionExists: (childId) => ctx.agents.get(SessionId(childId)) !== undefined,
@@ -124,7 +125,7 @@ async function setup(adapter: LlmAdapter): Promise<Harness> {
     callbackBodies,
     callback,
     runs,
-    callbackUrlOf: () => `http://127.0.0.1:${callbackPort}/result`,
+    callbackUrlOf: (childId = 'child-1') => `http://127.0.0.1:${callbackPort}/subagent/result/${childId}/0123456789abcdef`,
     post: async (path, payload, headers = {}) => {
       const res = await fetch(`${h.baseUrl}${path}`, {
         method: 'POST',
@@ -144,8 +145,9 @@ async function setup(adapter: LlmAdapter): Promise<Harness> {
 }
 
 function startRequest(h: Harness, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const childId = typeof overrides['childId'] === 'string' ? overrides['childId'] : 'child-1'
   return {
-    childId: 'child-1',
+    childId,
     realm: 'dev',
     label: 'child task',
     prompt: [{ type: 'text', text: 'child 任务' }],
@@ -157,7 +159,7 @@ function startRequest(h: Harness, overrides: Record<string, unknown> = {}): Reco
       provider: 'mock',
       model: 'mock',
     },
-    callbackUrl: h.callbackUrlOf(),
+    callbackUrl: h.callbackUrlOf(childId),
     ...overrides,
   }
 }

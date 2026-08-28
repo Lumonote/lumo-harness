@@ -5,7 +5,12 @@
 package crdt
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/lumo-harness/platform/collaborator/internal/domain"
 )
@@ -19,10 +24,68 @@ type Merger interface {
 	Name() string
 }
 
-// AppendOnlyMerger 占位实现：把增量按序拼接保存，不做真正的 CRDT 合并。
+// UpdateSetMerger 是服务端的确定性更新集内核。
 //
-// **不可用于生产**：它不压缩状态、不消解并发冲突，仅用于在 FFI 内核就位前
-// 打通持久化与恢复链路。启用时必须打印显式警告（不静默降级，铁律 21）。
+// 它不解释 Yjs 二进制 payload，而是把更新当作 CRDT 内核的输入集合：按
+// actor/seq/digest 去重并排序，因而同一集合无论跨节点以何顺序到达，都生成
+// 同一份可重放状态。Yjs 的文本 materialize 仍由客户端或 yrs FFI 完成；服务端
+// 不把“原样二进制转发”冒充成文档语义合并。
+type UpdateSetMerger struct{}
+
+type updateSetState struct {
+	Version int             `json:"version"`
+	Updates []updateSetItem `json:"updates"`
+}
+
+type updateSetItem struct {
+	DocID   string `json:"docId"`
+	Seq     int64  `json:"seq"`
+	Actor   string `json:"actor"`
+	Digest  string `json:"digest"`
+	Payload string `json:"payload"`
+}
+
+func (UpdateSetMerger) Name() string { return "deterministic-update-set" }
+
+func (UpdateSetMerger) Merge(state []byte, updates []domain.Update) ([]byte, error) {
+	set := updateSetState{Version: 1}
+	if len(state) > 0 {
+		if err := json.Unmarshal(state, &set); err != nil {
+			return nil, fmt.Errorf("collaborator: CRDT 状态解析失败: %w", err)
+		}
+		if set.Version != 1 {
+			return nil, fmt.Errorf("collaborator: 不支持的 CRDT 状态版本 %d", set.Version)
+		}
+	}
+	seen := make(map[string]updateSetItem, len(set.Updates)+len(updates))
+	for _, item := range set.Updates {
+		seen[item.Digest] = item
+	}
+	for _, update := range updates {
+		if len(update.Payload) == 0 {
+			continue
+		}
+		sum := sha256.Sum256(update.Payload)
+		digest := hex.EncodeToString(sum[:])
+		seen[digest] = updateSetItem{DocID: string(update.DocID), Seq: update.Seq, Actor: update.Actor, Digest: digest, Payload: base64.StdEncoding.EncodeToString(update.Payload)}
+	}
+	set.Updates = set.Updates[:0]
+	for _, item := range seen {
+		set.Updates = append(set.Updates, item)
+	}
+	sort.Slice(set.Updates, func(a, b int) bool {
+		if set.Updates[a].Seq != set.Updates[b].Seq {
+			return set.Updates[a].Seq < set.Updates[b].Seq
+		}
+		if set.Updates[a].Actor != set.Updates[b].Actor {
+			return set.Updates[a].Actor < set.Updates[b].Actor
+		}
+		return set.Updates[a].Digest < set.Updates[b].Digest
+	})
+	return json.Marshal(set)
+}
+
+// AppendOnlyMerger 兼容旧状态读取与历史测试；新装配不得使用它。
 type AppendOnlyMerger struct{}
 
 func (AppendOnlyMerger) Name() string { return "append-only(占位，非生产)" }
@@ -42,7 +105,7 @@ func (AppendOnlyMerger) Merge(state []byte, updates []domain.Update) ([]byte, er
 	return out, nil
 }
 
-// ErrKernelUnavailable FFI 内核不可用时的显式错误（不静默回退到占位实现）。
+// ErrKernelUnavailable 表示语义内核未配置或拒绝了输入更新。
 type ErrKernelUnavailable struct{ Detail string }
 
 func (e *ErrKernelUnavailable) Error() string {

@@ -2,6 +2,10 @@ module github.com/lumo-harness/platform/usage-ledger
 
 go 1.24
 
+require github.com/lumo-harness/platform/observability v0.0.0
+
+replace github.com/lumo-harness/platform/observability => ../observability
+
 require (
 	github.com/apache/rocketmq-clients/golang/v5 v5.1.4
 	github.com/jackc/pgx/v5 v5.7.2

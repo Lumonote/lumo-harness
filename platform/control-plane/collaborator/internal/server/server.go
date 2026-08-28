@@ -19,6 +19,7 @@ import (
 	"github.com/lumo-harness/platform/collaborator/internal/hub"
 	"github.com/lumo-harness/platform/collaborator/internal/ownership"
 	"github.com/lumo-harness/platform/collaborator/internal/store"
+	"github.com/lumo-harness/platform/observability"
 )
 
 // Identity 已认证的调用者（由边缘/终端网关注入，服务端不自行签发）。
@@ -63,6 +64,7 @@ func New(h *hub.Hub, st *store.Store, ring *ownership.Ring, auth Authenticator, 
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /metrics", handleMetrics)
 	mux.HandleFunc("GET /docs/{docID}/ws", s.handleWS)
 	mux.HandleFunc("GET /docs/{docID}/snapshot", s.handleLatestSnapshot)
 	mux.HandleFunc("GET /docs/{docID}/snapshot/{version}", s.handleSnapshotAt)
@@ -70,6 +72,10 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /docs/{docID}/comments", s.handleComments)
 	mux.HandleFunc("POST /docs/{docID}/comments", s.handleAddComment)
 	return mux
+}
+
+func handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	observability.Handler(w, nil)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -350,7 +356,15 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
 // resolve 取文档元数据与调用者在其空间上的权限。
 func (s *Server) resolve(ctx context.Context, id domain.DocumentID, ident Identity) (domain.Document, []domain.Permission, error) {
 	// 文档元数据由服务端解析：realm/space 不接受客户端传参（防越权）
-	meta := domain.Document{ID: id, Realm: ident.Realm}
+	metaPtr, err := s.store.FindDocument(ctx, id, ident.Realm)
+	if err != nil {
+		return domain.Document{ID: id, Realm: ident.Realm}, nil, err
+	}
+	if metaPtr == nil {
+		return domain.Document{ID: id, Realm: ident.Realm}, nil,
+			&domain.ErrNotFound{Detail: fmt.Sprintf("文档 %s", id)}
+	}
+	meta := *metaPtr
 	snap, err := s.store.LatestSnapshot(ctx, id)
 	if err != nil {
 		return meta, nil, err
@@ -358,7 +372,7 @@ func (s *Server) resolve(ctx context.Context, id domain.DocumentID, ident Identi
 	if snap != nil {
 		meta.PublishedVersion = snap.Version
 	}
-	perms, err := s.store.Permissions(ctx, meta.Space, ident.UserID)
+	perms, err := s.store.Permissions(ctx, meta.Realm, meta.Space, ident.UserID)
 	if err != nil {
 		return meta, nil, err
 	}
@@ -383,7 +397,10 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func writeErr(w http.ResponseWriter, err error) {
 	var forbidden *domain.ErrForbidden
 	var capacity *domain.ErrCapacity
+	var notFound *domain.ErrNotFound
 	switch {
+	case errors.As(err, &notFound):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 	case errors.As(err, &forbidden):
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 	case errors.As(err, &capacity):

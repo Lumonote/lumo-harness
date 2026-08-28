@@ -7,8 +7,10 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -77,7 +79,7 @@ CREATE TABLE IF NOT EXISTS collab_space_grants (
   realm       TEXT NOT NULL,
   subject     TEXT NOT NULL,
   permissions TEXT[] NOT NULL,
-  PRIMARY KEY (space, subject)
+  PRIMARY KEY (realm, space, subject)
 );
 `
 
@@ -116,6 +118,51 @@ func (s *Store) Close() {
 
 func walKey(id domain.DocumentID) string { return "collab:wal:" + string(id) }
 
+func walSeqKey(id domain.DocumentID) string { return "collab:wal-seq:" + string(id) }
+
+// 序号必须在 Redis 内分配，不能先 JSON 序列化再依赖 RPush 的返回值；否则
+// 持久化的 WAL 记录拿不到自己的全局序号。
+var appendWALScript = redis.NewScript(`
+local seq = redis.call('INCR', KEYS[2])
+redis.call('RPUSH', KEYS[1], '{"seq":' .. seq .. ',"update":' .. ARGV[1] .. '}')
+return seq
+`)
+
+// 恢复时以 PG 快照/WAL 中已知的最大序号抬升 Redis 计数器。这样即使
+// Redis 计数 key 因故丢失，重启后的新 update 也不会复用旧序号。
+var ensureWALSeqScript = redis.NewScript(`
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+local desired = tonumber(ARGV[1])
+if current < desired then
+  redis.call('SET', KEYS[1], desired)
+  return desired
+end
+return current
+`)
+
+// Redis list 裁剪使用的是物理下标，而应用序号在前缀裁剪后仍需单调递增；
+// 扫描 envelope 找到第一个未覆盖序号，避免把全局 seq 当 list index。
+var trimWALScript = redis.NewScript(`
+local values = redis.call('LRANGE', KEYS[1], 0, -1)
+for i, value in ipairs(values) do
+  local seq = string.match(value, '^%{"seq":([0-9]+),')
+  if seq == nil then
+    return -1
+  end
+  if tonumber(seq) > tonumber(ARGV[1]) then
+    redis.call('LTRIM', KEYS[1], i - 1, -1)
+    return i - 1
+  end
+end
+redis.call('DEL', KEYS[1])
+return 0
+`)
+
+type walEntry struct {
+	Seq    int64         `json:"seq"`
+	Update domain.Update `json:"update"`
+}
+
 // AppendWAL 追加一条 CRDT update 到 WAL，返回分配的序号。
 //
 // **这是确认给客户端的前提**：本调用返回后数据已在 Redis AOF 中；
@@ -125,24 +172,52 @@ func (s *Store) AppendWAL(ctx context.Context, u domain.Update) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("collaborator: 序列化 update 失败: %w", err)
 	}
-	seq, err := s.rdb.RPush(ctx, walKey(u.DocID), blob).Result()
+	seq, err := appendWALScript.Run(ctx, s.rdb, []string{walKey(u.DocID), walSeqKey(u.DocID)}, blob).Int64()
 	if err != nil {
 		return 0, fmt.Errorf("collaborator: 写 WAL 失败: %w", err)
 	}
 	return seq, nil
 }
 
-// ReadWALFrom 读取 WAL 中自 from（含）起的增量，用于崩溃后重建。
+// EnsureWALSeq 将 Redis 中的序号至少推进到 atLeast，且不会回退已有序号。
+// 该操作在文档恢复时调用，兼容 Redis 热层重建或计数 key 缺失的场景。
+func (s *Store) EnsureWALSeq(ctx context.Context, id domain.DocumentID, atLeast int64) error {
+	if atLeast < 0 {
+		atLeast = 0
+	}
+	if _, err := ensureWALSeqScript.Run(ctx, s.rdb, []string{walSeqKey(id)}, atLeast).Int64(); err != nil {
+		return fmt.Errorf("collaborator: 校准 WAL 序号失败: %w", err)
+	}
+	return nil
+}
+
+// ReadWALFrom 读取 WAL 中序号大于 from 的增量，用于崩溃后重建。
+// Redis list 可能已经裁剪过前缀，因此必须按 envelope 中的全局 seq 过滤。
 func (s *Store) ReadWALFrom(ctx context.Context, id domain.DocumentID, from int64) ([]domain.Update, error) {
-	raw, err := s.rdb.LRange(ctx, walKey(id), from, -1).Result()
+	raw, err := s.rdb.LRange(ctx, walKey(id), 0, -1).Result()
 	if err != nil {
 		return nil, fmt.Errorf("collaborator: 读 WAL 失败: %w", err)
 	}
 	out := make([]domain.Update, 0, len(raw))
 	for _, item := range raw {
+		var entry walEntry
+		if err := json.Unmarshal([]byte(item), &entry); err == nil && entry.Update.DocID != "" {
+			entry.Update.Seq = entry.Seq
+			if entry.Seq > 0 && entry.Seq <= from {
+				continue
+			}
+			out = append(out, entry.Update)
+			continue
+		}
+
+		// 兼容旧版直接存 domain.Update 的 WAL。旧记录没有可靠全局序号，
+		// from>0 时宁可重复交给 CRDT（幂等）也不能静默漏掉更新。
 		var u domain.Update
 		if err := json.Unmarshal([]byte(item), &u); err != nil {
 			return nil, fmt.Errorf("collaborator: 解析 WAL 记录失败: %w", err)
+		}
+		if u.Seq > 0 && u.Seq <= from {
+			continue
 		}
 		out = append(out, u)
 	}
@@ -151,8 +226,13 @@ func (s *Store) ReadWALFrom(ctx context.Context, id domain.DocumentID, from int6
 
 // TrimWAL 快照落库后裁剪 WAL 前缀（快照已覆盖的部分）。
 func (s *Store) TrimWAL(ctx context.Context, id domain.DocumentID, upto int64) error {
-	if err := s.rdb.LTrim(ctx, walKey(id), upto, -1).Err(); err != nil {
+	trimmed, err := trimWALScript.Run(ctx, s.rdb, []string{walKey(id)}, upto).Int64()
+	if err != nil {
 		return fmt.Errorf("collaborator: 裁剪 WAL 失败: %w", err)
+	}
+	if trimmed < 0 {
+		// 旧格式没有 envelope 序号，保留数据等待自然迁移，不能冒险删除。
+		return nil
 	}
 	return nil
 }
@@ -177,11 +257,32 @@ func (s *Store) LoadState(ctx context.Context, id domain.DocumentID) ([]byte, in
 	var seq int64
 	err := s.pg.QueryRow(ctx,
 		`SELECT state, wal_seq FROM collab_state WHERE doc_id = $1`, string(id)).Scan(&state, &seq)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		// 无状态记录 = 新文档，从空开始
 		return nil, 0, nil
 	}
+	if err != nil {
+		return nil, 0, fmt.Errorf("collaborator: 读取状态失败: %w", err)
+	}
 	return state, seq, nil
+}
+
+// FindDocument 读取文档权威元数据，并在查询时固定 realm 边界。
+// 调用方不得用请求体提供的 space/realm 替代此查询结果。
+func (s *Store) FindDocument(ctx context.Context, id domain.DocumentID, realm domain.RealmID) (*domain.Document, error) {
+	var d domain.Document
+	err := s.pg.QueryRow(ctx,
+		`SELECT doc_id, realm, space, title, published_version, updated_at
+		 FROM collab_documents WHERE doc_id = $1 AND realm = $2`,
+		string(id), string(realm)).Scan(
+		&d.ID, &d.Realm, &d.Space, &d.Title, &d.PublishedVersion, &d.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("collaborator: 读取文档元数据失败: %w", err)
+	}
+	return &d, nil
 }
 
 // EnsureDocument 幂等登记文档元数据。
@@ -241,8 +342,11 @@ func (s *Store) LatestSnapshot(ctx context.Context, id domain.DocumentID) (*doma
 		`SELECT doc_id, version, publisher, content, created_at
 		 FROM collab_snapshots WHERE doc_id = $1 ORDER BY version DESC LIMIT 1`,
 		string(id)).Scan(&snap.DocID, &snap.Version, &snap.Publisher, &snap.Content, &snap.CreatedAt)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("collaborator: 读取最新快照失败: %w", err)
 	}
 	return &snap, nil
 }
@@ -295,13 +399,16 @@ func (s *Store) MarkDispatched(ctx context.Context, id domain.DocumentID, versio
 }
 
 // Permissions 查询主体在空间上的权限集合（空 = 无任何权限）。
-func (s *Store) Permissions(ctx context.Context, space domain.SpaceID, subject string) ([]domain.Permission, error) {
+func (s *Store) Permissions(ctx context.Context, realm domain.RealmID, space domain.SpaceID, subject string) ([]domain.Permission, error) {
 	var perms []string
 	err := s.pg.QueryRow(ctx,
-		`SELECT permissions FROM collab_space_grants WHERE space = $1 AND subject = $2`,
-		string(space), subject).Scan(&perms)
-	if err != nil {
+		`SELECT permissions FROM collab_space_grants WHERE realm = $1 AND space = $2 AND subject = $3`,
+		string(realm), string(space), subject).Scan(&perms)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("collaborator: 读取空间权限失败: %w", err)
 	}
 	out := make([]domain.Permission, 0, len(perms))
 	for _, p := range perms {
@@ -318,7 +425,7 @@ func (s *Store) Grant(ctx context.Context, space domain.SpaceID, realm domain.Re
 	}
 	_, err := s.pg.Exec(ctx,
 		`INSERT INTO collab_space_grants (space, realm, subject, permissions) VALUES ($1,$2,$3,$4)
-		 ON CONFLICT (space, subject) DO UPDATE SET permissions = EXCLUDED.permissions`,
+		 ON CONFLICT (realm, space, subject) DO UPDATE SET permissions = EXCLUDED.permissions`,
 		string(space), string(realm), subject, raw)
 	if err != nil {
 		return fmt.Errorf("collaborator: 授权失败: %w", err)

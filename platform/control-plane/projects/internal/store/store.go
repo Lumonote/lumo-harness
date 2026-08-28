@@ -38,15 +38,40 @@ CREATE TABLE IF NOT EXISTS project_members (
   added_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (project_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS project_artifacts (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind       TEXT NOT NULL CHECK (kind IN ('component','skill','agent','connector','flow')),
+  name       TEXT NOT NULL,
+  version    TEXT NOT NULL,
+  PRIMARY KEY (project_id, kind, name)
+);
+
+CREATE TABLE IF NOT EXISTS project_spaces (
+  space_id   TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  realm      TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  UNIQUE (project_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS project_automations (
+  automation_id TEXT PRIMARY KEY,
+  project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  trigger_kind  TEXT NOT NULL CHECK (trigger_kind IN ('cron','webhook','event')),
+  trigger_spec  TEXT NOT NULL,
+  flow_ref      TEXT NOT NULL,
+  enabled       BOOLEAN NOT NULL DEFAULT true
+);
 `
 
 // 领域错误（server 层映射 HTTP 状态）。
 var (
-	ErrNotFound        = errors.New("项目不存在（或非成员不可见）")
-	ErrNameTaken       = errors.New("同名项目已存在于本 realm")
-	ErrLastOwner       = errors.New("最后一个 owner 不可移除或降级（项目不可成为无主孤儿）")
-	ErrNotArchived     = errors.New("删除只接受 archived 态——归档是常态，删除是异常（先归档再删）")
-	ErrAlreadyMember   = errors.New("该用户已是成员")
+	ErrNotFound      = errors.New("项目不存在（或非成员不可见）")
+	ErrNameTaken     = errors.New("同名项目已存在于本 realm")
+	ErrLastOwner     = errors.New("最后一个 owner 不可移除或降级（项目不可成为无主孤儿）")
+	ErrNotArchived   = errors.New("删除只接受 archived 态——归档是常态，删除是异常（先归档再删）")
+	ErrAlreadyMember = errors.New("该用户已是成员")
 	// ErrMeteringNotReady budget_trees 表尚未创建（真相源在 TS metering 插件，
 	// dsh-node 首启时建）。项目树种子是创建的硬依赖——不建表（第二 DDL 真相源
 	// 比等待更贵），把装配顺序如实暴露给调用方。
@@ -55,8 +80,8 @@ var (
 
 // Store PG 存储。
 type Store struct {
-	pool           *pgxpool.Pool
-	defaultBudget  int64
+	pool          *pgxpool.Pool
+	defaultBudget int64
 }
 
 func New(pool *pgxpool.Pool, defaultBudget int64) *Store {
@@ -276,6 +301,110 @@ func (s *Store) RemoveMember(ctx context.Context, projectID, userID string) erro
 		return ErrNotFound
 	}
 	return tx.Commit(ctx)
+}
+
+func (s *Store) UpsertArtifact(ctx context.Context, artifact domain.Artifact) error {
+	if artifact.Kind != "component" && artifact.Kind != "skill" && artifact.Kind != "agent" &&
+		artifact.Kind != "connector" && artifact.Kind != "flow" {
+		return fmt.Errorf("未知制品类型 %q", artifact.Kind)
+	}
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO project_artifacts (project_id, kind, name, version)
+		VALUES ($1,$2,$3,$4)
+		ON CONFLICT (project_id, kind, name) DO UPDATE SET version = EXCLUDED.version`,
+		artifact.ProjectID, artifact.Kind, artifact.Name, artifact.Version)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ListArtifacts(ctx context.Context, projectID string) ([]domain.Artifact, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT project_id, kind, name, version FROM project_artifacts
+		WHERE project_id = $1 ORDER BY kind, name`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	out := []domain.Artifact{}
+	for rows.Next() {
+		var a domain.Artifact
+		if err := rows.Scan(&a.ProjectID, &a.Kind, &a.Name, &a.Version); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpsertSpace(ctx context.Context, space domain.Space) error {
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO project_spaces (space_id, project_id, realm, name)
+		SELECT $1, $2, $3, $4 WHERE EXISTS (
+			SELECT 1 FROM projects WHERE id = $2 AND realm = $3)
+		ON CONFLICT (space_id) DO UPDATE SET name = EXCLUDED.name`,
+		space.ID, space.ProjectID, space.Realm, space.Name)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ListSpaces(ctx context.Context, projectID string) ([]domain.Space, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT space_id, project_id, realm, name FROM project_spaces
+		WHERE project_id = $1 ORDER BY name, space_id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	out := []domain.Space{}
+	for rows.Next() {
+		var space domain.Space
+		if err := rows.Scan(&space.ID, &space.ProjectID, &space.Realm, &space.Name); err != nil {
+			return nil, err
+		}
+		out = append(out, space)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpsertAutomation(ctx context.Context, a domain.Automation) error {
+	if a.TriggerKind != "cron" && a.TriggerKind != "webhook" && a.TriggerKind != "event" {
+		return fmt.Errorf("未知触发器类型 %q", a.TriggerKind)
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO project_automations
+		  (automation_id, project_id, trigger_kind, trigger_spec, flow_ref, enabled)
+		VALUES ($1,$2,$3,$4,$5,$6)
+		ON CONFLICT (automation_id) DO UPDATE SET
+		  trigger_kind=EXCLUDED.trigger_kind, trigger_spec=EXCLUDED.trigger_spec,
+		  flow_ref=EXCLUDED.flow_ref, enabled=EXCLUDED.enabled`,
+		a.ID, a.ProjectID, a.TriggerKind, a.TriggerSpec, a.FlowRef, a.Enabled)
+	return err
+}
+
+func (s *Store) ListAutomations(ctx context.Context, projectID string) ([]domain.Automation, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT automation_id, project_id, trigger_kind, trigger_spec, flow_ref, enabled
+		FROM project_automations WHERE project_id = $1 ORDER BY automation_id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	out := []domain.Automation{}
+	for rows.Next() {
+		var a domain.Automation
+		if err := rows.Scan(&a.ID, &a.ProjectID, &a.TriggerKind, &a.TriggerSpec, &a.FlowRef, &a.Enabled); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // Transition 生命周期转移（幂等：重复 archive 是重放）。归档时刻只在

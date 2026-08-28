@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/registry/internal/objstore"
 	"github.com/lumo-harness/platform/registry/internal/server"
 	"github.com/lumo-harness/platform/registry/internal/store"
@@ -66,7 +67,7 @@ func main() {
 	addr := ":" + env("REGISTRY_PORT", "8084")
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.New(s, ts, objs),
+		Handler:           observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(server.New(s, ts, objs))),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.Printf("registry: 监听 %s", addr)

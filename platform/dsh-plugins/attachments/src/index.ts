@@ -44,7 +44,10 @@ export const Config: z<AttachmentsConfig> = z.object({
 export const inject: string[] = ['objectStore']
 
 export function apply(ctx: Context, config: AttachmentsConfig): void {
-  ctx.provide('attachments', new MinioAttachmentStore(ctx, config))
+  // AttachmentStore extends Cordis Service and registers `attachments` from
+  // super(ctx). Providing the instance a second time races the Service-owned
+  // registration and makes multi-plugin profile boot fail as a duplicate.
+  new MinioAttachmentStore(ctx, config)
 }
 
 export default apply

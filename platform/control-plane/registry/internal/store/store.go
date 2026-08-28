@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lumo-harness/platform/registry/internal/bundle"
 
 	"github.com/lumo-harness/platform/registry/internal/manifest"
 	"github.com/lumo-harness/platform/registry/internal/objstore"
@@ -155,6 +156,19 @@ func (s *Store) Publish(ctx context.Context, raw, sig []byte) (*Record, error) {
 	}
 	if bad, within := trust.ScopesWithin(m.Scopes, pub.MaxScopes); !within {
 		return nil, fmt.Errorf("%w: %s", trust.ErrScopeEscalation, bad)
+	}
+	if m.PayloadDigest != "" {
+		payload, err := s.objs.Get(ctx, m.PayloadDigest)
+		if err != nil {
+			return nil, fmt.Errorf("registry: 读取 payload %s 失败: %w", m.PayloadDigest, err)
+		}
+		parsed, err := bundle.Decode(payload)
+		if err != nil {
+			return nil, fmt.Errorf("registry: payload %s 非法: %w", m.PayloadDigest, err)
+		}
+		if parsed.Header.Bundle != m.Name || parsed.Header.Version != m.Version {
+			return nil, fmt.Errorf("registry: payload header %s@%s 与 manifest %s@%s 不一致", parsed.Header.Bundle, parsed.Header.Version, m.Name, m.Version)
+		}
 	}
 
 	digest := objstore.Digest(raw)

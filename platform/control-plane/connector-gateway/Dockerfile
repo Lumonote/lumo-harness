@@ -1,9 +1,10 @@
 # 连接器网关镜像（§10.1）。多阶段构建：编译期完整工具链，运行期最小面。
-FROM golang:1.24-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY connector-gateway/go.mod connector-gateway/go.sum ./
+COPY observability /observability
 RUN go mod download
-COPY . .
+COPY connector-gateway .
 # CGO_ENABLED=0：纯 Go，无 FFI 依赖。
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/connector-gateway ./cmd/connector-gateway
 

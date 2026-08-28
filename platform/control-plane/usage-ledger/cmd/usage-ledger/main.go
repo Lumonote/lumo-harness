@@ -13,8 +13,8 @@
 package main
 
 import (
-	"fmt"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -26,6 +26,7 @@ import (
 	"github.com/apache/rocketmq-clients/golang/v5/credentials"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/usage-ledger/internal/ledger"
 	"github.com/lumo-harness/platform/usage-ledger/internal/rmqconsume"
 	"github.com/lumo-harness/platform/usage-ledger/internal/rmqpublish"
@@ -124,6 +125,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+	mux.HandleFunc("GET /metrics", observability.Handler)
 	// 仪表化积压（§20/§21 已立指标）：outbox 未发布数。发布后未消费的积压在
 	// broker 侧，不在 PG 可见——此处是 publisher 侧的天花板告警口径。
 	mux.HandleFunc("GET /v1/metrics/pending", func(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +141,7 @@ func main() {
 
 	addr := envOr("LUMO_LISTEN", ":8085")
 	log.Info("usage-ledger 启动", "addr", addr, "rmq", endpoint, "group", group, "topics", len(topics))
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux))); err != nil {
 		log.Error("退出", "err", err)
 		os.Exit(1)
 	}

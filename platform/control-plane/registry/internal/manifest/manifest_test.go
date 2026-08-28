@@ -56,6 +56,7 @@ func TestParseRejects(t *testing.T) {
 		{"publisher 空", `{"apiVersion":"lumo.artifact/v1","kind":"Skill","name":"a-b","version":"1.0.0","publisher":"","scopes":["x:y"]}`, "publisher"},
 		{"scopes 空", `{"apiVersion":"lumo.artifact/v1","kind":"Skill","name":"a-b","version":"1.0.0","publisher":"p","scopes":[]}`, "scopes"},
 		{"scope 格式错", `{"apiVersion":"lumo.artifact/v1","kind":"Skill","name":"a-b","version":"1.0.0","publisher":"p","scopes":["nocolon"]}`, "scopes"},
+		{"payload digest 非法", `{"apiVersion":"lumo.artifact/v1","kind":"Skill","name":"a-b","version":"1.0.0","publisher":"p","scopes":["x:y"],"payload_digest":"sha256:no"}`, "payload_digest"},
 		{"自依赖", `{"apiVersion":"lumo.artifact/v1","kind":"Skill","name":"a-b","version":"1.0.0","publisher":"p","scopes":["x:y"],"deps":[{"name":"a-b","version":"1.0.0"}]}`, "自依赖"},
 		{"依赖版本非法", `{"apiVersion":"lumo.artifact/v1","kind":"Skill","name":"a-b","version":"1.0.0","publisher":"p","scopes":["x:y"],"deps":[{"name":"c-d","version":"latest"}]}`, "deps"},
 		{"重复依赖", `{"apiVersion":"lumo.artifact/v1","kind":"Skill","name":"a-b","version":"1.0.0","publisher":"p","scopes":["x:y"],"deps":[{"name":"c-d","version":"1.0.0"},{"name":"c-d","version":"2.0.0"}]}`, "重复"},

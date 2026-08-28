@@ -27,10 +27,11 @@ type Doc struct {
 
 	meta domain.Document
 	// state 最近落库的 CRDT 状态（y-crdt 合并内核的输入；本服务不解释其语义）
-	state   []byte
-	walSeq  int64
-	dirty   bool
-	lastUse time.Time
+	state    []byte
+	stateSeq int64
+	walSeq   int64
+	dirty    bool
+	lastUse  time.Time
 
 	subs map[string]*Subscriber
 }
@@ -88,13 +89,18 @@ func (h *Hub) Open(ctx context.Context, meta domain.Document) (*Doc, error) {
 	if err != nil {
 		return nil, err
 	}
+	walSeq := maxWALSeq(seq, tail)
+	if err := h.store.EnsureWALSeq(ctx, meta.ID, walSeq); err != nil {
+		return nil, err
+	}
 
 	d := &Doc{
-		meta:    meta,
-		state:   state,
-		walSeq:  seq + int64(len(tail)),
-		lastUse: time.Now(),
-		subs:    make(map[string]*Subscriber),
+		meta:     meta,
+		state:    state,
+		stateSeq: seq,
+		walSeq:   walSeq,
+		lastUse:  time.Now(),
+		subs:     make(map[string]*Subscriber),
 	}
 
 	h.mu.Lock()
@@ -205,13 +211,13 @@ func (h *Hub) Snapshot(ctx context.Context, merge func(state []byte, updates []d
 		}
 
 		d.mu.RLock()
-		dirty, state, seq := d.dirty, d.state, d.walSeq
+		dirty, state, stateSeq, seq := d.dirty, d.state, d.stateSeq, d.walSeq
 		d.mu.RUnlock()
 		if !dirty {
 			continue
 		}
 
-		updates, err := h.store.ReadWALFrom(ctx, id, 0)
+		updates, err := h.store.ReadWALFrom(ctx, id, stateSeq)
 		if err != nil {
 			return err
 		}
@@ -228,10 +234,30 @@ func (h *Hub) Snapshot(ctx context.Context, merge func(state []byte, updates []d
 
 		d.mu.Lock()
 		d.state = merged
-		d.dirty = false
+		d.stateSeq = seq
+		// Apply may have appended a newer WAL record while this snapshot was
+		// being merged. Keep the document dirty so the newer tail is not
+		// falsely reported as persisted.
+		d.dirty = d.walSeq > seq
 		d.mu.Unlock()
 	}
 	return nil
+}
+
+func maxWALSeq(base int64, updates []domain.Update) int64 {
+	max := base
+	for _, update := range updates {
+		if update.Seq > max {
+			max = update.Seq
+		}
+	}
+	// Legacy direct records did not persist seq. Their tail is still ordered,
+	// so retain the old length-based estimate as a conservative compatibility
+	// fallback while new records use their explicit global sequence.
+	if candidate := base + int64(len(updates)); candidate > max {
+		max = candidate
+	}
+	return max
 }
 
 // EvictIdle 闲置回收：无订阅者且超时的文档落最终快照后卸载出内存。

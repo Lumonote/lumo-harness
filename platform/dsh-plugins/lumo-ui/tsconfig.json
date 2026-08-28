@@ -1,0 +1,12 @@
+{
+  "extends": "../../../deepseek-harness/tsconfig.base.client.json",
+  "compilerOptions": { "rootDir": "src", "outDir": "lib/types", "types": ["node"], "jsx": "react-jsx" },
+  "include": ["src", "src/**/*.d.ts"],
+  "references": [
+    { "path": "../../../deepseek-harness/vendor/cordis" },
+    { "path": "../../../deepseek-harness/packages/client/runtime" },
+    { "path": "../../../deepseek-harness/packages/client/ui-layout" },
+    { "path": "../../../deepseek-harness/packages/client/ui-slots" },
+    { "path": "../../../deepseek-harness/packages/host/webserver" }
+  ]
+}

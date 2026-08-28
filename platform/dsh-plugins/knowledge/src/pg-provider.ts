@@ -45,6 +45,18 @@ CREATE TABLE IF NOT EXISTS knowledge_tombstones (
   realm      TEXT NOT NULL,
   removed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 源文档是重建真相；向量表和图表都只是可删除的派生投影。
+CREATE TABLE IF NOT EXISTS knowledge_sources (
+  doc_id          TEXT PRIMARY KEY,
+  realm           TEXT NOT NULL,
+  space           TEXT NOT NULL,
+  title           TEXT NOT NULL,
+  source_version  INTEGER NOT NULL,
+  embedding_model TEXT NOT NULL,
+  chunks          JSONB NOT NULL,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 ${OUTBOX_DDL}`
 }
 
@@ -85,6 +97,15 @@ export class PgKnowledgeProvider implements KnowledgeSeam {
     try {
       await client.query('BEGIN')
       const vectors = await this.embedding.embed(chunks.map((c) => c.text))
+      await client.query(
+        `INSERT INTO knowledge_sources
+           (doc_id, realm, space, title, source_version, embedding_model, chunks, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+         ON CONFLICT (doc_id) DO UPDATE SET realm = EXCLUDED.realm, space = EXCLUDED.space,
+           title = EXCLUDED.title, source_version = EXCLUDED.source_version,
+           embedding_model = EXCLUDED.embedding_model, chunks = EXCLUDED.chunks, updated_at = now()`,
+        [doc.docId, doc.realm, doc.space, doc.title, doc.sourceVersion, doc.embeddingModel, JSON.stringify(chunks)],
+      )
       for (const [i, chunk] of chunks.entries()) {
         await client.query(
           `INSERT INTO knowledge_chunks
@@ -143,6 +164,7 @@ export class PgKnowledgeProvider implements KnowledgeSeam {
     try {
       await client.query('BEGIN')
       await client.query('DELETE FROM knowledge_chunks WHERE doc_id = $1 AND realm = $2', [docId, realm])
+      await client.query('DELETE FROM knowledge_sources WHERE doc_id = $1 AND realm = $2', [docId, realm])
       await client.query(
         `INSERT INTO knowledge_tombstones (doc_id, realm) VALUES ($1,$2)
          ON CONFLICT (doc_id) DO UPDATE SET removed_at = now()`,
@@ -161,8 +183,22 @@ export class PgKnowledgeProvider implements KnowledgeSeam {
     }
   }
 
-  async rebuild(_realm: string): Promise<void> {
-    // ∎ P2：从 MinIO/PG 源全量重建（§5.4.3 一等交付物）；当前为空实现 —— 重建语义由 ingest 重新注入
+  async rebuild(realm: string): Promise<void> {
+    type SourceRow = {
+      doc_id: string; space: string; title: string; source_version: number
+      embedding_model: string; chunks: Array<{ text: string; metadata: Record<string, unknown> }>
+    }
+    const rows = await this.pool.query<SourceRow>(
+      `SELECT doc_id, space, title, source_version, embedding_model, chunks
+       FROM knowledge_sources WHERE realm = $1 ORDER BY doc_id`, [realm],
+    )
+    await this.pool.query('DELETE FROM knowledge_chunks WHERE realm = $1', [realm])
+    for (const row of rows.rows) {
+      await this.ingest({
+        doc: { docId: row.doc_id, realm, space: row.space, title: row.title, sourceVersion: row.source_version, embeddingModel: row.embedding_model },
+        chunks: row.chunks,
+      })
+    }
   }
 
   async close(): Promise<void> {

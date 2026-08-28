@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/lumo-harness/platform/collaborator/internal/domain"
 )
@@ -27,6 +28,7 @@ type Ring struct {
 	mu     sync.RWMutex
 	vnodes []vnode
 	self   string
+	ready  atomic.Bool
 }
 
 // NewRing 以本实例标识建环；初始为空（须调用 SetInstances）。
@@ -50,7 +52,12 @@ func (r *Ring) SetInstances(instances []string) {
 	r.mu.Lock()
 	r.vnodes = nodes
 	r.mu.Unlock()
+	r.ready.Store(true)
 }
+
+// MarkReady 切换到注册中心驱动模式。标记后，空环不再默认归属本实例，
+// 避免 Nacos 暂未返回实例时多个有状态副本同时接管同一文档。
+func (r *Ring) MarkReady() { r.ready.Store(true) }
 
 // OwnerOf 返回该文档应归属的实例标识；环为空时返回空串。
 func (r *Ring) OwnerOf(id domain.DocumentID) string {
@@ -73,7 +80,7 @@ func (r *Ring) OwnerOf(id domain.DocumentID) string {
 // 集群形态下注册中心就绪后自动收敛。
 func (r *Ring) IsMine(id domain.DocumentID) bool {
 	owner := r.OwnerOf(id)
-	return owner == "" || owner == r.self
+	return owner == r.self || (owner == "" && !r.ready.Load())
 }
 
 // Self 返回本实例标识。

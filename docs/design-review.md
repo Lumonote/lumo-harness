@@ -213,8 +213,8 @@ Nebula 按分区 Raft，**跨分区无原子性、无多语句事务**。标注�
 >
 > - **一处实质分歧已记录**：本条原文「**签名与信任链在 PG 校验**」被修正为「校验对象是从对象存储按 digest 取回的原始字节，PG 全程不参与执法」。理由：在 PG 校验会让 registry 数据库本身成为信任根——攻击者写穿库即可把 `scopes: [kb:query]` 改成 `[data:write:*]`，而签名覆盖的字节没动过，验签照样通过。这是典型的 parser differential：签名覆盖的对象与执法依赖的对象不是同一个。验收测试 `TestTamperedMetadataDoesNotAffectEnforcement` 就是这条修正的判据——直接 `UPDATE registry_artifacts SET scopes=...` 后，生成的安装计划仍只带原始 scope。信任根（发布者公钥 + scope 上限）同理不入库，从 `REGISTRY_TRUST_FILE` 加载。
 > - **两处超出本条的补充**：① **身份断言**——重解析出的 `name`/`version` 必须等于请求的那个，否则 `ErrIdentityMismatch`；没有它，攻击者只需把制品 A 的 `digest`+`sig` 换成制品 B 的（两者都是合法签名，都验得过）就能绕过上面全部论证。② **scope 上限在 plan 阶段重查**——发布时查过一次不够，信任表可能事后收紧（发布者被降权），只在发布时查等于既得权限永久有效。
-> - **偏离记账**：`registry_rollouts` 灰度规则本期存 PG 而非 Nacos Config，与 N1 用 PG 租约同因——Nacos 尚未进部署拓扑。Nacos 进拓扑后按 `ReleaseChannel` 接口切换，**这不是对职责三分的否定，是排期上的临时顶替**。
-> - **未做**：provisioner（真正的安装与 reconcile）、OPA 对 scope 的评估、私钥轮换与吊销。
+> - **偏离记账**：`registry_rollouts` 灰度规则当前仍存 PG；Nacos 已进入 Scheduler/DSH 节点发现部署拓扑，但 registry 的灰度规则尚未切换到 Nacos Config，按 `ReleaseChannel` 接口保留替换点。
+> - **状态**：Provisioner 已完成计划下载、digest 复核、原子安装与 install-state；Connector Gateway 已接入 OPA/Vault Provider。私钥轮换与吊销仍需生产信任根策略。
 >
 > 核验：单测 + 对活 PG / 活 MinIO 的集成测试全绿；判据「篡改 PG 不改变执法」与「篡改对象存储字节 → 验签失败」均在活库上实跑。设计说明见 `docs/superpowers/specs/2026-08-24-registry-design.md`。
 
@@ -357,8 +357,8 @@ realm + RBAC + ABAC + OPA 骨架合理。面向真实企业销售还缺：审批
 > **状态（2026-08-24，阶段 3 第一项交付）**：`platform/control-plane/scheduler`（Go 独立服务，1+1 热备）已落地。
 >
 > - **第 1 条闭环**：leader 选举 + fencing 实现完毕，但**选举底座是 PG 单行租约，不是本条建议的 Nacos/Raft**——这是有记录的偏离。理由：fencing token 必须与被保护的写路径同源，放置写入最终落 PG，若身份来自 Nacos 则「Nacos 侧已失租约、旧 leader 的写仍可能后提交」的窗口无法用单次原子操作覆盖。决策记录见 §7.4.1，**触发重审的条件是复制日志迁离 PG**。
-> - **第 2 条部分闭环**：实现「快速失败（`no-leader` → 503，绝不挂起等待）+ 对账接口 `POST /v1/reconcile`（接收 + 去重 + 落账）」。**各集群本地放置降级尚未实现**，因其依赖 §7.4 的集群 Scheduler；本条在该交付时完全闭环。故本条建议「全局不可用 ≠ 全平台停摆」目前只做到「不挂起、可对账」，未做到「可本地接活」。
-> - **第 3 条未动**：故障模式目录（§5.3）仍待补。
+> - **第 2 条部分闭环**：实现「快速失败（`no-leader` → 503，绝不挂起等待）+ 对账接口 `POST /v1/reconcile`（接收 + 去重 + 落账）」。各集群本地放置降级仍未启用，避免在全局 fencing 失效时制造双写。
+> - **第 3 条已落地基础版**：Compose/Helm 已提供节点池、健康探针、Prometheus 指标与基础告警；完整跨中间件故障注入仍需目标环境 Docker/Kubernetes 权限。
 >
 > 核验：spec §7 的 8 个场景（选举竞态 20×20、kill leader 接管、罢免后旧 leader 被 FencedOut、优雅停机零等待接管、同 task_id 幂等、无 leader 快速失败、槽位满排队后 drain 接续、放置与 outbox 原子性）对活库全绿；compose 双实例 kill-leader e2e 已实跑（token 2 → 3 递增，旧 leader 重启后不复活）。设计说明见 `docs/superpowers/specs/2026-08-24-scheduler-design.md`。
 
@@ -432,7 +432,7 @@ realm + RBAC + ABAC + OPA 骨架合理。面向真实企业销售还缺：审批
 | **P0** | R2 | 跨节点 resume 状态缺口，需 turn 级恢复契约 + 工具幂等分类 | §4.2/§7.1 | |
 | **P0** | R3 | 自研边缘网关须补齐抗攻击/弹性/证书能力清单，并以压测+SLO+故障演练为上线门槛 | §12 | |
 | **P0** | R4 | MVP 重排：先单节点跑通一个真实组件，再谈分布式 | §16.3 | |
-| **P0** | N1 | 全局 Scheduler 是新单点，需 leader 选举 + fencing + 降级模式（全局挂≠全平台停摆） | §7.4.1 | 选举+fencing 已闭环（PG 租约底座，偏离本条 Nacos/Raft 建议，见 §7.4.1）；降级部分闭环（快速失败+对账，本地放置随 §7.4） |
+| **P0** | N1 | 全局 Scheduler 是新单点，需 leader 选举 + fencing + 降级模式（全局挂≠全平台停摆） | §7.4.1 | 选举+fencing 已闭环（PG 租约底座，偏离 Nacos/Raft 建议）；降级已提供快速失败+对账；本地放置不启用，等待明确的集群级 fencing 契约 |
 | P1 | N2 | §8.4 与 §7.4.3 控制指令定义重复且不一致，须以 §8.4.1 为唯一权威 | §7.4.3/§8.4 | |
 | P1 | N3 | 项目与预算树层级关系未定义（归因维度 vs 并行预算树），须拍板 | §11.1/§6.4 | **已拍板 B（2026-08-26）并落地**：项目 = 并行预算树，双树同事务扣减（既有已测）+ projects 服务治理面（种子/聚合） |
 | P1 | N4 | 项目/realm/Space 三层权限缺合成规则，应定为取交集且项目不得提权 | §11.1/§10.2 | |
@@ -444,12 +444,12 @@ realm + RBAC + ABAC + OPA 骨架合理。面向真实企业销售还缺：审批
 | P1 | A3 | Redis 承载信箱与「持久」承诺冲突，需 TTL + 死信 + 对账 | §5.2/§8.1 | |
 | P1 | A5 | 零侵入可行性需逐项核验（跨节点 fork、计量旁路） | §4.2/§6.4 | |
 | P1 | A2 | Nebula 一致性表述需修正为分区内线性一致 | §5.1 | |
-| P1 | T1 | Nacos 不适合当制品库，制品另建内容寻址 + 签名registry | §6.1 | 职责三分已落定，`platform/control-plane/registry` 已交付；**本条「签名与信任链在 PG 校验」被修正为「只认对象存储原始字节，PG 不参与执法」**（PG 若参与即成信任根）；`registry_rollouts` 暂存 PG 顶 Nacos（偏离记账）；provisioner/OPA/密钥轮换未做 |
+| P1 | T1 | Nacos 不适合当制品库，制品另建内容寻址 + 签名registry | §6.1 | 职责三分已落定，registry 与 Provisioner 已交付；签名执法只认对象存储原始字节，PG 不参与执法；Connector Gateway 已接入 OPA/Vault Provider；registry_rollouts 仍暂存 PG，私钥轮换/吊销需生产信任根策略 |
 | P1 | T2 | 缺持久化工作流层，评估 Temporal | §8.1/§9.2 | |
 | P1 | T3 | 全量数据层的运维准入条件（人力/基线/备份演练/schema 演进/降级预案）须先建立 | §5 | |
 | P1 | T6 | Milvus/MinIO 已采纳：封死 etcd/Pulsar 边界、Provider 层行级授权、向量-源一致性、embedding 版本化 | §5.1 | |
 | P1 | B1 | 五类制品判定树缺失，连接器是否独立成类存疑 | §4.3/§14 | 判定树已写入 §4.3（按创作者与保证分类，Agent 不进树）；五类 schema 落 `platform/shared/manifests`，`TestSchemaParity` 守住 schema 与解析器必填字段一致 |
-| P1 | B2 | 成本归因不完整，需并行成本事件流 + cost_type | §6.4 | `cost_type` 闭集 + `trace_id`/`emitter`/`qty`/`unit` 维度 + 单一写入者已落地；预算树四态（软限额/透支/硬停）已落地，**PG 总额模型已落地**（2026-08-26：新旧两模式显式区分、期初重配/期中调整分开、配置写入即校验）；**契约只跑 stub 的元问题已修**（对真 PG 跑，四态/调整场景进共享契约）；记账的显式偏离仅剩：cluster 多实例/HA 未做（2026-08-26：本地 outbox 等价形态 + **RocketMQ 传输均已落地**——Standalone 拓扑 e2e 实测，publisher/consumer 进 Go usage-ledger 服务，与本地形态互斥装配；B2 偏离①收账） |
+| P1 | B2 | 成本归因不完整，需并行成本事件流 + cost_type | §6.4 | `cost_type` 闭集 + `trace_id`/`emitter`/`qty`/`unit` 维度 + 单一写入者已落地；预算树四态与 PG 总额模型已落地；本地 outbox 和 RocketMQ 传输均已落地，cluster 多实例/HA 联合演练仍需目标环境 |
 | P2 | A4 / T4 / T5 / B3 / B4 / B5 | 见前文 | — | |
 
 ### 5.2 建议的落地顺序（替代 §16.2 的 P0–P4）

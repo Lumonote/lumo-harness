@@ -1,0 +1,73 @@
+{{- if and .Values.provisioner.enabled (not .Values.dshNode.enabled) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lumo-platform.name" . }}-provisioner
+  labels:
+    lumo.dev/service: provisioner
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { lumo.dev/service: provisioner }
+  template:
+    metadata:
+      labels: { lumo.dev/service: provisioner }
+    spec:
+      containers:
+        - name: provisioner
+          image: {{ .Values.provisioner.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: REGISTRY_URL
+              value: {{ printf "http://%s-registry:%v" (include "lumo-platform.name" .) .Values.services.registry.port | quote }}
+            - name: PROVISIONER_ARTIFACT_NAME
+              value: {{ required "provisioner.artifactName is required when provisioner is enabled" .Values.provisioner.artifactName | quote }}
+            - name: PROVISIONER_ARTIFACT_VERSION
+              value: {{ required "provisioner.artifactVersion is required when provisioner is enabled" .Values.provisioner.artifactVersion | quote }}
+            - name: PROVISIONER_INTERVAL
+              value: {{ .Values.provisioner.interval | quote }}
+            - name: PROVISIONER_SHAPE
+              value: {{ .Values.provisioner.shape | quote }}
+            - name: PROVISIONER_INSTALL_DIR
+              value: {{ .Values.provisioner.installDir | quote }}
+            - name: LUMO_CONTROL_PLANE_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ .Values.controlPlaneAuth.tokenSecret }}, key: {{ .Values.controlPlaneAuth.tokenKey }}, optional: false } }
+          volumeMounts:
+            - name: artifacts
+              mountPath: {{ .Values.provisioner.installDir | quote }}
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - >-
+                  test -f {{ .Values.provisioner.installDir }}/install-state.jsonl.zst
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+      volumes:
+        - name: artifacts
+          {{- if .Values.provisioner.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "lumo-platform.name" . }}-provisioner
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+{{- if .Values.provisioner.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "lumo-platform.name" . }}-provisioner
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ .Values.provisioner.persistence.size | quote }}
+  {{- with .Values.provisioner.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

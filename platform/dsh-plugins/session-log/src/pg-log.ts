@@ -82,7 +82,21 @@ export class PgSessionLog implements SessionLogSeam {
   }
 
   async init(): Promise<void> {
-    await this.pool.query(SESSION_LOG_DDL)
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      // PostgreSQL's CREATE TABLE IF NOT EXISTS can still race while creating
+      // the table's implicit composite type. Serialize only this schema unit;
+      // the transaction-scoped lock is released on commit or rollback.
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('lumo.session-log.schema.v1'))")
+      await client.query(SESSION_LOG_DDL)
+      await client.query('COMMIT')
+    } catch (error: unknown) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   /**

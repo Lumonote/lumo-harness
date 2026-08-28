@@ -7,31 +7,35 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/lumo-harness/platform/flows/internal/domain"
+	"github.com/lumo-harness/platform/flows/internal/engine"
 	"github.com/lumo-harness/platform/flows/internal/store"
+	"github.com/lumo-harness/platform/observability"
 )
 
 type Server struct {
-	store *store.Store
-	log   *slog.Logger
+	store  *store.Store
+	log    *slog.Logger
+	engine *engine.Engine
 }
 
 func New(st *store.Store, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{store: st, log: log}
+	return &Server{store: st, log: log, engine: engine.New()}
 }
 
 type caller struct {
-	user   string
-	realm  string
-	roles  []string
-	depts  []string
+	user  string
+	realm string
+	roles []string
+	depts []string
 }
 
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (caller, bool) {
@@ -119,9 +123,78 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/flows/{id}/target", s.target)
 	mux.HandleFunc("POST /v1/flows/{id}/deprecate", s.deprecate)
 	mux.HandleFunc("POST /v1/flows/{id}/rollback", s.rollback)
+	mux.HandleFunc("POST /v1/flows/{id}/run", s.run)
+	mux.HandleFunc("POST /v1/events/{name}", s.event)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /metrics", metrics)
+}
+
+// event 将外部事件安全落入持久 outbox；真正执行由 worker 完成，故入口快速返回 202。
+func (s *Server) event(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	name := strings.TrimSpace(r.PathValue("name"))
+	// "*" is reserved by the in-process wildcard subscriber; accepting it at
+	// the ingress would make one event fan out twice and is never a valid
+	// application event name.
+	if name == "" || name == "*" || len(name) > 128 {
+		http.Error(w, `{"error":"invalid event name"}`, http.StatusBadRequest)
+		return
+	}
+	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil || len(payload) == 0 || !json.Valid(payload) {
+		http.Error(w, `{"error":"JSON payload required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := s.store.EnqueueTrigger(r.Context(), c.realm, name, payload); err != nil {
+		s.log.Error("事件入队失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued", "event": name})
+}
+
+func metrics(w http.ResponseWriter, _ *http.Request) {
+	observability.Handler(w, nil)
+}
+
+// run 只执行已发布快照；运行时不读取 draft 定义，避免编辑态绕过审核进入生产。
+func (s *Server) run(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if !c.hasRole("admin") && !c.hasRole("manager") && !c.hasRole("editor") && !c.hasRole("owner") {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	definition, err := s.store.Definition(r.Context(), r.PathValue("id"), c.realm)
+	if err != nil {
+		http.Error(w, `{"error":"published flow not found"}`, http.StatusNotFound)
+		return
+	}
+	var req struct {
+		Input any `json:"input"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, `{"error":"invalid input"}`, http.StatusBadRequest)
+		return
+	}
+	var def domain.Definition
+	if err := json.Unmarshal(definition, &def); err != nil {
+		http.Error(w, `{"error":"stored definition invalid"}`, http.StatusInternalServerError)
+		return
+	}
+	result, err := s.engine.Run(r.Context(), &def, req.Input)
+	if err != nil {
+		http.Error(w, `{"error":"flow execution failed: `+err.Error()+`"}`, http.StatusUnprocessableEntity)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // parseDefinition 入库护栏（防环在两处跑：TS 前端提示 + Go 入库强制——Go 是执法位）。

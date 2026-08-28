@@ -1,7 +1,10 @@
 // Package domain 定义调度服务的核心类型：任务、节点、租约与领域错误。
 package domain
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // TaskState 任务状态机：PENDING → PLACED → RUNNING → COMPLETED/FAILED/ABORTED。
 type TaskState string
@@ -36,14 +39,31 @@ type Task struct {
 	ClusterID string        `json:"cluster_id"`
 	Requires  []Requirement `json:"requires"`
 	Priority  int           `json:"priority"`
+	// Residency is an optional hard data-residency domain (for example cn-east).
+	// Empty means the realm policy has not constrained this task.
+	Residency string `json:"residency,omitempty"`
+	// DeadlineMS is an optional absolute deadline. Pending work is ordered by
+	// earliest deadline first (EDF); zero means no deadline.
+	DeadlineMS int64 `json:"deadline_ms,omitempty"`
+	// Queue and Weight provide weighted fair queuing for pending work. Empty
+	// queue uses the default queue and non-positive weights normalize to 1.
+	Queue  string `json:"queue,omitempty"`
+	Weight int    `json:"weight,omitempty"`
+	// AvoidNodes is a hard anti-affinity list, useful for retrying away from a
+	// failed or degraded host.
+	AvoidNodes []string `json:"avoid_nodes,omitempty"`
+	// EnqueuedAt is server metadata used only for stable queue ordering.
+	EnqueuedAt time.Time `json:"-"`
 }
 
 // Node 注册进目录的执行节点。
 type Node struct {
 	NodeID       string   `json:"node_id"`
+	Realm        string   `json:"realm"`
 	ClusterID    string   `json:"cluster_id"`
 	Capacity     int      `json:"capacity"`
 	Capabilities []string `json:"capabilities"`
+	Residency    string   `json:"residency,omitempty"`
 }
 
 // Satisfies requires 的 key 全在节点能力内。
@@ -51,7 +71,7 @@ func (n Node) Satisfies(reqs []Requirement) bool {
 	for _, r := range reqs {
 		found := false
 		for _, c := range n.Capabilities {
-			if c == r.Key {
+			if c == r.Key || (r.Value != "" && c == r.Key+"="+r.Value) {
 				found = true
 				break
 			}
@@ -74,6 +94,7 @@ type Lease struct {
 // 任务侧消费端断言 node_id，Task/Node 同训）。
 type Placement struct {
 	TaskID       string    `json:"task_id"`
+	Realm        string    `json:"realm"`
 	NodeID       string    `json:"node_id"`
 	Attempt      int       `json:"attempt"`
 	State        TaskState `json:"state"`

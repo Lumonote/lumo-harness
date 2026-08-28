@@ -17,15 +17,22 @@ const TIMEOUT_MS = 30_000
  * 201 → node_id(放置成功);202 → 域外(队列形态不支持,`REMOTE_PLACEMENT_QUEUED`);
  * 其它 → 基础设施 `SubagentError`(服务端错误码透传)。
  */
+export interface PlacementResult {
+  nodeId: string
+  attempt: number
+}
+
 export async function postPlacement(opts: {
   base: string
   realm: string
   childId: string
-}): Promise<string> {
+  clusterId?: string
+  controlPlaneToken?: string
+}): Promise<PlacementResult> {
   const res = await rawFetch(`${opts.base}/v1/placements`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-lumo-realm': opts.realm },
-    body: JSON.stringify({ task_id: opts.childId, cluster_id: '', requires: [], priority: 0 }),
+    headers: { 'content-type': 'application/json', 'x-lumo-realm': opts.realm, ...(opts.controlPlaneToken ? { Authorization: `Bearer ${opts.controlPlaneToken}` } : {}) },
+    body: JSON.stringify({ task_id: opts.childId, cluster_id: opts.clusterId ?? '', requires: [], priority: 0 }),
   })
   if (res.status === 202) {
     throw new SubagentError(
@@ -42,10 +49,11 @@ export async function postPlacement(opts: {
   }
   const body = (await res.json()) as Record<string, unknown>
   const nodeId = body['node_id']
-  if (typeof nodeId !== 'string' || nodeId === '') {
+  const attempt = body['attempt']
+  if (typeof nodeId !== 'string' || nodeId === '' || typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt < 1) {
     throw new SubagentError(`Scheduler 201 应答缺 node_id(收到 ${JSON.stringify(body)})`, 'internal')
   }
-  return nodeId
+  return { nodeId, attempt }
 }
 
 /**
@@ -108,11 +116,13 @@ export async function postTerminalState(opts: {
   realm: string
   childId: string
   state: string
+  attempt?: number
+  controlPlaneToken?: string
 }): Promise<void> {
   const res = await rawFetch(`${opts.base}/v1/tasks/${encodeURIComponent(opts.childId)}/result`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-lumo-realm': opts.realm },
-    body: JSON.stringify({ state: opts.state }),
+    headers: { 'content-type': 'application/json', 'x-lumo-realm': opts.realm, ...(opts.controlPlaneToken ? { Authorization: `Bearer ${opts.controlPlaneToken}` } : {}) },
+    body: JSON.stringify({ state: opts.state, ...(opts.attempt !== undefined ? { attempt: opts.attempt } : {}) }),
   })
   if (res.ok) return
   const detail = await schedulerErrorOf(res)

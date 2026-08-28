@@ -1,0 +1,56 @@
+{{- range $name, $cfg := .Values.services }}
+{{- if $cfg.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lumo-platform.name" $ }}-{{ $name }}
+  labels:
+    lumo.dev/service: {{ $name }}
+spec:
+  replicas: {{ $.Values.replicaCount }}
+  selector:
+    matchLabels: { lumo.dev/service: {{ $name }} }
+  template:
+    metadata:
+      labels: { lumo.dev/service: {{ $name }} }
+    spec:
+      containers:
+        - name: {{ $name }}
+          image: {{ $.Values.image.repository }}/{{ $name }}:{{ $.Values.image.tag }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          ports: [{ name: http, containerPort: {{ $cfg.port }} }]
+          envFrom: [{ configMapRef: { name: {{ include "lumo-platform.name" $ }}-config } }]
+          env:
+            - name: LUMO_CONTROL_PLANE_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $.Values.controlPlaneAuth.tokenSecret }}, key: {{ $.Values.controlPlaneAuth.tokenKey }}, optional: false } }
+            - name: LUMO_VAULT_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $.Values.vault.tokenSecret }}, key: token, optional: true } }
+            {{- if eq $name "collaborator" }}
+            - name: LUMO_INSTANCE
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: LUMO_NACOS_COLLABORATOR_SERVICE
+              value: lumo-collaborator
+            - name: LUMO_NODE_ADVERTISE_HOST
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: LUMO_NACOS_PORT
+              value: {{ $cfg.port | quote }}
+            {{- end }}
+          {{- if eq $name "registry" }}
+          volumeMounts:
+            - name: registry-trust
+              mountPath: /etc/lumo/trust
+              readOnly: true
+          {{- end }}
+          readinessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 5, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 15, periodSeconds: 20 }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+      {{- if eq $name "registry" }}
+      volumes:
+        - name: registry-trust
+          secret: { secretName: {{ $.Values.registry.trustSecret }}, optional: false }
+      {{- end }}
+---
+{{- end }}
+{{- end }}

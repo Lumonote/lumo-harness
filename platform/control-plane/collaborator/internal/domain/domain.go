@@ -114,3 +114,8 @@ func (e *ErrCapacity) Error() string { return "collaborator: 超出容量上限:
 type ErrForbidden struct{ Detail string }
 
 func (e *ErrForbidden) Error() string { return "collaborator: 无权限: " + e.Detail }
+
+// ErrNotFound 表示请求的租户内资源不存在。
+type ErrNotFound struct{ Detail string }
+
+func (e *ErrNotFound) Error() string { return "collaborator: 资源不存在: " + e.Detail }

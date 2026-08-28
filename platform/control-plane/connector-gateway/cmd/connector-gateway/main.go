@@ -32,6 +32,7 @@ import (
 	"github.com/lumo-harness/platform/connector-gateway/internal/ratelimit"
 	"github.com/lumo-harness/platform/connector-gateway/internal/registry"
 	"github.com/lumo-harness/platform/connector-gateway/internal/server"
+	"github.com/lumo-harness/platform/observability"
 )
 
 // headerAuth 从网关注入的头解析身份（与协作服务同一约定）。
@@ -118,13 +119,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	creds := credentials.NewCaching(credentials.NewEnvStore(*credPrefix), 60*time.Second)
+	var credStore credentials.Store = credentials.NewEnvStore(*credPrefix)
+	if vaultAddr := os.Getenv("LUMO_VAULT_ADDR"); vaultAddr != "" {
+		credStore = credentials.NewVaultStore(vaultAddr, os.Getenv("LUMO_VAULT_TOKEN"))
+		log.Info("启用 Vault 凭证存储")
+	}
+	creds := credentials.NewCaching(credStore, 60*time.Second)
 	brk := breaker.NewGroup(breaker.DefaultConfig())
+	policyImpl := policy.Policy(policy.DefaultRules())
+	if opaAddr := os.Getenv("LUMO_OPA_ADDR"); opaAddr != "" {
+		policyImpl = policy.NewOPAClient(opaAddr, os.Getenv("LUMO_OPA_POLICY"))
+		log.Info("启用 OPA 策略存储")
+	}
 
 	gw := gateway.New(gateway.Options{
 		Registry: reg,
 		Creds:    creds,
-		Policy:   policy.DefaultRules(),
+		Policy:   policyImpl,
 		Limiter:  ratelimit.New(rdb),
 		Breakers: brk,
 		Audit:    sink,
@@ -145,7 +156,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr: *listen,
-		Handler: server.New(server.Options{
+		Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(server.New(server.Options{
 			Gateway:    gw,
 			Registry:   reg,
 			Breakers:   brk,
@@ -153,7 +164,7 @@ func main() {
 			Logger:     log,
 			AdminRoles: splitCSV(*adminRoles),
 			WebEgress:  webEgress,
-		}).Routes(),
+		}).Routes())),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

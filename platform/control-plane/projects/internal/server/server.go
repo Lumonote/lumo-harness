@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/projects/internal/domain"
 	"github.com/lumo-harness/platform/projects/internal/store"
 )
@@ -87,6 +88,13 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/projects/{id}/members", s.addMember)
 	mux.HandleFunc("PATCH /v1/projects/{id}/members/{userId}", s.updateMember)
 	mux.HandleFunc("DELETE /v1/projects/{id}/members/{userId}", s.removeMember)
+	mux.HandleFunc("GET /v1/projects/{id}/artifacts", s.listArtifacts)
+	mux.HandleFunc("PUT /v1/projects/{id}/artifacts/{kind}/{name}", s.putArtifact)
+	mux.HandleFunc("GET /v1/projects/{id}/spaces", s.listSpaces)
+	mux.HandleFunc("POST /v1/projects/{id}/spaces", s.createSpace)
+	mux.HandleFunc("GET /v1/projects/{id}/automations", s.listAutomations)
+	mux.HandleFunc("PUT /v1/projects/{id}/automations/{automationId}", s.putAutomation)
+	mux.HandleFunc("GET /v1/projects/{id}/dashboard", s.dashboard)
 	mux.HandleFunc("POST /v1/projects/{id}/archive", s.archive)
 	mux.HandleFunc("POST /v1/projects/{id}/unarchive", s.unarchive)
 	mux.HandleFunc("DELETE /v1/projects/{id}", s.delete)
@@ -94,6 +102,11 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /metrics", metrics)
+}
+
+func metrics(w http.ResponseWriter, _ *http.Request) {
+	observability.Handler(w, nil)
 }
 
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
@@ -168,6 +181,154 @@ func (s *Server) listMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"members": members})
+}
+
+func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, _, ok := s.require(w, r, id, domain.ActionRead); !ok {
+		return
+	}
+	items, err := s.store.ListArtifacts(r.Context(), id)
+	if err != nil {
+		s.log.Error("列制品失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, 500)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"artifacts": items})
+}
+
+func (s *Server) putArtifact(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, _, ok := s.require(w, r, id, domain.ActionEdit); !ok {
+		return
+	}
+	var req struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil || req.Version == "" {
+		http.Error(w, `{"error":"version required"}`, http.StatusBadRequest)
+		return
+	}
+	a := domain.Artifact{ProjectID: id, Kind: r.PathValue("kind"), Name: r.PathValue("name"), Version: req.Version}
+	if a.Name == "" {
+		http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := s.store.UpsertArtifact(r.Context(), a); err != nil {
+		http.Error(w, `{"error":"invalid artifact"}`, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, a)
+}
+
+func (s *Server) listSpaces(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, _, ok := s.require(w, r, id, domain.ActionRead); !ok {
+		return
+	}
+	items, err := s.store.ListSpaces(r.Context(), id)
+	if err != nil {
+		s.log.Error("列空间失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, 500)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"spaces": items})
+}
+
+func (s *Server) createSpace(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	p, _, ok := s.require(w, r, id, domain.ActionEdit)
+	if !ok {
+		return
+	}
+	var req struct {
+		ID   string `json:"spaceId"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil || req.Name == "" {
+		http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		req.ID, _ = newID("space_")
+	}
+	space := domain.Space{ID: req.ID, ProjectID: id, Realm: p.Realm, Name: req.Name}
+	if err := s.store.UpsertSpace(r.Context(), space); err != nil {
+		s.log.Error("创建空间失败", "err", err)
+		http.Error(w, `{"error":"space conflict"}`, http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusCreated, space)
+}
+
+func (s *Server) listAutomations(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, _, ok := s.require(w, r, id, domain.ActionRead); !ok {
+		return
+	}
+	items, err := s.store.ListAutomations(r.Context(), id)
+	if err != nil {
+		s.log.Error("列自动化失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, 500)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"automations": items})
+}
+
+func (s *Server) putAutomation(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, _, ok := s.require(w, r, id, domain.ActionEdit); !ok {
+		return
+	}
+	var a domain.Automation
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&a); err != nil {
+		http.Error(w, `{"error":"invalid automation"}`, http.StatusBadRequest)
+		return
+	}
+	a.ID, a.ProjectID = r.PathValue("automationId"), id
+	if a.TriggerSpec == "" || a.FlowRef == "" {
+		http.Error(w, `{"error":"triggerSpec and flowRef required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := s.store.UpsertAutomation(r.Context(), a); err != nil {
+		http.Error(w, `{"error":"invalid automation"}`, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, a)
+}
+
+func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	p, role, ok := s.require(w, r, id, domain.ActionRead)
+	if !ok {
+		return
+	}
+	members, err := s.store.ListMembers(r.Context(), id)
+	if err != nil {
+		http.Error(w, `{"error":"internal"}`, 500)
+		return
+	}
+	artifacts, err := s.store.ListArtifacts(r.Context(), id)
+	if err != nil {
+		http.Error(w, `{"error":"internal"}`, 500)
+		return
+	}
+	spaces, err := s.store.ListSpaces(r.Context(), id)
+	if err != nil {
+		http.Error(w, `{"error":"internal"}`, 500)
+		return
+	}
+	automations, err := s.store.ListAutomations(r.Context(), id)
+	if err != nil {
+		http.Error(w, `{"error":"internal"}`, 500)
+		return
+	}
+	items, budget, err := s.store.Usage(r.Context(), id)
+	if err != nil {
+		http.Error(w, `{"error":"internal"}`, 500)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"project": p, "yourRole": role, "members": members, "artifacts": artifacts, "spaces": spaces, "automations": automations, "usage": items, "budget": budget})
 }
 
 func (s *Server) addMember(w http.ResponseWriter, r *http.Request) {

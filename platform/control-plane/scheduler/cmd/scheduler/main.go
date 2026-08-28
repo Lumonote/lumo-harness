@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/scheduler/internal/catalog"
 	"github.com/lumo-harness/platform/scheduler/internal/domain"
 	"github.com/lumo-harness/platform/scheduler/internal/election"
@@ -49,7 +50,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	cat := &catalog.Pg{Pool: st.Pool()}
+	var cat catalog.Catalog = &catalog.Pg{Pool: st.Pool()}
+	if nacosAddr := os.Getenv("LUMO_NACOS_ADDR"); nacosAddr != "" {
+		cat = catalog.NewNacos(nacosAddr, os.Getenv("LUMO_NACOS_SERVICE"), os.Getenv("LUMO_NACOS_GROUP"))
+		log.Info("使用 Nacos 节点目录", "addr", nacosAddr)
+	}
 	elec := &election.State{}
 
 	// 选主循环：acquire + 续租（TTL/3）
@@ -71,6 +76,9 @@ func main() {
 				if !elec.IsLeader() {
 					continue
 				}
+				if _, err := st.RequeueStaleDispatch(ctx, *ttlMs*2); err != nil {
+					log.Warn("回收过期派发失败", "err", err)
+				}
 				drainOnce(ctx, st, cat, elec.Current(), log)
 			}
 		}
@@ -78,7 +86,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           server.New(st, elec, cat, log).Routes(),
+		Handler:           observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(server.New(st, elec, cat, log).Routes())),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -129,10 +137,14 @@ func drainOnce(ctx context.Context, st *store.Store, cat catalog.Catalog, lease 
 		log.Error("活跃计数失败", "err", err)
 		return
 	}
-	for _, task := range pending {
+	for _, task := range planner.OrderPending(pending, time.Now()) {
 		n := planner.Pick(task, nodes, active)
 		if n == nil {
 			break // 剩余任务同样无候选，等下一轮
+		}
+		if err := st.SyncNodeSnapshot(ctx, *n); err != nil {
+			log.Error("同步节点快照失败", "node_id", n.NodeID, "err", err)
+			continue
 		}
 		if _, err := st.PlaceTask(ctx, lease, task, n.NodeID); err != nil {
 			var ncap *domain.NoCapacityError

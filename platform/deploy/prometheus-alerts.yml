@@ -1,0 +1,44 @@
+groups:
+  - name: lumo-platform
+    interval: 30s
+    rules:
+      - alert: LumoServiceDown
+        expr: lumo_service_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Lumo service is down"
+          description: "{{ $labels.instance }} has reported lumo_service_up=0 for 2 minutes."
+
+      - alert: LumoSchedulerQueueBacklog
+        expr: lumo_scheduler_pending_tasks > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Scheduler pending queue is growing"
+          description: "{{ $labels.instance }} has more than 100 pending tasks for 10 minutes."
+
+      - alert: LumoHttpErrorRateHigh
+        expr: |
+          sum by (job) (rate(lumo_http_errors_total[5m]))
+            /
+          clamp_min(sum by (job) (rate(lumo_http_requests_total[5m])), 1) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lumo HTTP error rate is high"
+          description: "{{ $labels.job }} has exceeded 5% HTTP errors for 5 minutes."
+
+      - alert: LumoHttpP95LatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (job, le) (rate(lumo_http_request_duration_seconds_bucket[5m]))) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lumo HTTP p95 latency is high"
+          description: "{{ $labels.job }} p95 request latency is above 800ms."
