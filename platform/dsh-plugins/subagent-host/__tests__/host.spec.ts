@@ -48,6 +48,13 @@ interface Harness {
   runs: RunRegistry
   post(path: string, payload: unknown, headers?: Record<string, string>): Promise<Reply>
   callbackUrlOf(childId?: string): string
+  /**
+   * 把 origin 加进承载节点的回调白名单,并返回该 origin 上与 childId 同核的合法回执 URL。
+   * 死端口/挂起端口的用例必须走这里:回调白名单与 `/subagent/result/{childId}/{secret}`
+   * 路径是 SSRF 闸门(callback-policy.ts),裸 `/result` 会在到达网络层之前就被 400 掉,
+   * 于是「回执发不出去」的场景根本没被测到。
+   */
+  allowCallbackAt(origin: string, childId?: string): string
 }
 
 interface Reply {
@@ -63,6 +70,9 @@ afterEach(async () => {
     await new Promise<void>((resolve) => h.server.close(() => resolve()))
   }
 })
+
+/** 回执路径的 secret 段(callback-policy 要求 16–128 位)。 */
+const CALLBACK_SECRET = '0123456789abcdef'
 
 /** 一个当前空闲的端口(先取得再释放 —— 测试期间不应被别的东西占用)。 */
 function freePort(): Promise<number> {
@@ -99,12 +109,14 @@ async function setup(adapter: LlmAdapter): Promise<Harness> {
   const callbackPort = (callback.address() as AddressInfo).port
 
   const runs: RunRegistry = new Map()
+  // 白名单持有可变引用:server.ts 在每次请求时才读它,用例可按需追加死/挂起端口的 origin。
+  const callbackOrigins = new Set([`http://127.0.0.1:${callbackPort}`])
   const server = createSubagentHost({
     host: '127.0.0.1',
     port: 0,
     maxBodyBytes: 1 << 20,
     tokens: new Map([['dev', 't0k']]),
-    callbackOrigins: new Set([`http://127.0.0.1:${callbackPort}`]),
+    callbackOrigins,
     runs,
     // 与 index.ts 同款接线:已发布会话 = 已结集(或他处占用的幂等键)→ 重放闸
     sessionExists: (childId) => ctx.agents.get(SessionId(childId)) !== undefined,
@@ -125,7 +137,11 @@ async function setup(adapter: LlmAdapter): Promise<Harness> {
     callbackBodies,
     callback,
     runs,
-    callbackUrlOf: (childId = 'child-1') => `http://127.0.0.1:${callbackPort}/subagent/result/${childId}/0123456789abcdef`,
+    callbackUrlOf: (childId = 'child-1') => `http://127.0.0.1:${callbackPort}/subagent/result/${childId}/${CALLBACK_SECRET}`,
+    allowCallbackAt: (origin, childId = 'child-1') => {
+      callbackOrigins.add(origin)
+      return `${origin}/subagent/result/${childId}/${CALLBACK_SECRET}`
+    },
     post: async (path, payload, headers = {}) => {
       const res = await fetch(`${h.baseUrl}${path}`, {
         method: 'POST',
@@ -302,7 +318,7 @@ describe('subagent-host —— 承载节点子代理面', () => {
     const h = await setup(textOnlyAdapter('child 答复'))
     const deadPort = await freePort()
     const reply = await h.post('/subagent/start', startRequest(h, {
-      callbackUrl: `http://127.0.0.1:${deadPort}/result`,
+      callbackUrl: h.allowCallbackAt(`http://127.0.0.1:${deadPort}`),
     }))
     expect(reply.status).toBe(200)
 
@@ -335,7 +351,7 @@ describe('subagent-host —— 承载节点子代理面', () => {
     try {
       const began = Date.now()
       const reply = await h.post('/subagent/start', startRequest(h, {
-        callbackUrl: `http://127.0.0.1:${hangingPort}/result`,
+        callbackUrl: h.allowCallbackAt(`http://127.0.0.1:${hangingPort}`),
       }))
       expect(reply.status).toBe(200)
 

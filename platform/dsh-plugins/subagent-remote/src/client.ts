@@ -50,8 +50,12 @@ export async function postPlacement(opts: {
   const body = (await res.json()) as Record<string, unknown>
   const nodeId = body['node_id']
   const attempt = body['attempt']
-  if (typeof nodeId !== 'string' || nodeId === '' || typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt < 1) {
-    throw new SubagentError(`Scheduler 201 应答缺 node_id(收到 ${JSON.stringify(body)})`, 'internal')
+  const nodeIdBad = typeof nodeId !== 'string' || nodeId === ''
+  const attemptBad = typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt < 1
+  if (nodeIdBad || attemptBad) {
+    // 逐字段列名:两个字段共用一条「缺 node_id」的文案时,缺的是 attempt 也会把排查引向 node_id。
+    const missing = [nodeIdBad ? 'node_id' : '', attemptBad ? 'attempt(正整数)' : ''].filter((f) => f !== '')
+    throw new SubagentError(`Scheduler 201 应答缺 ${missing.join('、')}(收到 ${JSON.stringify(body)})`, 'internal')
   }
   return { nodeId, attempt }
 }

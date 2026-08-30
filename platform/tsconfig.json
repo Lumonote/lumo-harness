@@ -11,5 +11,10 @@
     "dsh-plugins/*/tests/**/*.ts",
     "data-plane/*/src/**/*.ts",
     "vitest.config.ts"
-  ]
+  ],
+  // 浏览器侧子树由插件自己的 tsconfig 编（extends dsh 的 tsconfig.base.client.json：
+  // 有 DOM lib、jsx、ui-theme 的模块增强）。本工程是 Node 侧的，types 只有 node。
+  // 不排除的话 `src/**/*.ts` 会把 client/*.ts 卷进来 —— 而同目录的 *.tsx 因为
+  // `*.ts` 不匹配 `.tsx` 反而豁免，于是同一个目录里两种文件走两套配置。
+  "exclude": ["node_modules", "dsh-plugins/*/src/client/**"]
 }

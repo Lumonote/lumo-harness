@@ -39,7 +39,7 @@ interface Harness {
 }
 
 interface SetupOptions {
-  /** 放置应答;缺省 201 { node_id: 'N1' }。 */
+  /** 放置应答;缺省 201 { node_id: 'N1', attempt: 1 }(与 domain.Placement 的 JSON 契约一致 —— 两个字段都非 omitempty)。 */
   schedule?: () => { status: number; body: Record<string, unknown> }
   /** 承载节点期望的令牌;缺省 't0k'。置于预期之外(hostTokens 覆写)即 403 场景。 */
   hostExpects?: string
@@ -67,7 +67,7 @@ async function setup(opts: SetupOptions = {}): Promise<Harness> {
       if (req.method === 'POST' && url.pathname === '/v1/placements') {
         const body = await readJson(req)
         schedCalls.placements.push({ headers: req.headers, body })
-        const reply = opts.schedule?.() ?? { status: 201, body: { node_id: 'N1' } }
+        const reply = opts.schedule?.() ?? { status: 201, body: { node_id: 'N1', attempt: 1 } }
         json(res, reply.status, reply.body)
         return
       }
@@ -345,10 +345,11 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
     const result = await run.result
     expect(result).toEqual({ output: [{ type: 'text', text: 'child 答复' }], stopReason: 'completed' })
 
-    // 终态上报(scheduler /v1/tasks/{childId}/result)best-effort 必达
+    // 终态上报(scheduler /v1/tasks/{childId}/result)best-effort 必达;
+    // 带上放置时拿到的 attempt —— scheduler 的 resultRequest 用它给陈旧上报做栅栏。
     const report = await waitFor(() => h.schedCalls.results[0], 'scheduler 终态上报')
     expect(report.headers['x-lumo-realm']).toBe('dev')
-    expect(report.body).toEqual({ state: 'COMPLETED' })
+    expect(report.body).toEqual({ state: 'COMPLETED', attempt: 1 })
   })
 
   it('排队 202:start 拒绝 REMOTE_PLACEMENT_QUEUED,host 未被请求', async () => {
@@ -373,7 +374,7 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
     // start 失败不报终态 = 槽位永久泄漏 —— best-effort FAILED 上报必须发生
     const failedReport = await waitFor(() => h.schedCalls.results[0], 'start 失败后的 FAILED 终态上报')
     expect(failedReport.headers['x-lumo-realm']).toBe('dev')
-    expect(failedReport.body).toEqual({ state: 'FAILED' })
+    expect(failedReport.body).toEqual({ state: 'FAILED', attempt: 1 })
   })
 
   it('dispose → host stop 收到;dispose 幂等(两次调用只一次 fetch);回调 aborted 结集', async () => {

@@ -22,4 +22,20 @@ describe('subagent-remote scheduler client', () => {
       expect(init?.headers).toMatchObject({ Authorization: 'Bearer control-token', 'x-lumo-realm': 'realm-a' })
     }
   })
+
+  it('names the field that actually failed when a 201 body is incomplete', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ node_id: 'N1' }), { status: 201 })))
+
+    // 缺 attempt 却报「缺 node_id」会把排查引向错误的字段 —— 载荷里 node_id 明明在。
+    const rejection = postPlacement({ base: 'http://scheduler', realm: 'realm-a', childId: 'child-1' })
+    await expect(rejection).rejects.toThrow(/attempt/)
+    await expect(rejection).rejects.not.toThrow(/缺 node_id/)
+  })
+
+  it('names node_id when it is the missing one', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ attempt: 1 }), { status: 201 })))
+
+    await expect(postPlacement({ base: 'http://scheduler', realm: 'realm-a', childId: 'child-1' }))
+      .rejects.toThrow(/node_id/)
+  })
 })
