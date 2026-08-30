@@ -4,13 +4,25 @@ node_modules/
 
 deepseek-harness/
 .idea/
-# 本地工具状态（CodeGraph 索引 / Serena 记忆），非项目产物
+# macOS Finder 元数据
+.DS_Store
+# 本地工具状态（CodeGraph 索引 / Serena 记忆 / OMC 状态 / workbuddy 备忘），非项目产物。
+# 这些规则不加前缀，故在任意层级生效；`deepseek-harness/` 整棵树本就已被上面一行忽略。
 .codegraph/
 .serena/
 .omc/
-deepseek-harness/.omc/
-docs/.omc/
-deepseek-harness/.idea/
+.workbuddy/
+
+# ── 平台侧的可复现装配物：能被脚本重建的东西不入库 ──────────────────────
+# 固定上游 Skill 快照。由 platform/upstream/install-components.sh 按
+# skill-sources.json 里的 pin 提交装出，约 13k 个文件（其中 12k 是素材 SVG）。
+# **来源清单三件套必须入库、快照不入库** —— 见 platform/upstream/README.md
+# 「在新 checkout 中安装固定依赖」。忽略它不改变新 checkout 拿到什么（本来就没入库），
+# 只是让 git status 不再被淹没，也堵死 `git add -A` 误提交 13k 个文件的口子。
+platform/upstream/skills/
+
+# Tauri 由 cargo tauri 生成的能力/ACL schema
+platform/desktop/gen/schemas/
 
 
 # Byte-compiled / optimized / DLL files
@@ -220,6 +232,10 @@ cython_debug/
 # .vscode/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
+
+# Isolated DeepSeek Harness staging tree used by desktop/container builds.
+# Product overlays are applied here; the upstream checkout stays pristine.
+platform/.build/
 
 # Ruff stuff:
 .ruff_cache/
