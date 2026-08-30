@@ -219,6 +219,11 @@ writeFileSync(resolve(stagingRoot, 'runtime-manifest.json'), `${JSON.stringify({
 
 console.log(`桌面 runtime 已准备：${packageSources.size} 个包，Node ${nodeVersion(nodeSource)}`)
 
+// 构建后复查上游洁净度。暂存副本的 node_modules 是软链回源树的，pnpm 有可能顺着
+// workspace 链接把编译产物写回 deepseek-harness/packages —— 那正是仓库里那批
+// .js/.d.ts/.map 的来路。产物已经落盘才发现，好过打包发出去之后才发现。
+runPlatformScript('assert-pristine.mjs', [sourceDshRoot], '构建把产物写回了上游源码树')
+
 function bundlePptPython() {
   const venvPython = resolve(pptVenvRoot, 'bin', 'python')
   if (!existsSync(venvPython)) {

@@ -31,6 +31,13 @@ if [[ ! -f "${web_index}" ]]; then
 fi
 node "${platform_root}/dsh-overrides/brand-web.mjs" "${deepseek_root}"
 
+# The Web build above runs inside the staged copy, whose node_modules are
+# symlinked back to the source checkout — pnpm can follow a workspace link and
+# write compiled output into deepseek-harness/packages. Re-verify before the
+# runtime starts, so a write-back is reported here rather than discovered as
+# untracked .js/.d.ts files days later.
+node "${platform_root}/dsh-overrides/assert-pristine.mjs" "${deepseek_source_root}"
+
 # This wrapper is for the repository-built desktop preview. A release build
 # can replace it with a signed/bundled DSH runtime without changing the Rust
 # shell contract.

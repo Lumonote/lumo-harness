@@ -42,8 +42,10 @@ export function applyLumoDshOverrides(root) {
         + "    'conversation.hero.composer.dock': { kind: 'list'; scope: 'root'; owner: HeroComposerOwnerProps }\n",
     ],
     [
-      "export interface InputZone {\n  readonly session: SessionState\n  readonly input: InputState\n}\n",
-      "export interface InputZone {\n  readonly session: SessionState\n  readonly input: InputState\n}\n\n"
+      // 锚点逐字来自 pin 住的上游（ConversationSnapshot，不是 SessionState）。
+      // __tests__/overlay.spec.ts 对着 `git show HEAD:` 的原文跑，锚点漂移会当场红。
+      "export interface InputZone {\n  readonly session: ConversationSnapshot\n  readonly input: InputState\n}\n",
+      "export interface InputZone {\n  readonly session: ConversationSnapshot\n  readonly input: InputState\n}\n\n"
         + "/** LUMO_DSH_OVERLAY: root-scoped currency for pre-session composer extensions. */\n"
         + "export interface HeroComposerOwnerProps {}\n",
     ],

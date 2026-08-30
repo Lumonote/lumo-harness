@@ -1,17 +1,14 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ThemeDefinition, ThemeTokens } from '@deepseek-ai/dsh-client-ui-theme/client'
+import {
+  isLumoTheme, LUMO_DEFAULT_THEME, LUMO_THEME_STORAGE_KEY, type LumoThemeId,
+} from '../theme-catalog.ts'
 
-export const LUMO_THEME_STORAGE_KEY = 'lumo-theme'
+// id / 标签 / 配色模式的唯一真相源在 ../theme-catalog.ts —— 宿主侧的引导脚本
+// (../boot-theme.ts) 也读同一张表。这里只负责把它兑现成 dsh 的主题定义并装配。
+export { isLumoTheme, LUMO_THEME_OPTIONS, LUMO_THEME_STORAGE_KEY, type LumoThemeId } from '../theme-catalog.ts'
+
 export const LUMO_THEME_EVENT = 'lumo:set-theme'
-
-export const LUMO_THEME_OPTIONS = [
-  { id: 'obsidian-signal', label: '曜石信号' },
-  { id: 'ember-foundry', label: '余烬工坊' },
-  { id: 'orbital-glass', label: '轨道玻璃' },
-  { id: 'infrared-grid', label: '红外网格' },
-] as const
-
-export type LumoThemeId = typeof LUMO_THEME_OPTIONS[number]['id']
 
 interface DarkThemePalette {
   base: string
@@ -137,14 +134,10 @@ const themes: readonly ThemeDefinition[] = Object.freeze([
   }),
 ])
 
-export function isLumoTheme(value: unknown): value is LumoThemeId {
-  return typeof value === 'string' && LUMO_THEME_OPTIONS.some(theme => theme.id === value)
-}
-
 export function readLumoTheme(): LumoThemeId {
-  if (typeof localStorage === 'undefined') return 'obsidian-signal'
+  if (typeof localStorage === 'undefined') return LUMO_DEFAULT_THEME
   const stored = localStorage.getItem(LUMO_THEME_STORAGE_KEY)
-  return isLumoTheme(stored) ? stored : 'obsidian-signal'
+  return isLumoTheme(stored) ? stored : LUMO_DEFAULT_THEME
 }
 
 function persistLumoTheme(id: LumoThemeId): void {

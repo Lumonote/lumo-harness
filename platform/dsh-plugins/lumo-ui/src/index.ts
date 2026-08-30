@@ -6,6 +6,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { SessionLogQuerySeam } from '../../../shared/seam-contracts/session-query.ts'
 
 import { assertIdentityConfiguration, IdentityAssertionError, resolveRequestIdentity, type RequestIdentity } from './identity.ts'
+import { lumoBootThemeInjection } from './boot-theme.ts'
 
 /** Read-only browser projection of the platform KnowledgeSeam. */
 interface KnowledgeQueryService {
@@ -536,6 +537,9 @@ function ops(_req: IncomingMessage, res: ServerResponse): void { res.writeHead(3
 
 export function apply(ctx: Context, config: Config): void {
   assertIdentityConfiguration(config)
+  // 预插件区间的深色引导。放在 registerRoutes 之外、inject 门之前：主题与
+  // knowledge/skills 是否装配无关，任何形态下白底闪一帧都不可接受。
+  ctx.on('webserver/index-inject', (table) => { table.push(lumoBootThemeInjection()) })
   const registerRoutes = (runtimeCtx: Context): void => {
     const knowledge = runtimeCtx.get('knowledge') as KnowledgeQueryService | undefined
     const skills = runtimeCtx.get('skills') as SkillRegistryService | undefined

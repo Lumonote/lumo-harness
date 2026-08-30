@@ -12,29 +12,10 @@ import {
 import { createHash } from 'node:crypto'
 import { dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { spawnSync } from 'node:child_process'
 import { applyLumoDshOverrides } from './apply.mjs'
+import { assertPristineProductSource, git } from './assert-pristine.mjs'
 
 const scriptRoot = dirname(fileURLToPath(import.meta.url))
-
-function git(root, args, encoding = 'utf8') {
-  const result = spawnSync('git', ['-C', root, ...args], { encoding })
-  if (result.error !== undefined) throw result.error
-  if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${String(result.stderr).trim()}`)
-  return result.stdout
-}
-
-function assertPristineProductSource(root) {
-  const tracked = git(root, ['status', '--porcelain', '--untracked-files=no']).trim()
-  if (tracked !== '') {
-    throw new Error('DeepSeek Harness has tracked modifications. Move product changes to platform overlays before building.\n' + tracked)
-  }
-  const untracked = git(root, ['ls-files', '--others', '--exclude-standard'])
-    .split('\n').filter(path => path.startsWith('apps/') || path.startsWith('packages/'))
-  if (untracked.length > 0) {
-    throw new Error('DeepSeek Harness contains generated/product files under apps or packages. Clean them before building.\n' + untracked.join('\n'))
-  }
-}
 
 function fingerprint(root) {
   const commit = git(root, ['rev-parse', 'HEAD']).trim()
