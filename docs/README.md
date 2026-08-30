@@ -21,6 +21,7 @@
 | 文档 | 内容 |
 |------|------|
 | **[`2026-08-28-cluster-organization-desktop-and-artifact-distribution-design.md`](./superpowers/specs/2026-08-28-cluster-organization-desktop-and-artifact-distribution-design.md)** | Cluster 专属功能门禁、PC 桌面节点注册与运营、用户/角色/部门、技能分发与自定义技能、不可变 Bundle、Nacos 期望态与多 Agent 委派权限交集 |
+| **[`2026-08-29-task-control-and-dispatch-design.md`](./superpowers/specs/2026-08-29-task-control-and-dispatch-design.md)** | **业务控制面 §23**（P5a–P5e 已落地）：统一 Worker（人/Agent 同尺）、五维归一化派单与置信度分档、任务/Run 拆分与评审闸门、证据链汇报（stale fail-closed）、集群派单与本机多智能体入口。含**外部研究稿的选型映射护栏**（§1：Kafka/NATS/LiteLLM/Volcano 等一律不采纳）与 Agent 授权死路径缺陷（§2.3） |
 
 ## 二、阅读路径
 
@@ -55,13 +56,14 @@
 
 | 形态 | 载体 | 组成 | 用途 |
 |------|------|------|------|
-| **Local-lite** | 本地（1 二进制 + 1 PG 容器） | PG（含 pgvector）+ 进程内队列/缓存 + 本地文件 | 日常开发、组件调试、CI 快速用例 |
+| **Local Desktop** | Rust/Tauri 桌面包 | SQLite + 本地 DSH worker；不启动任何网络中间件 | 个人工作台、本机 Agent、离线技能 |
 | **Standalone** | 本地 Docker / 生产单机 | 同引擎单节点：PG·Redis·MinIO·Milvus·RocketMQ·Nacos | 私有化小规模、POC 转正 |
 | **Cluster** | 本地 Docker（缩微）/ 生产 K8s | 完整分布式；**本地缩微 = 自研服务多实例 + 中间件单实例** | 生产；**本地用于调试分布式行为与故障注入** |
+| **Legacy Local-lite** | `compose.local.yml` | PG + Redis + Embedding | 仅开发/CI 集成测试，不是产品发行形态 |
 
-- **形态 × 载体是两轴**：本地同样可跑 Standalone 与 Cluster 拓扑（`deploy/compose.*.yml`），同一套镜像与应用配置，只换编排清单。
-- **迁移界线**：Local-lite → Standalone 是**重装**（数据一次性）；Standalone → Cluster 是**单向在线升级**（`architecture` §13.2.7）。
-- **能力缺失显式拒绝**：Local-lite 无 OLAP/图能力时 seam 返回 `CapabilityUnavailable`，**不得用 PG 模拟**。
+- **形态 × 载体是两轴**：本地可以运行服务器 Standalone/Cluster 拓扑，但那是开发验收，不等于本地单机产品；本地单机必须走 `platform/desktop`。
+- **迁移界线**：Local Desktop → Standalone 是**导出/重装**（不承诺 SQLite 数据在线迁移）；Standalone → Cluster 是**单向在线升级**（`architecture` §13.2.7）。
+- **能力缺失显式拒绝**：Local Desktop 无向量、OLAP、图能力时 seam 返回 `CapabilityUnavailable`，**不得用 SQLite 模拟**。
 
 详见 `architecture` §13.2。
 
@@ -90,7 +92,7 @@
 
 | # | 议题 | 待决内容 | 出处 |
 |---|------|---------|------|
-| 1 | **落地首切顺序** | 规范为「Nacos → 自研网关 → 连接器 + DAG」；评审主张**先单节点垂直切片**（一个真实业务组件 + 知识库 seam + 计量）验证产品假设，再上分布式控制面。**技术栈一致，分歧只在顺序。** | `roadmap` §16.3 vs `review` §5.2 |
+| 1 | **落地首切顺序** | **基础设施顺序已完成，后续按垂直闭环组织**。Nacos、网关、连接器、DAG 均已建成；后续以真实业务闭环推进，不再把两种顺序作为未决分歧。 | `roadmap` §16.3 vs `review` §5.2 |
 | 2 | **是否引入 TiDB/CRDB** | 规范自标待决；视多集群联邦需求。**后加远比先加后拆便宜**，建议保持待决 | `architecture` §13.3 |
 
 

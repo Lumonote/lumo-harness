@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -26,6 +28,18 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	value, err := strconv.Atoi(os.Getenv(key))
+	if err != nil || value < 1 {
+		return fallback
+	}
+	return value
+}
+
+func envSeconds(key string, fallback int) time.Duration {
+	return time.Duration(envInt(key, fallback)) * time.Second
 }
 
 func main() {
@@ -57,8 +71,40 @@ func main() {
 		log.Error("initialize governance", "err", err)
 		os.Exit(1)
 	}
+	bootstrapUsername := strings.TrimSpace(os.Getenv("LUMO_AUTH_BOOTSTRAP_USERNAME"))
+	bootstrapPassword := os.Getenv("LUMO_AUTH_BOOTSTRAP_PASSWORD")
+	if (bootstrapUsername == "") != (bootstrapPassword == "") {
+		log.Error("bootstrap authentication requires both username and password")
+		os.Exit(2)
+	}
+	if bootstrapUsername != "" {
+		bootstrapUserID := envOr("LUMO_AUTH_BOOTSTRAP_USER_ID", bootstrapUsername)
+		if err := st.EnsureBootstrapAuthUser(ctx, store.BootstrapAuthUser{
+			Realm:       envOr("LUMO_AUTH_BOOTSTRAP_REALM", "dev"),
+			UserID:      bootstrapUserID,
+			Username:    bootstrapUsername,
+			Password:    bootstrapPassword,
+			DisplayName: envOr("LUMO_AUTH_BOOTSTRAP_DISPLAY_NAME", bootstrapUsername),
+			Department:  envOr("LUMO_AUTH_BOOTSTRAP_DEPARTMENT", "platform"),
+			Roles:       strings.Split(envOr("LUMO_AUTH_BOOTSTRAP_ROLES", "platform_admin,operator"), ","),
+		}); err != nil {
+			log.Error("initialize bootstrap user", "err", err)
+			os.Exit(1)
+		}
+		log.Info("bootstrap user ready", "realm", envOr("LUMO_AUTH_BOOTSTRAP_REALM", "dev"), "user_id", bootstrapUserID)
+	}
 
-	srv := server.New(st, server.Config{DeploymentMode: mode, ClusterStatus: *clusterStatus}, log)
+	srv := server.New(st, server.Config{
+		DeploymentMode:    mode,
+		ClusterStatus:     *clusterStatus,
+		SchedulerURL:      envOr("LUMO_SCHEDULER_URL", ""),
+		ClusterID:         envOr("LUMO_CLUSTER_ID", ""),
+		ControlPlaneToken: os.Getenv("LUMO_CONTROL_PLANE_TOKEN"),
+		AuthMaxAttempts:   envInt("LUMO_AUTH_MAX_ATTEMPTS", 5),
+		AuthLockFor:       envSeconds("LUMO_AUTH_LOCK_SECONDS", 300),
+		AuthSessionTTL:    envSeconds("LUMO_AUTH_SESSION_TTL_SECONDS", 86400),
+		AuthCaptchaTTL:    envSeconds("LUMO_AUTH_CAPTCHA_TTL_SECONDS", 120),
+	}, log)
 	mux := http.NewServeMux()
 	srv.Register(mux)
 	log.Info("governance started", "addr", *listen, "deployment_mode", mode, "cluster_status", *clusterStatus)

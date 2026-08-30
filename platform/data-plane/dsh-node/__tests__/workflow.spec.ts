@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { localSkillSnapshotAssembly, skillSnapshotSource, waitForSkillSnapshotFile } from '../src/skills.ts'
-import { profileLifetimeOverlay, profileStorageRows, workflowEngineOverlay } from '../src/workflow.ts'
+import { localStorageRows, profileLifetimeOverlay, profileStorageRows, workflowEngineOverlay } from '../src/workflow.ts'
 
 describe('dsh-node FlowEngine assembly', () => {
   it('overrides the stock unary engine only on a parent node, routing fan-out to lumo-remote', () => {
@@ -32,6 +32,13 @@ describe('dsh-node FlowEngine assembly', () => {
       name: '@deepseek-ai/dsh-storage'
 `)
     expect(profileStorageRows('web')).toBe('')
+  })
+
+  it('assembles the desktop storage hub with the official SQLite backend', () => {
+    const rows = localStorageRows('headless', '/Users/palmer/Library/Application Support/Lumo/lumo.sqlite')
+    expect(rows).toContain("name: '@deepseek-ai/dsh-storage-sqlite'")
+    expect(rows).toContain('path: "/Users/palmer/Library/Application Support/Lumo/lumo.sqlite"')
+    expect(localStorageRows('web', '/tmp/lumo.sqlite')).toContain("name: '@deepseek-ai/dsh-storage-sqlite'")
   })
 
   it('mounts a pinned local-skill provider and disables mutable filesystem discovery', () => {

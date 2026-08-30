@@ -20,7 +20,7 @@
 | 向量检索 | **未选型**（§2 只写「向量库 Provider」，§5/§13 均无对应行） | **Milvus**（`ctx.knowledge.vector`），与 Nebula 组成「图 + 向量」双 seam 知识库 | §5.1 / §13 |
 | 对象存储 | **未选型**（§4.2/§5.2 出现「对象存储」占位但无选型） | **MinIO**（`ctx.datastore.object`）：日志冷层 + 制品二进制 + Milvus 后端 | §5.1 / §5.2 |
 | 策略 / 凭证 | OPA / Vault | 不变 | §6.3 |
-| 部署形态 | **未覆盖**（只有一段集群拓扑描述，无单机形态与切换） | **三档形态**：Local（1 二进制 + 1 PG，允许轻量替代、不承诺迁移）/ Standalone（同引擎单节点）/ Cluster；**Standalone → Cluster 单向在线升级** | §13.2 |
+| 部署形态 | **未覆盖**（只有一段集群拓扑描述，无单机形态与切换） | **三档形态**：Local Desktop（Rust 壳 + SQLite、零中间件）/ Standalone（服务器单例）/ Cluster；**Standalone → Cluster 单向在线升级** | §13.2 |
 | 文档实时协作 | **未覆盖**（RBAC 只管读写权限，无并发编辑模型） | **CRDT（Yjs 协议）+ 不可变发布快照**；协作服务 Go 主体 + y-crdt(Rust) 合并内核（FFI，落 §12.3 既有例外） | §5.4.7 / §12.3 |
 | 多集群 | 仅 Nacos namespace 联邦一句话，无调度与监控模型 | **全局主 Scheduler 唯一放置决策点** + 两段式失联判定 + 全局监控三面 | §7.4 |
 | 工作区组织 | **未覆盖**（制品无挂载单元，权限计量只能落 realm） | **项目（Project）= realm 内工作区**，权限载体 + 计量单元（`project_id`），非第六类制品 | §11.1 |
@@ -616,7 +616,7 @@ manifest 格式为 JSON 而非 YAML：签名覆盖的是上传的原始字节，
   （Go 消费侧 go:embed 同一文件），加列只改清单，杜绝「schema 第二份」。
   **聚合投影**：日分区列式 cube（Doris）、PG 单向重建（watermark + 桶级 REPLACE 幂等）、
   缺失时 `CapabilityUnavailable` 显式拒绝——设计 `docs/superpowers/specs/2026-08-26-doris-aggregation-design.md`。
-- **异步削峰**：计量事件不留请求路径——`commit`（LLM 截面）与 `emit`（并行成本流）把已校验事件写入 `usage_event_outbox`（**与预算扣减同一事务**，原子配套），由搬运器批量投递入 `usage_ledger`：`event_key` 幂等（至少一次投递不重复入账）、事件时刻保真（`ts` = 发生时刻，非投影时刻）、按序搬运。写穿即见换**有界最终一致**（≤ drain 周期），`reserve`/`balance` 不搬。**Local-lite = PG 事务 outbox + 进程内调度器**（§13.2 等价形态，2026-08-26 已落地）；Standalone+/Cluster = 事件走 RocketMQ `usage-events-<cost_type>` 消费侧（**2026-08-26 修正：原写 `usage.event.*`——RocketMQ topic 合法字符集 `^[%|a-zA-Z0-9_-]+$`，点号非法，由真实 broker 联调首次发现并改此命名**）。**传输已接线（2026-08-26，Standalone 形态实测）**：`platform/control-plane/usage-ledger` Go 服务——publisher（outbox 锁批 FOR UPDATE SKIP LOCKED → broker，整批标记 `published_at`，失败回滚）+ consumer（订阅闭集 topic，校验→`usage_ledger` 幂等落账→Ack，毒丸告警不落库，瞬时失败靠不可见到期重投）；与 TS 侧 `drainOnce` 为**互斥装配**（metering 插件 `ledgerTransport: 'local' | 'rmq'`）——台账单一写入者。设计说明 `docs/superpowers/specs/2026-08-26-metering-outbox-design.md` 与 [`2026-08-26-ledger-rmq-transport-design.md`](./superpowers/specs/2026-08-26-ledger-rmq-transport-design.md)（含 §8 实测补记：proxy 须独立 mqproxy、topic 部署期预建、新消费组重放历史）。Cluster 多实例/HA 随 helm 形态。
+- **异步削峰**：计量事件不留请求路径——`commit`（LLM 截面）与 `emit`（并行成本流）把已校验事件写入 `usage_event_outbox`（**与预算扣减同一事务**，原子配套），由搬运器批量投递入 `usage_ledger`：`event_key` 幂等（至少一次投递不重复入账）、事件时刻保真（`ts` = 发生时刻，非投影时刻）、按序搬运。写穿即见换**有界最终一致**（≤ drain 周期），`reserve`/`balance` 不搬。**Legacy Local-lite = PG 事务 outbox + 进程内调度器**（仅用于历史开发/CI 集成测试）；**Local Desktop 不装配计量控制面**，只保留本地工作台与 SQLite 边界。Standalone+/Cluster = 事件走 RocketMQ `usage-events-<cost_type>` 消费侧（**2026-08-26 修正：原写 `usage.event.*`——RocketMQ topic 合法字符集 `^[%|a-zA-Z0-9_-]+$`，点号非法，由真实 broker 联调首次发现并改此命名**）。**传输已接线（2026-08-26，Standalone 形态实测）**：`platform/control-plane/usage-ledger` Go 服务——publisher（outbox 锁批 FOR UPDATE SKIP LOCKED → broker，整批标记 `published_at`，失败回滚）+ consumer（订阅闭集 topic，校验→`usage_ledger` 幂等落账→Ack，毒丸告警不落库，瞬时失败靠不可见到期重投）；与 TS 侧 `drainOnce` 为**互斥装配**（metering 插件 `ledgerTransport: 'local' | 'rmq'`）——台账单一写入者。设计说明 `docs/superpowers/specs/2026-08-26-metering-outbox-design.md` 与 [`2026-08-26-ledger-rmq-transport-design.md`](./superpowers/specs/2026-08-26-ledger-rmq-transport-design.md)（含 §8 实测补记：proxy 须独立 mqproxy、topic 部署期预建、新消费组重放历史）。Cluster 多实例/HA 随 helm 形态。
 - **调度联动**：Scheduler 放置时读预算余量，预算将尽的任务降优先级/suspend。
 
 ### 6.5 分发自动安装 Provisioner（声明式 reconcile）
@@ -1032,47 +1032,47 @@ ORM:     Ent (PG)
 
 #### 13.2.1 两个正交维度：形态 × 载体
 
-**形态**（跑什么拓扑）与**载体**（跑在哪）是两轴，不可混为一谈——「本地」不等于「单机形态」，本地同样要能跑集群拓扑做调试：
+**形态**（跑什么拓扑）与**载体**（跑在哪）是两轴，不可混为一谈。产品本地单机与本地 Docker 缩微集群是两个不同载体：前者给用户使用，后者给平台做分布式验收。
 
-| 形态 \ 载体 | 本地 Docker Compose | 生产（K8s / 裸机） |
-|-------------|--------------------|-------------------|
-| **Local-lite** | ✅ 1 二进制 + 1 PG，秒级启动，最快迭代 | — （不用于生产） |
+| 形态 \ 载体 | 桌面应用 / 本地 Docker Compose | 生产（K8s / 裸机） |
+|-------------|----------------------------|-------------------|
+| **Local Desktop** | ✅ Rust/Tauri 桌面包 + 本地 DSH worker + SQLite | —（不启动服务器中间件） |
 | **Standalone** | ✅ `compose.standalone.yml` | ✅ 单机生产部署 |
 | **Cluster** | ✅ `compose.cluster.yml`（**缩微集群**，见 §13.2.5） | ✅ Helm + K8s |
 
-**同一套镜像与应用配置，只换编排清单。** 本地与生产的差异必须收敛在 compose/Helm 清单里，不允许出现「本地专用镜像」或「本地专用配置项」。
+**服务器单例与集群使用同一套服务镜像，只换编排清单。** Local Desktop 是独立的 Rust/Tauri 载体，运行本地 DSH worker 和 SQLite；它不拉起服务器中间件，也不伪装成服务器单例。
 
 #### 13.2.2 三档形态
 
 | 形态 | 目标场景 | 引擎装配 | 资源基线 | 迁移承诺 |
 |------|---------|---------|---------|---------|
-| **Local 本地开发** | 开发者机器、CI、组件调试 | **1 个二进制 + 1 个 PG 容器**：PG（含 pgvector）+ 进程内队列/缓存 + 本地文件系统 + 本地 YAML 配置 | 4C / 8G / 20G | **不支持迁移**，数据一次性 |
+| **Local 本地单机** | 个人桌面、本机 Agent、离线技能 | **Rust/Tauri 桌面壳 + 本地 DSH worker + SQLite**；不启动 RocketMQ、Nacos、MinIO、Redis、PostgreSQL 等中间件 | 4C / 8G / 20G | **不支持迁移**，数据一次性 |
 | **Standalone 单机生产** | 私有化小规模、离线环境、POC 转正 | 与集群**完全相同的引擎**跑单节点拓扑：PG · Redis · MinIO · Milvus(standalone) · RocketMQ(单 broker) · Nacos(standalone)；Doris/Nebula 按需 | 16C / 64G / SSD 1T | **支持在线升级到 Cluster** |
 | **Cluster 集群** | 生产 | 控制面 3 节点(CP) + GPU 推理节点(IB/RDMA) + 存储分层集群 + K8s worker + 自研边缘网关 + RocketMQ 骨干 + OTel；昼夜弹性（闲时回收 agent 节点、忙时扩容） | 按容量模型（**待补，见评审 §5.3**） | — |
 
 **Local 与 Standalone 之间是「重装」，Standalone 与 Cluster 之间才是「迁移」。** 这条界线必须对用户明示，不能让人以为本地跑出来的数据能直接带上生产。
 
-#### 13.2.3 Local-lite 的替代映射
+#### 13.2.3 Local Desktop 的替代映射
 
-选 PG 作为本地唯一外部依赖，是因为它一个进程同时顶掉四件事：
+Local Desktop 不依赖任何服务器中间件；下面是它和服务器形态的明确映射：
 
 | 能力 | 集群 / Standalone | **Local 替代** | 为什么可以换 |
 |------|------------------|---------------|-------------|
-| 关系库 | PostgreSQL | **PostgreSQL**（不换） | PG 本身够轻（~200MB）；换 SQLite 会引入 SQL 方言差异，处处要写两套，成本远高于收益 |
-| 向量检索 | Milvus | **pgvector**（同一个 PG 实例） | 本地数据量小，ANN 收益不存在；零额外进程 |
-| 消息 / A2A / Trigger | RocketMQ | **PG 事务 outbox + 进程内调度器** | **PG 事务天然提供「扣配额 + 发任务」的原子性**——这正是 §8.3 选 RocketMQ 的首要理由，本地用事务直接满足 |
-| 对象存储 | MinIO | **本地文件系统**（S3 driver 抽象后端） | 接口经 `ctx.datastore.object` 抽象，实现可换 |
-| 缓存 / 限流 | Redis Cluster | **进程内 LRU + 计数器** | 单进程无需跨进程共享 |
-| 注册 / 配置 | Nacos | **本地 YAML + 文件 watch** | 单节点无发现问题；配置热加载语义保留 |
-| OLAP / 图 | Doris / Nebula | **不提供** | 见下条：显式不可用，不用 PG 模拟 |
+| 关系库 | PostgreSQL | **SQLite** | 桌面单进程、本地数据文件；不承诺与服务器 SQL/并发语义等价 |
+| 向量检索 | Milvus | **不提供** | 不用 SQLite 假装向量库；对应 seam 显式返回 `CapabilityUnavailable` |
+| 消息 / A2A / Trigger | RocketMQ | **进程内有界队列** | 本机能力只支持本地 Agent；跨用户/跨节点委派必须进入 Cluster |
+| 对象存储 | MinIO | **应用数据目录下的本地文件** | 不暴露 S3 端口；大对象能力按本地文件 seam 明确降级 |
+| 缓存 / 限流 | Redis Cluster | **进程内有界缓存** | 单进程无需跨进程共享；重启后不保留热态 |
+| 注册 / 配置 | Nacos | **进程内配置 + 本地文件** | 不做服务发现；不读取 Nacos 地址 |
+| OLAP / 图 | Doris / Nebula | **不提供** | 显式不可用，不用 SQLite 模拟 |
 
-#### 13.2.4 换引擎的代价与兜底（Local-lite 专属）
+#### 13.2.4 换引擎的代价与兜底（Local Desktop 专属）
 
 替代品**行为不完全等价**，这是真实代价，必须显式管理而非假装不存在：
 
 - **必须通过同一套 seam 契约测试**：每个 seam 定义一份契约测试集，**Local Provider 与集群 Provider 必须同时通过**。这是允许替换的前提条件——契约测试是 seam 抽象兑现价值的地方，不是可选项。
-- **不可等价模拟的能力必须显式标注**：pgvector 与 Milvus 的召回排序、过滤语义存在差异；进程内队列没有 RocketMQ 的死信、重试与顺序保证。**Local 模式启动时须打印能力差异清单**，避免「本地好好的，上生产就变了」。
-- **缺失能力显式拒绝，严禁静默模拟**（对齐 §15「误配置必须响亮失败」）：Local 无 OLAP / 图能力时，对应 seam 返回 `CapabilityUnavailable`，**不得用 PG 递归 CTE 假装图数据库、不得用 PG 聚合假装 OLAP**——那会让用户在本地得到与生产不同的查询语义与性能画像，是最隐蔽的坑。
+- **不可等价模拟的能力必须显式标注**：SQLite 与 PostgreSQL 的并发语义不同；进程内队列没有 RocketMQ 的死信、重试与顺序保证。**Local Desktop 启动时须打印能力差异清单**，避免「本地好好的，上生产就变了」。
+- **缺失能力显式拒绝，严禁静默模拟**（对齐 §15「误配置必须响亮失败」）：Local 无向量、OLAP / 图能力时，对应 seam 返回 `CapabilityUnavailable`，**不得用 SQLite 或 PG 假装这些引擎**——那会让用户在本地得到与生产不同的查询语义与性能画像，是最隐蔽的坑。
 - 组件 manifest 的 `requires` 声明所需能力（如 `{olap: true, graph: true}`），Provisioner **在安装期**校验并拒绝，不允许装上后运行时才失败（§6.5）。
 - 控制台「专家·技能·连接器」目录（§11.1）按当前形态过滤或标灰不可用制品。
 
@@ -1192,7 +1192,7 @@ docker compose -f compose.cluster.yml up          # 起两个缩微集群
 | **编辑态 / 发布态** | 编辑态 = CRDT 实时文档（不进检索）；发布态 = 不可变快照 version N（唯一可被 RAG 召回） | 「模型看到的」永远是发布态 |
 | **协作服务 Collaborator** | 承载 CRDT 实时协作的有状态 Go 服务 | 属协同面；有状态，区别于无状态 AgentSlot |
 | **全局 Scheduler** | 跨集群唯一放置决策点 | vs 集群 Scheduler：后者只受理不决策 |
-| **部署形态 Profile** | Minimal / Standalone / Cluster 三档，由配置声明 | 差异是**拓扑与装配**，不是引擎选型；不得表现为代码分支 |
+| **部署形态 Profile** | Local Desktop / Standalone / Cluster 三档，由配置声明 | 差异是**拓扑与装配**，不是业务逻辑分支；Local Desktop 固定 SQLite + 零中间件 |
 
 ---
 
@@ -1218,7 +1218,7 @@ docker compose -f compose.cluster.yml up          # 起两个缩微集群
 18. **控制指令是一等审计事件**：pause/stop/abort/approve 等一律经 OPA 评估并写入 SessionEvent 日志 + UsageLedger，带 actor 与 reason；终端只发指令、不实现状态机（§8.4）。
 19. **跨集群失联两段式判定，严禁秒级切换**：suspect(30s) → down(90s) 才迁移，迁移前必须 fencing；一个任务同一时刻只在一个集群执行（§7.4）。
 20. **项目是计量单元不是制品**：`project_id` 进 usage_ledger；项目承载引用，不参与「五类制品」分类（§11.1）。
-21. **迁移承诺决定能否换引擎**：**Local 本地开发**可用轻量替代（PG/pgvector/进程内队列/本地文件），代价是不承诺迁移、且必须通过同一套 seam 契约测试并声明能力差异；**Standalone 单机生产及以上**必须同引擎不同拓扑，否则「升级到集群」退化为重装。**任何形态下，缺失能力一律显式拒绝，严禁静默模拟**（不得用 PG 假装 OLAP 或图库）。形态差异只允许存在于装配层，业务代码禁止 `if (standalone)` 分支（§13.2）。
+21. **迁移承诺决定能否换引擎**：**Local Desktop 本地单机**固定 SQLite、进程内队列和本地文件，零 RocketMQ/Nacos/MinIO/Redis/PostgreSQL，代价是不承诺迁移、且必须通过同一套 seam 契约测试并声明能力差异；**Standalone 服务器单例及以上**必须同引擎不同拓扑，否则「升级到集群」退化为重装。**任何形态下，缺失能力一律显式拒绝，严禁静默模拟**（不得用 SQLite/PG 假装向量、OLAP/图库；本地 Docker 调试集群必须保留中间件以验证真实多实例行为）。形态差异只允许存在于装配层，业务代码禁止 `if (standalone)` 分支（§13.2）。
 22. **外部内容不得在无人确认下把副作用送出平台**：进入上下文的内容按来源分四档（system / user / internal / external），判据是**「谁能写这段字节」**；一个 turn 内一旦引入 `external` 内容，该 turn 的工具集**只收窄不扩张**，出平台写（连接器 POST、任意命令执行）默认转 HITL。**污点必须从 SessionEvent 日志重算，不得只存进程内存**——否则跨节点 resume 会把污点洗白，而攻击者有能力主动触发迁移（§18）。
 
 ---
@@ -1242,7 +1242,7 @@ docker compose -f compose.cluster.yml up          # 起两个缩微集群
 
 | 资产 | 保护目标 | 现有机制 |
 |---|---|---|
-| 凭证（连接器 token、模型 key） | 永不进入 prompt，永不落日志 | Vault；Local-lite 走环境变量注入；参数只存指纹不存原文（§6.3） |
+| 凭证（连接器 token、模型 key） | 永不进入 prompt，永不落日志 | Vault；Local Desktop/Legacy Local-lite 走环境变量注入；参数只存指纹不存原文（§6.3） |
 | 知识库发布态内容 | 模型只读 `published`，草稿不进上下文 | 铁律 17；realm 与角色由装配层固定注入，模型不可改（§5.4.1） |
 | 连接器出向权限 | 不被外部内容操纵 | 四道闸 + egress 白名单 + 审计（§10.1）；**本章的 turn 能力封闭** |
 | SessionEvent 日志 | 恢复与审计的唯一真相源 | 强一致写路径 + 每会话单调序号（评审 A1） |
@@ -1305,7 +1305,7 @@ docker compose -f compose.cluster.yml up          # 起两个缩微集群
 
 ## 19. 测试与验证策略
 
-> 补 design-review §5.3 五项待补「测试与验证策略」。起点说透：**seam 契约测试是允许 Local-lite 换引擎的唯一依据**，没有契约测试，「本地能跑」推不出「生产能跑」。本仓库的测试实践（契约双实现、mutation 验证、真依赖、skip 可见）在此固化，后面按层展开。
+> 补 design-review §5.3 五项待补「测试与验证策略」。起点说透：**seam 契约测试是允许 Legacy Local-lite 或 Local Desktop 使用替代实现的唯一依据**，没有契约测试，「本地能跑」推不出「生产能跑」。本仓库的测试实践（契约双实现、mutation 验证、真依赖、skip 可见）在此固化，后面按层展开。
 
 ### 19.1 分层：四层测试金字塔
 
@@ -1427,7 +1427,7 @@ SessionEvent 日志 append-only、每会话单调序号（§8.2）——这让�
 
 | 形态 | 硬件基线 | 规模目标（用户/项目/并发 turn） | 主要瓶颈与扩法 |
 |---|---|---|---|
-| **Local-lite** | 开发机 + 1 PG 容器 | 1–2 用户 / 1–2 项目 / 并发 4 | 进程内队列无死信——仅开发/CI |
+| **Local Desktop** | Rust/Tauri + SQLite | 1 用户 / 本机项目 / 并发 4 | 进程内队列无死信——本地产品边界 |
 | **Standalone** | **16C / 64G / SSD 1T**（§13.2 既有） | ≤ 50 用户 / ≤ 10 项目 / **32 并发 turn** / ≤ 300 LLM 调用/min / ≤ 20M tokens/月 | PG 预算树行锁、LLM 速率；超限 → 换 Cluster（单向在线升级，§13.2） |
 | **Cluster 基线** | CP 3 节点 + 数据节点 N×（16C/32G）；中间件各 1（本地缩微）/HA（生产） | ≤ 200 用户 / ≤ 100 项目 / **1000 并发 turn ≈ 32 数据节点** | 节点线性扩展；控制面每 500 并发 turn 复核一次 |
 | **Cluster 扩展** | 每 +32 并发 turn → +1 数据节点 | 集群规模随负载横向扩 | 队列通量（RocketMQ 计 50% 余量）、PG write 前分离视图关注 |

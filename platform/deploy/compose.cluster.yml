@@ -68,6 +68,10 @@ services:
   milvus:
     image: milvusdb/milvus:v3.0.0
     command: ["milvus", "run", "standalone"]
+    # During a full cold start Milvus can temporarily lose its etcd lease while
+    # the Docker VM is CPU-starved. The process exits with 80 in that case and
+    # is safe to restart against the same persisted volume.
+    restart: unless-stopped
     security_opt:
       - seccomp:unconfined
     environment:
@@ -117,6 +121,11 @@ services:
     environment:
       JAVA_OPT_EXT: -Xms512m -Xmx512m -Xmn128m
       NAMESRV_ADDR: rocketmq-namesrv:9876
+      # Cold starts replay the persisted store before Netty binds 10911. On a
+      # busy Docker Desktop host this routinely exceeds the former 40s guard.
+      # Persisted stores can take several minutes to recover while the DSH JVMs
+      # and Nacos are cold-starting on a constrained Docker Desktop VM.
+      ROCKETMQ_BROKER_START_TIMEOUT_SECONDS: "300"
     volumes:
       - ./rocketmq-broker-dev.conf:/rocketmq-broker-dev.conf:ro
       - ./rocketmq-entrypoint.sh:/rocketmq-entrypoint.sh:ro
@@ -129,7 +138,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
-      start_period: 40s
+      start_period: 300s
   rocketmq-topic-init:
     image: apache/rocketmq:5.3.1
     network_mode: "service:rocketmq"
@@ -187,8 +196,8 @@ services:
       timeout: 5s
       retries: 30
       start_period: 60s
-  opa: { image: openpolicyagent/opa:latest, command: [run, --server] }
-  vault: { image: hashicorp/vault:latest, cap_add: [IPC_LOCK], environment: ["VAULT_DEV_ROOT_TOKEN_ID=${LUMO_VAULT_TOKEN:-dev-root-token}"], command: [server, -dev] }
+  opa: { image: "openpolicyagent/opa:latest", command: ["run", "--server"] }
+  vault: { image: "hashicorp/vault:latest", cap_add: ["IPC_LOCK"], environment: ["VAULT_DEV_ROOT_TOKEN_ID=${LUMO_VAULT_TOKEN:-dev-root-token}"], command: ["server", "-dev"] }
   prometheus:
     image: prom/prometheus:v2.54.1
     volumes:
@@ -226,11 +235,19 @@ services:
   dsh-web:
     build: { context: ../.., dockerfile: platform/data-plane/dsh-node/Dockerfile }
     image: "${LUMO_DSH_IMAGE:-lumo/dsh-node:dev}"
+    # The Harness process owns long-lived PostgreSQL clients. If PostgreSQL
+    # performs crash recovery, restart the plugin host after its connections
+    # are terminated so it can rebuild the complete runtime graph.
+    restart: unless-stopped
     environment:
       - LUMO_DSH_PROFILE=web
-      - DSH_AUTH_HOST=0.0.0.0
-      - DSH_AUTH_PORT=3080
-      - "DSH_AUTH_PUBLIC_URL=http://127.0.0.1:${LUMO_CONSOLE_PORT:-4173}"
+      - LUMO_DEPLOYMENT_MODE=cluster
+      - LUMO_CLUSTER_STATUS=ready
+      - LUMO_SCHEDULER_URL=http://scheduler-0:8083
+      - LUMO_CLUSTER_ID=${LUMO_CLUSTER_ID:-cluster-a}
+      - LUMO_AUTH_HOST=0.0.0.0
+      - LUMO_AUTH_PORT=3080
+      - "LUMO_AUTH_PUBLIC_URL=http://127.0.0.1:${LUMO_CONSOLE_PORT:-4173}"
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       - "LUMO_IDENTITY_ASSERTION_SECRET=${LUMO_IDENTITY_ASSERTION_SECRET:-}"
       - LUMO_WEB_PORT=3080
@@ -254,6 +271,7 @@ services:
       - LUMO_SCHEDULER_API_URL=http://scheduler-0:8083
       - LUMO_PROJECTS_URL=http://projects:8086
       - LUMO_FLOWS_URL=http://flows:8087
+      - LUMO_GOVERNANCE_URL=http://governance:8089
       - LUMO_SUBAGENT_HOST_TOKENS={"cluster-a-dsh-1":"${LUMO_SUBAGENT_HOST_TOKEN:-dev-subagent-token}"}
       - LUMO_NACOS_ADDR=http://nacos:8848
       - LUMO_NACOS_SERVICE=lumo-dsh-node
@@ -266,19 +284,20 @@ services:
     volumes:
       - provisionerdata:/var/lib/lumo/artifacts:ro
       - dshwebdata:/root/.dsh
-    # deepseek-harness-auth owns the public in-container listener and proxies to
-    # the Harness WebServer only after authentication. Host publication remains
-    # loopback-only for local testing.
+    # @lumo/user-auth owns the public listener and injects governance-backed
+    # signed identity into the loopback-only Harness WebServer.
     ports: ["127.0.0.1:${LUMO_CONSOLE_PORT:-4173}:3080"]
     depends_on:
       scheduler-0: { condition: service_started }
       projects: { condition: service_started }
       flows: { condition: service_started }
       connector-gateway: { condition: service_started }
+      governance: { condition: service_started }
 
   cluster-a-dsh-0:
     build: { context: ../.., dockerfile: platform/data-plane/dsh-node/Dockerfile }
     image: "${LUMO_DSH_IMAGE:-lumo/dsh-node:dev}"
+    restart: unless-stopped
     environment:
       - LUMO_NODE_ID=cluster-a-dsh-0
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -310,6 +329,7 @@ services:
   cluster-a-dsh-1:
     build: { context: ../.., dockerfile: platform/data-plane/dsh-node/Dockerfile }
     image: "${LUMO_DSH_IMAGE:-lumo/dsh-node:dev}"
+    restart: unless-stopped
     environment:
       - LUMO_NODE_ID=cluster-a-dsh-1
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -340,6 +360,7 @@ services:
   cluster-b-dsh-0:
     build: { context: ../.., dockerfile: platform/data-plane/dsh-node/Dockerfile }
     image: "${LUMO_DSH_IMAGE:-lumo/dsh-node:dev}"
+    restart: unless-stopped
     environment:
       - LUMO_NODE_ID=cluster-b-dsh-0
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -371,6 +392,7 @@ services:
   cluster-b-dsh-1:
     build: { context: ../.., dockerfile: platform/data-plane/dsh-node/Dockerfile }
     image: "${LUMO_DSH_IMAGE:-lumo/dsh-node:dev}"
+    restart: unless-stopped
     environment:
       - LUMO_NODE_ID=cluster-b-dsh-1
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -402,7 +424,7 @@ services:
   scheduler-0:
     build: { context: ../control-plane, dockerfile: scheduler/Dockerfile }
     image: lumo/scheduler:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", LUMO_INSTANCE=scheduler-0, LUMO_LISTEN=:8083, LUMO_NACOS_ADDR=http://nacos:8848, "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-0", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
       nacos: { condition: service_healthy }
@@ -410,7 +432,7 @@ services:
   scheduler-1:
     build: { context: ../control-plane, dockerfile: scheduler/Dockerfile }
     image: lumo/scheduler:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", LUMO_INSTANCE=scheduler-1, LUMO_LISTEN=:8083, LUMO_NACOS_ADDR=http://nacos:8848, "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-1", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
       nacos: { condition: service_healthy }
@@ -419,7 +441,7 @@ services:
   collaborator-0:
     build: { context: ../control-plane, dockerfile: collaborator/Dockerfile }
     image: lumo/collaborator:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", LUMO_REDIS_ADDR=redis:6379, LUMO_INSTANCE=collaborator-0, LUMO_LISTEN=:8081, LUMO_NACOS_ADDR=http://nacos:8848, LUMO_NACOS_COLLABORATOR_SERVICE=lumo-collaborator, LUMO_NODE_ADVERTISE_HOST=collaborator-0, LUMO_NACOS_PORT=8081, "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_REDIS_ADDR=redis:6379", "LUMO_INSTANCE=collaborator-0", "LUMO_LISTEN=:8081", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_NACOS_COLLABORATOR_SERVICE=lumo-collaborator", "LUMO_NODE_ADVERTISE_HOST=collaborator-0", "LUMO_NACOS_PORT=8081", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
@@ -427,7 +449,7 @@ services:
   collaborator-1:
     build: { context: ../control-plane, dockerfile: collaborator/Dockerfile }
     image: lumo/collaborator:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", LUMO_REDIS_ADDR=redis:6379, LUMO_INSTANCE=collaborator-1, LUMO_LISTEN=:8081, LUMO_NACOS_ADDR=http://nacos:8848, LUMO_NACOS_COLLABORATOR_SERVICE=lumo-collaborator, LUMO_NODE_ADVERTISE_HOST=collaborator-1, LUMO_NACOS_PORT=8081, "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_REDIS_ADDR=redis:6379", "LUMO_INSTANCE=collaborator-1", "LUMO_LISTEN=:8081", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_NACOS_COLLABORATOR_SERVICE=lumo-collaborator", "LUMO_NODE_ADVERTISE_HOST=collaborator-1", "LUMO_NACOS_PORT=8081", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
@@ -435,7 +457,7 @@ services:
   registry:
     build: { context: ../control-plane, dockerfile: registry/Dockerfile }
     image: lumo/registry:dev
-    environment: ["REGISTRY_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", REGISTRY_TRUST_FILE=/run/secrets/registry-trust, REGISTRY_LOCAL_ROOT=/var/lib/registry/objects, REGISTRY_PORT=8084, "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["REGISTRY_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "REGISTRY_TRUST_FILE=/run/secrets/registry-trust", "REGISTRY_LOCAL_ROOT=/var/lib/registry/objects", "REGISTRY_PORT=8084", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     secrets: [registry-trust]
     volumes:
       - registrydata:/var/lib/registry/objects
@@ -446,7 +468,7 @@ services:
   connector-gateway:
     build: { context: ../control-plane, dockerfile: connector-gateway/Dockerfile }
     image: lumo/connector-gateway:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", LUMO_REDIS_ADDR=redis:6379, LUMO_LISTEN=:8082, LUMO_OPA_ADDR=http://opa:8181, LUMO_VAULT_ADDR=http://vault:8200, "LUMO_VAULT_TOKEN=${LUMO_VAULT_TOKEN:-dev-root-token}", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_REDIS_ADDR=redis:6379", "LUMO_LISTEN=:8082", "LUMO_OPA_ADDR=http://opa:8181", "LUMO_VAULT_ADDR=http://vault:8200", "LUMO_VAULT_TOKEN=${LUMO_VAULT_TOKEN:-dev-root-token}", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
@@ -456,21 +478,21 @@ services:
   llm-gateway:
     build: { context: ../control-plane, dockerfile: llm-gateway/Dockerfile }
     image: lumo/llm-gateway:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", LUMO_LISTEN=:8088, "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_LISTEN=:8088", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["18088:8088"]
   flows:
     build: { context: ../control-plane, dockerfile: flows/Dockerfile }
     image: lumo/flows:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", LUMO_LISTEN=:8087, "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_LISTEN=:8087", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["18087:8087"]
   projects:
     build: { context: ../control-plane, dockerfile: projects/Dockerfile }
     image: lumo/projects:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", LUMO_LISTEN=:8086, "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_LISTEN=:8086", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["18086:8086"]
@@ -483,13 +505,24 @@ services:
       - LUMO_LISTEN=:8089
       - LUMO_DEPLOYMENT_MODE=cluster
       - LUMO_CLUSTER_STATUS=ready
+      - "LUMO_AUTH_BOOTSTRAP_REALM=${LUMO_REALM:-dev}"
+      - "LUMO_AUTH_BOOTSTRAP_USER_ID=${LUMO_AUTH_BOOTSTRAP_USER_ID:-admin}"
+      - "LUMO_AUTH_BOOTSTRAP_USERNAME=${LUMO_AUTH_BOOTSTRAP_USERNAME:-admin}"
+      - "LUMO_AUTH_BOOTSTRAP_PASSWORD=${LUMO_AUTH_BOOTSTRAP_PASSWORD:-lumo-admin-123}"
+      - "LUMO_AUTH_BOOTSTRAP_DISPLAY_NAME=${LUMO_AUTH_BOOTSTRAP_DISPLAY_NAME:-Lumo Administrator}"
+      - "LUMO_AUTH_BOOTSTRAP_DEPARTMENT=${LUMO_AUTH_BOOTSTRAP_DEPARTMENT:-platform}"
+      - "LUMO_AUTH_BOOTSTRAP_ROLES=${LUMO_AUTH_BOOTSTRAP_ROLES:-platform_admin,operator}"
+      - "LUMO_AUTH_MAX_ATTEMPTS=${LUMO_AUTH_MAX_ATTEMPTS:-5}"
+      - "LUMO_AUTH_LOCK_SECONDS=${LUMO_AUTH_LOCK_SECONDS:-300}"
+      - "LUMO_AUTH_SESSION_TTL_SECONDS=${LUMO_AUTH_SESSION_TTL_SECONDS:-86400}"
+      - "LUMO_AUTH_CAPTCHA_TTL_SECONDS=${LUMO_AUTH_CAPTCHA_TTL_SECONDS:-120}"
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["18089:8089"]
   usage-ledger:
     build: { context: ../control-plane, dockerfile: usage-ledger/Dockerfile }
     image: lumo/usage-ledger:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", LUMO_RMQ_ENDPOINT=rocketmq:8081, LUMO_LISTEN=:8085, "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_RMQ_ENDPOINT=rocketmq:8081", "LUMO_LISTEN=:8085", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
       rocketmq-topic-init: { condition: service_completed_successfully }

@@ -92,8 +92,14 @@ export JAVA_HOME="${JAVA_HOME:-/opt/java/openjdk}"
 export PATH="$JAVA_HOME/bin:$PATH"
 export NAMESRV_ADDR="${NAMESRV_ADDR:-rocketmq-namesrv:9876}"
 broker_config="${ROCKETMQ_BROKER_CONFIG:-/rocketmq-broker-dev.conf}"
+broker_start_timeout="${ROCKETMQ_BROKER_START_TIMEOUT_SECONDS:-300}"
 broker_pid=""
 proxy_pid=""
+
+if [[ ! "$broker_start_timeout" =~ ^[1-9][0-9]*$ ]]; then
+  echo "rocketmq-entrypoint: ROCKETMQ_BROKER_START_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 64
+fi
 
 report_logs() {
   local log_file
@@ -125,7 +131,8 @@ sh mqbroker -c "$broker_config" &
 broker_pid=$!
 
 broker_ready=false
-for _ in $(seq 1 40); do
+broker_started_at=$SECONDS
+while (( SECONDS - broker_started_at < broker_start_timeout )); do
   if ! kill -0 "$broker_pid" 2>/dev/null; then
     status=0
     wait "$broker_pid" || status=$?
@@ -139,7 +146,7 @@ for _ in $(seq 1 40); do
   sleep 1
 done
 if [[ "$broker_ready" != true ]]; then
-  echo "rocketmq-entrypoint: broker did not bind 10911 within 40 seconds" >&2
+  echo "rocketmq-entrypoint: broker did not bind 10911 within ${broker_start_timeout} seconds" >&2
   report_logs
   exit 1
 fi

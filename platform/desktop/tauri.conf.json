@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Lumo",
+  "version": "0.1.0",
+  "identifier": "io.lumo.desktop",
+  "build": {
+    "beforeBuildCommand": "node desktop/build-runtime.mjs",
+    "devUrl": "http://127.0.0.1:3080",
+    "frontendDist": "../desktop-assets"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self' http://127.0.0.1:3080; connect-src 'self' http://127.0.0.1:3080 ws://127.0.0.1:3080; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png"],
+    "resources": {
+      "target/lumo-runtime": "runtime",
+      "../desktop-assets/startup-error.html": "startup-error.html",
+      "../desktop-assets/lumo-logo.png": "lumo-logo.png"
+    }
+  }
+}

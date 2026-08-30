@@ -8,6 +8,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -99,6 +100,10 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/projects/{id}/unarchive", s.unarchive)
 	mux.HandleFunc("DELETE /v1/projects/{id}", s.delete)
 	mux.HandleFunc("GET /v1/projects/{id}/usage", s.usage)
+	mux.HandleFunc("GET /v1/tasks/{taskID}/report", s.getTaskReport)
+	mux.HandleFunc("POST /v1/tasks/{taskID}/report", s.createTaskReport)
+	mux.HandleFunc("POST /v1/tasks/{taskID}/report/confirm", s.confirmTaskReport)
+	mux.HandleFunc("POST /v1/reports/{reportID}/confirm", s.confirmReportByID)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -107,6 +112,160 @@ func (s *Server) Register(mux *http.ServeMux) {
 
 func metrics(w http.ResponseWriter, _ *http.Request) {
 	observability.Handler(w, nil)
+}
+
+func (s *Server) reportProject(w http.ResponseWriter, r *http.Request) bool {
+	projectID := r.URL.Query().Get("project_id")
+	if projectID == "" {
+		http.Error(w, `{"error":"project_id is required for report authorization"}`, http.StatusBadRequest)
+		return false
+	}
+	_, _, ok := s.require(w, r, projectID, domain.ActionRead)
+	return ok
+}
+
+func reportLiveHead(w http.ResponseWriter, r *http.Request) (*int64, bool) {
+	raw := r.URL.Query().Get("live_head")
+	if raw == "" {
+		return nil, true
+	}
+	var head int64
+	if _, err := fmt.Sscanf(raw, "%d", &head); err != nil || head < 0 {
+		http.Error(w, `{"error":"live_head must be a non-negative integer"}`, http.StatusBadRequest)
+		return nil, false
+	}
+	return &head, true
+}
+
+func (s *Server) getTaskReport(w http.ResponseWriter, r *http.Request) {
+	if !s.reportProject(w, r) {
+		return
+	}
+	liveHead, ok := reportLiveHead(w, r)
+	if !ok {
+		return
+	}
+	report, err := s.store.GetTaskReport(r.Context(), r.Header.Get("X-Lumo-Realm"), r.PathValue("taskID"), liveHead)
+	if errors.Is(err, store.ErrReportStale) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"stale": true, "reason": "replication-lag", "message": "session log replication is stale; report is withheld"})
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, `{"error":"report not found"}`, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		s.log.Error("读取任务报告失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) createTaskReport(w http.ResponseWriter, r *http.Request) {
+	if !s.reportProject(w, r) {
+		return
+	}
+	liveHead, ok := reportLiveHead(w, r)
+	if !ok {
+		return
+	}
+	c, _ := s.authenticate(w, r)
+	var req struct {
+		RunID    string                 `json:"run_id"`
+		Sections []domain.ReportSection `json:"sections"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	report, err := s.store.CreateTaskReport(r.Context(), domain.TaskReport{
+		ID: newID("report"), Realm: c.realm, TaskID: r.PathValue("taskID"), RunID: req.RunID,
+		Sections: req.Sections, Status: domain.ReportDraft, CreatedBy: c.user,
+	}, liveHead)
+	if errors.Is(err, store.ErrReportStale) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"stale": true, "reason": "replication-lag", "message": "session log replication is stale; report was not persisted"})
+		return
+	}
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidReport) {
+			http.Error(w, `{"error":"invalid report"}`, http.StatusBadRequest)
+			return
+		}
+		s.log.Error("创建任务报告失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, report)
+}
+
+func (s *Server) confirmTaskReport(w http.ResponseWriter, r *http.Request) {
+	if !s.reportProject(w, r) {
+		return
+	}
+	c, _ := s.authenticate(w, r)
+	var req struct {
+		ReportID string `json:"report_id"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.ReportID == "" {
+		http.Error(w, `{"error":"report_id required"}`, http.StatusBadRequest)
+		return
+	}
+	report, err := s.store.ConfirmTaskReport(r.Context(), c.realm, r.PathValue("taskID"), req.ReportID, c.user)
+	if errors.Is(err, store.ErrInvalidReport) {
+		http.Error(w, `{"error":"report requires evidence in every section"}`, http.StatusUnprocessableEntity)
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, `{"error":"report not found"}`, http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, store.ErrConflict) {
+		http.Error(w, `{"error":"report is not a draft"}`, http.StatusConflict)
+		return
+	}
+	if err != nil {
+		s.log.Error("确认任务报告失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) confirmReportByID(w http.ResponseWriter, r *http.Request) {
+	if !s.reportProject(w, r) {
+		return
+	}
+	c, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	reportID := r.PathValue("reportID")
+	if reportID == "" {
+		http.Error(w, `{"error":"report_id required"}`, http.StatusBadRequest)
+		return
+	}
+	report, err := s.store.ConfirmTaskReportByID(r.Context(), c.realm, reportID, c.user)
+	if errors.Is(err, store.ErrInvalidReport) {
+		http.Error(w, `{"error":"report requires evidence in every section"}`, http.StatusUnprocessableEntity)
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, `{"error":"report not found"}`, http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, store.ErrConflict) {
+		http.Error(w, `{"error":"report is not a draft"}`, http.StatusConflict)
+		return
+	}
+	if err != nil {
+		s.log.Error("按 ID 确认任务报告失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {

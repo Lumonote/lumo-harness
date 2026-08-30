@@ -6,6 +6,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -93,6 +94,45 @@ type BudgetSnapshot struct {
 	SoftLimit int64  `json:"softLimit"`
 	Overdraft int64  `json:"overdraft"`
 	State     string `json:"state"`
+}
+
+type ReportEvidence struct {
+	SessionRef string `json:"session_ref"`
+	Seq        int64  `json:"seq"`
+}
+
+type ReportSection struct {
+	Name     string           `json:"name"`
+	Content  json.RawMessage  `json:"content"`
+	Evidence []ReportEvidence `json:"evidence"`
+	Verified bool             `json:"verified"`
+}
+
+type TaskReport struct {
+	ID          string          `json:"id"`
+	Realm       string          `json:"realm"`
+	TaskID      string          `json:"task_id"`
+	RunID       string          `json:"run_id,omitempty"`
+	Sections    []ReportSection `json:"sections"`
+	Status      string          `json:"status"`
+	Stale       bool            `json:"stale,omitempty"`
+	StaleReason string          `json:"stale_reason,omitempty"`
+	CreatedBy   string          `json:"created_by"`
+	ConfirmedBy string          `json:"confirmed_by,omitempty"`
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
+}
+
+const (
+	ReportDraft     = "draft"
+	ReportConfirmed = "confirmed"
+	ReportArchived  = "archived"
+)
+
+var ReportSectionNames = []string{"work_done", "proof_of_work", "verification", "duration", "cost", "risk"}
+
+func ValidReportStatus(value string) bool {
+	return value == ReportDraft || value == ReportConfirmed || value == ReportArchived
 }
 
 // CanProject 角色能力矩阵（3×6 逐格，无默认放行分支）。闭集外报错——未知值是

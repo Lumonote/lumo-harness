@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lumo — 本地运行时未启动</title>
+    <style>
+      :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; color: #eef3f6; background: #0b0e11; }
+      main { width: min(640px, calc(100vw - 56px)); padding: 48px; border: 1px solid #2f4656; border-radius: 28px; background: linear-gradient(145deg, #18212a, #0e1217); box-shadow: 0 28px 90px #0008; }
+      .mark { width: 54px; height: 54px; overflow: hidden; display: grid; place-items: center; border: 1px solid #2f4656; border-radius: 17px; color: transparent; font-size: 0; background: #0b0e11 url('lumo-logo.png') center / cover no-repeat; box-shadow: 0 8px 24px #0006; }
+      .eyebrow { margin: 32px 0 10px; color: #ffad70; font-size: 12px; letter-spacing: .16em; }
+      h1 { margin: 0; font-size: clamp(30px, 5vw, 48px); letter-spacing: -.04em; }
+      p { color: #a4b1bb; line-height: 1.7; }
+      code { display: block; margin: 24px 0; padding: 16px 18px; overflow: auto; border: 1px solid #2f4656; border-radius: 12px; color: #ffcfad; background: #11161c; }
+      small { color: #74818b; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark">L</div>
+      <div class="eyebrow">本地优先运行时</div>
+      <h1>本地运行时没有启动</h1>
+      <p>桌面壳已经启动，但应用内置的 DSH runtime 没有成功启动。正常安装包应直接打开真实工作台，不需要当前项目目录、pnpm 或开发机上的 Node。</p>
+      <code>请重新构建并安装最新的 Lumo.app
+Contents/Resources/runtime/lumo-runtime.sh</code>
+      <small>本地模式使用 SQLite；不会连接 RocketMQ、Nacos、MinIO、Redis 或 PostgreSQL。此页面只用于显示启动错误。</small>
+    </main>
+  </body>
+</html>

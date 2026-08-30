@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "installedAt": "2026-08-30",
+  "skills": [
+    {
+      "name": "gpt-image-2-style-library",
+      "repository": "https://github.com/freestylefly/awesome-gpt-image-2",
+      "path": "agents/skills/gpt-image-2-style-library",
+      "commit": "c7d293963b21c60bf338003915438cc5c39dd3ca",
+      "version": "1.0.4",
+      "license": "MIT"
+    },
+    {
+      "name": "archify",
+      "repository": "https://github.com/tt-a1i/archify",
+      "path": "archify",
+      "commit": "b36d79fdbc3aec3728744341485a7e79f03c0071",
+      "version": "2.16.0",
+      "license": "MIT"
+    },
+    {
+      "name": "ppt-master",
+      "repository": "https://github.com/hugohe3/ppt-master",
+      "path": "skills/ppt-master",
+      "commit": "bf81f3ece547e769095a6c0b82f40d33be3d2cf7",
+      "version": "5.1.0",
+      "license": "MIT"
+    }
+  ],
+  "runtimeComponents": [
+    {
+      "name": "ruflo",
+      "repository": "https://github.com/ruvnet/ruflo",
+      "commit": "d33ef4bf8ab27a8f9ef08352c9c293b53312a861",
+      "package": "ruflo@3.38.20",
+      "license": "MIT"
+    }
+  ]
+}

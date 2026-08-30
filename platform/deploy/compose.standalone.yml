@@ -1,6 +1,7 @@
-# Standalone 形态：与集群完全相同的引擎，单节点拓扑。承诺可在线升级到 Cluster（architecture §13.2）。
+# Server Standalone 形态：服务器单例拓扑；它不是本地桌面单机模式。
+# 本地桌面单机请使用 platform/desktop（SQLite、无 RocketMQ/Nacos/MinIO/Redis/PostgreSQL）。
 # 启动：docker compose -f compose.standalone.yml up -d
-# 说明：2026-08-26 起为可启动拓扑（RocketMQ namesrv+broker 单容器、Nacos 单机、MinIO、
+# 说明：这是可启动的服务器单例拓扑（RocketMQ namesrv+broker、Nacos、MinIO、
 #       PG+pgvector、Redis；平台 Go 服务单实例）。Milvus 除外——其官方单容器 standalone
 #       需伴生 etcd 与该清单共用 MinIO 需自配配置，故留注释块，对应能力 seam 明确不可用
 #       （铁律 21：能力缺失显式拒绝，不得以别的库模拟）。
@@ -89,6 +90,9 @@ services:
     environment:
       JAVA_OPT_EXT: "-Xms512m -Xmx512m -Xmn128m"
       NAMESRV_ADDR: rocketmq-namesrv:9876
+      # Keep the health window aligned with the entrypoint's persisted-store
+      # recovery timeout so a valid cold start is not killed prematurely.
+      ROCKETMQ_BROKER_START_TIMEOUT_SECONDS: "300"
     ports:
       - "10911:10911"   # broker remoting
       - "10909:10909"   # broker fast remoting
@@ -104,7 +108,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
-      start_period: 20s
+      start_period: 300s
 
   nacos:         # 注册/配置中心（docs/README 三·补：Standalone 组成含 Nacos）
     image: nacos/nacos-server:v2.4.0
@@ -140,7 +144,8 @@ services:
   # —— 自研 Go 服务（与 compose.local.yml 同镜像，仅拓扑不同 —— 铁则：一套配置只换清单）——
   collaborator:         # 知识库文档实时协作（§5.4.7）
     build:
-      context: ../control-plane/collaborator
+      context: ../control-plane
+      dockerfile: collaborator/Dockerfile
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -165,9 +170,18 @@ services:
       context: ../..
       dockerfile: platform/data-plane/dsh-node/Dockerfile
     image: "${LUMO_DSH_IMAGE:-lumo/dsh-node:dev}"
+    # Rebuild the long-lived plugin graph after a transient PostgreSQL recovery
+    # terminates its active clients.
+    restart: unless-stopped
     environment:
       LUMO_DSH_PROFILE: web
+      LUMO_DEPLOYMENT_MODE: standalone
+      LUMO_CLUSTER_STATUS: not_ready
       LUMO_WEB_PORT: "3080"
+      # 一方用户认证代理监听容器内 0.0.0.0；宿主侧仍仅回环发布。
+      LUMO_AUTH_HOST: 0.0.0.0
+      LUMO_AUTH_PORT: "3080"
+      LUMO_AUTH_PUBLIC_URL: "http://127.0.0.1:${LUMO_CONSOLE_PORT:-4173}"
       LUMO_NODE_ID: dsh-node-0
       LUMO_CLUSTER_ID: standalone
       LUMO_ROLE: node
@@ -194,17 +208,20 @@ services:
       LUMO_SCHEDULER_API_URL: http://scheduler-0:8083
       LUMO_PROJECTS_URL: http://projects:8086
       LUMO_FLOWS_URL: http://flows:8087
+      LUMO_GOVERNANCE_URL: http://governance:8089
       LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
       PROVISIONER_ARTIFACT_NAME: "${PROVISIONER_ARTIFACT_NAME:-}"
     volumes:
       - provisionerdata:/var/lib/lumo/artifacts:ro
+    # 与 cluster dsh-web 同款：仅回环发布；节点端口不出宿主机（走容器网络）。
     ports:
-      - "${LUMO_CONSOLE_PORT:-4173}:3080"
-      - "${LUMO_DSH_PORT:-18091}:8091"
+      - "127.0.0.1:${LUMO_CONSOLE_PORT:-4173}:3080"
     depends_on:
       scheduler-0:
         condition: service_started
       collaborator:
+        condition: service_started
+      governance:
         condition: service_started
 
   # 可选持续制品收敛器：默认不启动；设置 PROVISIONER_ARTIFACT_NAME/VERSION 后
@@ -262,7 +279,8 @@ services:
 
   connector-gateway:    # 外部连接器网关（§10.1）
     build:
-      context: ../control-plane/connector-gateway
+      context: ../control-plane
+      dockerfile: connector-gateway/Dockerfile
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -281,7 +299,8 @@ services:
 
   scheduler-0:          # 全局任务调度 §6.2/§7.4.1（单节点；子实例多副本场景见 cluster）
     build:
-      context: ../control-plane/scheduler
+      context: ../control-plane
+      dockerfile: scheduler/Dockerfile
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -300,7 +319,8 @@ services:
   # 上游 provider 表按需 seed（指向本集群推理或外部 API）；预算树随 metering 建表。
   llm-gateway:
     build:
-      context: ../control-plane/llm-gateway
+      context: ../control-plane
+      dockerfile: llm-gateway/Dockerfile
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -317,7 +337,8 @@ services:
   # project_members 表做成员判定（同库跨表，无服务间调用）。
   flows:
     build:
-      context: ../control-plane/flows
+      context: ../control-plane
+      dockerfile: flows/Dockerfile
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -334,7 +355,8 @@ services:
   # kind='project' 行；执法（双树同事务扣减）在 TS metering，本服务只治理不执法。
   projects:
     build:
-      context: ../control-plane/projects
+      context: ../control-plane
+      dockerfile: projects/Dockerfile
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -358,6 +380,18 @@ services:
       LUMO_LISTEN: ":8089"
       LUMO_DEPLOYMENT_MODE: "standalone"
       LUMO_CLUSTER_STATUS: "not_ready"
+      LUMO_SCHEDULER_URL: http://scheduler-0:8083
+      LUMO_AUTH_BOOTSTRAP_REALM: "${LUMO_REALM:-dev}"
+      LUMO_AUTH_BOOTSTRAP_USER_ID: "${LUMO_AUTH_BOOTSTRAP_USER_ID:-admin}"
+      LUMO_AUTH_BOOTSTRAP_USERNAME: "${LUMO_AUTH_BOOTSTRAP_USERNAME:-admin}"
+      LUMO_AUTH_BOOTSTRAP_PASSWORD: "${LUMO_AUTH_BOOTSTRAP_PASSWORD:-lumo-admin-123}"
+      LUMO_AUTH_BOOTSTRAP_DISPLAY_NAME: "${LUMO_AUTH_BOOTSTRAP_DISPLAY_NAME:-Lumo Administrator}"
+      LUMO_AUTH_BOOTSTRAP_DEPARTMENT: "${LUMO_AUTH_BOOTSTRAP_DEPARTMENT:-platform}"
+      LUMO_AUTH_BOOTSTRAP_ROLES: "${LUMO_AUTH_BOOTSTRAP_ROLES:-platform_admin,operator}"
+      LUMO_AUTH_MAX_ATTEMPTS: "${LUMO_AUTH_MAX_ATTEMPTS:-5}"
+      LUMO_AUTH_LOCK_SECONDS: "${LUMO_AUTH_LOCK_SECONDS:-300}"
+      LUMO_AUTH_SESSION_TTL_SECONDS: "${LUMO_AUTH_SESSION_TTL_SECONDS:-86400}"
+      LUMO_AUTH_CAPTCHA_TTL_SECONDS: "${LUMO_AUTH_CAPTCHA_TTL_SECONDS:-120}"
     ports:
       - "18089:8089"
     depends_on:
@@ -370,7 +404,8 @@ services:
   # 台账单一写入者，TS drain 轮询不并存（判据 7）。
   usage-ledger:
     build:
-      context: ../control-plane/usage-ledger
+      context: ../control-plane
+      dockerfile: usage-ledger/Dockerfile
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"

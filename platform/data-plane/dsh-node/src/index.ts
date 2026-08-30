@@ -15,17 +15,23 @@
  */
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
-import { writeFileSync, rmSync } from 'node:fs'
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { spawn } from 'node:child_process'
-import { profileLifetimeOverlay, profileStorageRows, workflowEngineOverlay } from './workflow.ts'
+import { localStorageRows, profileLifetimeOverlay, profileStorageRows, workflowEngineOverlay } from './workflow.ts'
 import { localSkillSnapshotAssembly, skillSnapshotSource, waitForSkillSnapshotFile } from './skills.ts'
 import { startNacosRegistration } from './nacos.ts'
 import { ensureProfilePlugins, PLATFORM_PLUGIN_MODULES } from './plugins.ts'
+import { assertLocalStoragePath, resolveDeploymentProfile, withClusterStatus } from './deployment.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const platformRoot = resolve(here, '..', '..', '..')
-const dshRoot = resolve(platformRoot, '..', 'deepseek-harness')
+const packagedRuntimeRoot = process.env['LUMO_RUNTIME_ROOT']
+  ? resolve(process.env['LUMO_RUNTIME_ROOT']!)
+  : undefined
+const platformRoot = packagedRuntimeRoot ?? resolve(here, '..', '..', '..')
+const dshRoot = process.env['LUMO_DSH_ROOT']
+  ? resolve(process.env['LUMO_DSH_ROOT']!)
+  : resolve(platformRoot, '..', 'deepseek-harness')
 
 const {
   knowledge: knowledgeEntry,
@@ -46,8 +52,19 @@ const {
   provenance: provenanceEntry,
   storage: storageEntry,
   platformUi: platformUiEntry,
+  userAuth: userAuthEntry,
+  openDesign: openDesignEntry,
+  archify: archifyEntry,
+  creativeSkills: creativeSkillsEntry,
+  rufloOrchestration: rufloOrchestrationEntry,
 } = PLATFORM_PLUGIN_MODULES
-const patchPath = resolve(here, '..', 'lumo.patch.yml')
+const patchPath = process.env['LUMO_PATCH_PATH']
+  ? resolve(process.env['LUMO_PATCH_PATH']!)
+  : resolve(here, '..', 'lumo.patch.yml')
+const deployment = withClusterStatus(resolveDeploymentProfile(), process.env['LUMO_CLUSTER_STATUS'])
+const localMode = deployment.mode === 'local'
+const sqlitePath = assertLocalStoragePath(process.env['LUMO_SQLITE_PATH'] ?? resolve(platformRoot, '.lumo', 'lumo.sqlite'))
+if (localMode) mkdirSync(dirname(sqlitePath), { recursive: true })
 
 // 节点标识：必须能区分同机重启，否则重启后的进程会被租约当成「本人续租」，
 // 白捡走上一代进程的写权（§A1 fencing 的前提是持有者身份唯一）。
@@ -78,9 +95,9 @@ const callbackPort = integerEnv('LUMO_SUBAGENT_CALLBACK_PORT', 8092)
 const callbackOrigins = (process.env['LUMO_SUBAGENT_CALLBACK_ALLOWED_ORIGINS'] ?? `http://127.0.0.1:${callbackPort}`)
   .split(',').map((value) => value.trim()).filter(Boolean)
 
-// All platform plugin wiring is deployment configuration. The defaults keep
-// the existing Local-lite developer experience; Standalone/Cluster manifests
-// should provide these values explicitly through LUMO_* environment variables.
+// All platform plugin wiring is deployment configuration. `local` is handled
+// by the SQLite-only branch below; server shapes provide these values through
+// LUMO_* environment variables. No URL is used to infer the deployment mode.
 const platformRealm = process.env['LUMO_REALM'] ?? subagentRealm
 const pgDSN = process.env['LUMO_PG_DSN'] ?? 'postgres://lumo:lumo@localhost:55432/lumo'
 const redisURL = process.env['LUMO_REDIS_URL'] ?? 'redis://localhost:6379'
@@ -88,6 +105,7 @@ const embeddingBaseURL = process.env['LUMO_EMBEDDING_BASE_URL'] ?? 'http://local
 const embeddingModel = process.env['LUMO_EMBEDDING_MODEL'] ?? 'BAAI/bge-m3'
 const embeddingDimension = integerEnv('LUMO_EMBEDDING_DIMENSION', 1024)
 const connectorGatewayURL = process.env['LUMO_CONNECTOR_GATEWAY_URL'] ?? 'http://localhost:58082'
+const governanceURL = process.env['LUMO_GOVERNANCE_URL'] ?? 'http://localhost:58089'
 const userID = process.env['LUMO_USER_ID'] ?? 'dev-user'
 const deptID = process.env['LUMO_DEPT_ID'] ?? 'dev-dept'
 const userRole = process.env['LUMO_USER_ROLE'] ?? 'operator'
@@ -104,11 +122,36 @@ const minioBucket = process.env['LUMO_MINIO_BUCKET'] ?? 'lumo-objects'
 const dshProfile = process.env['LUMO_DSH_PROFILE'] ?? 'headless'
 const isWebProfile = dshProfile === 'web'
 const webPort = integerEnv('LUMO_WEB_PORT', 3080)
+const authPort = integerEnv('LUMO_AUTH_PORT', webPort)
+const controlPlaneToken = process.env['LUMO_CONTROL_PLANE_TOKEN'] ?? ''
+const identityAssertionSecret = process.env['LUMO_IDENTITY_ASSERTION_SECRET'] || controlPlaneToken
 // `pnpm --filter ... start -- <args>` keeps the separator in argv. The DSH
 // launcher must see only the app arguments that follow it.
 const extraArgs = process.argv.slice(2).filter((arg) => arg !== '--')
 
-ensureProfilePlugins({ profile: dshProfile, platformRoot, dshRoot })
+ensureProfilePlugins({ profile: dshProfile, platformRoot, dshRoot, deploymentMode: deployment.mode })
+
+// These rows mirror the upstream plugins' own cordis.patch.yml files. The
+// package files are linked by ensureProfilePlugins (or staged into the app
+// bundle for a packaged desktop build), so the profile mounts real plugin
+// entrypoints without asking the app to download anything at launch.
+const basePluginPatchRows = `${isWebProfile ? `    - id: dsh-market
+      name: dshmarket
+    - id: modlens
+      name: '@liustack/modlens'
+    - id: browser
+      name: '@anweat/dsh-browser'
+      config:
+        channel: chromium
+        headless: true
+        opencliEnabled: true
+        autoInstall: false
+        verbose: false
+    - id: dsh-context
+      name: dsh-context
+    - id: cost-meter
+      name: dsh-cost-meter
+` : ''}`
 
 function integerEnv(name: string, fallback: number): number {
   const value = Number(process.env[name] ?? fallback)
@@ -148,41 +191,66 @@ type PluginSummary = {
   id: string
   label: string
   description: string
-  surface: 'overview' | 'projects' | 'flows' | 'connectors' | 'plugins'
+  surface: 'knowledge' | 'skills' | 'connectors' | 'operations' | 'account' | 'market'
   kind: 'runtime' | 'governance'
 }
 
-// The launcher owns this catalogue: it mirrors only the patch rows that this
-// process will assemble. It is deliberately not a service-health assertion.
-const mountedPlugins: PluginSummary[] = [
-  { id: 'knowledge', label: '知识库', description: '检索与来源引用', surface: 'plugins', kind: 'runtime' },
-  { id: 'project', label: '项目空间', description: '成员、空间与制品边界', surface: 'projects', kind: 'governance' },
-  { id: 'control', label: '权限控制', description: '能力与治理闸门', surface: 'projects', kind: 'governance' },
+// The workbench owns this catalogue: every row routes to the surface that
+// actually consumes its service or registry, rather than a generic plugin list.
+// Local Desktop is deliberately a smaller product: it exposes the local
+// workbench, design/diagram skills and any signed local skill snapshot, while
+// server-only control-plane capabilities stay out of the catalogue entirely.
+const basePluginRows: PluginSummary[] = [
+  { id: 'dshmarket', label: '插件市场', description: '浏览、搜索并管理 DSH 基础插件', surface: 'market', kind: 'runtime' },
+  { id: 'modlens', label: '视觉理解', description: '图片读取、OCR 与视觉证据', surface: 'market', kind: 'runtime' },
+  { id: 'dsh-browser', label: '浏览器自动化', description: '基于 Playwright 的浏览、点击与页面操作', surface: 'market', kind: 'runtime' },
+  { id: 'dsh-context', label: '上下文洞察', description: '查看上下文组成、趋势与注入事件', surface: 'market', kind: 'runtime' },
+  { id: 'dsh-cost-meter', label: '费用统计', description: '会话、预算、模型价格与历史费用', surface: 'market', kind: 'runtime' },
+  { id: 'gpt-image-2-style-library', label: '图像风格库', description: 'GPT Image 2 模板、风格标签与工业级提示词', surface: 'skills', kind: 'runtime' },
+  { id: 'ppt-master', label: '演示文稿生成', description: '生成、编辑和增强原生可编辑 PPTX', surface: 'skills', kind: 'runtime' },
+  { id: 'ruflo-orchestration', label: '多智能体编排', description: '在任务运行内组织 Ruflo 智能体拓扑与分工', surface: 'operations', kind: 'runtime' },
+]
+
+const mountedPlugins: PluginSummary[] = localMode ? [
+  ...basePluginRows,
+  { id: 'subagent-local', label: '本机多智能体', description: '官方进程内生成与分叉，多智能体并行执行', surface: 'operations', kind: 'runtime' },
+  { id: 'open-design', label: '开放设计', description: '产物优先的原型与视觉工作流', surface: 'skills', kind: 'runtime' },
+  { id: 'archify', label: '架构与调度图', description: '可验证的系统图、流程图与多智能体调度视图', surface: 'skills', kind: 'runtime' },
+] : [
+  ...basePluginRows,
+  { id: 'knowledge', label: '知识库', description: '检索与来源引用', surface: 'knowledge', kind: 'runtime' },
+  { id: 'project', label: '项目空间', description: '成员、空间与制品边界', surface: 'operations', kind: 'governance' },
+  { id: 'control', label: '权限控制', description: '能力与治理闸门', surface: 'operations', kind: 'governance' },
   { id: 'connector', label: '连接器治理', description: '凭证、策略和受控调用', surface: 'connectors', kind: 'governance' },
   { id: 'web-gateway', label: 'Web 出站', description: 'SSRF 与域名策略拦截', surface: 'connectors', kind: 'governance' },
-  { id: 'metering', label: '用量计量', description: 'reserve / commit / ledger', surface: 'overview', kind: 'governance' },
-  { id: 'session-log', label: '会话审计', description: '脱敏轨迹与可回放记录', surface: 'plugins', kind: 'runtime' },
-  { id: 'mailbox', label: '协作信箱', description: '跨智能体消息与领取确认', surface: 'overview', kind: 'runtime' },
-  { id: 'job-control', label: '作业控制', description: '任务状态与结果回写', surface: 'flows', kind: 'runtime' },
-  { id: 'attachments', label: '附件', description: '安全附件引用', surface: 'plugins', kind: 'runtime' },
-  { id: 'object-store', label: '对象存储', description: '大对象读写边界', surface: 'plugins', kind: 'runtime' },
-  { id: 'provenance', label: '来源追踪', description: '上下文来源链', surface: 'plugins', kind: 'runtime' },
-  { id: 'recovery', label: '恢复检查点', description: '失败恢复与幂等', surface: 'flows', kind: 'runtime' },
-  { id: 'storage', label: '存储适配', description: 'PostgreSQL 存储后端', surface: 'plugins', kind: 'runtime' },
+  { id: 'metering', label: '用量计量', description: '额度预留、提交与台账', surface: 'operations', kind: 'governance' },
+  { id: 'session-log', label: '会话审计', description: '脱敏轨迹与可回放记录', surface: 'operations', kind: 'runtime' },
+  { id: 'mailbox', label: '协作信箱', description: '跨智能体消息与领取确认', surface: 'operations', kind: 'runtime' },
+  { id: 'job-control', label: '作业控制', description: '任务状态与结果回写', surface: 'operations', kind: 'runtime' },
+  { id: 'attachments', label: '附件', description: '安全附件引用', surface: 'operations', kind: 'runtime' },
+  { id: 'object-store', label: '对象存储', description: '大对象读写边界', surface: 'operations', kind: 'runtime' },
+  { id: 'open-design', label: '开放设计', description: '产物优先的原型与视觉工作流', surface: 'skills', kind: 'runtime' },
+  { id: 'archify', label: '架构与调度图', description: '可验证的系统图、流程图与多智能体调度视图', surface: 'skills', kind: 'runtime' },
+  { id: 'provenance', label: '来源追踪', description: '上下文来源链', surface: 'operations', kind: 'runtime' },
+  { id: 'recovery', label: '恢复检查点', description: '失败恢复与幂等', surface: 'operations', kind: 'runtime' },
+  { id: 'storage', label: '存储适配', description: 'PostgreSQL 存储后端', surface: 'operations', kind: 'runtime' },
   role === 'node'
-    ? { id: 'subagent-host', label: '子智能体承载', description: '受控执行与回调宿主', surface: 'overview', kind: 'runtime' }
-    : { id: 'subagent-remote', label: '子智能体路由', description: 'Scheduler 放置与远程回调', surface: 'overview', kind: 'runtime' },
+    ? { id: 'subagent-host', label: '子智能体承载', description: '受控执行与回调宿主', surface: 'operations', kind: 'runtime' }
+    : { id: 'subagent-remote', label: '子智能体路由', description: 'Scheduler 放置与远程回调', surface: 'operations', kind: 'runtime' },
 ]
 
 if (skillLocalRows !== '') {
-  mountedPlugins.push({ id: 'skill-local', label: '技能管理', description: '受签名快照约束的本地技能', surface: 'plugins', kind: 'runtime' })
+  mountedPlugins.push({ id: 'skill-local', label: '技能管理', description: '受签名快照约束的本地技能', surface: 'skills', kind: 'runtime' })
 }
 if (isWebProfile) {
-  mountedPlugins.push({ id: 'platform-ui', label: 'Lumo 运营面', description: '原生 DSH 内的控制信号室', surface: 'overview', kind: 'runtime' })
+  mountedPlugins.push(
+    { id: 'platform-ui', label: 'Lumo 运营面', description: '原生 DSH 内的能力工作台', surface: 'operations', kind: 'runtime' },
+  )
+  if (!localMode) mountedPlugins.push({ id: 'auth', label: '用户中心', description: '账号、安全与会话退出', surface: 'account', kind: 'governance' })
 }
 
 // 行 5 的下发段:角色不同,只挂对应一侧(承载节点不需要 remote,父节点不需要 host)。
-const roleRows = role === 'node'
+const roleRows = localMode ? '' : role === 'node'
   ? `    - id: lumo-subagent-host
       name: ${JSON.stringify(subagentHostEntry)}
       inject: [agents, jobControl]
@@ -216,15 +284,34 @@ const roleRows = role === 'node'
 // 平台插件 patch（官方 patch 语法：insert 数组 = 追加条目）
 writeFileSync(
   patchPath,
-  `# Platform object storage replaces the base local attachment/spill stores.
+  `${localMode ? `# Local desktop shape: SQLite only. No PostgreSQL, Redis, MinIO, RocketMQ or Nacos.
+# The Rust desktop shell supplies LUMO_SQLITE_PATH in the OS application-data directory.
+` : `# Server shape: platform object storage replaces the base local attachment/spill stores.
 # The object-store plugin fails loudly on unavailable MinIO instead of quietly
 # writing node-local data that another worker cannot resume.
-- id: attachment-local
+`}
+${isWebProfile ? `${localMode ? `# Local desktop serves the native DSH Web shell directly on loopback.
+` : `# The first-party auth listener is the only public face. The DSH carrier gets
+# an OS-assigned loopback port so unauthenticated traffic cannot bypass it.
+`}
+- id: webserver
+  config:
+    host: 127.0.0.1
+    port: ${localMode ? webPort : 0}
+- id: web-runtime
+  config:
+    openBrowser: false
+    printUrl: false
+    surfaceContext: false
+    trustedHosts: []
+` : ''}${localMode ? '' : `- id: attachment-local
   disabled: true
 - id: spill-local
   disabled: true
+`}
 - insert:
-    - id: lumo-object-store
+${basePluginPatchRows}
+${localMode ? localStorageRows(dshProfile, sqlitePath) : `    - id: lumo-object-store
       name: ${JSON.stringify(objectStoreEntry)}
       inject: []
       config:
@@ -354,9 +441,37 @@ ${profileStorageRows(dshProfile)}
         agentId: ${JSON.stringify(agentID)}
         componentId: ${JSON.stringify(componentID)}
         feature: web.fetch
+`}
+    - id: lumo-open-design
+      name: ${JSON.stringify(openDesignEntry)}
+      inject: [skills]
+    - id: lumo-archify
+      name: ${JSON.stringify(archifyEntry)}
+      inject: [skills]
+    - id: lumo-creative-skills
+      name: ${JSON.stringify(creativeSkillsEntry)}
+      inject: [skills]
+    - id: lumo-ruflo-orchestration
+      name: ${JSON.stringify(rufloOrchestrationEntry)}
+      inject: [skills]
 ${roleRows}
 ${skillLocalRows}
-${isWebProfile ? `    - id: lumo-platform-ui
+${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
+      name: ${JSON.stringify(userAuthEntry)}
+      inject: [webServer]
+      config:
+        host: ${JSON.stringify(process.env['LUMO_AUTH_HOST'] ?? '0.0.0.0')}
+        port: ${authPort}
+        publicBaseUrl: ${JSON.stringify(process.env['LUMO_AUTH_PUBLIC_URL'] ?? `http://127.0.0.1:${authPort}`)}
+        secureCookie: ${process.env['LUMO_AUTH_SECURE_COOKIE'] === 'true'}
+        governanceUrl: ${JSON.stringify(governanceURL)}
+        controlPlaneToken: ${JSON.stringify(controlPlaneToken)}
+        realm: ${JSON.stringify(platformRealm)}
+        projectId: ${JSON.stringify(projectID)}
+        identityAssertionSecret: ${JSON.stringify(identityAssertionSecret)}
+        timeoutMs: ${integerEnv('LUMO_AUTH_TIMEOUT_MS', 5000)}
+`}
+    - id: lumo-platform-ui
       name: ${JSON.stringify(platformUiEntry)}
       inject: [webServer]
       config:
@@ -364,14 +479,19 @@ ${isWebProfile ? `    - id: lumo-platform-ui
         projectsUrl: ${JSON.stringify(process.env['LUMO_PROJECTS_URL'] ?? 'http://localhost:8086')}
         flowsUrl: ${JSON.stringify(process.env['LUMO_FLOWS_URL'] ?? 'http://localhost:8087')}
         connectorUrl: ${JSON.stringify(process.env['LUMO_CONNECTOR_GATEWAY_URL'] ?? 'http://localhost:8082')}
+        governanceUrl: ${JSON.stringify(governanceURL)}
         realm: ${JSON.stringify(platformRealm)}
         userId: ${JSON.stringify(userID)}
         roles: ${JSON.stringify([userRole])}
         projectId: ${JSON.stringify(projectID)}
         deptId: ${JSON.stringify(deptID)}
-        controlPlaneToken: ${JSON.stringify(process.env['LUMO_CONTROL_PLANE_TOKEN'] ?? '')}
-        identityAssertionSecret: ${JSON.stringify(process.env['LUMO_IDENTITY_ASSERTION_SECRET'] ?? '')}
+        controlPlaneToken: ${JSON.stringify(controlPlaneToken)}
+        identityAssertionSecret: ${JSON.stringify(identityAssertionSecret)}
         timeoutMs: ${integerEnv('LUMO_UI_API_TIMEOUT_MS', 5000)}
+        deploymentMode: ${JSON.stringify(deployment.mode)}
+        storageBackend: ${JSON.stringify(deployment.storage)}
+        middleware: ${JSON.stringify(deployment.middleware)}
+        clusterStatus: ${JSON.stringify(deployment.clusterReady ? 'ready' : 'not_ready')}
         plugins: ${JSON.stringify(mountedPlugins)}
 ` : ''}
 ${workflowEngineOverlay(role)}
@@ -380,14 +500,19 @@ ${profileLifetimeOverlay(dshProfile, extraArgs.length > 0)}
 `,
 )
 
-const args = [
-  'run', 'dsh', '--profile', dshProfile, '--patch', patchPath,
-  ...(isWebProfile ? ['--no-open', '--port', String(webPort)] : []),
+const dshArgs = [
+  '--profile', dshProfile, '--patch', patchPath,
+  // The public auth proxy owns LUMO_WEB_PORT. The DSH WebServer stays on the
+  // loopback-only, OS-assigned port from the patch above; passing --port here
+  // would override that row and race the proxy for the public port.
+  ...(isWebProfile ? ['--no-open'] : []),
   ...extraArgs,
 ]
 
-// pnpm 经 corepack 调用（Node ≥22 自带 corepack；避免依赖外壳 PATH）
-const nacosRegistration = role === 'node' && process.env['LUMO_NACOS_ADDR']
+// Packaged desktop builds carry their own Node and official dsh CLI. Repository
+// previews keep the pnpm path so HMR and local workspace development remain
+// unchanged.
+const nacosRegistration = !localMode && role === 'node' && process.env['LUMO_NACOS_ADDR']
   ? startNacosRegistration({
     baseUrl: process.env['LUMO_NACOS_ADDR'],
     serviceName: process.env['LUMO_NACOS_SERVICE'] ?? 'lumo-dsh-node',
@@ -403,17 +528,24 @@ const nacosRegistration = role === 'node' && process.env['LUMO_NACOS_ADDR']
   })
   : { close: async (): Promise<void> => {} }
 
-const child = spawn('corepack', ['pnpm', ...args], {
-  cwd: dshRoot,
-  stdio: 'inherit',
-  env: {
-    ...process.env,
+const packagedDshCli = process.env['LUMO_DSH_CLI']
+const childCommand = packagedDshCli ? process.execPath : 'corepack'
+const childArgs = packagedDshCli ? [packagedDshCli, ...dshArgs] : ['pnpm', 'run', 'dsh', ...dshArgs]
+const child = spawn(childCommand, childArgs, {
+    cwd: dshRoot,
+    stdio: 'inherit',
+    env: {
+      ...process.env,
     // The platform package is deliberately outside the ignored DSH source
     // tree. NODE_PATH lets the untouched official profile resolve its package
     // name while the package's own dependencies remain workspace links.
-    NODE_PATH: [resolve(platformRoot, 'data-plane/dsh-node/node_modules'), process.env['NODE_PATH']].filter(Boolean).join(':'),
-  },
-})
+      NODE_PATH: [
+        process.env['LUMO_RUNTIME_NODE_MODULES'],
+        resolve(platformRoot, 'data-plane/dsh-node/node_modules'),
+        process.env['NODE_PATH'],
+      ].filter(Boolean).join(':'),
+    },
+  })
 
 let stopping = false
 const forwardSignal = (signal: NodeJS.Signals): void => {

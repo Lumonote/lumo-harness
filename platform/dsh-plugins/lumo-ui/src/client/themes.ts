@@ -1,0 +1,177 @@
+import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ThemeDefinition, ThemeTokens } from '@deepseek-ai/dsh-client-ui-theme/client'
+
+export const LUMO_THEME_STORAGE_KEY = 'lumo-theme'
+export const LUMO_THEME_EVENT = 'lumo:set-theme'
+
+export const LUMO_THEME_OPTIONS = [
+  { id: 'obsidian-signal', label: '曜石信号' },
+  { id: 'ember-foundry', label: '余烬工坊' },
+  { id: 'orbital-glass', label: '轨道玻璃' },
+  { id: 'infrared-grid', label: '红外网格' },
+] as const
+
+export type LumoThemeId = typeof LUMO_THEME_OPTIONS[number]['id']
+
+interface DarkThemePalette {
+  base: string
+  layer1: string
+  layer2: string
+  layer3: string
+  overlay: string
+  sidebar: string
+  border: string
+  borderStrong: string
+  text: string
+  muted: string
+  faint: string
+  accent: string
+  accentHover: string
+  accentSoft: string
+  accentMuted: string
+  error: string
+  success: string
+  warn: string
+}
+
+function darkTheme(id: LumoThemeId, palette: DarkThemePalette): ThemeDefinition {
+  const tokens: ThemeTokens = {
+    '--dsw-alias-bg-base': palette.base,
+    '--dsw-alias-bg-layer-1': palette.layer1,
+    '--dsw-alias-bg-layer-2': palette.layer2,
+    '--dsw-alias-bg-layer-3': palette.layer3,
+    '--dsw-alias-bg-overlay': palette.overlay,
+    '--dsw-alias-bg-module-platform': palette.layer2,
+    '--dsw-alias-bg-multi-select': palette.layer2,
+    '--dsw-alias-bg-skeleton': palette.accentMuted,
+    '--dsw-alias-border-l1': palette.border,
+    '--dsw-alias-border-l2-darkmode-thin': palette.border,
+    '--dsw-alias-border-l2': palette.borderStrong,
+    '--dsw-alias-border-l3': palette.borderStrong,
+    '--dsw-alias-brand-primary-invert': palette.base,
+    '--dsw-alias-brand-primary-new-colorprimary-new-color': palette.accent,
+    '--dsw-alias-brand-primary': palette.accent,
+    '--dsw-alias-brand-text': palette.accent,
+    '--dsw-alias-button-contrast-fill': palette.layer3,
+    '--dsw-alias-button-elevated-fill': palette.layer2,
+    '--dsw-alias-button-floating-fill': palette.layer2,
+    '--dsw-alias-button-floating-hover': palette.layer3,
+    '--dsw-alias-button-info-fill': palette.accent,
+    '--dsw-alias-button-info-hover': palette.accentHover,
+    '--dsw-alias-button-primary-dimmed': palette.accentSoft,
+    '--dsw-alias-button-primary-fill': palette.accent,
+    '--dsw-alias-button-primary-hover': palette.accentHover,
+    '--dsw-alias-button-tool-bar-fill': palette.layer2,
+    '--dsw-alias-button-tool-bar-hover': palette.layer3,
+    '--dsw-alias-interactive-bg-active': palette.accentMuted,
+    '--dsw-alias-interactive-bg-hover-accent': palette.accentMuted,
+    '--dsw-alias-interactive-bg-hover-solid': palette.layer3,
+    '--dsw-alias-interactive-bg-hover': palette.accentMuted,
+    '--dsw-alias-label-primary-bluish': palette.text,
+    '--dsw-alias-label-primary-dimmed': palette.faint,
+    '--dsw-alias-label-primary-foreground': palette.base,
+    '--dsw-alias-label-primary-inverted': palette.base,
+    '--dsw-alias-label-primary': palette.text,
+    '--dsw-alias-label-secondary': palette.muted,
+    '--dsw-alias-label-tertiary': palette.faint,
+    '--dsw-alias-markdown-citation': palette.layer2,
+    '--dsw-alias-markdown-code-block-banner': palette.layer2,
+    '--dsw-alias-markdown-code-block': palette.layer1,
+    '--dsw-alias-markdown-code-segment-selected': palette.layer2,
+    '--dsw-alias-markdown-code-segment-unselected': palette.base,
+    '--dsw-alias-markdown-inline-code': palette.layer2,
+    '--dsw-alias-markdown-placeholder': palette.layer2,
+    '--dsw-alias-markdown-tag': palette.layer2,
+    '--dsw-alias-scrollbar-bg-l1': palette.layer2,
+    '--dsw-alias-scrollbar-bg-l2': palette.layer3,
+    '--dsw-alias-scrollbar-hover-l1': palette.layer3,
+    '--dsw-alias-scrollbar-hover-l2': palette.overlay,
+    '--dsw-alias-state-business-primary': palette.accent,
+    '--dsw-alias-state-business-tertiary': palette.accentSoft,
+    '--dsw-alias-state-error-primary': palette.error,
+    '--dsw-alias-state-error-secondary': palette.error,
+    '--dsw-alias-state-success-primary': palette.success,
+    '--dsw-alias-state-success-secondary': palette.success,
+    '--dsw-alias-state-success-tertiary': palette.accentSoft,
+    '--dsw-alias-state-warn-label': palette.warn,
+    '--dsw-alias-state-warn-primary': palette.warn,
+    '--dsw-alias-state-warn-secondary': palette.warn,
+    '--dsw-alias-state-warn-tertiary': palette.accentSoft,
+    '--dsw-alias-toast-bg': palette.layer3,
+    '--dsw-alias-tooltip-bg': palette.layer3,
+    '--dsw-specific-bubble-highlight': palette.accentSoft,
+    '--dsw-specific-bubble': palette.layer2,
+    '--dsw-specific-input-major': palette.layer2,
+    '--dsw-specific-login-input': palette.layer1,
+    '--dsw-specific-menu': palette.layer3,
+    '--dsw-specific-selector': palette.layer2,
+    '--dsw-specific-sidebar-fill': palette.sidebar,
+    '--dsw-specific-sidebar-nav-item-active-accent': palette.accentSoft,
+    '--dsw-specific-sidebar-nav-item-active': palette.layer2,
+    '--dsw-specific-sidebar-nav-item-hover': palette.layer3,
+    '--dsw-specific-tip': palette.layer2,
+  }
+  return Object.freeze({ id, colorScheme: 'dark', tokens: Object.freeze(tokens) })
+}
+
+const themes: readonly ThemeDefinition[] = Object.freeze([
+  darkTheme('obsidian-signal', {
+    base: '#0b0e11', layer1: '#11161c', layer2: '#18212a', layer3: '#202b35', overlay: '#26343f', sidebar: '#0e1217',
+    border: 'rgba(185, 206, 220, 0.10)', borderStrong: 'rgba(185, 206, 220, 0.18)', text: '#eef3f6', muted: '#a4b1bb', faint: '#74818b',
+    accent: '#ff914d', accentHover: '#ffad70', accentSoft: '#4d2d21', accentMuted: 'rgba(255, 145, 77, 0.14)', error: '#ff6b72', success: '#63d7d0', warn: '#f4bd6b',
+  }),
+  darkTheme('ember-foundry', {
+    base: '#100d0b', layer1: '#181210', layer2: '#211816', layer3: '#2a1e19', overlay: '#35261f', sidebar: '#140f0d',
+    border: 'rgba(255, 198, 150, 0.11)', borderStrong: 'rgba(255, 198, 150, 0.20)', text: '#f8eee7', muted: '#c3aaa0', faint: '#89736a',
+    accent: '#f26b3f', accentHover: '#ff8a61', accentSoft: '#4e271d', accentMuted: 'rgba(242, 107, 63, 0.15)', error: '#ff7474', success: '#7ad8c6', warn: '#f5bd70',
+  }),
+  darkTheme('orbital-glass', {
+    base: '#09111b', layer1: '#0f1b2a', layer2: '#14263a', layer3: '#1b3248', overlay: '#24445f', sidebar: '#0b1521',
+    border: 'rgba(150, 200, 255, 0.12)', borderStrong: 'rgba(150, 200, 255, 0.22)', text: '#e8f0fa', muted: '#9fb5c9', faint: '#6f879d',
+    accent: '#69b7ff', accentHover: '#91ccff', accentSoft: '#1c4466', accentMuted: 'rgba(105, 183, 255, 0.15)', error: '#ff7c86', success: '#71d7d0', warn: '#f3c46f',
+  }),
+  darkTheme('infrared-grid', {
+    base: '#0e0c12', layer1: '#16131b', layer2: '#201923', layer3: '#2b202d', overlay: '#392738', sidebar: '#120e16',
+    border: 'rgba(255, 150, 176, 0.12)', borderStrong: 'rgba(255, 150, 176, 0.22)', text: '#f7edf2', muted: '#c1a9b5', faint: '#8d7180',
+    accent: '#ff6685', accentHover: '#ff8ca2', accentSoft: '#542336', accentMuted: 'rgba(255, 102, 133, 0.15)', error: '#ff7777', success: '#78d2e4', warn: '#f2bf6d',
+  }),
+])
+
+export function isLumoTheme(value: unknown): value is LumoThemeId {
+  return typeof value === 'string' && LUMO_THEME_OPTIONS.some(theme => theme.id === value)
+}
+
+export function readLumoTheme(): LumoThemeId {
+  if (typeof localStorage === 'undefined') return 'obsidian-signal'
+  const stored = localStorage.getItem(LUMO_THEME_STORAGE_KEY)
+  return isLumoTheme(stored) ? stored : 'obsidian-signal'
+}
+
+function persistLumoTheme(id: LumoThemeId): void {
+  localStorage.setItem(LUMO_THEME_STORAGE_KEY, id)
+  document.cookie = `${LUMO_THEME_STORAGE_KEY}=${encodeURIComponent(id)}; Path=/; Max-Age=31536000; SameSite=Lax`
+}
+
+export function requestLumoTheme(id: LumoThemeId): void {
+  window.dispatchEvent(new CustomEvent<LumoThemeId>(LUMO_THEME_EVENT, { detail: id }))
+}
+
+export function installLumoThemes(ctx: ClientContext): void {
+  ctx.effect(() => {
+    const disposers = themes.map(theme => ctx.theme.register(theme))
+    const activate = (id: LumoThemeId): void => {
+      persistLumoTheme(id)
+      ctx.theme.setTheme(id)
+    }
+    const onTheme = (event: Event): void => {
+      const id = (event as CustomEvent<unknown>).detail
+      if (isLumoTheme(id)) activate(id)
+    }
+    window.addEventListener(LUMO_THEME_EVENT, onTheme)
+    activate(readLumoTheme())
+    return () => {
+      window.removeEventListener(LUMO_THEME_EVENT, onTheme)
+      for (const dispose of disposers.reverse()) dispose()
+    }
+  }, 'lumo-ui: product theme registry')
+}

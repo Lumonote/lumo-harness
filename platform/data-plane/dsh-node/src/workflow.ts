@@ -38,3 +38,24 @@ export function profileStorageRows(profile: string): string {
       name: '@deepseek-ai/dsh-storage'
 `
 }
+
+/** Assemble the local desktop storage hub with the official SQLite backend. */
+export function localStorageRows(profile: string, sqlitePath: string): string {
+  if (profile === 'web') {
+    return `    - id: lumo-storage-sqlite
+      name: '@deepseek-ai/dsh-storage-sqlite'
+      inject: [storage]
+      config:
+        path: ${JSON.stringify(sqlitePath)}
+`
+  }
+  if (profile !== 'headless') return ''
+  return `    - id: storage
+      name: '@deepseek-ai/dsh-storage'
+    - id: lumo-storage-sqlite
+      name: '@deepseek-ai/dsh-storage-sqlite'
+      inject: [storage]
+      config:
+        path: ${JSON.stringify(sqlitePath)}
+`
+}

@@ -13,6 +13,7 @@ dsh_repo="${DSH_REPOSITORY:-https://github.com/deepseek-ai/deepseek-harness.git}
 
 usage() {
   echo "usage: $0 {cluster|standalone} [docker compose up options]" >&2
+  echo "local is the Rust desktop shape; run: pnpm --dir platform desktop:dev" >&2
   echo "example: $0 cluster -d --build" >&2
   exit 64
 }
@@ -65,6 +66,11 @@ shape="$1"
 shift
 case "$shape" in
   cluster|standalone) ;;
+  local)
+    echo "local 不使用 Docker Compose、RocketMQ、Nacos、MinIO、Redis 或 PostgreSQL。" >&2
+    echo "请使用 pnpm --dir platform desktop:dev（SQLite 由 Rust 桌面壳管理）。" >&2
+    exit 64
+    ;;
   *) usage ;;
 esac
 

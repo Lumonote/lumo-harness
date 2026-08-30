@@ -4,4 +4,15 @@ packages:
   - console
 allowBuilds:
   # tsx 依赖 esbuild 原生二进制（bootstrap 的 --import tsx 需要）
+  '@claude-flow/cli': true
+  '@google/genai': true
+  agentdb: true
+  agentic-flow: true
+  argon2: true
+  better-sqlite3: true
   esbuild: true
+  hnswlib-node: true
+  onnxruntime-node: true
+  protobufjs: true
+  sharp: true
+  tldjs: true

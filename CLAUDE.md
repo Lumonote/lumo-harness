@@ -50,11 +50,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repository is
 
-A **design-specification repository**, not a code repository. It holds the technical spec for
+A **design-and-implementation repository**. It holds the technical spec and implementation for
 turning the open-source [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)
-into a distributed agent platform (`deepseek-harnes 分布式集群改造`). There is no build system, no
-test suite, and no application source at this level — the content is `docs/` plus
-`README.md`/`LICENSE`.
+into a distributed agent platform (`deepseek-harness 分布式集群改造`). The implementation lives
+under `platform/`: Go control-plane services, DSH plugins, shared TypeScript contracts, and the
+Tauri desktop shell; `docs/` remains the design and delivery record.
 
 Two trees, very different rules:
 
@@ -69,7 +69,9 @@ there to show up in `git status`.
 
 ## Documentation authority — read this before citing any doc
 
-`docs/` holds exactly four files. Start at `README.md`; cite `architecture.md` for design decisions.
+`docs/` holds the architecture, roadmap, review, implementation status, and numbered superpower
+specs. Start at `README.md`; cite `architecture.md` for design decisions and the relevant numbered
+spec for a capability's implementation contract.
 
 | File | Role |
 |---|---|

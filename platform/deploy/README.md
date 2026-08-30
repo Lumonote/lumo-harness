@@ -5,17 +5,19 @@
 `registry-trust.dev.json` 仅用于本地 Compose 验证，生产必须替换为真实信任根。
 所有控制面非健康接口还要求 `LUMO_CONTROL_PLANE_TOKEN`；Compose 启动前必须设置，
 Helm 默认从 `lumo-control-plane-token/token` 读取。
-生产 DSH Web 还应设置 `dshWeb.identityAssertion.secretName/secretKey`，由前置 OIDC/SSO
-代理按 `docs/configuration.md` 的契约签发逐请求身份；未设置时仅适合本地静态身份模式。
+生产 DSH Web 还应设置 `dshWeb.identityAssertion.secretName/secretKey`。公开入口的
+`@lumo/user-auth` 会在治理用户完成登录后按 `docs/configuration.md` 的契约签发逐请求身份；
+未设置时仅适合本地开发。
 
-> 三档形态 × 两类载体（参见 `docs/architecture.md` §13.2）。**同引擎不同拓扑**：仅 Local-lite 允许轻量替代（不承诺迁移）。
+> 三档产品形态：本地单机、服务器单例、服务器集群。**本地单机不是服务器单例的缩小版**，不启动任何网络中间件，使用 SQLite；`compose.local.yml` 只是遗留的开发集成测试台。
 
-| 文件 | 形态 | 载体 | 用途 |
+| 文件/目录 | 形态 | 载体 | 用途 |
 |------|------|------|------|
-| `compose.local.yml` | Local-lite | 本地 | 开发、CI 快速用例；1 PG（pgvector）+ 进程内队列/文件 |
-| `compose.standalone.yml` | Standalone | 本地/单机 | 同引擎单节点，**承诺可在线升级到 Cluster**；2026-08-26 起**可启动**（PG+pgvector / Redis / MinIO / RocketMQ 单容器 namesrv+broker / Nacos 单机 / Prometheus + 平台 Go 服务单实例；Milvus 需伴生 etcd、按文件头注释手动启用） |
-| `compose.cluster.yml` | Cluster（缩微） | 本地 | **自研服务多实例 + 中间件单实例**；分布式行为与故障注入调试 |
+| `desktop/` | 本地单机 | Rust/Tauri 桌面包 | SQLite、本机 Agent、本地技能；无 RocketMQ/Nacos/MinIO/Redis/PostgreSQL |
+| `compose.standalone.yml` | 服务器单例 | Docker Compose | PG+pgvector / Redis / MinIO / RocketMQ / Nacos + 平台 Go 服务单实例 |
+| `compose.cluster.yml` | 服务器集群 | Docker Compose | **自研服务多实例 + 中间件单实例**；分布式行为与故障注入调试 |
 | `helm/` | Cluster | 生产 | 控制面服务 Helm chart、健康探针和依赖配置 |
+| `compose.local.yml` | Legacy Local-lite | 本地 | 仅开发/CI：PG + Redis + Embedding，不作为产品发行包 |
 | `migrations/` + `migrate.sh` | — | — | 版本化平台迁移记录与执行入口 |
 
 ## 原生 DSH Web + Lumo 运营面
@@ -27,8 +29,14 @@ Helm 默认从 `lumo-control-plane-token/token` 读取。
 fetch、pull、checkout、reset 或覆盖，直接使用现有源码。
 
 ```sh
-./platform/deploy/up.sh cluster -d --build
+# 本地单机：不执行 docker compose
+pnpm --dir platform desktop:dev
+
+# 服务器单例
 ./platform/deploy/up.sh standalone -d --build
+
+# 服务器集群
+./platform/deploy/up.sh cluster -d --build
 ```
 
 Cluster 全部容器启动后执行统一冒烟验收；脚本会等待长期服务进入 running/healthy、
@@ -52,21 +60,34 @@ Cluster 全部容器启动后执行统一冒烟验收；脚本会等待长期服
 docker compose -f compose.cluster.yml up -d --build
 ```
 
-Web profile 首次启动会自动安装固定版本的登录与数据分析插件，以及所有本地 Lumo
-插件包。认证状态与 profile 依赖保存在 `dshwebdata` 卷中；首次部署需初始化账号：
+Web profile 首次启动会自动安装固定版本的数据分析插件，以及所有本地 Lumo 插件包。
+登录不再依赖第三方认证包：本地 `@lumo/user-auth` 连接 Governance 的
+`governance_users` 用户源，密码摘要、一次性交互式验证码和会话都保存在 PostgreSQL。
+Standalone/Cluster Compose 默认引导以下本地账号：
 
-```sh
-docker compose -f compose.cluster.yml exec dsh-web sh -lc \
-  'cd /workspace/deepseek-harness && pnpm dsh plugin --profile web exec dsh-auth init'
-```
+- 用户名：`admin`
+- 初始密码：`lumo-admin-123`
 
-打开 `http://127.0.0.1:4173` 登录并验证原生 DSH 会话、模型、工具与插件交互；新建
+启动前应通过 `LUMO_AUTH_BOOTSTRAP_USERNAME` 和 `LUMO_AUTH_BOOTSTRAP_PASSWORD` 覆盖默认值。
+引导逻辑只在账号尚无凭据时写入密码，不会在容器重启时重置现有密码。登录页始终要求
+3×3 点选九宫格验证码（按提示顺序点击数字），验证码只可使用一次。登录后可在“用户中心”修改密码，修改会撤销该用户
+的全部现有会话。
+
+打开 `http://127.0.0.1:4173` 使用上述治理用户登录并验证原生 DSH 会话、模型、工具与插件交互；新建
 会话后选择“数据模式”即可打开数据分析工作台。打开
 `http://127.0.0.1:4173/lumo/ops` 直接进入 Lumo 运营面。Lumo API 上游地址和身份由
 环境变量注入，不写死在前端；面板会读取 leader、真实 Nacos 节点、项目/流程/连接器清单，
 并展示已挂载的知识库、项目、计量、连接器等插件。插件通过包名装入 profile，设置页不再
 显示容器绝对路径。右下角入口和运营页使用 ReactBits 风格的渐变胶囊、玻璃面板、
 状态点和轻量动效。
+
+OpenDesign、Archify、图像风格库、PPT Master 与 Ruflo 编排适配器会装入所有 DSH profile。
+OpenDesign 提供 artifact-first 的设计/原型工作流；Archify 提供可校验 JSON IR 的架构图和
+任务调度视图；图像风格库与 PPT Master 提供创作 Skill；Ruflo 只负责单次 Lumo TaskRun
+内部的子智能体拓扑。Lumo 仍是任务、权限、放置、取消、审计、报告和复核的唯一事实源。
+固定 Skill 位于 `/workspace/platform/upstream/skills`，来源和提交哈希见
+`platform/upstream/skill-sources.json`。这些适配器不会运行 `ruflo init`、修改仓库级指令文件，
+也不会在服务启动时下载上游代码。
 
 ## 故障注入（compose.cluster.yml）
 

@@ -7,6 +7,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -63,6 +64,24 @@ CREATE TABLE IF NOT EXISTS project_automations (
   flow_ref      TEXT NOT NULL,
   enabled       BOOLEAN NOT NULL DEFAULT true
 );
+
+-- task_reports is the project-facing report projection. The governance service
+-- owns the task/run lifecycle; this table intentionally keeps only report
+-- sections and evidence coordinates, never a copied session transcript.
+CREATE TABLE IF NOT EXISTS task_reports (
+  id          TEXT PRIMARY KEY,
+  realm       TEXT NOT NULL,
+  task_id     TEXT NOT NULL,
+  run_id      TEXT,
+  sections    JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status      TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','confirmed','archived')),
+  created_by  TEXT NOT NULL,
+  confirmed_by TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE task_reports ADD COLUMN IF NOT EXISTS confirmed_by TEXT;
+CREATE INDEX IF NOT EXISTS task_reports_pending_idx ON task_reports (realm, updated_at DESC) WHERE status = 'draft';
 `
 
 // 领域错误（server 层映射 HTTP 状态）。
@@ -76,6 +95,8 @@ var (
 	// dsh-node 首启时建）。项目树种子是创建的硬依赖——不建表（第二 DDL 真相源
 	// 比等待更贵），把装配顺序如实暴露给调用方。
 	ErrMeteringNotReady = errors.New("budget_trees 尚未创建（计量插件未初始化——须先完成 metering 建表再创建项目）")
+	ErrReportStale      = errors.New("report session log is stale; refusing to persist a partial report")
+	ErrInvalidReport    = errors.New("invalid task report")
 )
 
 // Store PG 存储。
@@ -502,6 +523,241 @@ func budgetState(s domain.BudgetSnapshot) string {
 	default:
 		return "ok"
 	}
+}
+
+const reportMaxLag int64 = 8
+
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func validateReportSections(sections []domain.ReportSection) error {
+	allowed := map[string]bool{}
+	for _, name := range domain.ReportSectionNames {
+		allowed[name] = true
+	}
+	seen := map[string]bool{}
+	for i := range sections {
+		section := &sections[i]
+		if !allowed[section.Name] || seen[section.Name] {
+			return fmt.Errorf("%w: unknown or duplicate section %q", ErrInvalidReport, section.Name)
+		}
+		seen[section.Name] = true
+		clean := section.Evidence[:0]
+		for _, evidence := range section.Evidence {
+			if evidence.SessionRef == "" || evidence.Seq < 0 {
+				continue
+			}
+			clean = append(clean, evidence)
+		}
+		section.Evidence = clean
+		// Evidence is the only source of verification. A client cannot promote a
+		// prose-only section by setting verified=true in JSON.
+		section.Verified = len(clean) > 0
+	}
+	if len(seen) != len(allowed) {
+		return fmt.Errorf("%w: report must contain all six sections", ErrInvalidReport)
+	}
+	return nil
+}
+
+func reportReplicaHead(sections []domain.ReportSection) int64 {
+	var head int64
+	for _, section := range sections {
+		for _, evidence := range section.Evidence {
+			if evidence.Seq > head {
+				head = evidence.Seq
+			}
+		}
+	}
+	return head
+}
+
+func reportIsStale(sections []domain.ReportSection, liveHead *int64) bool {
+	return liveHead != nil && *liveHead-reportReplicaHead(sections) > reportMaxLag
+}
+
+type reportCostLine struct {
+	CostType string  `json:"cost_type"`
+	Qty      float64 `json:"qty"`
+	Tokens   int64   `json:"tokens"`
+	CostUSD  float64 `json:"cost_usd"`
+}
+
+type reportCostSummary struct {
+	Source     string           `json:"source"`
+	CostUSD    float64          `json:"cost_usd"`
+	Tokens     int64            `json:"tokens"`
+	ByCostType []reportCostLine `json:"by_cost_type"`
+}
+
+func (s *Store) hydrateReportCost(ctx context.Context, sections []domain.ReportSection) error {
+	refs := make([]string, 0)
+	seen := map[string]bool{}
+	for _, section := range sections {
+		for _, evidence := range section.Evidence {
+			if evidence.SessionRef != "" && !seen[evidence.SessionRef] {
+				seen[evidence.SessionRef] = true
+				refs = append(refs, evidence.SessionRef)
+			}
+		}
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT cost_type, COALESCE(SUM(qty),0)::float8, COALESCE(SUM(tokens),0)::bigint, COALESCE(SUM(cost_usd),0)::float8
+		FROM usage_ledger WHERE session_ref = ANY($1::text[]) GROUP BY cost_type ORDER BY cost_type`, refs)
+	if isUndefinedTable(err) {
+		// A project service can start before the optional metering plugin. Do not
+		// fabricate a cost value; the report can still carry its other evidence.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	summary := reportCostSummary{Source: "usage_ledger", ByCostType: []reportCostLine{}}
+	for rows.Next() {
+		var line reportCostLine
+		if err := rows.Scan(&line.CostType, &line.Qty, &line.Tokens, &line.CostUSD); err != nil {
+			return err
+		}
+		summary.CostUSD += line.CostUSD
+		summary.Tokens += line.Tokens
+		summary.ByCostType = append(summary.ByCostType, line)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		return err
+	}
+	for i := range sections {
+		if sections[i].Name == "cost" {
+			sections[i].Content = encoded
+		}
+	}
+	return nil
+}
+
+func (s *Store) CreateTaskReport(ctx context.Context, report domain.TaskReport, liveHead *int64) (domain.TaskReport, error) {
+	if report.ID == "" || report.Realm == "" || report.TaskID == "" || report.CreatedBy == "" {
+		return domain.TaskReport{}, fmt.Errorf("%w: id, realm, task_id and created_by are required", ErrInvalidReport)
+	}
+	if report.Status == "" {
+		report.Status = domain.ReportDraft
+	}
+	if report.Status != domain.ReportDraft {
+		return domain.TaskReport{}, fmt.Errorf("%w: new report must be draft", ErrInvalidReport)
+	}
+	if err := validateReportSections(report.Sections); err != nil {
+		return domain.TaskReport{}, err
+	}
+	if reportIsStale(report.Sections, liveHead) {
+		return domain.TaskReport{}, ErrReportStale
+	}
+	if err := s.hydrateReportCost(ctx, report.Sections); err != nil {
+		return domain.TaskReport{}, err
+	}
+	sections, err := json.Marshal(report.Sections)
+	if err != nil {
+		return domain.TaskReport{}, err
+	}
+	err = s.pool.QueryRow(ctx, `
+		INSERT INTO task_reports (id,realm,task_id,run_id,sections,status,created_by)
+		VALUES ($1,$2,$3,$4,$5,'draft',$6)
+		RETURNING created_at,updated_at`, report.ID, report.Realm, report.TaskID, nullableText(report.RunID), sections, report.CreatedBy).
+		Scan(&report.CreatedAt, &report.UpdatedAt)
+	if isUniqueViolation(err) {
+		return domain.TaskReport{}, ErrConflict
+	}
+	if err != nil {
+		return domain.TaskReport{}, err
+	}
+	return report, nil
+}
+
+func scanTaskReport(row interface{ Scan(dest ...any) error }, report *domain.TaskReport) error {
+	var sections []byte
+	err := row.Scan(&report.ID, &report.Realm, &report.TaskID, &report.RunID, &sections, &report.Status, &report.CreatedBy, &report.ConfirmedBy, &report.CreatedAt, &report.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	if len(sections) == 0 {
+		report.Sections = []domain.ReportSection{}
+		return nil
+	}
+	return json.Unmarshal(sections, &report.Sections)
+}
+
+func reportSelect() string {
+	return `SELECT id,realm,task_id,COALESCE(run_id,''),sections,status,created_by,COALESCE(confirmed_by,''),created_at,updated_at FROM task_reports`
+}
+
+func (s *Store) GetTaskReport(ctx context.Context, realm, taskID string, liveHead *int64) (domain.TaskReport, error) {
+	var report domain.TaskReport
+	err := scanTaskReport(s.pool.QueryRow(ctx, reportSelect()+` WHERE realm=$1 AND task_id=$2 ORDER BY updated_at DESC LIMIT 1`, realm, taskID), &report)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.TaskReport{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.TaskReport{}, err
+	}
+	if reportIsStale(report.Sections, liveHead) {
+		return domain.TaskReport{}, ErrReportStale
+	}
+	return report, nil
+}
+
+func (s *Store) ConfirmTaskReport(ctx context.Context, realm, taskID, reportID, confirmedBy string) (domain.TaskReport, error) {
+	return s.confirmTaskReport(ctx, realm, taskID, reportID, confirmedBy)
+}
+
+func (s *Store) ConfirmTaskReportByID(ctx context.Context, realm, reportID, confirmedBy string) (domain.TaskReport, error) {
+	var taskID string
+	err := s.pool.QueryRow(ctx, `SELECT task_id FROM task_reports WHERE realm=$1 AND id=$2`, realm, reportID).Scan(&taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.TaskReport{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.TaskReport{}, err
+	}
+	return s.confirmTaskReport(ctx, realm, taskID, reportID, confirmedBy)
+}
+
+func (s *Store) confirmTaskReport(ctx context.Context, realm, taskID, reportID, confirmedBy string) (domain.TaskReport, error) {
+	var report domain.TaskReport
+	err := scanTaskReport(s.pool.QueryRow(ctx, reportSelect()+` WHERE realm=$1 AND task_id=$2 AND id=$3`, realm, taskID, reportID), &report)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.TaskReport{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.TaskReport{}, err
+	}
+	verified := false
+	for _, section := range report.Sections {
+		if !section.Verified || len(section.Evidence) == 0 {
+			verified = false
+			break
+		}
+		verified = true
+	}
+	if !verified || len(report.Sections) == 0 {
+		return domain.TaskReport{}, fmt.Errorf("%w: every report section needs evidence before confirmation", ErrInvalidReport)
+	}
+	err = scanTaskReport(s.pool.QueryRow(ctx, `
+		UPDATE task_reports SET status='confirmed',confirmed_by=$4,updated_at=now()
+		WHERE realm=$1 AND task_id=$2 AND id=$3 AND status='draft'
+		RETURNING id,realm,task_id,COALESCE(run_id,''),sections,status,created_by,COALESCE(confirmed_by,''),created_at,updated_at`, realm, taskID, reportID, confirmedBy), &report)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.TaskReport{}, ErrConflict
+	}
+	return report, err
 }
 
 func (s *Store) getProjectByID(ctx context.Context, projectID string) (domain.Project, string, error) {

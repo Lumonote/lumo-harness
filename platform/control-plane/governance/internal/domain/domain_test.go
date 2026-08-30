@@ -46,3 +46,24 @@ func TestResolveRejectsSamePriorityVersionConflict(t *testing.T) {
 		t.Fatal("same-priority conflicting versions must fail closed")
 	}
 }
+
+func TestRankDelegationCandidatesIsExplainableAndBalancesLoad(t *testing.T) {
+	inferredTags, inferredSkills, candidates := RankDelegationCandidates(DelegationSpec{
+		Intent: "请跟进华东客户的合同复核",
+	}, []UserProfile{
+		{User: User{ID: "alice", DisplayName: "Alice", Status: "active"}, Tags: []string{"华东", "客户"}, Skills: []EffectiveSkill{{SkillID: "contract-review", Name: "合同复核"}}, ActiveTasks: 2},
+		{User: User{ID: "bob", DisplayName: "Bob", Status: "active"}, Tags: []string{"华南"}, Skills: []EffectiveSkill{{SkillID: "contract-review", Name: "合同复核"}}, ActiveTasks: 0},
+	})
+	if len(inferredTags) != 2 || len(inferredSkills) != 1 { t.Fatalf("inference = %#v %#v", inferredTags, inferredSkills) }
+	if len(candidates) != 2 || candidates[0].UserID != "alice" || !candidates[0].Eligible || !candidates[1].Eligible || candidates[0].Score <= candidates[1].Score {
+		t.Fatalf("candidates = %#v", candidates)
+	}
+	if len(candidates[0].Rationale) == 0 { t.Fatal("eligible candidate must include rationale") }
+}
+
+func TestRankDelegationCandidatesRejectsMissingExplicitRequirement(t *testing.T) {
+	_, _, candidates := RankDelegationCandidates(DelegationSpec{Intent: "合同复核", RequiredTags: []string{"华东"}}, []UserProfile{
+		{User: User{ID: "bob", DisplayName: "Bob", Status: "active"}, Tags: []string{"华南"}, Skills: []EffectiveSkill{{SkillID: "contract-review", Name: "合同复核"}}},
+	})
+	if len(candidates) != 1 || candidates[0].Eligible { t.Fatalf("missing requirement must be ineligible: %#v", candidates) }
+}

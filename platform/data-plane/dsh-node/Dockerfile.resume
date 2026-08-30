@@ -1,0 +1,90 @@
+# Dev-loop resume build for the DSH node image.
+#
+# The canonical build (./Dockerfile) spends almost all of its wall time in the
+# first half: COPY deepseek-harness followed by `pnpm install
+# --frozen-lockfile` over ~935 packages. That RUN is long enough that an
+# interrupted build commits no layer at all — the next attempt restarts from
+# zero and downloads everything again.
+#
+# This file resumes from lumo/dsh-node:stage-deps, an image that already holds
+# a completed install of the harness tree, and replays only the second half.
+# Context is the repository root, exactly as for the canonical Dockerfile.
+#
+# It is a shortcut, NOT a replacement. DSH_SRC_FINGERPRINT must be the content
+# hash of the current deepseek-harness tree; the build aborts if the snapshot
+# baked into stage-deps has drifted from it. So a changed deepseek-harness can
+# never silently produce a stale image — re-materialise stage-deps from the
+# canonical Dockerfile instead.
+#
+#   docker build -f platform/data-plane/dsh-node/Dockerfile.resume \
+#     --build-arg DSH_SRC_FINGERPRINT=$(
+#       cd deepseek-harness \
+#       && find . \( -name node_modules -o -name .git -o -name dist -o -name coverage \
+#                    -o -name .turbo -o -name .cache -o -name target -o -name .codegraph \) \
+#              -prune -o -type f -print0 \
+#         | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | cut -d' ' -f1
+#     ) -t lumo/dsh-node:dev .
+#
+# The prune list mirrors the repository .dockerignore, and LC_ALL=C pins the
+# collation: macOS sort and GNU sort order differently under a UTF-8 locale,
+# so without it two identical trees hash differently.
+FROM lumo/dsh-node:stage-deps
+
+ARG DSH_SRC_FINGERPRINT=""
+
+# Guard: refuse to build on a stage-deps snapshot that no longer matches the
+# harness tree this shortcut claims to represent.
+RUN set -eu; \
+    if [ -z "$DSH_SRC_FINGERPRINT" ]; then \
+      echo "Dockerfile.resume: DSH_SRC_FINGERPRINT not supplied; SKIPPING drift check" >&2; \
+      echo "Dockerfile.resume: the result may embed a stale deepseek-harness" >&2; \
+    else \
+      actual=$(cd /workspace/deepseek-harness \
+        && find . \( -name node_modules -o -name .git -o -name dist -o -name coverage \
+                     -o -name .turbo -o -name .cache -o -name target -o -name .codegraph \) \
+               -prune -o -type f -print0 \
+          | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1); \
+      if [ "$actual" != "$DSH_SRC_FINGERPRINT" ]; then \
+        echo "Dockerfile.resume: stage-deps is stale, refusing to build." >&2; \
+        echo "  current tree  : $DSH_SRC_FINGERPRINT" >&2; \
+        echo "  stage-deps has: $actual" >&2; \
+        echo "Rebuild stage-deps with the canonical ./Dockerfile." >&2; \
+        exit 1; \
+      fi; \
+      echo "Dockerfile.resume: harness snapshot verified ($actual)"; \
+    fi
+
+# --- second half, identical to the canonical Dockerfile ---
+
+# Build the untouched official host/client packages and Web static assets in
+# the image. Some lib directories are intentionally ignored build artifacts in
+# the source checkout and are not guaranteed to exist in a clean context.
+RUN cd /workspace/deepseek-harness \
+    && if grep -q '^ref: ' .git/HEAD; then \
+         dsh_commit_ref="$(sed 's/^ref: //' .git/HEAD)"; \
+         if [ -f ".git/$dsh_commit_ref" ]; then \
+           dsh_commit_hash="$(cat ".git/$dsh_commit_ref")"; \
+         else \
+           dsh_commit_hash="$(awk -v ref="$dsh_commit_ref" '$2 == ref { print $1; exit }' .git/packed-refs)"; \
+         fi; \
+       else \
+         dsh_commit_hash="$(cat .git/HEAD)"; \
+       fi \
+    && DSH_CLIENT_COMMIT_HASH="$dsh_commit_hash" pnpm build
+
+COPY platform/pnpm-lock.yaml /workspace/platform/pnpm-lock.yaml
+COPY platform/pnpm-workspace.yaml /workspace/platform/pnpm-workspace.yaml
+COPY platform/package.json /workspace/platform/package.json
+RUN cd /workspace/platform && pnpm fetch
+
+COPY platform /workspace/platform
+RUN cd /workspace/platform && pnpm install --frozen-lockfile --prefer-offline
+RUN cd /workspace/platform && pnpm --filter @lumo/dsh-platform-ui run bundle
+# Profile plugin management follows the pnpm version pinned by the platform
+# workspace. Pre-warm it so first boot can install local link: plugins without
+# a runtime package-manager download.
+RUN corepack prepare pnpm@11.7.0
+
+WORKDIR /workspace/platform
+ENV NODE_ENV=production
+CMD ["pnpm", "--filter", "@lumo/dsh-node", "start"]

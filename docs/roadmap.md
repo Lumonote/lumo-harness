@@ -32,7 +32,8 @@ platform/
     seam-providers/    # PG/Doris/Nebula/Milvus/MinIO/Redis Provider 实现
     connectors/        # HTTP/MCP/SaaS/消息 适配器
   deploy/
-    compose.local.yml      # Local-lite: 1 二进制 + 1 PG（秒级启动）
+    desktop/                # Local Desktop: Rust/Tauri + DSH worker + SQLite（无中间件）
+    compose.local.yml      # Legacy Local-lite: 仅开发/CI 集成测试，不是产品单机包
     compose.standalone.yml # 单机形态: 同引擎单节点拓扑
     compose.cluster.yml    # 缩微集群: 2 节点×2 集群 + 中间件单实例（故障注入调试）
     helm/                  # 生产 Cluster 形态
@@ -110,4 +111,3 @@ Agent─ctx.tools:action─▶ConnectorGateway
   → OPA(egress+scope) → Vault 取凭证 → 限速/熔断/PII 脱敏 → 外部 API/MCP
   → 调用记 session 事件(审计) + usage_ledger(feature=..., user/dept/role 溯源)
 ```
-
