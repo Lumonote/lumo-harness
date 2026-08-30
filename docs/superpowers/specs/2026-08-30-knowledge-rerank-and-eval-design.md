@@ -74,12 +74,15 @@ export interface RerankClient {
 }
 
 export class TeiRerankClient implements RerankClient   // POST /rerank
-export class NoopRerankClient implements RerankClient  // 未配置：返回全零 → 保持原序
 ```
 
-`NoopRerankClient` 返回全零依赖**排序稳定性**才能保持原序。JS 的 `Array.prototype.sort` 自
-ES2019 起保证稳定，实现时直接用它即可；但不得改用任何不保证稳定的排序，否则「不配置 rerank」
-会变成「随机打乱顺序」——这是一条不会报错的静默回归。
+未配置 reranker 时**不构造任何客户端**，装配层传 `undefined`，`rerankHits` 直接短路返回
+`hits.slice(0, topK)`。（初稿曾设计一个返回全零分的 `NoopRerankClient`；实现时发现它没有
+生产调用方——`undefined` 这条路更直接，且省掉一次无意义的 map/sort/slice。已删除。）
+
+`rankByScore` **必须用稳定排序**：交叉编码器给相近片段打出并列分数是常态，缺失分数也按 0
+补齐；排序不稳定会让并列项的相对次序随实现漂移——同一查询两次结果不同，且不会报错。
+`Array.prototype.sort` 自 ES2019 起保证稳定，直接用它，不得换成不保证稳定的排序。
 
 选择「返回对齐分数」而非「返回重排后的数组」，是为了让调用方保留原始 hit 对象（`docId`、
 `sourceVersion`、向量分数）不被 rerank 层重新包装——重排不应该有能力丢字段。
@@ -190,8 +193,8 @@ export interface RerankConfig {
 }
 ```
 
-**不配置 = `NoopRerankClient`**。现有部署（含 Standalone/Cluster 的 Milvus 形态）零影响，
-无需同步升级。这是 rerank 作为可选质量增强的直接体现，也与 §2.3 的 fail-open 档位一致。
+**不配置 = 传 `undefined`，两个 Consumer 完全不重排也不过量召回**。现有部署（含
+Standalone/Cluster 的 Milvus 形态）零影响，无需同步升级。这是 rerank 作为可选质量增强的直接体现，也与 §2.3 的 fail-open 档位一致。
 
 ---
 
@@ -240,7 +243,7 @@ export interface RerankConfig {
 ```
 platform/dsh-plugins/knowledge/eval/
   golden.zh.json      # 标注集
-  ingest-corpus.ts    # 按 markdown 标题层级切块入库
+  corpus.ts           # 按 markdown 标题层级切块
   run-eval.ts         # 同一 golden set 跑两遍（rerank on / off），输出对比表
 ```
 
@@ -250,8 +253,38 @@ CI 里起 TEI 需要拉约 2GB 模型权重（embedding 与 reranker 各一份�
 输出格式设计成可直接粘进 §5.4.4 的模型切换记录——评测的产物要能当决策依据用，否则跑完
 只是一堆终端输出。
 
-`ingest-corpus.ts` 的按标题切块是**本轮唯一触及分块的部分**，且刻意保持朴素：它是评测的
+`corpus.ts` 的按标题切块是**本轮唯一触及分块的部分**，且刻意保持朴素：它是评测的
 夹具，不是分块策略的实现。真正的分块策略见 §7.3。
+
+---
+
+## 5b. 实现期确定的三件事
+
+写代码时定下、初稿未覆盖、但读者需要知道的：
+
+**① GraphRAG 里重排必须发生在扩图之前。** `graph-rag.ts` 的 `origins` 由 hits 派生。若先扩图
+再重排，图会从未重排的 `overfetchFactor` 倍候选出发，代价成倍上升且把噪声带进上下文。
+执行顺序固定为：向量粗召回 → 重排 → 截 topK → 以重排后的 docId 扩图。已有断言锁死
+（`graph-rag-rerank.spec.ts` 检查 `neighborhood` 收到的 `origins`）。
+
+**② 评测中的 rerank 降级必须抛错，而不是沿用生产的 fail-open。** §2.3 的 fail-open 是**生产**
+语义；在评测里悄悄降级会把「rerank 无提升」的结论坐实成假象——实际是根本没跑 rerank。
+`run-eval.ts` 的降级回调直接抛。同一机制在两种场景下档位相反，这是有意的。
+
+**③ golden set 的悬空引用做成了测试。** `expectedDocIds` 引用了不存在的小节会让该用例恒定
+计 0 分，把指标压低却查不出原因。`eval-corpus.spec.ts` 对着真实 `docs/architecture.md` 校验
+全部 24 条标注存在，并要求每条都有非空干扰项 `note`。文档重构后标注失效会立刻变红。
+
+实际落地的评测目录：
+
+```
+eval/
+  golden.zh.json      # 24 条标注
+  corpus.ts           # 按标题切块（纯逻辑，5 个单测）
+  metrics.ts          # Recall@1/3/5 · MRR · nDCG@5 + markdown 对比表（6 个单测）
+  run-eval.ts         # 入库 → 跑两遍 → 出表（需真 PG + TEI）
+  README.md           # 跑法、语料选择理由、指标口径、标注质量声明
+```
 
 ---
 
@@ -331,8 +364,7 @@ WeKnora 是自带前后端、用户体系、Space RBAC、会话、ReAct Agent、
    非有限分数抛、超时错误含模型名
 3. 降级路径有测试：reranker 返回 5xx / 超时 / 连接被拒三种情况下，`knowledge_query` 与
    `knowledge_graph_query` 均返回向量原序结果而非抛错
-4. 未配置 `rerank` 时，两个 Consumer 工具的返回结果与本轮之前完全一致（Noop 路径；含顺序，
-   见 §2.1 的排序稳定性要求）
+4. 未配置 `rerank` 时，两个 Consumer 工具的返回结果与本轮之前完全一致（`undefined` 短路路径）
 5. `pnpm run kb:eval` 可跑通，输出 rerank on/off 的 Recall@1/3/5、MRR、nDCG@5 对比表
 6. 评测结果表明 rerank 开启后 nDCG@5 有提升；**若无提升，本设计的前提就是错的，应当记录该
    否定结论而不是调参数直到好看**

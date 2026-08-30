@@ -6,6 +6,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
+import { DEFAULT_OVERFETCH_FACTOR, rerankHits, type RerankClient } from './rerank.ts'
 
 export interface KnowledgeToolConfig {
   /** 本 agent 的 realm —— 工具固定注入，模型不可改（§5.4.1 硬规矩） */
@@ -13,6 +14,10 @@ export interface KnowledgeToolConfig {
   /** 检索角色（Provider 层 OPA 校验名单） */
   roles: string[]
   defaultTopK: number
+  /** 交叉编码器重排（§5.4.5）；不配则保持向量原序，行为与引入 rerank 之前一致 */
+  rerank?: RerankClient
+  /** 粗召回倍数（默认 3）；仅在配置了 rerank 时生效 */
+  overfetchFactor?: number
 }
 
 export function defineKnowledgeTool(
@@ -61,13 +66,18 @@ export function defineKnowledgeTool(
       const { question, topK } = args as { question?: string; topK?: number }
       if (!question?.trim()) throw new Error('knowledge_query: question 不能为空')
       const k = Math.min(Math.max(topK ?? config.defaultTopK, 1), config.defaultTopK * 4)
-      const hits = await seam.query({
+      // 过量召回给重排留出空间；未配置 reranker 时倍数恒为 1，检索量不变。
+      const factor = config.rerank ? Math.max(config.overfetchFactor ?? DEFAULT_OVERFETCH_FACTOR, 1) : 1
+      const candidates = await seam.query({
         realm: config.realm,
         roles: config.roles,
         text: question,
-        topK: k,
+        topK: k * factor,
         scope: 'published', // 铁律 17：模型只读发布态
       })
+      const hits = await rerankHits(config.rerank, question, candidates, k, (reason) =>
+        ctx.logger.warn('knowledge: 重排降级为向量原序: %s', reason),
+      )
       return {
         hits: hits.map((h) => ({ docId: h.docId, text: h.text, score: h.score })),
       }

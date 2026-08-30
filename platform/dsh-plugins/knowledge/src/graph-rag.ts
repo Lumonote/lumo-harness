@@ -9,6 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
 import type { GraphSeam } from '../../../shared/seam-contracts/graph.ts'
+import { DEFAULT_OVERFETCH_FACTOR, rerankHits, type RerankClient } from './rerank.ts'
 
 export interface GraphRagConfig {
   realm: string
@@ -18,6 +19,10 @@ export interface GraphRagConfig {
   graphDepth: number
   /** 图扩展节点上限 */
   graphMaxNodes: number
+  /** 交叉编码器重排（§5.4.5）；不配则保持向量原序 */
+  rerank?: RerankClient
+  /** 粗召回倍数（默认 3）；仅在配置了 rerank 时生效 */
+  overfetchFactor?: number
 }
 
 export function defineGraphRagTool(
@@ -98,15 +103,22 @@ export function defineGraphRagTool(
 
       // 阶段 1：向量召回（只读 published —— 铁律 17）
       const k = Math.min(Math.max(topK ?? config.defaultTopK, 1), config.defaultTopK * 4)
-      const hits = await vector.query({
+      const factor = config.rerank ? Math.max(config.overfetchFactor ?? DEFAULT_OVERFETCH_FACTOR, 1) : 1
+      const candidates = await vector.query({
         realm: config.realm,
         roles: config.roles,
         text: question,
-        topK: k,
+        topK: k * factor,
         scope: 'published',
       })
 
-      // 阶段 2：图邻域扩展（以召回的 docId 为起点）
+      // 阶段 1.5：重排必须在扩图之前 —— origins 由 hits 派生，拿未重排的 factor 倍候选
+      // 扩图会让图代价成倍上升并把噪声带进上下文。
+      const hits = await rerankHits(config.rerank, question, candidates, k, (reason) =>
+        ctx.logger.warn('knowledge: 重排降级为向量原序: %s', reason),
+      )
+
+      // 阶段 2：图邻域扩展（以重排后的 docId 为起点）
       const origins = [...new Set(hits.map((h) => h.docId))]
       const hood = origins.length === 0
         ? { nodes: [], edges: [], truncated: false, origin: '', depth: 0 }

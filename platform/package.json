@@ -13,7 +13,10 @@
   ],
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc -b --noEmit",
+    "kb:eval": "tsx dsh-plugins/knowledge/eval/run-eval.ts",
+    "desktop:dev": "cargo tauri dev --manifest-path desktop/Cargo.toml",
+    "desktop:build": "cargo tauri build --manifest-path desktop/Cargo.toml"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

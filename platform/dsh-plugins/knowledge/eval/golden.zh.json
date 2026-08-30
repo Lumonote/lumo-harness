@@ -1,0 +1,146 @@
+[
+  {
+    "id": "g01",
+    "query": "换 embedding 模型时为什么不能原地覆盖已有向量",
+    "expectedDocIds": ["architecture#5.4.4"],
+    "note": "干扰：§5.4.2 也谈索引选择，§5.4.3 也谈「从源全量重建」"
+  },
+  {
+    "id": "g02",
+    "query": "知识库检索的 realm 过滤条件由谁注入，能不能由调用方传",
+    "expectedDocIds": ["architecture#5.4.1"],
+    "note": "干扰：§6.3 讲 OPA 单一策略点，§10.2 讲 realm 是首要隔离边界，都谈权限但不谈注入位置"
+  },
+  {
+    "id": "g03",
+    "query": "向量索引和源数据不同步会造成什么后果",
+    "expectedDocIds": ["architecture#5.4.3"],
+    "note": "干扰：§5.4.4 也谈「召回质量崩塌」，但那是换模型引起的"
+  },
+  {
+    "id": "g04",
+    "query": "常规 RAG 召回用哪一档一致性级别，为什么不用最强的",
+    "expectedDocIds": ["architecture#5.4.2"],
+    "note": "干扰：§13.1 是全平台的一致性模型总表，也有 CAP 取舍"
+  },
+  {
+    "id": "g05",
+    "query": "向量召回之后怎么用知识图谱扩展上下文",
+    "expectedDocIds": ["architecture#5.4.5"],
+    "note": "干扰：§5.1 的 seam 映射也提到 Nebula 负责关系遍历"
+  },
+  {
+    "id": "g06",
+    "query": "知识库的原始文档存在哪个对象存储桶，保留策略是什么",
+    "expectedDocIds": ["architecture#5.4.6"],
+    "note": "干扰：§5.4.1 也提到「源指针（MinIO objectKey）」"
+  },
+  {
+    "id": "g07",
+    "query": "多人同时编辑同一篇知识库文档用什么协作模型",
+    "expectedDocIds": ["architecture#5.4.7.1"],
+    "note": "干扰：§5.4.7 是总述，§5.4.7.2 讲行为不讲模型选型"
+  },
+  {
+    "id": "g08",
+    "query": "智能体自己编辑知识库文档时受什么约束",
+    "expectedDocIds": ["architecture#5.4.7.3"],
+    "note": "干扰：§5.4.7.2 的实时协作行为也涉及编辑"
+  },
+  {
+    "id": "g09",
+    "query": "协作服务扩缩容和故障恢复怎么做",
+    "expectedDocIds": ["architecture#5.4.7.4"],
+    "note": "干扰：§6.2 讲 Scheduler 的放置与容错，也是「扩缩容」词面"
+  },
+  {
+    "id": "g10",
+    "query": "token 消耗在哪一道截面被计量",
+    "expectedDocIds": ["architecture#6.4"],
+    "note": "干扰：§7.2 的 LLM 批处理网关同样在 ctx.llm 附近"
+  },
+  {
+    "id": "g11",
+    "query": "外部 API 凭证存在哪里，会不会进入提示词",
+    "expectedDocIds": ["architecture#6.3"],
+    "note": "干扰：§10.1 讲连接器，§6.1 讲 Nacos 配置下发，都涉及「配置」"
+  },
+  {
+    "id": "g12",
+    "query": "Nacos 在这个平台里收敛了原本的哪些组件",
+    "expectedDocIds": ["architecture#6.1"],
+    "note": "干扰：§8.3 的标题也写着「收敛 NATS」"
+  },
+  {
+    "id": "g13",
+    "query": "制品安装是怎么声明式对齐的",
+    "expectedDocIds": ["architecture#6.5"],
+    "note": "干扰：§10.3 的分发体系也讲部署链路"
+  },
+  {
+    "id": "g14",
+    "query": "哪些 seam 不允许被远程化，判据是什么",
+    "expectedDocIds": ["architecture#4.1.1"],
+    "note": "干扰：§4.1 说「最高杠杆」，§4.1.2 是两条硬规矩，三节紧邻且都谈 seam 远程化"
+  },
+  {
+    "id": "g15",
+    "query": "跨节点共享的会话真相是怎么组织的",
+    "expectedDocIds": ["architecture#4.2"],
+    "note": "干扰：§2 的 dsh 原生机制也介绍 append-only SessionEvent 日志"
+  },
+  {
+    "id": "g16",
+    "query": "平台一共定义了哪几类可分发的制品",
+    "expectedDocIds": ["architecture#4.3"],
+    "note": "干扰：§11.1 讨论项目引用哪些制品，§10.3 讲制品如何流通"
+  },
+  {
+    "id": "g17",
+    "query": "什么该做成 Cordis 插件，什么该做成独立服务",
+    "expectedDocIds": ["architecture#3.1"],
+    "note": "干扰：§3 的分层图同时列出插件层与服务层"
+  },
+  {
+    "id": "g18",
+    "query": "本地形态换掉集群引擎要付出什么代价，缺失能力怎么处理",
+    "expectedDocIds": ["architecture#13.2.4"],
+    "note": "干扰：§13.2.3 是替代映射表（换成什么），§13.2.2 是三档形态"
+  },
+  {
+    "id": "g19",
+    "query": "单机形态怎么迁移到集群形态",
+    "expectedDocIds": ["architecture#13.2.7"],
+    "note": "干扰：§13.2.5 讲本地 Docker 缩微集群，§13.2.6 讲形态由装配决定"
+  },
+  {
+    "id": "g20",
+    "query": "为什么不用 APISIX 或 Envoy 而要自研网关",
+    "expectedDocIds": ["architecture#12.2"],
+    "note": "干扰：§12.1 是网关定义与分层，§12.3 是语言选型"
+  },
+  {
+    "id": "g21",
+    "query": "平台后端为什么统一用 Go",
+    "expectedDocIds": ["architecture#12.3"],
+    "note": "干扰：§12.2 的标题里也写着「替代 APISIX/Envoy」"
+  },
+  {
+    "id": "g22",
+    "query": "多个智能体之间靠什么做异步消息投递",
+    "expectedDocIds": ["architecture#8.3"],
+    "note": "干扰：§8.1 讲 suspend/resume 异步协同，§7.3 讲协同拓扑"
+  },
+  {
+    "id": "g23",
+    "query": "谁有权中止别人发起的一次执行",
+    "expectedDocIds": ["architecture#8.4.2"],
+    "note": "干扰：§8.4.1 定义控制指令语义，§10.2 定义角色权限，三处都谈权限"
+  },
+  {
+    "id": "g24",
+    "query": "跨集群的运行状况怎么统一监控",
+    "expectedDocIds": ["architecture#7.4.2"],
+    "note": "干扰：§7.4.1 是调度拓扑，§7.4.3 是执行控制"
+  }
+]

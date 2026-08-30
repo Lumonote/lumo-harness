@@ -22,6 +22,7 @@ import { PgGraphProvider } from './graph-provider.ts'
 import { GraphProjector } from './graph-projector.ts'
 import { defineGraphRagTool } from './graph-rag.ts'
 import { MilvusKnowledgeProvider, NebulaGraphProvider } from './remote-provider.ts'
+import { TeiRerankClient } from './rerank.ts'
 import type { KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
 import type { GraphSeam } from '../../../shared/seam-contracts/graph.ts'
 
@@ -68,6 +69,19 @@ export interface KnowledgeConfig {
   remoteApiKey?: string
   /** 图扩展参数（缺省 1 跳 / 50 节点） */
   graph?: GraphConfig
+  /** 交叉编码器重排（§5.4.5）；**不配则完全不重排**，行为与引入本功能之前一致 */
+  rerank?: RerankConfig
+}
+
+/** 重排参数（§5.4.5）。与 embedding 分属两个 TEI 实例：模型不同，不可复用同一地址。 */
+export interface RerankConfig {
+  /** TEI reranker 地址（deploy/compose.local.yml 的 lumo-platform-tei-rerank :55434） */
+  baseUrl: string
+  /** 模型标识（记录用；bge-reranker-v2-m3 或体感不足时的 bge-reranker-base） */
+  model: string
+  /** 粗召回倍数（缺省 3）。不过量召回则重排无空间，见 rerank.ts */
+  overfetchFactor?: number
+  timeoutMs?: number
 }
 
 /** Schemastery validation for {@link KnowledgeConfig}（可选性由 interface 的 `?` 表达） */
@@ -92,6 +106,12 @@ export const Config: z<KnowledgeConfig> = z.object({
     maxNodes: z.number(),
     projectIntervalMs: z.number(),
     projectBatchSize: z.number(),
+  }),
+  rerank: z.object({
+    baseUrl: z.string(),
+    model: z.string(),
+    overfetchFactor: z.number(),
+    timeoutMs: z.number(),
   }),
 })
 
@@ -141,19 +161,33 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   ctx.provide('knowledge', provider)
   ctx.provide('knowledgeGraph', graph)
 
+  // 交叉编码器重排（§5.4.5）。未配置 → undefined → 两个 Consumer 完全不重排、不过量召回。
+  const rerank = config.rerank
+    ? new TeiRerankClient({
+        baseUrl: config.rerank.baseUrl,
+        model: config.rerank.model,
+        timeoutMs: config.rerank.timeoutMs,
+      })
+    : undefined
+  const overfetchFactor = config.rerank?.overfetchFactor
+
   // Consumer 1：纯向量 RAG（装配层固定 realm、只读 published —— 铁律 17）
   const unregister = defineKnowledgeTool(ctx, provider, {
     realm: config.realm,
     roles,
     defaultTopK,
+    rerank,
+    overfetchFactor,
   })
-  // Consumer 2：GraphRAG（向量召回 → 图邻域扩展；输出带 provenance 标记，评审 R5）
+  // Consumer 2：GraphRAG（向量召回 → 重排 → 图邻域扩展；输出带 provenance 标记，评审 R5）
   const unregisterGraph = defineGraphRagTool(ctx, provider, graph, {
     realm: config.realm,
     roles,
     defaultTopK,
     graphDepth: config.graph?.depth ?? 1,
     graphMaxNodes: config.graph?.maxNodes ?? 50,
+    rerank,
+    overfetchFactor,
   })
   ctx.effect(() => () => {
     unregister()

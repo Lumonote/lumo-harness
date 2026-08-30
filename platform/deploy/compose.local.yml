@@ -1,4 +1,5 @@
-# Local-lite 形态：1 二进制 + 1 PG —— 秒级启动，数据一次性（不承诺迁移，见 architecture §13.2）
+# Legacy Local-lite 集成测试台：它会启动 PostgreSQL/Redis/Embedding，仅用于开发与契约测试。
+# 它不是产品的本地单机模式。产品本地单机必须使用 platform/desktop：SQLite 且无中间件。
 # 启动：docker compose -f compose.local.yml up
 # 项目/容器命名隔离：lumo-platform-* 前缀，与用户其它 compose 项目（如 lumonte-*）互不影响；
 # down -v 仅作用于本项目卷。
@@ -34,6 +35,21 @@ services:
       - "55433:80"
     volumes:
       - tei-data:/data
+
+  rerank:               # TEI 交叉编码器重排（§5.4.5）。可选组件：不配置 knowledge.rerank 时
+                        # 两个 Consumer 完全不重排，本服务可以不起。
+    # 与 embedding 同镜像不同模型 —— 换模型即换实例，不复用同一地址。
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.6
+    container_name: lumo-platform-tei-rerank
+    environment:
+      # 568M 参数，CPU 变体上明显慢于 bge-m3；体感不足时换 BAAI/bge-reranker-base（278M），
+      # 两者走同一个 /rerank 端点，RerankClient 无需改动。
+      MODEL_ID: BAAI/bge-reranker-v2-m3
+      PORT: "80"
+    ports:
+      - "55434:80"
+    volumes:
+      - tei-rerank-data:/data
 
   redis:                # 协作服务 WAL 热层（§5.4.7.4：确认前必须已落 WAL）
     image: redis:7-alpine
@@ -118,6 +134,7 @@ volumes:
   pgdata:
   redisdata:
   tei-data:
+  tei-rerank-data:
 
 # 平台进程（dsh node）本地裸进程运行：
 #   source ~/.nvm/nvm.sh && nvm use 24
