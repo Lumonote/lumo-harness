@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/scheduler/internal/domain"
 )
 
@@ -33,7 +34,7 @@ func NewNacos(baseURL, service, group string) *NacosCatalog {
 	}
 	return &NacosCatalog{
 		baseURL: strings.TrimRight(baseURL, "/"), service: service, group: group,
-		client: &http.Client{Timeout: 5 * time.Second},
+		client: observability.ConfiguredHTTPClient(5 * time.Second),
 	}
 }
 
@@ -87,7 +88,7 @@ func (n *NacosCatalog) List(ctx context.Context) ([]domain.Node, error) {
 		if realm == "" {
 			continue
 		}
-		out = append(out, domain.Node{NodeID: id, Realm: realm, ClusterID: cluster, Capacity: capacity, Capabilities: caps, Residency: h.Metadata["residency"]})
+		out = append(out, domain.Node{NodeID: id, Realm: realm, ClusterID: cluster, Capacity: capacity, Capabilities: caps, Residency: h.Metadata["residency"], ControlURL: "http://" + h.IP + ":" + strconv.Itoa(h.Port)})
 	}
 	return out, nil
 }

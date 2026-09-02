@@ -92,6 +92,44 @@ func TestPublishIdempotent(t *testing.T) {
 	}
 }
 
+func TestRolloutTargetsOnlyPublishedImmutableVersion(t *testing.T) {
+	ctx := context.Background()
+	priv, ts := testKey(t, "acme", []string{"kb:query"})
+	s, _ := newStore(t, ts)
+
+	for _, version := range []string{"1.0.0", "1.1.0"} {
+		raw := mf("sales-kb", version, []string{"kb:query"}, nil)
+		if _, err := s.Publish(ctx, raw, sign(priv, raw)); err != nil {
+			t.Fatalf("发布 %s: %v", version, err)
+		}
+	}
+	if _, err := s.UpsertRollout(ctx, store.Rollout{Channel: "stable", Name: "sales-kb", Version: "9.9.9", Percent: 100}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("未发布版本不能成为期望状态，得到: %v", err)
+	}
+	first, err := s.UpsertRollout(ctx, store.Rollout{Channel: "stable", Name: "sales-kb", Version: "1.0.0", Percent: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Version != "1.0.0" || first.UpdatedAt.IsZero() {
+		t.Fatalf("首次目标状态不正确: %+v", first)
+	}
+	updated, err := s.UpsertRollout(ctx, store.Rollout{Channel: "stable", Name: "sales-kb", Version: "1.1.0", Percent: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Version != "1.1.0" {
+		t.Fatalf("期望版本更新失败: %+v", updated)
+	}
+	got, err := s.GetRollout(ctx, "stable", "sales-kb")
+	if err != nil || got.Version != "1.1.0" || got.Percent != 100 {
+		t.Fatalf("读取期望状态 = %+v, %v", got, err)
+	}
+	items, err := s.ListRollouts(ctx, "stable", 10)
+	if err != nil || len(items) != 1 || items[0].Name != "sales-kb" {
+		t.Fatalf("列出期望状态 = %+v, %v", items, err)
+	}
+}
+
 // TestPublishImmutable —— 不动版本号悄悄换内容，是最经典的供应链手法。
 func TestPublishImmutable(t *testing.T) {
 	ctx := context.Background()

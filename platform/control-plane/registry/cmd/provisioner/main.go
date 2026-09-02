@@ -18,6 +18,7 @@ import (
 func main() {
 	name := flag.String("name", env("PROVISIONER_ARTIFACT_NAME", ""), "root artifact name")
 	version := flag.String("version", env("PROVISIONER_ARTIFACT_VERSION", ""), "root artifact version")
+	channel := flag.String("channel", env("PROVISIONER_ROLLOUT_CHANNEL", ""), "desired-state rollout channel; resolves the root version each cycle")
 	registry := flag.String("registry", env("REGISTRY_URL", "http://127.0.0.1:8084"), "registry URL")
 	dir := flag.String("dir", env("PROVISIONER_INSTALL_DIR", "/var/lib/lumo/artifacts"), "install directory")
 	shapeRaw := flag.String("shape", env("PROVISIONER_SHAPE", `{"object":true}`), "target shape JSON")
@@ -30,11 +31,30 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	installer := provisioner.New(*registry, *dir)
+	installer.NodeID = env("PROVISIONER_NODE_ID", "")
 	installer.ControlPlaneToken = env("LUMO_CONTROL_PLANE_TOKEN", "")
 	reconcile := func() error {
-		state, changed, err := installer.Reconcile(ctx, *name, *version, shape)
+		targetVersion := *version
+		if *channel != "" {
+			resolved, err := installer.ResolveRollout(ctx, *channel, *name)
+			if err != nil {
+				return err
+			}
+			targetVersion = resolved
+		}
+		state, changed, err := installer.Reconcile(ctx, *name, targetVersion, shape)
 		if err != nil {
+			if *name != "" && targetVersion != "" {
+				if reportErr := installer.Report(ctx, *name, targetVersion, shape, nil, err); reportErr != nil {
+					log.Printf("provisioner: 回报失败对账状态失败: %v", reportErr)
+				}
+			}
 			return err
+		}
+		if reportErr := installer.Report(ctx, *name, targetVersion, shape, state, nil); reportErr != nil {
+			// 安装已经原子落盘；不能把回报不可达说成安装失败，但日志必须让运维发现
+			// 市场页缺少这台节点的事实状态。
+			log.Printf("provisioner: 回报收敛安装状态失败: %v", reportErr)
 		}
 		if changed {
 			log.Printf("provisioner: installed %s (%d items)", state.Root, len(state.Installed))
@@ -49,8 +69,8 @@ func main() {
 		}
 		return
 	}
-	if *name == "" || *version == "" {
-		log.Fatal("provisioner: -name 与 -version 是持续 reconcile 的必填参数")
+	if *name == "" || (*version == "" && *channel == "") {
+		log.Fatal("provisioner: -name 与 -version，或 -name 与 -channel，是持续 reconcile 的必填参数")
 	}
 	if err := reconcile(); err != nil {
 		log.Print(err)

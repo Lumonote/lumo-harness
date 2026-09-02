@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -50,6 +51,10 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if _, err := observability.ConfigureOTelFromEnv(ctx, "lumo-projects"); err != nil {
+		log.Error("invalid OpenTelemetry configuration", "err", err)
+		os.Exit(2)
+	}
 
 	pool, err := pgxpool.New(ctx, *pgDSN)
 	if err != nil {
@@ -69,7 +74,8 @@ func main() {
 	srv.Register(mux)
 
 	log.Info("projects 启动", "addr", *listen)
-	if err := http.ListenAndServe(*listen, observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux))); err != nil {
+	httpSrv := &http.Server{Addr: *listen, Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)), ReadHeaderTimeout: 10 * time.Second}
+	if err := observability.Serve(httpSrv); err != nil {
 		log.Error("退出", "err", err)
 		os.Exit(1)
 	}

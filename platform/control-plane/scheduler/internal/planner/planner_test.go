@@ -61,6 +61,20 @@ func TestPickNilWhenNoCandidate(t *testing.T) {
 	}
 }
 
+func TestFullEligibleNodesKeepsHardConstraintsForPreemption(t *testing.T) {
+	nodes := []domain.Node{
+		{NodeID: "eligible-full", Realm: "r1", ClusterID: "c1", Capacity: 1, Residency: "cn-east", Capabilities: []string{"llm"}},
+		{NodeID: "eligible-free", Realm: "r1", ClusterID: "c1", Capacity: 2, Residency: "cn-east", Capabilities: []string{"llm"}},
+		{NodeID: "wrong-realm", Realm: "r2", ClusterID: "c1", Capacity: 1, Residency: "cn-east", Capabilities: []string{"llm"}},
+		{NodeID: "wrong-capability", Realm: "r1", ClusterID: "c1", Capacity: 1, Residency: "cn-east", Capabilities: []string{"doris"}},
+	}
+	task := domain.Task{Realm: "r1", ClusterID: "c1", Residency: "cn-east", Requires: reqs("llm")}
+	full := FullEligibleNodes(task, nodes, map[string]int{"eligible-full": 1, "eligible-free": 1, "wrong-realm": 1, "wrong-capability": 1})
+	if len(full) != 1 || full[0].NodeID != "eligible-full" {
+		t.Fatalf("抢占只应考虑同 realm 的已满兼容节点, got %+v", full)
+	}
+}
+
 func TestPickEnforcesDataResidency(t *testing.T) {
 	nodes := []domain.Node{
 		{NodeID: "outside", Capacity: 4, Residency: "eu", Capabilities: []string{"llm"}},

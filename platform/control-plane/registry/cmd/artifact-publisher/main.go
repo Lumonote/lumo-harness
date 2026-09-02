@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/x509"
 	"encoding/base64"
-	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -93,25 +91,11 @@ func readPrivateKey(path string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("artifact-publisher: 读取私钥失败: %w", err)
 	}
-	if block, _ := pem.Decode(raw); block != nil {
-		value, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("artifact-publisher: PKCS#8 私钥解析失败: %w", err)
-		}
-		key, ok := value.(ed25519.PrivateKey)
-		if !ok {
-			return nil, errors.New("artifact-publisher: PKCS#8 私钥不是 ed25519")
-		}
-		return key, nil
-	}
-	if key, err := rawOrBase64(raw, ed25519.PrivateKeySize); err == nil {
-		return ed25519.PrivateKey(key), nil
-	}
-	seed, err := rawOrBase64(raw, ed25519.SeedSize)
+	key, err := publisher.ParsePrivateKey(raw)
 	if err != nil {
-		return nil, errors.New("artifact-publisher: 私钥须为 32 字节 seed、64 字节私钥或 PKCS#8 PEM，可使用标准 base64 文本")
+		return nil, fmt.Errorf("artifact-publisher: 私钥格式错误: %w", err)
 	}
-	return ed25519.NewKeyFromSeed(seed), nil
+	return key, nil
 }
 
 func rawOrBase64(raw []byte, size int) ([]byte, error) {

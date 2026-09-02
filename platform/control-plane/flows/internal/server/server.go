@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/lumo-harness/platform/flows/internal/domain"
@@ -117,6 +118,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/projects/{pid}/flows", s.listProject)
 	mux.HandleFunc("GET /v1/flows", s.discover)
 	mux.HandleFunc("GET /v1/flows/{id}", s.get)
+	mux.HandleFunc("GET /v1/flows/{id}/versions/{version}", s.getVersion)
+	mux.HandleFunc("GET /v1/flows/{id}/runs", s.listRuns)
+	mux.HandleFunc("POST /v1/flows/{id}/runs/{runID}/replay", s.replayRun)
 	mux.HandleFunc("PUT /v1/flows/{id}/definition", s.updateDefinition)
 	mux.HandleFunc("POST /v1/flows/{id}/submit", s.submit)
 	mux.HandleFunc("POST /v1/flows/{id}/review", s.review)
@@ -314,6 +318,129 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, f)
+}
+
+// getVersion returns an immutable published definition snapshot. A flow may be
+// globally discoverable, but its definition can include operational details and
+// must therefore remain inside the owning project boundary.
+func (s *Server) getVersion(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	f, err := s.store.GetFlow(r.Context(), r.PathValue("id"), c.realm)
+	if err != nil || !canSee(f, c) {
+		http.Error(w, `{"error":"flow not found"}`, http.StatusNotFound)
+		return
+	}
+	if _, err := s.store.ProjectRole(r.Context(), f.ProjectID, c.realm, c.user); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, `{"error":"flow not found"}`, http.StatusNotFound)
+			return
+		}
+		s.log.Error("检查流程版本项目权限失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	version, err := strconv.Atoi(r.PathValue("version"))
+	if err != nil || version < 1 {
+		http.Error(w, `{"error":"version must be a positive integer"}`, http.StatusBadRequest)
+		return
+	}
+	definition, reviewer, err := s.store.GetVersion(r.Context(), f.ID, version)
+	if errors.Is(err, store.ErrVersionGone) {
+		http.Error(w, `{"error":"version not found"}`, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		s.log.Error("读取流程版本失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"flow_id": f.ID, "version": version, "reviewer": reviewer, "definition": definition,
+	})
+}
+
+// listRuns returns actual event/webhook execution records. A targeted or
+// globally visible flow is not sufficient to inspect its automation activity:
+// the history can reveal operational timing and failure details, so it remains
+// within the owning project boundary.
+func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	f, err := s.store.GetFlow(r.Context(), r.PathValue("id"), c.realm)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, `{"error":"flow not found"}`, http.StatusNotFound)
+			return
+		}
+		s.log.Error("取流程运行历史失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	if !canSee(f, c) {
+		http.Error(w, `{"error":"flow not found"}`, http.StatusNotFound)
+		return
+	}
+	if _, err := s.store.ProjectRole(r.Context(), f.ProjectID, c.realm, c.user); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, `{"error":"flow not found"}`, http.StatusNotFound)
+			return
+		}
+		s.log.Error("检查流程运行历史项目权限失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	runs, err := s.store.ListTriggerRuns(r.Context(), f.ID, 50)
+	if err != nil {
+		s.log.Error("列出流程运行历史失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+}
+
+// replayRun queues one explicit retry of a failed event/webhook run. The store
+// pins the original event payload plus automation and published flow version;
+// this handler only grants project editors/owners the authority to request it.
+func (s *Server) replayRun(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	f, err := s.store.GetFlow(r.Context(), r.PathValue("id"), c.realm)
+	if err != nil || !canSee(f, c) {
+		http.Error(w, `{"error":"flow not found"}`, http.StatusNotFound)
+		return
+	}
+	if _, ok := s.requireProjectMember(w, r, f.ProjectID, c); !ok {
+		return
+	}
+	runID, err := strconv.ParseInt(r.PathValue("runID"), 10, 64)
+	if err != nil || runID < 1 {
+		http.Error(w, `{"error":"run id must be a positive integer"}`, http.StatusBadRequest)
+		return
+	}
+	queued, err := s.store.EnqueueReplay(r.Context(), f.ID, c.realm, runID)
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, `{"error":"run not found"}`, http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, store.ErrRunNotReplayable) {
+		http.Error(w, `{"error":"only failed runs can be replayed"}`, http.StatusConflict)
+		return
+	}
+	if err != nil {
+		s.log.Error("重放流程运行入队失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"status": "queued", "replay_trigger_id": queued.TriggerID, "already_queued": queued.AlreadyQueued,
+	})
 }
 
 func (s *Server) updateDefinition(w http.ResponseWriter, r *http.Request) {

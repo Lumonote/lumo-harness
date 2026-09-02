@@ -185,3 +185,80 @@ func TestApproveAtomicity(t *testing.T) {
 		t.Fatalf("审计行: %d %v", audits, err)
 	}
 }
+
+// A manual replay must remain a new, auditable attempt even after automation
+// bindings or the flow's current version have changed. The original payload and
+// captured binding are copied to a fresh outbox record, never re-matched.
+func TestFailedRunReplayPinsPayloadAndPublishedVersion(t *testing.T) {
+	st, pool := newStore(t)
+	ctx := context.Background()
+
+	f, err := st.CreateFlow(ctx, "flow_replay", "p1", "r1", "replay", "author1", def(t, "op.a"))
+	if err != nil {
+		t.Fatalf("建流程: %v", err)
+	}
+	if _, err := st.Transition(ctx, f.ID, domain.EventSubmit); err != nil {
+		t.Fatalf("提审: %v", err)
+	}
+	if _, err := st.Review(ctx, f.ID, "reviewer", true, ""); err != nil {
+		t.Fatalf("发布: %v", err)
+	}
+
+	payload := json.RawMessage(`{"ticket":"T-7","severity":"high"}`)
+	if err := st.EnqueueTrigger(ctx, "r1", "ticket.opened", payload); err != nil {
+		t.Fatalf("入原事件: %v", err)
+	}
+	var triggerID uint64
+	if err := pool.QueryRow(ctx, `SELECT id FROM flow_trigger_outbox WHERE event_name='ticket.opened'`).Scan(&triggerID); err != nil {
+		t.Fatalf("取原事件: %v", err)
+	}
+	if claimed, err := st.StartTriggerRun(ctx, triggerID, "automation-ticket", f.ID, 1); err != nil || !claimed {
+		t.Fatalf("启动原运行: claimed=%v err=%v", claimed, err)
+	}
+	if err := st.FinishTriggerRun(ctx, triggerID, "automation-ticket", "failed", nil, fmt.Errorf("upstream unavailable")); err != nil {
+		t.Fatalf("结束原运行: %v", err)
+	}
+	// Delivery of a terminal business failure must not silently become another
+	// business attempt if its outbox acknowledgement needs recovery.
+	if claimed, err := st.StartTriggerRun(ctx, triggerID, "automation-ticket", f.ID, 1); err != nil || claimed {
+		t.Fatalf("失败运行不得被自动接管: claimed=%v err=%v", claimed, err)
+	}
+
+	var runID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM flow_runs WHERE trigger_id=$1`, triggerID).Scan(&runID); err != nil {
+		t.Fatalf("取原运行: %v", err)
+	}
+	queued, err := st.EnqueueReplay(ctx, f.ID, "r1", runID)
+	if err != nil || queued.TriggerID == 0 || queued.AlreadyQueued {
+		t.Fatalf("首次重放入队: %+v err=%v", queued, err)
+	}
+	duplicate, err := st.EnqueueReplay(ctx, f.ID, "r1", runID)
+	if err != nil || !duplicate.AlreadyQueued || duplicate.TriggerID != queued.TriggerID {
+		t.Fatalf("重复重放应幂等: %+v err=%v", duplicate, err)
+	}
+
+	var gotPayload json.RawMessage
+	var automationID, flowID string
+	var version int
+	var replayOf int64
+	if err := pool.QueryRow(ctx, `
+		SELECT payload, replay_automation_id, replay_flow_id, replay_flow_version, replay_of_run_id
+		FROM flow_trigger_outbox WHERE id=$1`, queued.TriggerID).Scan(
+		&gotPayload, &automationID, &flowID, &version, &replayOf,
+	); err != nil {
+		t.Fatalf("读重放事件: %v", err)
+	}
+	if string(gotPayload) != string(payload) || automationID != "automation-ticket" || flowID != f.ID || version != 1 || replayOf != runID {
+		t.Fatalf("重放没有固定原始快照: payload=%s automation=%s flow=%s version=%d replayOf=%d", gotPayload, automationID, flowID, version, replayOf)
+	}
+
+	if _, err := st.EnqueueReplay(ctx, f.ID, "r1", runID+999); err != store.ErrNotFound {
+		t.Fatalf("不存在运行应拒绝: %v", err)
+	}
+	if err := st.FinishTriggerRun(ctx, triggerID, "automation-ticket", "succeeded", json.RawMessage(`{}`), nil); err != nil {
+		t.Fatalf("置成功运行: %v", err)
+	}
+	if _, err := st.EnqueueReplay(ctx, f.ID, "r1", runID); err != store.ErrRunNotReplayable {
+		t.Fatalf("成功运行不得重放: %v", err)
+	}
+}

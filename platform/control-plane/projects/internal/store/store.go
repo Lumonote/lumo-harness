@@ -97,6 +97,7 @@ var (
 	ErrMeteringNotReady = errors.New("budget_trees 尚未创建（计量插件未初始化——须先完成 metering 建表再创建项目）")
 	ErrReportStale      = errors.New("report session log is stale; refusing to persist a partial report")
 	ErrInvalidReport    = errors.New("invalid task report")
+	ErrConflict         = errors.New("task report state conflicts with the requested operation")
 )
 
 // Store PG 存储。

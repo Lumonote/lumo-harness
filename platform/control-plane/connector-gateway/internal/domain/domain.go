@@ -46,6 +46,25 @@ type Auth struct {
 	Kind          AuthKind `json:"kind"`
 	CredentialRef string   `json:"credentialRef"`
 	HeaderName    string   `json:"headerName,omitempty"`
+	// OAuth is a provider registration contract, never a client secret or a
+	// refresh token.  CredentialRef remains the short-lived access-token
+	// reference that this gateway resolves only at dispatch time.
+	OAuth *OAuth2 `json:"oauth,omitempty"`
+}
+
+// OAuth2 is deliberately provider-neutral: a SaaS/MCP integrator must give
+// the exact provider endpoints and callback that were registered upstream.
+// PKCE is mandatory for the authorization-code flow.  Client refs resolve via
+// Vault/environment and are never serialized into an audit record or prompt.
+type OAuth2 struct {
+	Provider         string   `json:"provider"`
+	AuthorizationURL string   `json:"authorizationUrl"`
+	TokenURL         string   `json:"tokenUrl"`
+	CallbackURL      string   `json:"callbackUrl"`
+	ClientIDRef      string   `json:"clientIdRef"`
+	ClientSecretRef  string   `json:"clientSecretRef"`
+	Scopes           []string `json:"scopes"`
+	PKCE             bool     `json:"pkce"`
 }
 
 // Operation 工具面（toolSurface）中的一个可调用操作。
@@ -118,7 +137,8 @@ type Caller struct {
 	Roles     []string
 	SessionID string
 	ProjectID string
-	// Approved 该次调用已获人工批准（HITL）；由终端网关在审批回流后带入。
+	// Approved 该次调用已获人工批准（HITL）；只能由连接器网关消费与本次
+	// 请求精确绑定的一次性审批记录后设置，绝不能由调用方头部或请求体自报。
 	Approved bool
 
 	// ── 计量归因（可空；缺省在网关 buildMeter）──

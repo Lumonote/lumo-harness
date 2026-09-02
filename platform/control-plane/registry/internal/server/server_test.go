@@ -54,12 +54,82 @@ func TestMethodNotAllowed(t *testing.T) {
 		{http.MethodPost, "/v1/artifacts/foo/1.0.0"},
 		{http.MethodGet, "/v1/resolve"},
 		{http.MethodGet, "/v1/plan"},
+		{http.MethodDelete, "/v1/installations"},
+		{http.MethodDelete, "/v1/rollouts/stable"},
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 		if w.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("%s %s 应 405，得到 %d", tc.method, tc.path, w.Code)
+		}
+	}
+}
+
+// TestRolloutRejectsInvalidCommandsBeforeStoreAccess keeps the desired-state
+// command boundary testable without a live PG Store.
+func TestRolloutRejectsInvalidCommandsBeforeStoreAccess(t *testing.T) {
+	h := server.New(nil, nil, nil)
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   string
+		header http.Header
+		status int
+	}{
+		{http.MethodGet, "/v1/rollouts/stable?limit=0", "", nil, http.StatusBadRequest},
+		{http.MethodGet, "/v1/rollouts/bad%20channel", "", nil, http.StatusBadRequest},
+		{http.MethodPut, "/v1/rollouts/stable/demo-skill", `{"version":"1.0.0","percent":100}`, nil, http.StatusUnauthorized},
+		{http.MethodPut, "/v1/rollouts/stable/demo-skill", `{"version":"1.0.0","percent":-1}`, http.Header{"X-Lumo-User": []string{"admin"}, "X-Lumo-Realm": []string{"dev"}, "X-Lumo-Roles": []string{"realm_admin"}}, http.StatusBadRequest},
+		{http.MethodPut, "/v1/rollouts/stable/demo-skill", `{"version":"1.0.0","percent":101}`, http.Header{"X-Lumo-User": []string{"admin"}, "X-Lumo-Realm": []string{"dev"}, "X-Lumo-Roles": []string{"realm_admin"}}, http.StatusBadRequest},
+		{http.MethodPut, "/v1/rollouts/stable/demo-skill", `{"version":"1.0.0","percent":100,"unexpected":true}`, http.Header{"X-Lumo-User": []string{"admin"}, "X-Lumo-Realm": []string{"dev"}, "X-Lumo-Roles": []string{"realm_admin"}}, http.StatusBadRequest},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+		for key, values := range tc.header {
+			for _, value := range values {
+				req.Header.Add(key, value)
+			}
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != tc.status {
+			t.Fatalf("%s %s 应为 %d，得到 %d: %s", tc.method, tc.path, tc.status, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestCatalogRejectsInvalidLimitBeforeStoreAccess(t *testing.T) {
+	h := server.New(nil, nil, nil)
+	for _, path := range []string{"/v1/artifacts?limit=0", "/v1/artifacts?limit=201", "/v1/artifacts?limit=nope"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s 应为 400，得到 %d", path, w.Code)
+		}
+	}
+}
+
+// TestInstallationReportRejectsInvalidRequestBeforeStoreAccess keeps the
+// handler's untrusted-input boundary testable without a live PG Store.
+func TestInstallationReportRejectsInvalidRequestBeforeStoreAccess(t *testing.T) {
+	h := server.New(nil, nil, nil)
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/v1/installations?limit=0", ""},
+		{http.MethodPost, "/v1/installations", `{"node_id":"bad id","state":"converged","root":"demo@1.0.0","installed":[]}`},
+		{http.MethodPost, "/v1/installations", `{"node_id":"node-a","state":"converged","root":"demo@1.0.0","installed":[{"name":"demo","version":"1.0.0","digest":"not-a-digest"}]}`},
+		{http.MethodPost, "/v1/installations", `{"node_id":"node-a","state":"failed","root":"demo@1.0.0","installed":[{"name":"demo","version":"1.0.0","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}`},
+		{http.MethodPost, "/v1/installations", `{"node_id":"node-a","state":"failed","root":"demo@1.0.0","installed":[]}{}`},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s %s 应为 400，得到 %d: %s", tc.method, tc.path, w.Code, w.Body.String())
 		}
 	}
 }

@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	authcrypto "github.com/lumo-harness/platform/governance/internal/auth"
 	"github.com/lumo-harness/platform/governance/internal/domain"
 	"github.com/lumo-harness/platform/governance/internal/server"
 	"github.com/lumo-harness/platform/governance/internal/store"
@@ -42,6 +44,18 @@ func envSeconds(key string, fallback int) time.Duration {
 	return time.Duration(envInt(key, fallback)) * time.Second
 }
 
+func envBool(key string, fallback bool) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w", key, err)
+	}
+	return value, nil
+}
+
 func main() {
 	modeDefault := strings.ToLower(envOr("LUMO_DEPLOYMENT_MODE", "standalone"))
 	statusDefault := envOr("LUMO_CLUSTER_STATUS", "not_ready")
@@ -56,9 +70,32 @@ func main() {
 		slog.Error("unsupported deployment mode", "mode", mode)
 		os.Exit(2)
 	}
+	requireUV, err := envBool("LUMO_AUTH_WEBAUTHN_REQUIRE_USER_VERIFICATION", true)
+	if err != nil {
+		slog.Error("invalid WebAuthn configuration", "err", err)
+		os.Exit(2)
+	}
+	origins := []string{}
+	if rawOrigins := strings.TrimSpace(os.Getenv("LUMO_AUTH_WEBAUTHN_ORIGINS")); rawOrigins != "" {
+		origins = strings.Split(rawOrigins, ",")
+	}
+	webauthnConfig, err := authcrypto.NewWebAuthnConfig(
+		os.Getenv("LUMO_AUTH_WEBAUTHN_RP_ID"),
+		os.Getenv("LUMO_AUTH_WEBAUTHN_RP_NAME"),
+		origins,
+		requireUV,
+	)
+	if err != nil {
+		slog.Error("invalid WebAuthn configuration", "err", err)
+		os.Exit(2)
+	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if _, err := observability.ConfigureOTelFromEnv(ctx, "lumo-governance"); err != nil {
+		log.Error("invalid OpenTelemetry configuration", "err", err)
+		os.Exit(2)
+	}
 
 	pool, err := pgxpool.New(ctx, *pgDSN)
 	if err != nil {
@@ -104,11 +141,14 @@ func main() {
 		AuthLockFor:       envSeconds("LUMO_AUTH_LOCK_SECONDS", 300),
 		AuthSessionTTL:    envSeconds("LUMO_AUTH_SESSION_TTL_SECONDS", 86400),
 		AuthCaptchaTTL:    envSeconds("LUMO_AUTH_CAPTCHA_TTL_SECONDS", 120),
+		AuthMFAKey:        os.Getenv("LUMO_AUTH_MFA_KEY"),
+		WebAuthn:          webauthnConfig,
 	}, log)
 	mux := http.NewServeMux()
 	srv.Register(mux)
 	log.Info("governance started", "addr", *listen, "deployment_mode", mode, "cluster_status", *clusterStatus)
-	if err := http.ListenAndServe(*listen, observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux))); err != nil {
+	httpSrv := &http.Server{Addr: *listen, Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)), ReadHeaderTimeout: 10 * time.Second}
+	if err := observability.Serve(httpSrv); err != nil {
 		log.Error("governance stopped", "err", err)
 		os.Exit(1)
 	}

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/lumo-harness/platform/observability"
 )
 
 type OPAClient struct {
@@ -26,7 +28,7 @@ func NewOPAClient(baseURL, policyPath string) *OPAClient {
 	return &OPAClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		path:    strings.Trim(policyPath, "/"),
-		client:  &http.Client{Timeout: 5 * time.Second},
+		client:  observability.ConfiguredHTTPClient(5 * time.Second),
 	}
 }
 

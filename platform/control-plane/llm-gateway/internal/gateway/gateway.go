@@ -15,8 +15,10 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/lumo-harness/platform/llm-gateway/internal/domain"
+	"github.com/lumo-harness/platform/observability"
 )
 
 // Upstream 一次调用的上游句柄（由 store.Provider 提供）。
@@ -37,7 +39,7 @@ type Gateway struct {
 
 func New(client *http.Client, onWarn func(string, ...any)) *Gateway {
 	if client == nil {
-		client = http.DefaultClient
+		client = observability.ConfiguredHTTPClient(30 * time.Second)
 	}
 	if onWarn == nil {
 		onWarn = func(string, ...any) {}

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/registry/internal/bundle"
 	"github.com/lumo-harness/platform/registry/internal/jsonlzstd"
 	"github.com/lumo-harness/platform/registry/internal/manifest"
@@ -35,8 +37,63 @@ var skillNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
 type Installer struct {
 	RegistryURL       string
 	InstallDir        string
+	NodeID            string
 	ControlPlaneToken string
 	Client            *http.Client
+}
+
+// ResolveRollout reads a channel's desired version for one root artifact. It
+// is deliberately not an install API: the returned value is only fed back into
+// Reconcile, which fetches and verifies a fresh signed plan before any local
+// state changes occur.
+func (i *Installer) ResolveRollout(ctx context.Context, channel, name string) (string, error) {
+	if i.RegistryURL == "" || channel == "" || name == "" {
+		return "", errors.New("provisioner: registry、rollout 通道和制品名均为必填")
+	}
+	endpoint := i.RegistryURL + "/v1/rollouts/" + url.PathEscape(channel) + "/" + url.PathEscape(name)
+	if i.NodeID != "" {
+		endpoint += "?node_id=" + url.QueryEscape(i.NodeID)
+	}
+	res, err := i.do(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("provisioner: rollout 返回 HTTP %d", res.StatusCode)
+	}
+	var body struct {
+		Rollout struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+			Percent int    `json:"percent"`
+		} `json:"rollout"`
+		Selection *struct {
+			NodeID  string `json:"node_id"`
+			Version string `json:"version"`
+			Cohort  string `json:"cohort"`
+		} `json:"selection"`
+	}
+	dec := json.NewDecoder(io.LimitReader(res.Body, 64<<10))
+	if err := dec.Decode(&body); err != nil {
+		return "", fmt.Errorf("provisioner: rollout 解析失败: %w", err)
+	}
+	if body.Rollout.Name != name || body.Rollout.Version == "" || body.Rollout.Percent < 0 || body.Rollout.Percent > 100 {
+		return "", errors.New("provisioner: rollout 返回非法目标")
+	}
+	if body.Rollout.Percent < 100 {
+		if i.NodeID == "" {
+			return "", errors.New("provisioner: 部分 rollout 需要 PROVISIONER_NODE_ID")
+		}
+		if body.Selection == nil || body.Selection.NodeID != i.NodeID || body.Selection.Version == "" || (body.Selection.Cohort != "target" && body.Selection.Cohort != "holdback") {
+			return "", errors.New("provisioner: rollout 未返回当前节点的有效目标")
+		}
+		return body.Selection.Version, nil
+	}
+	if body.Selection != nil && body.Selection.NodeID == i.NodeID && body.Selection.Version != "" {
+		return body.Selection.Version, nil
+	}
+	return body.Rollout.Version, nil
 }
 
 type InstallState struct {
@@ -88,6 +145,63 @@ func (i *Installer) Reconcile(ctx context.Context, name, version string, shape p
 	return state, true, nil
 }
 
+// Report publishes a node's latest reconcile fact after the installer has
+// already performed all signature, plan, digest, and atomic-write checks. It
+// deliberately reports only identity/digest facts, never local paths, payload
+// bytes, or a raw error that could disclose node topology to a product surface.
+func (i *Installer) Report(ctx context.Context, name, version string, shape plan.Shape, state *InstallState, reconcileErr error) error {
+	if i.NodeID == "" {
+		return errors.New("provisioner: PROVISIONER_NODE_ID 是节点安装状态回报的必填项")
+	}
+	root := name + "@" + version
+	payload := struct {
+		NodeID    string `json:"node_id"`
+		State     string `json:"state"`
+		Root      string `json:"root"`
+		Installed []struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+			Digest  string `json:"digest"`
+		} `json:"installed"`
+		Shape plan.Shape `json:"shape"`
+	}{NodeID: i.NodeID, State: "failed", Root: root, Installed: []struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+		Digest  string `json:"digest"`
+	}{}, Shape: shape}
+	if reconcileErr == nil {
+		if state == nil || state.Root == "" || len(state.Installed) == 0 {
+			return errors.New("provisioner: 无法回报空的收敛安装状态")
+		}
+		payload.State, payload.Root = "converged", state.Root
+		payload.Installed = make([]struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+			Digest  string `json:"digest"`
+		}, 0, len(state.Installed))
+		for _, item := range state.Installed {
+			payload.Installed = append(payload.Installed, struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+				Digest  string `json:"digest"`
+			}{Name: item.Name, Version: item.Version, Digest: item.Digest})
+		}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("provisioner: 序列化安装状态回报失败: %w", err)
+	}
+	res, err := i.do(ctx, http.MethodPost, i.RegistryURL+"/v1/installations", strings.NewReader(string(raw)))
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("provisioner: 安装状态回报返回 HTTP %d", res.StatusCode)
+	}
+	return nil
+}
+
 func (i *Installer) readState(p *plan.Plan) (*InstallState, bool) {
 	raw, err := os.ReadFile(filepath.Join(i.InstallDir, installStateFile))
 	if err != nil {
@@ -131,7 +245,7 @@ func (i *Installer) matchesPlan(p *plan.Plan, state *InstallState) bool {
 
 func New(registryURL, installDir string) *Installer {
 	return &Installer{RegistryURL: strings.TrimRight(registryURL, "/"), InstallDir: installDir,
-		Client: &http.Client{Timeout: 30 * time.Second}}
+		Client: observability.ConfiguredHTTPClient(30 * time.Second)}
 }
 
 func (i *Installer) Install(ctx context.Context, name, version string, shape plan.Shape) (*InstallState, error) {
@@ -371,7 +485,7 @@ func (i *Installer) fetchBlob(ctx context.Context, digest string) ([]byte, error
 func (i *Installer) do(ctx context.Context, method, endpoint string, body io.Reader) (*http.Response, error) {
 	client := i.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = observability.ConfiguredHTTPClient(30 * time.Second)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
@@ -507,6 +621,38 @@ func (i *Installer) matchesPayload(dir, expectedDigest string) bool {
 		}
 	}
 	return true
+}
+
+// matchesPayloadEntry binds a runtime entrypoint to one concrete, signed
+// bundle entry. matchesPayload deliberately permits a bundle to contain many
+// files; this narrower check prevents a manifest from selecting a path that
+// the bundle never supplied.
+func (i *Installer) matchesPayloadEntry(dir, expectedDigest, entryPath string) bool {
+	raw, err := os.ReadFile(filepath.Join(dir, "bundle.jsonl.zst"))
+	if err != nil || digest(raw) != expectedDigest {
+		return false
+	}
+	parsed, err := bundle.Decode(raw)
+	if err != nil {
+		return false
+	}
+	for _, entry := range parsed.Entries {
+		if entry.Path != entryPath {
+			continue
+		}
+		expected, err := bundle.EntryBytes(entry)
+		if err != nil {
+			return false
+		}
+		path := filepath.Join(dir, "payload", filepath.FromSlash(entry.Path))
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return false
+		}
+		actual, err := os.ReadFile(path)
+		return err == nil && bytes.Equal(actual, expected)
+	}
+	return false
 }
 
 func (i *Installer) materializeSkillSnapshot(p *plan.Plan) error {

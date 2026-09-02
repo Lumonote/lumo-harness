@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/lumo-harness/platform/connector-gateway/internal/approval"
 	"github.com/lumo-harness/platform/connector-gateway/internal/audit"
 	"github.com/lumo-harness/platform/connector-gateway/internal/breaker"
 	"github.com/lumo-harness/platform/connector-gateway/internal/credentials"
@@ -54,8 +55,8 @@ func (headerAuth) Authenticate(r *http.Request) (domain.Caller, error) {
 		Roles:     splitCSV(r.Header.Get("X-Lumo-Roles")),
 		SessionID: r.Header.Get("X-Lumo-Session"),
 		ProjectID: r.Header.Get("X-Lumo-Project"),
-		// 审批结论由终端网关在人工批准后带入；连接器网关只认这一个来源
-		Approved: r.Header.Get("X-Lumo-Approved") == "true",
+		// 审批结论只来自本服务消费的一次性审批记录，不能由调用方请求头自报。
+		Approved: false,
 		// 计量归因元数据头：可空 —— 缺省在网关 buildMeter 处补（'unknown'/'system' + 告警），
 		// 而不是在这里 400。理由：既有 TS 客户端今天只发 User/Realm/Roles/Project 已在跑，
 		// 把归因改成必填会立刻打破现有链路。
@@ -92,6 +93,11 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	shutdownOTel, telemetryErr := observability.ConfigureOTelFromEnv(ctx, "lumo-connector-gateway")
+	if telemetryErr != nil {
+		log.Error("invalid OpenTelemetry configuration", "err", telemetryErr)
+		os.Exit(2)
+	}
 
 	pool, err := pgxpool.New(ctx, *pgDSN)
 	if err != nil {
@@ -116,6 +122,11 @@ func main() {
 	sink := audit.NewPg(pool)
 	if err := sink.Init(ctx); err != nil {
 		log.Error("初始化审计表失败", "err", err)
+		os.Exit(1)
+	}
+	approvals := approval.NewPg(pool)
+	if err := approvals.Init(ctx); err != nil {
+		log.Error("初始化连接器审批存储失败", "err", err)
 		os.Exit(1)
 	}
 
@@ -159,6 +170,7 @@ func main() {
 		Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(server.New(server.Options{
 			Gateway:    gw,
 			Registry:   reg,
+			Approvals:  approvals,
 			Breakers:   brk,
 			Auth:       headerAuth{},
 			Logger:     log,
@@ -176,7 +188,7 @@ func main() {
 				webEgress.AllowPrivateNetwork, webEgress.RedactResponse))
 		log.Warn("当前为 Local-lite 形态：凭证读环境变量、策略走进程内规则",
 			"remedy", "Standalone+ 换 Vault Store 与 OPA Policy 实现同一接口（architecture §13.2）")
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := observability.Serve(srv); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("HTTP 服务异常退出", "err", err)
 			stop()
 		}
@@ -188,6 +200,9 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
 		log.Error("关闭 HTTP 服务失败", "err", err)
+	}
+	if err := shutdownOTel(shutCtx); err != nil {
+		log.Warn("flush OpenTelemetry failed", "err", err)
 	}
 	log.Info("连接器网关已停止")
 }

@@ -110,6 +110,46 @@ func TestIdempotentResubmit(t *testing.T) {
 	}
 }
 
+// TestCancelIntentAndTerminal reports the durable control command separately
+// from the terminal task state: node acknowledgement means CANCELLING, while
+// only an execution terminal report yields ABORTED.
+func TestCancelIntentAndTerminal(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	nodeN1(t, st)
+	lease, err := st.Acquire(ctx, "node-a", 5000)
+	if err != nil {
+		t.Fatalf("建租失败: %v", err)
+	}
+	if _, err := st.PlaceTask(ctx, lease, domain.Task{TaskID: "cancel-me", Realm: "r1", ClusterID: "c1"}, "N1"); err != nil {
+		t.Fatalf("放置失败: %v", err)
+	}
+	if err := st.RecordCancelIntent(ctx, "cancel-me"); err != nil {
+		t.Fatalf("持久化取消命令失败: %v", err)
+	}
+	var commandState string
+	if err := st.Pool().QueryRow(ctx, `SELECT status FROM scheduler_control_commands WHERE task_id='cancel-me' AND command='CANCEL'`).Scan(&commandState); err != nil {
+		t.Fatalf("读取取消命令失败: %v", err)
+	}
+	if commandState != "REQUESTED" {
+		t.Fatalf("取消命令初态应 REQUESTED, got %s", commandState)
+	}
+	p, err := st.RequestCancel(ctx, "cancel-me")
+	if err != nil || p.State != domain.StateCancelling {
+		t.Fatalf("节点确认后应 CANCELLING: %+v err=%v", p, err)
+	}
+	if err := st.Pool().QueryRow(ctx, `SELECT status FROM scheduler_control_commands WHERE task_id='cancel-me' AND command='CANCEL'`).Scan(&commandState); err != nil {
+		t.Fatalf("读取确认取消命令失败: %v", err)
+	}
+	if commandState != "ACKNOWLEDGED" {
+		t.Fatalf("节点确认后命令应 ACKNOWLEDGED, got %s", commandState)
+	}
+	p, err = st.CompleteTask(ctx, "cancel-me", domain.StateAborted)
+	if err != nil || p.State != domain.StateAborted {
+		t.Fatalf("终态回报应 ABORTED: %+v err=%v", p, err)
+	}
+}
+
 // TestOutboxAtomicity spec §7 场景 8：放置 ⟺ 派发同事务，任一失败两行皆无。
 func TestOutboxAtomicity(t *testing.T) {
 	st := newStore(t)

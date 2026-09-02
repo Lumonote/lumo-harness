@@ -34,13 +34,17 @@ func (f *fakeOutbox) AckTrigger(_ context.Context, id uint64) error {
 }
 
 func TestWorkerPublishesAndAcksOnlyAfterHandlersSucceed(t *testing.T) {
-	fake := &fakeOutbox{items: []store.TriggerRecord{{ID: 7, Realm: "r1", Name: "deploy", Payload: json.RawMessage(`{"value":1}`)}}}
+	fake := &fakeOutbox{items: []store.TriggerRecord{{
+		ID: 7, Realm: "r1", Name: "deploy", Payload: json.RawMessage(`{"value":1}`),
+		ReplayAutomationID: "deploy-prod", ReplayFlowID: "flow-deploy", ReplayFlowVersion: 3, ReplayOfRunID: 41,
+	}}}
 	bus := New()
 	var got Event
 	bus.Subscribe("deploy", func(_ context.Context, event Event) error { got = event; return nil })
 	worker := NewWorker(fake, bus, "test")
 	worker.cycle(context.Background())
-	if got.ID != 7 || got.Realm != "r1" || got.Name != "deploy" {
+	if got.ID != 7 || got.Realm != "r1" || got.Name != "deploy" || !got.IsReplay() ||
+		got.ReplayAutomationID != "deploy-prod" || got.ReplayFlowID != "flow-deploy" || got.ReplayFlowVersion != 3 || got.ReplayOfRunID != 41 {
 		t.Fatalf("unexpected event: %+v", got)
 	}
 	if len(fake.acked) != 1 || fake.acked[0] != 7 {

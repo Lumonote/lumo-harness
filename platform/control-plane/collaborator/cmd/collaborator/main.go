@@ -60,6 +60,10 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if _, err := observability.ConfigureOTelFromEnv(ctx, "lumo-collaborator"); err != nil {
+		log.Error("invalid OpenTelemetry configuration", "err", err)
+		os.Exit(2)
+	}
 
 	st, err := store.New(ctx, *pgDSN, *redisAddr)
 	if err != nil {
@@ -147,7 +151,7 @@ func main() {
 	go func() {
 		log.Info("协作服务启动", "listen", *listen, "instance", *instance,
 			"maxDocs", limits.MaxDocsPerInstance, "maxEditorsPerDoc", limits.MaxEditorsPerDoc)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := observability.Serve(srv); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("HTTP 服务异常退出", "err", err)
 			stop()
 		}

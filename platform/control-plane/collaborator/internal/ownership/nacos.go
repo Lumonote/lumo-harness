@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/lumo-harness/platform/observability"
 )
 
 type NacosPeerOptions struct {
@@ -44,7 +46,7 @@ func NewNacosPeerSync(options NacosPeerOptions, log *slog.Logger) *NacosPeerSync
 	}
 	return &NacosPeerSync{
 		opts:   options,
-		client: &http.Client{Timeout: 3 * time.Second},
+		client: observability.ConfiguredHTTPClient(3 * time.Second),
 		log:    log,
 	}
 }

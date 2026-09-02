@@ -39,8 +39,13 @@ type Registry interface {
 	// —— 三种情况回同一个错误，避免通过错误码探测他 realm 的连接器是否存在。
 	Lookup(ctx context.Context, realm domain.RealmID, id string) (domain.Connector, error)
 	List(ctx context.Context, realm domain.RealmID) ([]domain.Connector, error)
+	// ListAll is limited to connector administrators by the HTTP layer. It is
+	// required to recover a stopped connector; ordinary callers never discover
+	// disabled manifests.
+	ListAll(ctx context.Context, realm domain.RealmID) ([]domain.Connector, error)
 	Upsert(ctx context.Context, c domain.Connector) error
 	Disable(ctx context.Context, realm domain.RealmID, id string) error
+	Enable(ctx context.Context, realm domain.RealmID, id string) error
 }
 
 type cacheEntry struct {
@@ -105,9 +110,20 @@ func (r *PgRegistry) Lookup(ctx context.Context, realm domain.RealmID, id string
 }
 
 func (r *PgRegistry) List(ctx context.Context, realm domain.RealmID) ([]domain.Connector, error) {
-	rows, err := r.pool.Query(ctx,
-		`SELECT id, manifest, version FROM connectors WHERE realm = $1 AND enabled ORDER BY id`,
-		string(realm))
+	return r.list(ctx, realm, true)
+}
+
+func (r *PgRegistry) ListAll(ctx context.Context, realm domain.RealmID) ([]domain.Connector, error) {
+	return r.list(ctx, realm, false)
+}
+
+func (r *PgRegistry) list(ctx context.Context, realm domain.RealmID, enabledOnly bool) ([]domain.Connector, error) {
+	query := `SELECT id, manifest, version, enabled FROM connectors WHERE realm = $1`
+	if enabledOnly {
+		query += ` AND enabled`
+	}
+	query += ` ORDER BY id`
+	rows, err := r.pool.Query(ctx, query, string(realm))
 	if err != nil {
 		return nil, err
 	}
@@ -118,14 +134,15 @@ func (r *PgRegistry) List(ctx context.Context, realm domain.RealmID) ([]domain.C
 		var id string
 		var raw []byte
 		var version int
-		if err := rows.Scan(&id, &raw, &version); err != nil {
+		var enabled bool
+		if err := rows.Scan(&id, &raw, &version, &enabled); err != nil {
 			return nil, err
 		}
 		var c domain.Connector
 		if err := json.Unmarshal(raw, &c); err != nil {
 			return nil, fmt.Errorf("connector %s manifest 解析失败: %w", id, err)
 		}
-		c.ID, c.Realm, c.Version, c.Enabled = id, realm, version, true
+		c.ID, c.Realm, c.Version, c.Enabled = id, realm, version, enabled
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -160,6 +177,23 @@ func (r *PgRegistry) Disable(ctx context.Context, realm domain.RealmID, id strin
 		id, string(realm))
 	if err != nil {
 		return err
+	}
+	r.invalidate(realm, id)
+	return nil
+}
+
+func (r *PgRegistry) Enable(ctx context.Context, realm domain.RealmID, id string) error {
+	// Re-enabling preserves the exact audited manifest and its version. Any
+	// material manifest change must still go through Upsert, which increments
+	// the version and invalidates request-bound approvals.
+	result, err := r.pool.Exec(ctx,
+		`UPDATE connectors SET enabled = true, updated_at = now() WHERE id = $1 AND realm = $2`,
+		id, string(realm))
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", domain.ErrNotFound, id)
 	}
 	r.invalidate(realm, id)
 	return nil

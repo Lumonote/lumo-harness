@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/lumo-harness/platform/connector-gateway/internal/approval"
 	"github.com/lumo-harness/platform/connector-gateway/internal/breaker"
 	"github.com/lumo-harness/platform/connector-gateway/internal/domain"
 	"github.com/lumo-harness/platform/connector-gateway/internal/gateway"
@@ -25,12 +27,13 @@ type Authenticator interface {
 
 // Server HTTP 接入。
 type Server struct {
-	gw      *gateway.Gateway
-	reg     registry.Registry
-	brk     *breaker.Group
-	auth    Authenticator
-	log     *slog.Logger
-	maxBody int64
+	gw        *gateway.Gateway
+	reg       registry.Registry
+	brk       *breaker.Group
+	approvals *approval.Store
+	auth      Authenticator
+	log       *slog.Logger
+	maxBody   int64
 	// AdminRoles 允许注册/停用连接器的角色。
 	AdminRoles []string
 }
@@ -39,6 +42,7 @@ type Options struct {
 	Gateway     *gateway.Gateway
 	Registry    registry.Registry
 	Breakers    *breaker.Group
+	Approvals   *approval.Store
 	Auth        Authenticator
 	Logger      *slog.Logger
 	MaxBodyByte int64
@@ -62,7 +66,7 @@ func New(o Options) *Server {
 		o.Gateway.SetWebEgress(o.WebEgress)
 	}
 	return &Server{
-		gw: o.Gateway, reg: o.Registry, brk: o.Breakers,
+		gw: o.Gateway, reg: o.Registry, brk: o.Breakers, approvals: o.Approvals,
 		auth: o.Auth, log: o.Logger,
 		maxBody: o.MaxBodyByte, AdminRoles: o.AdminRoles,
 	}
@@ -75,7 +79,11 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /connectors", s.handleList)
 	mux.HandleFunc("PUT /connectors/{id}", s.handleRegister)
 	mux.HandleFunc("DELETE /connectors/{id}", s.handleDisable)
+	mux.HandleFunc("POST /connectors/{id}/enable", s.handleEnable)
 	mux.HandleFunc("POST /connectors/{id}/invoke", s.handleInvoke)
+	mux.HandleFunc("GET /approvals", s.handleListApprovals)
+	mux.HandleFunc("POST /approvals/{id}/approve", s.handleApprove)
+	mux.HandleFunc("POST /approvals/{id}/reject", s.handleReject)
 	mux.HandleFunc("POST /web/fetch", s.handleWebFetch)
 	return mux
 }
@@ -97,7 +105,17 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, err.Error())
 		return
 	}
-	conns, err := s.reg.List(r.Context(), caller.Realm)
+	includeDisabled := r.URL.Query().Get("includeDisabled") == "true"
+	if includeDisabled && !hasAnyRole(caller.Roles, s.AdminRoles) {
+		writeErr(w, http.StatusForbidden, "查看已停用连接器需要管理员角色")
+		return
+	}
+	var conns []domain.Connector
+	if includeDisabled {
+		conns, err = s.reg.ListAll(r.Context(), caller.Realm)
+	} else {
+		conns, err = s.reg.List(r.Context(), caller.Realm)
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -115,7 +133,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, map[string]any{
 			"id": c.ID, "name": c.Name, "protocol": c.Protocol,
-			"version": c.Version, "operations": ops,
+			"version": c.Version, "enabled": c.Enabled, "operations": ops,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"connectors": out})
@@ -164,26 +182,96 @@ func (s *Server) handleDisable(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleEnable(w http.ResponseWriter, r *http.Request) {
+	caller, err := s.auth.Authenticate(r)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if !hasAnyRole(caller.Roles, s.AdminRoles) {
+		writeErr(w, http.StatusForbidden, "恢复连接器需要管理员角色")
+		return
+	}
+	if err := s.reg.Enable(r.Context(), caller.Realm, r.PathValue("id")); err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "连接器不存在")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+const approvalTTL = 15 * time.Minute
+
+type invokeRequest struct {
+	domain.Invocation
+	ApprovalID string `json:"approvalId,omitempty"`
+}
+
 func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 	caller, err := s.auth.Authenticate(r)
 	if err != nil {
 		writeErr(w, http.StatusUnauthorized, err.Error())
 		return
 	}
+	// A caller never gets to self-assert approval in a request header. Only a
+	// successfully consumed, request-bound approval record can flip this bit for
+	// the single Gateway invocation below.
+	caller.Approved = false
 
-	var inv domain.Invocation
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.maxBody)).Decode(&inv); err != nil {
+	var input invokeRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.maxBody)).Decode(&input); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求解析失败: "+err.Error())
 		return
 	}
+	inv := input.Invocation
 	inv.ConnectorID = r.PathValue("id")
 	if inv.CorrelationID == "" {
 		inv.CorrelationID = r.Header.Get("X-Lumo-Correlation-Id")
+	}
+	if input.ApprovalID != "" {
+		if s.approvals == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "审批存储未配置，拒绝执行高敏感写操作", "code": "approval_unavailable"})
+			return
+		}
+		conn, lookupErr := s.reg.Lookup(r.Context(), caller.Realm, inv.ConnectorID)
+		if lookupErr != nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "连接器不存在或不可用", "code": "connector_not_found"})
+			return
+		}
+		if _, consumeErr := s.approvals.Consume(r.Context(), input.ApprovalID, caller, inv, conn.Version); consumeErr != nil {
+			status := http.StatusConflict
+			if !errors.Is(consumeErr, approval.ErrNotUsable) {
+				status = http.StatusInternalServerError
+			}
+			writeJSON(w, status, map[string]any{"error": "审批不可用于本次调用", "code": "approval_invalid"})
+			return
+		}
+		caller.Approved = true
 	}
 
 	result, err := s.gw.Invoke(r.Context(), caller, inv)
 	if err != nil {
 		status, code := classify(err)
+		if errors.Is(err, domain.ErrApproval) && s.approvals != nil {
+			conn, lookupErr := s.reg.Lookup(r.Context(), caller.Realm, inv.ConnectorID)
+			if lookupErr != nil {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "连接器不存在或不可用", "code": "connector_not_found"})
+				return
+			}
+			request, createErr := s.approvals.Create(r.Context(), caller, inv, conn.Version, approvalTTL)
+			if createErr != nil {
+				if s.log != nil {
+					s.log.Error("创建连接器审批失败", "connector", inv.ConnectorID, "operation", inv.Operation, "err", createErr)
+				}
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "审批记录暂不可创建，调用未执行", "code": "approval_unavailable"})
+				return
+			}
+			writeJSON(w, status, map[string]any{"error": err.Error(), "code": code, "approval": request})
+			return
+		}
 		s.log.Info("连接器调用被拒绝或失败",
 			"connector", inv.ConnectorID, "operation", inv.Operation,
 			"user", caller.UserID, "code", code, "err", err)
@@ -191,6 +279,58 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleListApprovals(w http.ResponseWriter, r *http.Request) {
+	caller, err := s.auth.Authenticate(r)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if s.approvals == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "审批存储未配置", "code": "approval_unavailable"})
+		return
+	}
+	requests, err := s.approvals.List(r.Context(), string(caller.Realm), caller.UserID, hasAnyRole(caller.Roles, s.AdminRoles))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"approvals": requests})
+}
+
+func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
+	s.decideApproval(w, r, "approved")
+}
+
+func (s *Server) handleReject(w http.ResponseWriter, r *http.Request) {
+	s.decideApproval(w, r, "rejected")
+}
+
+func (s *Server) decideApproval(w http.ResponseWriter, r *http.Request, decision string) {
+	caller, err := s.auth.Authenticate(r)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if !hasAnyRole(caller.Roles, s.AdminRoles) {
+		writeErr(w, http.StatusForbidden, "处理高敏感连接器审批需要管理员角色")
+		return
+	}
+	if s.approvals == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "审批存储未配置", "code": "approval_unavailable"})
+		return
+	}
+	request, err := s.approvals.Decide(r.Context(), r.PathValue("id"), string(caller.Realm), caller.UserID, decision)
+	if errors.Is(err, approval.ErrNotApprovable) {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "审批不存在、已过期、已处理或不可由申请人本人处理", "code": "approval_invalid"})
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, request)
 }
 
 // handleWebFetch 通用 URL 出站（ctx.web fetch 的网关截面）。

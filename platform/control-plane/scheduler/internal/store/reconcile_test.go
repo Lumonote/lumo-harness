@@ -3,7 +3,7 @@ package store
 import "testing"
 
 func TestReconcileStateOrderIsMonotonic(t *testing.T) {
-	ordered := []string{"PENDING", "PLACED", "RUNNING", "COMPLETED"}
+	ordered := []string{"PENDING", "PLACED", "RUNNING", "CANCELLING", "COMPLETED"}
 	for i, state := range ordered {
 		if !validState(state) {
 			t.Fatalf("%s should be valid", state)

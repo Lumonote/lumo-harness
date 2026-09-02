@@ -7,19 +7,24 @@ import (
 )
 
 // TaskState 任务状态机：PENDING → PLACED → RUNNING → COMPLETED/FAILED/ABORTED。
+// CANCELLING means the execution node accepted a stop request but has not yet
+// reported a terminal result; it must never be displayed as already cancelled.
 type TaskState string
 
 const (
-	StatePending   TaskState = "PENDING"
-	StatePlaced    TaskState = "PLACED"
-	StateRunning   TaskState = "RUNNING"
-	StateCompleted TaskState = "COMPLETED"
-	StateFailed    TaskState = "FAILED"
-	StateAborted   TaskState = "ABORTED"
+	StatePending    TaskState = "PENDING"
+	StatePlaced     TaskState = "PLACED"
+	StateRunning    TaskState = "RUNNING"
+	StateCancelling TaskState = "CANCELLING"
+	StateCompleted  TaskState = "COMPLETED"
+	StateFailed     TaskState = "FAILED"
+	StateAborted    TaskState = "ABORTED"
 )
 
 // Active 表示该状态下任务占据节点槽位、不允许开新 attempt。
-func (s TaskState) Active() bool { return s == StatePlaced || s == StateRunning }
+func (s TaskState) Active() bool {
+	return s == StatePlaced || s == StateRunning || s == StateCancelling
+}
 
 // Terminal 表示终态：可开启新 attempt。
 func (s TaskState) Terminal() bool {
@@ -64,6 +69,8 @@ type Node struct {
 	Capacity     int      `json:"capacity"`
 	Capabilities []string `json:"capabilities"`
 	Residency    string   `json:"residency,omitempty"`
+	// ControlURL is the node-local subagent-host endpoint used after placement.
+	ControlURL string `json:"control_url,omitempty"`
 }
 
 // Satisfies requires 的 key 全在节点能力内。
@@ -99,6 +106,28 @@ type Placement struct {
 	Attempt      int       `json:"attempt"`
 	State        TaskState `json:"state"`
 	FencingToken int64     `json:"fencing_token"`
+}
+
+// ControlCommand identifies a durable request sent to an execution node. A
+// preemption uses the same stop RPC as a user cancellation, but keeps a
+// distinct audit command so operators can tell the two causes apart.
+type ControlCommand string
+
+const (
+	ControlCommandCancel  ControlCommand = "CANCEL"
+	ControlCommandPreempt ControlCommand = "PREEMPT"
+)
+
+// PreemptionCandidate is the lower-priority active placement selected for a
+// possible stop request. Selection never changes its state: the node must
+// first acknowledge the control request, after which it becomes CANCELLING.
+type PreemptionCandidate struct {
+	TaskID   string
+	Realm    string
+	NodeID   string
+	Attempt  int
+	Priority int
+	State    TaskState
 }
 
 // ErrNotAcquired 租约被他人持有（未过期），本节点不是 leader。调用方不应等待。

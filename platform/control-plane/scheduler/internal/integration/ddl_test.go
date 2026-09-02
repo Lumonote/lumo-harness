@@ -18,7 +18,7 @@ func testDSN(t *testing.T) string {
 	return dsn
 }
 
-// TestDDLIdempotent 建表幂等 + 五张表齐备 + 预插空租约行。
+// TestDDLIdempotent 建表幂等 + 调度表齐备 + 预插空租约行。
 func TestDDLIdempotent(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.New(ctx, testDSN(t))
@@ -36,7 +36,8 @@ func TestDDLIdempotent(t *testing.T) {
 
 	for _, table := range []string{
 		"scheduler_leader_lease", "scheduler_nodes", "scheduler_tasks",
-		"scheduler_dispatch_outbox", "scheduler_reconcile_ledger",
+		"scheduler_dispatch_outbox", "scheduler_reconcile_ledger", "scheduler_task_attempts",
+		"scheduler_control_commands",
 	} {
 		var n int
 		if err := st.Pool().QueryRow(ctx,

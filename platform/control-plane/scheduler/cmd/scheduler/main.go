@@ -38,6 +38,11 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	shutdownOTel, telemetryErr := observability.ConfigureOTelFromEnv(ctx, "lumo-scheduler")
+	if telemetryErr != nil {
+		log.Error("invalid OpenTelemetry configuration", "err", telemetryErr)
+		os.Exit(2)
+	}
 
 	st, err := store.New(ctx, *pgDSN)
 	if err != nil {
@@ -86,12 +91,12 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(server.New(st, elec, cat, log).Routes())),
+		Handler:           observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(server.New(st, elec, cat, log, os.Getenv("LUMO_SUBAGENT_HOST_TOKEN")).Routes())),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
 		log.Info("调度服务启动", "listen", *listen, "instance", *instance, "ttl_ms", *ttlMs)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := observability.Serve(srv); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("HTTP 服务异常退出", "err", err)
 			stop()
 		}
@@ -110,6 +115,9 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("排空失败", "err", err)
+	}
+	if err := shutdownOTel(shutdownCtx); err != nil {
+		log.Warn("flush OpenTelemetry failed", "err", err)
 	}
 	if err := st.Release(context.Background(), *instance); err != nil {
 		log.Warn("释放租约失败", "err", err)

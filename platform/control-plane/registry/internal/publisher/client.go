@@ -12,6 +12,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
+
+	"github.com/lumo-harness/platform/observability"
 
 	"github.com/lumo-harness/platform/registry/internal/bundle"
 	"github.com/lumo-harness/platform/registry/internal/manifest"
@@ -41,9 +44,10 @@ func NewClient(baseURL, token string, client *http.Client) (*Client, error) {
 		return nil, fmt.Errorf("publisher: control-plane token 不能为空")
 	}
 	if client == nil {
-		client = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		client = observability.ConfiguredHTTPClient(30 * time.Second)
+		client.CheckRedirect = func(*http.Request, []*http.Request) error {
 			return errors.New("publisher: Registry 重定向已禁用")
-		}}
+		}
 	}
 	return &Client{base: strings.TrimRight(parsed.String(), "/"), token: token, http: client}, nil
 }

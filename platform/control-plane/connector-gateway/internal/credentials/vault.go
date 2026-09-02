@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/lumo-harness/platform/observability"
 )
 
 type VaultStore struct {
@@ -23,7 +25,7 @@ func NewVaultStore(baseURL, token string) *VaultStore {
 	return &VaultStore{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
-		client:  &http.Client{Timeout: 10 * time.Second},
+		client:  observability.ConfiguredHTTPClient(10 * time.Second),
 	}
 }
 

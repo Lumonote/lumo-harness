@@ -43,6 +43,10 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if _, err := observability.ConfigureOTelFromEnv(ctx, "lumo-usage-ledger"); err != nil {
+		log.Error("invalid OpenTelemetry configuration", "err", err)
+		os.Exit(2)
+	}
 
 	dsn := os.Getenv("LUMO_PG_DSN")
 	if dsn == "" {
@@ -141,7 +145,8 @@ func main() {
 
 	addr := envOr("LUMO_LISTEN", ":8085")
 	log.Info("usage-ledger 启动", "addr", addr, "rmq", endpoint, "group", group, "topics", len(topics))
-	if err := http.ListenAndServe(addr, observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux))); err != nil {
+	httpSrv := &http.Server{Addr: addr, Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)), ReadHeaderTimeout: 10 * time.Second}
+	if err := observability.Serve(httpSrv); err != nil {
 		log.Error("退出", "err", err)
 		os.Exit(1)
 	}

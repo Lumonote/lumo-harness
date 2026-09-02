@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,6 +92,7 @@ CREATE TABLE IF NOT EXISTS governance_auth_credentials (
   FOREIGN KEY (realm, user_id) REFERENCES governance_users(realm, id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS governance_auth_sessions (
+	  session_id        TEXT NOT NULL DEFAULT gen_random_uuid()::text,
   token_hash        TEXT PRIMARY KEY,
   realm             TEXT NOT NULL,
   user_id           TEXT NOT NULL,
@@ -100,7 +102,38 @@ CREATE TABLE IF NOT EXISTS governance_auth_sessions (
   expires_at        TIMESTAMPTZ NOT NULL,
   FOREIGN KEY (realm, user_id) REFERENCES governance_users(realm, id) ON DELETE CASCADE
 );
+ALTER TABLE governance_auth_sessions ADD COLUMN IF NOT EXISTS session_id TEXT;
+UPDATE governance_auth_sessions SET session_id=gen_random_uuid()::text WHERE session_id IS NULL OR session_id='';
+ALTER TABLE governance_auth_sessions ALTER COLUMN session_id SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS governance_auth_sessions_id_idx ON governance_auth_sessions (session_id);
 CREATE INDEX IF NOT EXISTS governance_auth_sessions_expiry_idx ON governance_auth_sessions (expires_at);
+CREATE TABLE IF NOT EXISTS governance_auth_security_events (
+  id          BIGSERIAL PRIMARY KEY,
+  realm       TEXT NOT NULL,
+  user_id     TEXT NOT NULL DEFAULT '',
+  event       TEXT NOT NULL CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected')),
+  client_ip   TEXT NOT NULL DEFAULT '',
+  detail      JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE governance_auth_security_events DROP CONSTRAINT IF EXISTS governance_auth_security_events_event_check;
+ALTER TABLE governance_auth_security_events ADD CONSTRAINT governance_auth_security_events_event_check
+  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected'));
+CREATE INDEX IF NOT EXISTS governance_auth_security_events_user_idx
+  ON governance_auth_security_events (realm, user_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS governance_auth_totp (
+  realm              TEXT NOT NULL,
+  user_id            TEXT NOT NULL,
+  secret_nonce       BYTEA NOT NULL,
+  secret_ciphertext  BYTEA NOT NULL,
+  enabled            BOOLEAN NOT NULL DEFAULT false,
+  pending_expires_at TIMESTAMPTZ,
+  enrolled_at        TIMESTAMPTZ,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (realm, user_id),
+  FOREIGN KEY (realm, user_id) REFERENCES governance_users(realm, id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS governance_auth_captchas (
   id                TEXT PRIMARY KEY,
   answer_hash       TEXT NOT NULL,
@@ -118,6 +151,34 @@ CREATE TABLE IF NOT EXISTS governance_auth_failures (
   PRIMARY KEY (realm, username, client_ip)
 );
 
+-- Passkey material is public-key data only.  Challenges are stored as hashes
+-- and consumed once, so neither a browser challenge nor an assertion can be
+-- replayed after a successful or failed finish request.
+CREATE TABLE IF NOT EXISTS governance_auth_webauthn_credentials (
+  credential_id       BYTEA PRIMARY KEY,
+  realm               TEXT NOT NULL,
+  user_id             TEXT NOT NULL,
+  public_key_cose     BYTEA NOT NULL,
+  sign_count          BIGINT NOT NULL DEFAULT 0 CHECK (sign_count >= 0),
+  label               TEXT NOT NULL DEFAULT '',
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at        TIMESTAMPTZ,
+  FOREIGN KEY (realm, user_id) REFERENCES governance_users(realm, id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS governance_auth_webauthn_credentials_user_idx
+  ON governance_auth_webauthn_credentials (realm, user_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS governance_auth_webauthn_challenges (
+  challenge_hash      TEXT PRIMARY KEY,
+  purpose             TEXT NOT NULL CHECK (purpose IN ('register','authenticate')),
+  realm               TEXT NOT NULL,
+  user_id             TEXT NOT NULL,
+  expires_at          TIMESTAMPTZ NOT NULL,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (realm, user_id) REFERENCES governance_users(realm, id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS governance_auth_webauthn_challenges_expiry_idx
+  ON governance_auth_webauthn_challenges (expires_at);
+
 CREATE TABLE IF NOT EXISTS governance_skills (
   realm             TEXT NOT NULL,
   id                TEXT NOT NULL,
@@ -125,12 +186,49 @@ CREATE TABLE IF NOT EXISTS governance_skills (
   kind              TEXT NOT NULL CHECK (kind IN ('prompt','workflow','tool','connector')),
   visibility        TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','project','department','global')),
   current_version   TEXT NOT NULL,
+  published_version TEXT NOT NULL DEFAULT '',
+  published_digest  TEXT NOT NULL DEFAULT '',
+  published_by      TEXT NOT NULL DEFAULT '',
+  published_at      TIMESTAMPTZ,
   created_by        TEXT NOT NULL,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (realm, id),
   UNIQUE (realm, name)
 );
 ALTER TABLE governance_skills ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+ALTER TABLE governance_skills ADD COLUMN IF NOT EXISTS published_version TEXT NOT NULL DEFAULT '';
+ALTER TABLE governance_skills ADD COLUMN IF NOT EXISTS published_digest TEXT NOT NULL DEFAULT '';
+ALTER TABLE governance_skills ADD COLUMN IF NOT EXISTS published_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE governance_skills ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ;
+
+-- Skill source is immutable per version. current_version tracks the latest
+-- governed draft, while published_version is the explicit runtime-release
+-- pointer. Neither pointer ever overwrites historical source.
+CREATE TABLE IF NOT EXISTS governance_skill_versions (
+  realm             TEXT NOT NULL,
+  skill_id          TEXT NOT NULL,
+  version           TEXT NOT NULL,
+  content           TEXT NOT NULL,
+  digest            TEXT NOT NULL,
+  created_by        TEXT NOT NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (realm, skill_id, version),
+  FOREIGN KEY (realm, skill_id) REFERENCES governance_skills(realm, id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS governance_skill_versions_lookup
+  ON governance_skill_versions(realm, skill_id, created_at DESC);
+
+-- Existing deployments predate the explicit publish pointer. Their current
+-- immutable revision remains the release rather than silently disappearing
+-- from consumers on upgrade. New skills start unpublished.
+UPDATE governance_skills sk
+SET published_version=sk.current_version,
+    published_digest=sv.digest,
+    published_by=sk.created_by,
+    published_at=sk.created_at
+FROM governance_skill_versions sv
+WHERE sk.published_version=''
+  AND sv.realm=sk.realm AND sv.skill_id=sk.id AND sv.version=sk.current_version;
 
 CREATE TABLE IF NOT EXISTS governance_skill_grants (
   id                TEXT PRIMARY KEY,
@@ -194,11 +292,12 @@ CREATE TABLE IF NOT EXISTS governance_delegation_tasks (
   inferred_tags     JSONB NOT NULL DEFAULT '[]'::jsonb,
   inferred_skills   JSONB NOT NULL DEFAULT '[]'::jsonb,
   selected_skills   JSONB NOT NULL DEFAULT '[]'::jsonb,
-  state             TEXT NOT NULL CHECK (state IN ('ASSIGNED','QUEUED','RUNNING','COMPLETED','FAILED','CANCELLED','BLOCKED')),
+  state             TEXT NOT NULL CHECK (state IN ('ASSIGNED','QUEUED','RUNNING','CANCELLING','COMPLETED','FAILED','CANCELLED','BLOCKED')),
   match_score       INTEGER NOT NULL DEFAULT 0,
   rationale         JSONB NOT NULL DEFAULT '[]'::jsonb,
   scheduler_task_id TEXT NOT NULL DEFAULT '',
   assigned_node_id  TEXT NOT NULL DEFAULT '',
+	  schedule          JSONB NOT NULL DEFAULT '{}'::jsonb,
   last_error        TEXT NOT NULL DEFAULT '',
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -216,6 +315,10 @@ ALTER TABLE governance_delegation_tasks ADD COLUMN IF NOT EXISTS confidence_band
 ALTER TABLE governance_delegation_tasks ADD COLUMN IF NOT EXISTS assignee_worker_id TEXT;
 ALTER TABLE governance_delegation_tasks ADD COLUMN IF NOT EXISTS score_breakdown JSONB;
 ALTER TABLE governance_delegation_tasks ADD COLUMN IF NOT EXISTS score_weights JSONB;
+ALTER TABLE governance_delegation_tasks ADD COLUMN IF NOT EXISTS schedule JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE governance_delegation_tasks DROP CONSTRAINT IF EXISTS governance_delegation_tasks_state_check;
+ALTER TABLE governance_delegation_tasks ADD CONSTRAINT governance_delegation_tasks_state_check
+  CHECK (state IN ('ASSIGNED','QUEUED','RUNNING','CANCELLING','COMPLETED','FAILED','CANCELLED','BLOCKED'));
 CREATE INDEX IF NOT EXISTS governance_delegation_tasks_worker_idx
   ON governance_delegation_tasks (realm, assignee_worker_id, updated_at DESC);
 
@@ -228,7 +331,7 @@ CREATE TABLE IF NOT EXISTS governance_task_runs (
   session_ref       TEXT NOT NULL DEFAULT '',
   scheduler_task_id TEXT NOT NULL DEFAULT '',
   assigned_node_id  TEXT NOT NULL DEFAULT '',
-  state             TEXT NOT NULL CHECK (state IN ('ASSIGNED','QUEUED','RUNNING','COMPLETED','FAILED','CANCELLED','BLOCKED')),
+  state             TEXT NOT NULL CHECK (state IN ('ASSIGNED','QUEUED','RUNNING','CANCELLING','COMPLETED','FAILED','CANCELLED','BLOCKED')),
   failure_kind      TEXT,
   last_error        TEXT NOT NULL DEFAULT '',
   started_at        TIMESTAMPTZ,
@@ -238,6 +341,9 @@ CREATE TABLE IF NOT EXISTS governance_task_runs (
 );
 CREATE INDEX IF NOT EXISTS governance_task_runs_task_idx ON governance_task_runs (realm, task_id, attempt DESC);
 CREATE INDEX IF NOT EXISTS governance_task_runs_worker_idx ON governance_task_runs (realm, worker_id, state, created_at DESC);
+ALTER TABLE governance_task_runs DROP CONSTRAINT IF EXISTS governance_task_runs_state_check;
+ALTER TABLE governance_task_runs ADD CONSTRAINT governance_task_runs_state_check
+  CHECK (state IN ('ASSIGNED','QUEUED','RUNNING','CANCELLING','COMPLETED','FAILED','CANCELLED','BLOCKED'));
 
 CREATE TABLE IF NOT EXISTS governance_skill_proficiency (
   realm       TEXT NOT NULL,
@@ -263,6 +369,40 @@ CREATE TABLE IF NOT EXISTS governance_worker_runtime (
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (realm, worker_id)
 );
+
+-- Agent presets are managed assets, not a second registry of live workers.
+-- Runtime heartbeats and active runs remain in governance_worker_runtime and
+-- governance_task_runs respectively. A preset takes precedence for desired
+-- delegation limits when it exists; runtime rows remain a legacy fallback.
+CREATE TABLE IF NOT EXISTS governance_agent_presets (
+  realm                  TEXT NOT NULL,
+  id                     TEXT NOT NULL,
+  project_id             TEXT NOT NULL DEFAULT '',
+  name                   TEXT NOT NULL,
+  description            TEXT NOT NULL DEFAULT '',
+  owner_user_id          TEXT NOT NULL,
+  status                 TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
+  version                TEXT NOT NULL DEFAULT '1.0.0',
+  revision               INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  provider               TEXT NOT NULL,
+  model_ref              TEXT NOT NULL,
+  system_prompt_ref      TEXT NOT NULL DEFAULT '',
+  connector_ids          JSONB NOT NULL DEFAULT '[]'::jsonb,
+  knowledge_space_ids    JSONB NOT NULL DEFAULT '[]'::jsonb,
+  max_concurrency        INTEGER NOT NULL CHECK (max_concurrency >= 1),
+  trust_level            TEXT NOT NULL DEFAULT 'unknown',
+  residency              TEXT NOT NULL DEFAULT '',
+  max_budget_cents       BIGINT NOT NULL DEFAULT 0 CHECK (max_budget_cents >= 0),
+  timeout_seconds        INTEGER NOT NULL DEFAULT 3600 CHECK (timeout_seconds BETWEEN 1 AND 86400),
+  max_delegation_depth   INTEGER NOT NULL DEFAULT 0 CHECK (max_delegation_depth BETWEEN 0 AND 16),
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (realm, id),
+  UNIQUE (realm, name),
+  FOREIGN KEY (realm, owner_user_id) REFERENCES governance_users(realm, id)
+);
+CREATE INDEX IF NOT EXISTS governance_agent_presets_project_idx
+  ON governance_agent_presets (realm, project_id, status, name);
 
 CREATE TABLE IF NOT EXISTS governance_dispatch_outcomes (
   id          TEXT PRIMARY KEY,
@@ -464,7 +604,7 @@ func (s *Store) ListUserProfiles(ctx context.Context, realm, projectID, query st
 			return nil, err
 		}
 		var active int
-		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM governance_delegation_tasks WHERE realm=$1 AND assignee_user_id=$2 AND state IN ('ASSIGNED','QUEUED','RUNNING')`, realm, user.ID).Scan(&active); err != nil {
+		if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM governance_delegation_tasks WHERE realm=$1 AND assignee_user_id=$2 AND state IN ('ASSIGNED','QUEUED','RUNNING','CANCELLING')`, realm, user.ID).Scan(&active); err != nil {
 			return nil, err
 		}
 		confidence, quality, err := s.workerStats(ctx, realm, "user:"+user.ID)
@@ -479,19 +619,159 @@ func (s *Store) ListUserProfiles(ctx context.Context, realm, projectID, query st
 	return profiles, nil
 }
 
-// ListWorkerProfiles merges human users with agent preset references found in
-// runtime rows or agent grants. It is a read model, not a fourth worker
-// registry; absent agent runtime metadata is an explicit cold-start profile.
+func scanAgentPreset(row rowScanner, preset *domain.AgentPreset) error {
+	var connectorIDs, knowledgeSpaceIDs []byte
+	if err := row.Scan(
+		&preset.ID, &preset.Realm, &preset.ProjectID, &preset.Name, &preset.Description, &preset.OwnerUserID,
+		&preset.Status, &preset.Version, &preset.Revision, &preset.Provider, &preset.ModelRef, &preset.SystemPromptRef,
+		&connectorIDs, &knowledgeSpaceIDs, &preset.MaxConcurrency, &preset.TrustLevel, &preset.Residency,
+		&preset.MaxBudgetCents, &preset.TimeoutSeconds, &preset.MaxDelegationDepth, &preset.CreatedAt, &preset.UpdatedAt,
+	); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(connectorIDs, &preset.ConnectorIDs); err != nil {
+		return fmt.Errorf("decode agent preset connector ids: %w", err)
+	}
+	if err := json.Unmarshal(knowledgeSpaceIDs, &preset.KnowledgeSpaceIDs); err != nil {
+		return fmt.Errorf("decode agent preset knowledge space ids: %w", err)
+	}
+	return nil
+}
+
+const agentPresetSelect = `
+	SELECT id,realm,project_id,name,description,owner_user_id,status,version,revision,
+	       provider,model_ref,system_prompt_ref,connector_ids,knowledge_space_ids,
+	       max_concurrency,trust_level,residency,max_budget_cents,timeout_seconds,
+	       max_delegation_depth,created_at,updated_at
+	FROM governance_agent_presets`
+
+func (s *Store) CreateAgentPreset(ctx context.Context, preset domain.AgentPreset) (domain.AgentPreset, error) {
+	preset.Normalize()
+	if !preset.Valid() {
+		return domain.AgentPreset{}, fmt.Errorf("%w: invalid agent preset", ErrBadRequest)
+	}
+	if !s.userExists(ctx, preset.Realm, preset.OwnerUserID) {
+		return domain.AgentPreset{}, ErrNotFound
+	}
+	connectorIDs, err := json.Marshal(preset.ConnectorIDs)
+	if err != nil {
+		return domain.AgentPreset{}, fmt.Errorf("encode agent preset connector ids: %w", err)
+	}
+	knowledgeSpaceIDs, err := json.Marshal(preset.KnowledgeSpaceIDs)
+	if err != nil {
+		return domain.AgentPreset{}, fmt.Errorf("encode agent preset knowledge space ids: %w", err)
+	}
+	err = s.pool.QueryRow(ctx, `
+		INSERT INTO governance_agent_presets (
+			realm,id,project_id,name,description,owner_user_id,status,version,provider,model_ref,
+			system_prompt_ref,connector_ids,knowledge_space_ids,max_concurrency,trust_level,residency,
+			max_budget_cents,timeout_seconds,max_delegation_depth)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+		RETURNING revision,created_at,updated_at`,
+		preset.Realm, preset.ID, preset.ProjectID, preset.Name, preset.Description, preset.OwnerUserID,
+		preset.Status, preset.Version, preset.Provider, preset.ModelRef, preset.SystemPromptRef,
+		connectorIDs, knowledgeSpaceIDs, preset.MaxConcurrency, preset.TrustLevel, preset.Residency,
+		preset.MaxBudgetCents, preset.TimeoutSeconds, preset.MaxDelegationDepth,
+	).Scan(&preset.Revision, &preset.CreatedAt, &preset.UpdatedAt)
+	if isUniqueViolation(err) {
+		return domain.AgentPreset{}, ErrConflict
+	}
+	if err != nil {
+		return domain.AgentPreset{}, err
+	}
+	return preset, nil
+}
+
+func (s *Store) ListAgentPresets(ctx context.Context, realm string) ([]domain.AgentPreset, error) {
+	rows, err := s.pool.Query(ctx, agentPresetSelect+` WHERE realm=$1 ORDER BY name, id`, realm)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.AgentPreset{}
+	for rows.Next() {
+		var preset domain.AgentPreset
+		if err := scanAgentPreset(rows, &preset); err != nil {
+			return nil, err
+		}
+		out = append(out, preset)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetAgentPreset(ctx context.Context, realm, presetID string) (domain.AgentPreset, error) {
+	var preset domain.AgentPreset
+	err := scanAgentPreset(s.pool.QueryRow(ctx, agentPresetSelect+` WHERE realm=$1 AND id=$2`, realm, presetID), &preset)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.AgentPreset{}, ErrNotFound
+	}
+	return preset, err
+}
+
+// UpdateAgentPreset is optimistic: a stale browser cannot overwrite another
+// operator's asset edit. Caller authorization is performed by the server.
+func (s *Store) UpdateAgentPreset(ctx context.Context, preset domain.AgentPreset, expectedRevision int) (domain.AgentPreset, error) {
+	preset.Normalize()
+	if !preset.Valid() || expectedRevision < 1 {
+		return domain.AgentPreset{}, fmt.Errorf("%w: invalid agent preset update", ErrBadRequest)
+	}
+	connectorIDs, err := json.Marshal(preset.ConnectorIDs)
+	if err != nil {
+		return domain.AgentPreset{}, fmt.Errorf("encode agent preset connector ids: %w", err)
+	}
+	knowledgeSpaceIDs, err := json.Marshal(preset.KnowledgeSpaceIDs)
+	if err != nil {
+		return domain.AgentPreset{}, fmt.Errorf("encode agent preset knowledge space ids: %w", err)
+	}
+	err = s.pool.QueryRow(ctx, `
+		UPDATE governance_agent_presets SET
+			project_id=$3,name=$4,description=$5,owner_user_id=$6,status=$7,version=$8,
+			provider=$9,model_ref=$10,system_prompt_ref=$11,connector_ids=$12,knowledge_space_ids=$13,
+			max_concurrency=$14,trust_level=$15,residency=$16,max_budget_cents=$17,
+			timeout_seconds=$18,max_delegation_depth=$19,revision=revision+1,updated_at=now()
+		WHERE realm=$1 AND id=$2 AND revision=$20
+		RETURNING revision,created_at,updated_at`,
+		preset.Realm, preset.ID, preset.ProjectID, preset.Name, preset.Description, preset.OwnerUserID,
+		preset.Status, preset.Version, preset.Provider, preset.ModelRef, preset.SystemPromptRef,
+		connectorIDs, knowledgeSpaceIDs, preset.MaxConcurrency, preset.TrustLevel, preset.Residency,
+		preset.MaxBudgetCents, preset.TimeoutSeconds, preset.MaxDelegationDepth, expectedRevision,
+	).Scan(&preset.Revision, &preset.CreatedAt, &preset.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.AgentPreset{}, ErrConflict
+	}
+	if isUniqueViolation(err) {
+		return domain.AgentPreset{}, ErrConflict
+	}
+	if err != nil {
+		return domain.AgentPreset{}, err
+	}
+	return preset, nil
+}
+
+// ListWorkerProfiles merges human users with managed Agent preset references,
+// runtime rows, and agent grants. It is a read model, not a fourth worker
+// registry: a preset is desired configuration; runtime rows are retained only
+// for liveness/legacy fallback and task runs remain the load authority.
 func (s *Store) ListWorkerProfiles(ctx context.Context, realm, projectID, query string) ([]domain.UserProfile, error) {
 	humans, err := s.ListUserProfiles(ctx, realm, projectID, query)
 	if err != nil {
 		return nil, err
 	}
 	out := append([]domain.UserProfile(nil), humans...)
+	presets, err := s.ListAgentPresets(ctx, realm)
+	if err != nil {
+		return nil, err
+	}
+	presetByID := make(map[string]domain.AgentPreset, len(presets))
+	for _, preset := range presets {
+		presetByID[preset.ID] = preset
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT worker_id FROM governance_worker_runtime WHERE realm=$1 AND worker_id LIKE 'agent:%'
 		UNION
 		SELECT 'agent:' || subject_id FROM governance_skill_grants WHERE realm=$1 AND subject_type='agent'
+		UNION
+		SELECT 'agent:' || id FROM governance_agent_presets WHERE realm=$1
 		ORDER BY worker_id`, realm)
 	if err != nil {
 		return nil, err
@@ -502,15 +782,31 @@ func (s *Store) ListWorkerProfiles(ctx context.Context, realm, projectID, query 
 		if err := rows.Scan(&workerID); err != nil {
 			return nil, err
 		}
-		var maxConcurrency int
-		var trustLevel, residency, status string
-		if err := s.pool.QueryRow(ctx, `SELECT max_concurrency,trust_level,residency,status FROM governance_worker_runtime WHERE realm=$1 AND worker_id=$2`, realm, workerID).Scan(&maxConcurrency, &trustLevel, &residency, &status); errors.Is(err, pgx.ErrNoRows) {
-			maxConcurrency, trustLevel, status = 1, "unknown", "active"
+		var runtimeMaxConcurrency int
+		var runtimeTrustLevel, runtimeResidency, runtimeStatus string
+		var runtimeUpdatedAt time.Time
+		runtimeReported := true
+		if err := s.pool.QueryRow(ctx, `SELECT max_concurrency,trust_level,residency,status,updated_at FROM governance_worker_runtime WHERE realm=$1 AND worker_id=$2`, realm, workerID).Scan(&runtimeMaxConcurrency, &runtimeTrustLevel, &runtimeResidency, &runtimeStatus, &runtimeUpdatedAt); errors.Is(err, pgx.ErrNoRows) {
+			runtimeMaxConcurrency, runtimeTrustLevel, runtimeStatus, runtimeReported = 1, "unknown", "not_reported", false
 		} else if err != nil {
 			return nil, err
 		}
 		workerRef := strings.TrimPrefix(workerID, "agent:")
-		if query != "" && !strings.Contains(strings.ToLower(workerRef), strings.ToLower(query)) {
+		preset, managed := presetByID[workerRef]
+		displayName, maxConcurrency, trustLevel, residency, status := workerRef, runtimeMaxConcurrency, runtimeTrustLevel, runtimeResidency, runtimeStatus
+		projectScopeID, presetVersion := "", ""
+		if managed {
+			displayName, maxConcurrency = preset.Name, preset.MaxConcurrency
+			trustLevel, residency = preset.TrustLevel, preset.Residency
+			projectScopeID, presetVersion, status = preset.ProjectID, preset.Version, preset.Status
+			// A managed preset may disable execution even when a node still reports
+			// active. Conversely a draining/disabled runtime immediately removes
+			// capacity without modifying the asset configuration.
+			if runtimeStatus == "draining" || runtimeStatus == "disabled" {
+				status = runtimeStatus
+			}
+		}
+		if query != "" && !strings.Contains(strings.ToLower(workerRef), strings.ToLower(query)) && !strings.Contains(strings.ToLower(displayName), strings.ToLower(query)) {
 			continue
 		}
 		skills, err := s.EffectiveSkillsForWorker(ctx, realm, workerID, projectID)
@@ -532,8 +828,14 @@ func (s *Store) ListWorkerProfiles(ctx context.Context, realm, projectID, query 
 		if load > 1 {
 			load = 1
 		}
+		var runtimeUpdatedAtPtr *time.Time
+		if runtimeReported {
+			runtimeUpdatedAtPtr = &runtimeUpdatedAt
+		}
 		out = append(out, domain.UserProfile{
-			WorkerID: workerID, WorkerKind: domain.WorkerAgent, DisplayName: workerRef, Status: status,
+			User:     domain.User{DisplayName: displayName, Status: status},
+			WorkerID: workerID, WorkerKind: domain.WorkerAgent, ProjectScopeID: projectScopeID, PresetVersion: presetVersion,
+			RuntimeStatus: runtimeStatus, RuntimeUpdatedAt: runtimeUpdatedAtPtr,
 			Skills: skills, ActiveTasks: active, Load: load, MaxConcurrency: maxConcurrency,
 			Confidence: confidence, Quality: quality, TrustLevel: trustLevel, Residency: residency,
 		})
@@ -552,9 +854,10 @@ func (s *Store) GetWorkerProfile(ctx context.Context, realm, workerID, projectID
 		}
 		return domain.WorkerProfile{
 			WorkerID: p.WorkerID, WorkerKind: p.WorkerKind, DisplayName: p.DisplayName, Status: p.Status,
+			ProjectScopeID: p.ProjectScopeID, PresetVersion: p.PresetVersion, RuntimeStatus: p.RuntimeStatus, RuntimeUpdatedAt: p.RuntimeUpdatedAt,
 			Skills: p.Skills, ActiveTasks: p.ActiveTasks, Load: p.Load, MaxConcurrency: p.MaxConcurrency,
 			Confidence: p.Confidence, Quality: p.Quality, CostNorm: p.CostNorm,
-			TrustLevel: p.TrustLevel, Residency: p.Residency, Eligible: p.Status == "active" && p.Load <= 0.8,
+			TrustLevel: p.TrustLevel, Residency: p.Residency, Eligible: p.Status == "active" && p.Load <= 0.8 && (p.WorkerKind != domain.WorkerAgent || p.RuntimeStatus == "active"),
 		}, nil
 	}
 	return domain.WorkerProfile{}, ErrNotFound
@@ -574,7 +877,7 @@ func (s *Store) UpsertWorkerRuntime(ctx context.Context, realm string, runtime d
 
 func (s *Store) activeRunsForWorker(ctx context.Context, realm, workerID string) (int, error) {
 	var active int
-	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM governance_task_runs WHERE realm=$1 AND worker_id=$2 AND state IN ('ASSIGNED','QUEUED','RUNNING','BLOCKED')`, realm, workerID).Scan(&active)
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM governance_task_runs WHERE realm=$1 AND worker_id=$2 AND state IN ('ASSIGNED','QUEUED','RUNNING','CANCELLING','BLOCKED')`, realm, workerID).Scan(&active)
 	return active, err
 }
 
@@ -714,7 +1017,7 @@ func (s *Store) AssignRole(ctx context.Context, realm, userID, roleID, grantedBy
 	return err
 }
 
-func (s *Store) CreateSkill(ctx context.Context, skill domain.Skill) (domain.Skill, error) {
+func (s *Store) CreateSkill(ctx context.Context, skill domain.Skill, initial domain.SkillVersion) (domain.Skill, error) {
 	if skill.ID == "" || skill.Realm == "" || skill.Name == "" || !skill.Kind.Valid() || skill.CreatedBy == "" {
 		return domain.Skill{}, fmt.Errorf("%w: invalid skill", ErrBadRequest)
 	}
@@ -727,7 +1030,17 @@ func (s *Store) CreateSkill(ctx context.Context, skill domain.Skill) (domain.Ski
 	if skill.CurrentVersion == "" {
 		skill.CurrentVersion = "1.0.0"
 	}
-	err := s.pool.QueryRow(ctx, `
+	initial.Realm, initial.SkillID, initial.Version, initial.CreatedBy = skill.Realm, skill.ID, skill.CurrentVersion, skill.CreatedBy
+	if !initial.Valid() {
+		return domain.Skill{}, fmt.Errorf("%w: initial skill version requires non-empty content up to 128 KiB", ErrBadRequest)
+	}
+	initial.Digest = fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(initial.Content)))
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Skill{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	err = tx.QueryRow(ctx, `
 		INSERT INTO governance_skills (realm,id,name,kind,visibility,current_version,created_by,description)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING created_at`,
 		skill.Realm, skill.ID, skill.Name, skill.Kind, skill.Visibility, skill.CurrentVersion, skill.CreatedBy, skill.Description,
@@ -738,12 +1051,22 @@ func (s *Store) CreateSkill(ctx context.Context, skill domain.Skill) (domain.Ski
 	if err != nil {
 		return domain.Skill{}, err
 	}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO governance_skill_versions (realm,skill_id,version,content,digest,created_by)
+		VALUES ($1,$2,$3,$4,$5,$6) RETURNING created_at`,
+		initial.Realm, initial.SkillID, initial.Version, initial.Content, initial.Digest, initial.CreatedBy,
+	).Scan(&initial.CreatedAt); err != nil {
+		return domain.Skill{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Skill{}, err
+	}
 	return skill, nil
 }
 
 func (s *Store) ListSkills(ctx context.Context, realm string) ([]domain.Skill, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, realm, name, kind, visibility, current_version, created_by, description, created_at
+		SELECT id, realm, name, kind, visibility, current_version, published_version, published_digest, published_by, published_at, created_by, description, created_at
 		FROM governance_skills WHERE realm=$1 ORDER BY name`, realm)
 	if err != nil {
 		return nil, err
@@ -752,12 +1075,153 @@ func (s *Store) ListSkills(ctx context.Context, realm string) ([]domain.Skill, e
 	out := []domain.Skill{}
 	for rows.Next() {
 		var skill domain.Skill
-		if err := rows.Scan(&skill.ID, &skill.Realm, &skill.Name, &skill.Kind, &skill.Visibility, &skill.CurrentVersion, &skill.CreatedBy, &skill.Description, &skill.CreatedAt); err != nil {
+		if err := rows.Scan(&skill.ID, &skill.Realm, &skill.Name, &skill.Kind, &skill.Visibility, &skill.CurrentVersion, &skill.PublishedVersion, &skill.PublishedDigest, &skill.PublishedBy, &skill.PublishedAt, &skill.CreatedBy, &skill.Description, &skill.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, skill)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) GetSkill(ctx context.Context, realm, skillID string) (domain.Skill, error) {
+	var skill domain.Skill
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, realm, name, kind, visibility, current_version, published_version, published_digest, published_by, published_at, created_by, description, created_at
+		FROM governance_skills WHERE realm=$1 AND id=$2`, realm, skillID,
+	).Scan(&skill.ID, &skill.Realm, &skill.Name, &skill.Kind, &skill.Visibility, &skill.CurrentVersion, &skill.PublishedVersion, &skill.PublishedDigest, &skill.PublishedBy, &skill.PublishedAt, &skill.CreatedBy, &skill.Description, &skill.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Skill{}, ErrNotFound
+	}
+	return skill, err
+}
+
+func (s *Store) ListSkillVersions(ctx context.Context, realm, skillID string) ([]domain.SkillVersion, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT realm, skill_id, version, digest, created_by, created_at
+		FROM governance_skill_versions WHERE realm=$1 AND skill_id=$2
+		ORDER BY created_at DESC, version DESC`, realm, skillID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.SkillVersion{}
+	for rows.Next() {
+		var version domain.SkillVersion
+		if err := rows.Scan(&version.Realm, &version.SkillID, &version.Version, &version.Digest, &version.CreatedBy, &version.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, version)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetSkillVersion(ctx context.Context, realm, skillID, version string) (domain.SkillVersion, error) {
+	var out domain.SkillVersion
+	err := s.pool.QueryRow(ctx, `
+		SELECT realm, skill_id, version, content, digest, created_by, created_at
+		FROM governance_skill_versions WHERE realm=$1 AND skill_id=$2 AND version=$3`, realm, skillID, version,
+	).Scan(&out.Realm, &out.SkillID, &out.Version, &out.Content, &out.Digest, &out.CreatedBy, &out.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.SkillVersion{}, ErrNotFound
+	}
+	return out, err
+}
+
+// RuntimeSkillSnapshot returns exactly the source revisions named by the
+// explicit published pointers. Drafts are intentionally absent. Callers must
+// still validate the returned bytes before turning them into a signed Registry
+// artifact because the database is an index, not a node trust root.
+func (s *Store) RuntimeSkillSnapshot(ctx context.Context, realm string) (domain.RuntimeSkillSnapshot, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT sk.id, sk.name, sv.version, sv.digest, sv.content
+		FROM governance_skills sk
+		JOIN governance_skill_versions sv
+		  ON sv.realm=sk.realm AND sv.skill_id=sk.id AND sv.version=sk.published_version
+		WHERE sk.realm=$1 AND sk.published_version<>''
+		ORDER BY sk.name, sk.id`, realm)
+	if err != nil {
+		return domain.RuntimeSkillSnapshot{}, err
+	}
+	defer rows.Close()
+	snapshot := domain.RuntimeSkillSnapshot{Realm: realm, Skills: []domain.RuntimeSkillSource{}}
+	for rows.Next() {
+		var source domain.RuntimeSkillSource
+		if err := rows.Scan(&source.SkillID, &source.Name, &source.Version, &source.Digest, &source.Content); err != nil {
+			return domain.RuntimeSkillSnapshot{}, err
+		}
+		snapshot.Skills = append(snapshot.Skills, source)
+	}
+	return snapshot, rows.Err()
+}
+
+// CreateSkillVersion never overwrites a version. Updating the draft pointer
+// and inserting source share one transaction so clients cannot observe a
+// current_version that lacks content. It deliberately never changes the
+// explicit runtime-release pointer.
+func (s *Store) CreateSkillVersion(ctx context.Context, version domain.SkillVersion) (domain.SkillVersion, error) {
+	if !version.Valid() {
+		return domain.SkillVersion{}, fmt.Errorf("%w: skill version requires non-empty content up to 128 KiB", ErrBadRequest)
+	}
+	version.Digest = fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(version.Content)))
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.SkillVersion{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO governance_skill_versions (realm,skill_id,version,content,digest,created_by)
+		VALUES ($1,$2,$3,$4,$5,$6) RETURNING created_at`,
+		version.Realm, version.SkillID, version.Version, version.Content, version.Digest, version.CreatedBy,
+	).Scan(&version.CreatedAt); err != nil {
+		if isUniqueViolation(err) {
+			return domain.SkillVersion{}, ErrConflict
+		}
+		return domain.SkillVersion{}, err
+	}
+	result, err := tx.Exec(ctx, `UPDATE governance_skills SET current_version=$3 WHERE realm=$1 AND id=$2`, version.Realm, version.SkillID, version.Version)
+	if err != nil {
+		return domain.SkillVersion{}, err
+	}
+	if result.RowsAffected() != 1 {
+		return domain.SkillVersion{}, ErrNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.SkillVersion{}, err
+	}
+	return version, nil
+}
+
+// PublishSkillVersion atomically makes one immutable source revision the
+// governed runtime-release snapshot. It copies the version digest into the
+// pointer so callers can verify exactly which bytes were approved without
+// treating the latest draft as executable.
+func (s *Store) PublishSkillVersion(ctx context.Context, realm, skillID, version, publishedBy string) (domain.Skill, error) {
+	if realm == "" || skillID == "" || version == "" || publishedBy == "" {
+		return domain.Skill{}, fmt.Errorf("%w: realm, skill, version, and publisher are required", ErrBadRequest)
+	}
+	var skill domain.Skill
+	err := s.pool.QueryRow(ctx, `
+		WITH selected AS (
+			SELECT digest FROM governance_skill_versions
+			WHERE realm=$1 AND skill_id=$2 AND version=$3
+		)
+		UPDATE governance_skills sk
+		SET published_version=$3,
+			published_digest=selected.digest,
+			published_by=$4,
+			published_at=now()
+		FROM selected
+		WHERE sk.realm=$1 AND sk.id=$2
+		RETURNING sk.id, sk.realm, sk.name, sk.kind, sk.visibility, sk.current_version,
+		          sk.published_version, sk.published_digest, sk.published_by, sk.published_at,
+		          sk.created_by, sk.description, sk.created_at`, realm, skillID, version, publishedBy,
+	).Scan(&skill.ID, &skill.Realm, &skill.Name, &skill.Kind, &skill.Visibility, &skill.CurrentVersion,
+		&skill.PublishedVersion, &skill.PublishedDigest, &skill.PublishedBy, &skill.PublishedAt,
+		&skill.CreatedBy, &skill.Description, &skill.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Skill{}, ErrNotFound
+	}
+	return skill, err
 }
 
 func (s *Store) GrantSkill(ctx context.Context, grant domain.SkillGrant) error {
@@ -1121,6 +1585,13 @@ func (s *Store) createDelegatedTask(ctx context.Context, task domain.DelegatedTa
 			return domain.DelegatedTask{}, err
 		}
 	}
+	schedule := task.Schedule
+	if len(schedule) == 0 {
+		schedule = json.RawMessage(`{}`)
+	}
+	if !json.Valid(schedule) {
+		return domain.DelegatedTask{}, fmt.Errorf("%w: invalid task schedule", ErrBadRequest)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return domain.DelegatedTask{}, err
@@ -1128,12 +1599,12 @@ func (s *Store) createDelegatedTask(ctx context.Context, task domain.DelegatedTa
 	defer func() { _ = tx.Rollback(ctx) }()
 	err = tx.QueryRow(ctx, `
 		INSERT INTO governance_delegation_tasks
-		  (id,realm,title,intent,project_id,requester_user_id,assignee_user_id,required_tags,required_skills,inferred_tags,inferred_skills,selected_skills,state,match_score,rationale,scheduler_task_id,assigned_node_id,last_error,business_state,confidence_band,assignee_worker_id,score_breakdown,score_weights)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+		  (id,realm,title,intent,project_id,requester_user_id,assignee_user_id,required_tags,required_skills,inferred_tags,inferred_skills,selected_skills,state,match_score,rationale,scheduler_task_id,assigned_node_id,schedule,last_error,business_state,confidence_band,assignee_worker_id,score_breakdown,score_weights)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
 		RETURNING created_at, updated_at`,
 		task.ID, task.Realm, task.Title, task.Intent, task.ProjectID, task.RequesterUserID, task.AssigneeUserID,
 		requiredTags, requiredSkills, inferredTags, inferredSkills, selectedSkills, task.State, task.MatchScore, rationale,
-		task.SchedulerTaskID, task.AssignedNodeID, task.LastError, nullableText(task.BusinessState), nullableText(task.ConfidenceBand), nullableText(task.AssigneeWorkerID), scoreBreakdown, scoreWeights).Scan(&task.CreatedAt, &task.UpdatedAt)
+		task.SchedulerTaskID, task.AssignedNodeID, schedule, task.LastError, nullableText(task.BusinessState), nullableText(task.ConfidenceBand), nullableText(task.AssigneeWorkerID), scoreBreakdown, scoreWeights).Scan(&task.CreatedAt, &task.UpdatedAt)
 	if isUniqueViolation(err) {
 		return domain.DelegatedTask{}, ErrConflict
 	}
@@ -1190,13 +1661,17 @@ type rowScanner interface{ Scan(dest ...any) error }
 
 func scanDelegatedTask(row rowScanner, task *domain.DelegatedTask) error {
 	var requiredTags, requiredSkills, inferredTags, inferredSkills, selectedSkills, rationale []byte
+	var schedule []byte
 	var businessState, confidenceBand, assigneeWorkerID *string
 	var scoreBreakdown, scoreWeights []byte
 	if err := row.Scan(&task.ID, &task.Realm, &task.Title, &task.Intent, &task.ProjectID, &task.RequesterUserID, &task.AssigneeUserID, &task.AssigneeName,
 		&requiredTags, &requiredSkills, &inferredTags, &inferredSkills, &selectedSkills, &task.State, &task.MatchScore, &rationale,
-		&task.SchedulerTaskID, &task.AssignedNodeID, &task.LastError, &businessState, &confidenceBand, &assigneeWorkerID,
+		&task.SchedulerTaskID, &task.AssignedNodeID, &schedule, &task.LastError, &businessState, &confidenceBand, &assigneeWorkerID,
 		&scoreBreakdown, &scoreWeights, &task.CreatedAt, &task.UpdatedAt); err != nil {
 		return err
+	}
+	if len(schedule) > 0 {
+		task.Schedule = append(json.RawMessage(nil), schedule...)
 	}
 	if businessState != nil {
 		task.BusinessState = *businessState
@@ -1239,7 +1714,7 @@ const delegationSelect = `
 	SELECT t.id,t.realm,t.title,t.intent,t.project_id,t.requester_user_id,t.assignee_user_id,
 	       COALESCE(u.display_name,NULLIF(t.assignee_worker_id,''),''),t.required_tags,t.required_skills,t.inferred_tags,t.inferred_skills,
 	       t.selected_skills,t.state,t.match_score,t.rationale,t.scheduler_task_id,t.assigned_node_id,
-	       t.last_error,t.business_state,t.confidence_band,t.assignee_worker_id,t.score_breakdown,t.score_weights,
+	       t.schedule,t.last_error,t.business_state,t.confidence_band,t.assignee_worker_id,t.score_breakdown,t.score_weights,
 	       t.created_at,t.updated_at
 	FROM governance_delegation_tasks t
 	LEFT JOIN governance_users u ON u.realm=t.realm AND u.id=t.assignee_user_id`
@@ -1256,11 +1731,28 @@ func (s *Store) GetDelegationTask(ctx context.Context, realm, taskID string) (do
 	return task, nil
 }
 
-func (s *Store) ListDelegationTasks(ctx context.Context, realm, userID string, all bool) ([]domain.DelegatedTask, error) {
+// ListDelegationTasks applies the task visibility scopes at the query boundary.
+// A department manager may see their own tasks plus tasks whose requester or
+// assignee belongs to an active department subtree they manage; it is never a
+// realm-wide grant.
+func (s *Store) ListDelegationTasks(ctx context.Context, realm, userID string, all, departmentScope bool) ([]domain.DelegatedTask, error) {
 	query := delegationSelect + ` WHERE t.realm=$1`
 	args := []any{realm}
 	if !all {
-		query += ` AND (t.requester_user_id=$2 OR t.assignee_user_id=$2)`
+		query += ` AND (t.requester_user_id=$2 OR t.assignee_user_id=$2`
+		if departmentScope {
+			query += ` OR EXISTS (
+				SELECT 1
+				FROM governance_departments managed
+				LEFT JOIN governance_users requester ON requester.realm=t.realm AND requester.id=t.requester_user_id
+				LEFT JOIN governance_departments requester_dept ON requester_dept.realm=t.realm AND requester_dept.id=requester.primary_dept_id
+				LEFT JOIN governance_users assignee ON assignee.realm=t.realm AND assignee.id=t.assignee_user_id
+				LEFT JOIN governance_departments assignee_dept ON assignee_dept.realm=t.realm AND assignee_dept.id=assignee.primary_dept_id
+				WHERE managed.realm=t.realm AND managed.manager_user_id=$2 AND managed.status='active'
+				  AND (requester_dept.path LIKE managed.path || '%' OR assignee_dept.path LIKE managed.path || '%')
+			)`
+		}
+		query += `)`
 		args = append(args, userID)
 	}
 	query += ` ORDER BY t.updated_at DESC LIMIT 200`
@@ -1303,8 +1795,8 @@ func (s *Store) UpdateDelegationTask(ctx context.Context, realm, taskID, state, 
 		WHERE id=$1 AND realm=$2
 		RETURNING id,realm,title,intent,project_id,requester_user_id,assignee_user_id,
 		          COALESCE((SELECT display_name FROM governance_users WHERE realm=$2 AND id=assignee_user_id),NULLIF(assignee_worker_id,''),''),
-		          required_tags,required_skills,inferred_tags,inferred_skills,selected_skills,state,match_score,rationale,
-		          scheduler_task_id,assigned_node_id,last_error,business_state,confidence_band,assignee_worker_id,score_breakdown,score_weights,created_at,updated_at`, taskID, realm, state, schedulerTaskID, nodeID, lastError), &task)
+		  required_tags,required_skills,inferred_tags,inferred_skills,selected_skills,state,match_score,rationale,
+		  scheduler_task_id,assigned_node_id,schedule,last_error,business_state,confidence_band,assignee_worker_id,score_breakdown,score_weights,created_at,updated_at`, taskID, realm, state, schedulerTaskID, nodeID, lastError), &task)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.DelegatedTask{}, ErrNotFound
 	}
@@ -1358,10 +1850,64 @@ func (s *Store) ListTaskRuns(ctx context.Context, realm, taskID string) ([]domai
 	return out, rows.Err()
 }
 
+// ListTaskAudit returns the latest immutable control-plane decisions in
+// chronological order, suitable for a Task detail timeline.
+func (s *Store) ListTaskAudit(ctx context.Context, realm, taskID string) ([]domain.TaskAuditEvent, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id,realm,task_id,event,actor,detail,created_at
+		FROM governance_task_audit
+		WHERE realm=$1 AND task_id=$2
+		ORDER BY created_at ASC, id ASC`, realm, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := []domain.TaskAuditEvent{}
+	for rows.Next() {
+		var event domain.TaskAuditEvent
+		if err := rows.Scan(&event.ID, &event.Realm, &event.TaskID, &event.Event, &event.Actor, &event.Detail, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		if len(event.Detail) == 0 {
+			event.Detail = json.RawMessage(`{}`)
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+// TaskRunAssignment is the current execution projection selected when a new
+// Run is assigned to a different worker. The former assignment remains on its
+// immutable Run; only the task's current projection advances.
+type TaskRunAssignment struct {
+	UserID         string
+	WorkerID       string
+	SelectedSkills []string
+	MatchScore     int
+	Rationale      []string
+	ConfidenceBand string
+	ScoreBreakdown domain.DispatchScoreBreakdown
+	ScoreWeights   domain.DispatchWeights
+}
+
 // CreateNextTaskRun materializes a legacy scheduler row before allocating the
 // next attempt. This preserves the old node/error under attempt=1 and records
 // why the migration happened instead of silently overwriting it.
 func (s *Store) CreateNextTaskRun(ctx context.Context, realm, taskID string, run domain.TaskRun) (domain.TaskRun, error) {
+	return s.createNextTaskRun(ctx, realm, taskID, run, nil)
+}
+
+// CreateNextAssignedTaskRun advances an immutable Run and its current task
+// projection atomically. It is used for reassignments so a read can never see
+// a new worker Run with the old worker still displayed as the assignee.
+func (s *Store) CreateNextAssignedTaskRun(ctx context.Context, realm, taskID string, run domain.TaskRun, assignment TaskRunAssignment) (domain.TaskRun, error) {
+	if assignment.WorkerID == "" || assignment.WorkerID != run.WorkerID {
+		return domain.TaskRun{}, fmt.Errorf("%w: assignee worker must match run worker", ErrBadRequest)
+	}
+	return s.createNextTaskRun(ctx, realm, taskID, run, &assignment)
+}
+
+func (s *Store) createNextTaskRun(ctx context.Context, realm, taskID string, run domain.TaskRun, assignment *TaskRunAssignment) (domain.TaskRun, error) {
 	if run.ID == "" || run.WorkerID == "" {
 		return domain.TaskRun{}, fmt.Errorf("%w: run id and worker id are required", ErrBadRequest)
 	}
@@ -1378,6 +1924,9 @@ func (s *Store) CreateNextTaskRun(ctx context.Context, realm, taskID string, run
 		return domain.TaskRun{}, ErrNotFound
 	} else if err != nil {
 		return domain.TaskRun{}, err
+	}
+	if domain.DelegationStateActive(state) {
+		return domain.TaskRun{}, fmt.Errorf("%w: current run is still active", ErrConflict)
 	}
 	var attempt int
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(attempt),0) FROM governance_task_runs WHERE realm=$1 AND task_id=$2`, realm, taskID).Scan(&attempt); err != nil {
@@ -1413,6 +1962,51 @@ func (s *Store) CreateNextTaskRun(ctx context.Context, realm, taskID string, run
 	}
 	if err := insertTaskRun(ctx, tx, run); err != nil {
 		return domain.TaskRun{}, err
+	}
+	// Advance the parent execution projection in the same transaction as the
+	// immutable Run insert. This closes the retry race where two callers could
+	// otherwise both observe a terminal task and allocate different attempts.
+	if assignment == nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE governance_delegation_tasks
+			SET state=$3,
+			    scheduler_task_id=CASE WHEN $4='' THEN scheduler_task_id ELSE $4 END,
+			    assigned_node_id=CASE WHEN $5='' THEN assigned_node_id ELSE $5 END,
+			    last_error=$6, updated_at=now()
+			WHERE realm=$1 AND id=$2`, realm, taskID, run.State, run.SchedulerTaskID, run.AssignedNodeID, run.LastError); err != nil {
+			return domain.TaskRun{}, err
+		}
+	} else {
+		selectedSkills, err := json.Marshal(assignment.SelectedSkills)
+		if err != nil {
+			return domain.TaskRun{}, err
+		}
+		rationale, err := json.Marshal(assignment.Rationale)
+		if err != nil {
+			return domain.TaskRun{}, err
+		}
+		scoreBreakdown, err := json.Marshal(assignment.ScoreBreakdown)
+		if err != nil {
+			return domain.TaskRun{}, err
+		}
+		scoreWeights, err := json.Marshal(assignment.ScoreWeights)
+		if err != nil {
+			return domain.TaskRun{}, err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE governance_delegation_tasks
+			SET assignee_user_id=$3, assignee_worker_id=$4, selected_skills=$5,
+			    match_score=$6, rationale=$7, confidence_band=$8,
+			    score_breakdown=$9, score_weights=$10, state=$11,
+			    scheduler_task_id=CASE WHEN $12='' THEN scheduler_task_id ELSE $12 END,
+			    assigned_node_id=CASE WHEN $13='' THEN assigned_node_id ELSE $13 END,
+			    last_error=$14, updated_at=now()
+			WHERE realm=$1 AND id=$2`,
+			realm, taskID, assignment.UserID, assignment.WorkerID, selectedSkills,
+			assignment.MatchScore, rationale, nullableText(assignment.ConfidenceBand), scoreBreakdown, scoreWeights,
+			run.State, run.SchedulerTaskID, run.AssignedNodeID, run.LastError); err != nil {
+			return domain.TaskRun{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.TaskRun{}, err
@@ -1452,6 +2046,27 @@ func insertTaskAudit(ctx context.Context, tx pgx.Tx, taskID, event, actor string
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO governance_task_audit (id,realm,task_id,event,actor,detail) SELECT gen_random_uuid()::text,realm,id,$2,$3,$4 FROM governance_delegation_tasks WHERE id=$1`, taskID, event, actor, detail)
 	return err
+}
+
+// RecordTaskAudit appends a user-visible control decision. It is kept separate
+// from the immutable Run row so retry/reassign reasons remain queryable even
+// if execution placement is retried by the Scheduler.
+func (s *Store) RecordTaskAudit(ctx context.Context, realm, taskID, event, actor string, detail any) error {
+	raw, err := json.Marshal(detail)
+	if err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO governance_task_audit (id,realm,task_id,event,actor,detail)
+		SELECT gen_random_uuid()::text,realm,id,$3,$4,$5
+		FROM governance_delegation_tasks WHERE realm=$1 AND id=$2`, realm, taskID, event, actor, raw)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) TransitionBusinessTask(ctx context.Context, realm, taskID, event, actor string) (domain.DelegatedTask, error) {
@@ -1606,6 +2221,12 @@ func (s *Store) projectMember(ctx context.Context, projectID, userID string) (bo
 		return false, nil
 	}
 	return member, err
+}
+
+// ProjectMember exposes the fail-closed membership check used when a
+// Governance action is attached to a project managed by the Projects service.
+func (s *Store) ProjectMember(ctx context.Context, projectID, userID string) (bool, error) {
+	return s.projectMember(ctx, projectID, userID)
 }
 
 // matchingRevocations applies every revocation whose subject is present in the

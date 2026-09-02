@@ -11,6 +11,7 @@
 //  7. 限速 429（假 redis.Scripter 注入令牌桶）；
 //  8. 缺身份 401；
 //  9. 审计+计量同事务双行（outbox payload 形状逐字段断言）；
+//
 // 10. denied → 审计有行、计量无行；
 // 11. 缺 X-Lumo-Dept → 入账 dept='unknown' 且非 400（缺省+告警，不破现有链）；
 // 12. 传输错误（响应缺失）→ 计量无行、审计有行；
@@ -37,6 +38,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/lumo-harness/platform/connector-gateway/internal/approval"
 	"github.com/lumo-harness/platform/connector-gateway/internal/audit"
 	"github.com/lumo-harness/platform/connector-gateway/internal/breaker"
 	"github.com/lumo-harness/platform/connector-gateway/internal/credentials"
@@ -63,6 +65,30 @@ type fakeScripter struct {
 	mu    sync.Mutex
 	calls int
 	allow int
+}
+
+type catalogRegistry struct {
+	visible   []domain.Connector
+	all       []domain.Connector
+	allCalls  int
+	enabledID string
+}
+
+func (r *catalogRegistry) Lookup(_ context.Context, _ domain.RealmID, _ string) (domain.Connector, error) {
+	return domain.Connector{}, domain.ErrNotFound
+}
+func (r *catalogRegistry) List(_ context.Context, _ domain.RealmID) ([]domain.Connector, error) {
+	return r.visible, nil
+}
+func (r *catalogRegistry) ListAll(_ context.Context, _ domain.RealmID) ([]domain.Connector, error) {
+	r.allCalls++
+	return r.all, nil
+}
+func (r *catalogRegistry) Upsert(_ context.Context, _ domain.Connector) error          { return nil }
+func (r *catalogRegistry) Disable(_ context.Context, _ domain.RealmID, _ string) error { return nil }
+func (r *catalogRegistry) Enable(_ context.Context, _ domain.RealmID, id string) error {
+	r.enabledID = id
+	return nil
 }
 
 func (f *fakeScripter) Eval(ctx context.Context, _ string, _ []string, _ ...any) *redis.Cmd {
@@ -154,6 +180,66 @@ func idHeaders() map[string]string {
 	}
 }
 
+func TestConnectorCatalogIncludesStoppedItemsOnlyForAdminsAndCanRestore(t *testing.T) {
+	active := domain.Connector{ID: "active", Name: "Active", Protocol: domain.ProtocolREST, Version: 3, Enabled: true}
+	stopped := domain.Connector{ID: "stopped", Name: "Stopped", Protocol: domain.ProtocolREST, Version: 7, Enabled: false}
+	reg := &catalogRegistry{visible: []domain.Connector{active}, all: []domain.Connector{active, stopped}}
+	h := server.New(server.Options{Auth: testAuth{}, Registry: reg}).Routes()
+
+	request := func(method, target, role string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, target, nil)
+		for key, value := range idHeaders() {
+			r.Header.Set(key, value)
+		}
+		r.Header.Set("X-Lumo-Roles", role)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+
+	visible := request(http.MethodGet, "/connectors", "operator")
+	if visible.Code != http.StatusOK || reg.allCalls != 0 {
+		t.Fatalf("ordinary catalog = status %d allCalls %d, want 200 and no stopped lookup", visible.Code, reg.allCalls)
+	}
+	var visibleBody struct {
+		Connectors []struct {
+			ID      string `json:"id"`
+			Enabled bool   `json:"enabled"`
+		} `json:"connectors"`
+	}
+	if err := json.NewDecoder(visible.Body).Decode(&visibleBody); err != nil {
+		t.Fatal(err)
+	}
+	if len(visibleBody.Connectors) != 1 || !visibleBody.Connectors[0].Enabled {
+		t.Fatalf("ordinary catalog leaked stopped connector: %#v", visibleBody.Connectors)
+	}
+
+	forbidden := request(http.MethodGet, "/connectors?includeDisabled=true", "operator")
+	if forbidden.Code != http.StatusForbidden || reg.allCalls != 0 {
+		t.Fatalf("non-admin stopped catalog = status %d allCalls %d, want 403 and no lookup", forbidden.Code, reg.allCalls)
+	}
+	all := request(http.MethodGet, "/connectors?includeDisabled=true", "admin")
+	if all.Code != http.StatusOK || reg.allCalls != 1 {
+		t.Fatalf("admin catalog = status %d allCalls %d, want 200 and 1", all.Code, reg.allCalls)
+	}
+	var allBody struct {
+		Connectors []struct {
+			ID      string `json:"id"`
+			Enabled bool   `json:"enabled"`
+		} `json:"connectors"`
+	}
+	if err := json.NewDecoder(all.Body).Decode(&allBody); err != nil {
+		t.Fatal(err)
+	}
+	if len(allBody.Connectors) != 2 || allBody.Connectors[1].Enabled {
+		t.Fatalf("admin catalog lost stopped state: %#v", allBody.Connectors)
+	}
+
+	if restored := request(http.MethodPost, "/connectors/stopped/enable", "admin"); restored.Code != http.StatusNoContent || reg.enabledID != "stopped" {
+		t.Fatalf("restore = status %d id %q, want 204 and stopped", restored.Code, reg.enabledID)
+	}
+}
+
 // setup 独立 schema（connector_audit/connectors 由各自 Init 建，
 // usage_event_outbox 在测试内建 —— DDL 真相源在 TS pg-meter，与 llm-gateway 同规）
 // + 网关测试服（httptest 假上游）。
@@ -189,6 +275,10 @@ func setup(t *testing.T, upstreamURL string, webEgress domain.WebEgress, limiter
 	if err := sink.Init(context.Background()); err != nil {
 		t.Fatalf("init audit: %v", err)
 	}
+	approvals := approval.NewPg(pool)
+	if err := approvals.Init(context.Background()); err != nil {
+		t.Fatalf("init approvals: %v", err)
+	}
 	reg := registry.NewPg(pool, time.Minute)
 	if err := reg.Init(context.Background()); err != nil {
 		t.Fatalf("init registry: %v", err)
@@ -204,7 +294,7 @@ func setup(t *testing.T, upstreamURL string, webEgress domain.WebEgress, limiter
 	})
 	srv := server.New(server.Options{
 		Gateway: gw, Registry: reg, Breakers: breaker.NewGroup(breaker.DefaultConfig()),
-		Auth: testAuth{}, WebEgress: webEgress,
+		Approvals: approvals, Auth: testAuth{}, WebEgress: webEgress,
 	})
 	ts := httptest.NewServer(srv.Routes())
 	t.Cleanup(ts.Close)
@@ -280,12 +370,12 @@ func readAudit(t *testing.T, pool *pgxpool.Pool) []auditRow {
 }
 
 type outboxEvent struct {
-	CostType string           `json:"costType"`
-	Qty      float64          `json:"qty"`
-	Unit     string           `json:"unit"`
-	TraceID  string           `json:"traceId"`
-	Emitter  string           `json:"emitter"`
-	CostUSD  float64          `json:"costUsd"`
+	CostType string            `json:"costType"`
+	Qty      float64           `json:"qty"`
+	Unit     string            `json:"unit"`
+	TraceID  string            `json:"traceId"`
+	Emitter  string            `json:"emitter"`
+	CostUSD  float64           `json:"costUsd"`
 	Context  map[string]string `json:"context"`
 }
 
@@ -614,6 +704,86 @@ func TestInvokeMeters(t *testing.T) {
 	}
 	if n := len(readOutbox(t, pool)); n != 1 {
 		t.Fatalf("denied 不得再计计量: %d", n)
+	}
+}
+
+// High-sensitivity writes must be approved by someone other than the requester.
+// The approved record is bound to the exact connector version and request fields,
+// and is consumed before the one permitted outbound call starts.
+func TestHighSensitivityInvokeRequiresOneTimeBoundApproval(t *testing.T) {
+	upstreamCalls := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	t.Cleanup(up.Close)
+
+	ts, _, reg := setup(t, up.URL, domain.WebEgress{AllowPrivateNetwork: true, RedactResponse: true}, ratelimit.New(&fakeScripter{allow: 99}))
+	if err := reg.Upsert(context.Background(), domain.Connector{
+		ID: "billing", Realm: "r1", Name: "账单连接器", Protocol: domain.ProtocolREST, BaseURL: up.URL,
+		Auth: domain.Auth{Kind: domain.AuthNone}, Roles: []string{"operator"}, Enabled: true,
+		Operations: map[string]domain.Operation{
+			"refund": {Name: "refund", Method: "POST", Path: "/refund", Write: true, Sensitivity: "high"},
+		},
+	}); err != nil {
+		t.Fatalf("注册连接器: %v", err)
+	}
+
+	request := `{"operation":"refund","body":{"invoice":"inv-1","amount":100}}`
+	resp, body := post(t, ts, "/connectors/billing/invoke", request, idHeaders())
+	if resp.StatusCode != http.StatusPreconditionRequired || !strings.Contains(body, "approval_required") {
+		t.Fatalf("高敏感调用应创建审批并返回 428: %d %s", resp.StatusCode, body)
+	}
+	var pending struct {
+		Approval struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"approval"`
+	}
+	if err := json.Unmarshal([]byte(body), &pending); err != nil || pending.Approval.ID == "" || pending.Approval.Status != "pending" {
+		t.Fatalf("审批响应不正确: body=%s err=%v", body, err)
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("批准前不得调用上游，calls=%d", upstreamCalls)
+	}
+
+	// 即使申请人同时拥有 admin 角色也不能自行批准。
+	self := idHeaders()
+	self["X-Lumo-Roles"] = "admin,operator"
+	resp, body = post(t, ts, "/approvals/"+pending.Approval.ID+"/approve", `{}`, self)
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, "approval_invalid") {
+		t.Fatalf("申请人不得自批: %d %s", resp.StatusCode, body)
+	}
+
+	approver := idHeaders()
+	approver["X-Lumo-User"] = "admin-2"
+	approver["X-Lumo-Roles"] = "admin"
+	resp, body = post(t, ts, "/approvals/"+pending.Approval.ID+"/approve", `{}`, approver)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"status":"approved"`) {
+		t.Fatalf("管理员批准失败: %d %s", resp.StatusCode, body)
+	}
+
+	// 变更金额后即使带同一个 approvalId 也不得执行。
+	resp, body = post(t, ts, "/connectors/billing/invoke", `{"operation":"refund","body":{"invoice":"inv-1","amount":101},"approvalId":"`+pending.Approval.ID+`"}`, idHeaders())
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, "approval_invalid") {
+		t.Fatalf("参数漂移应拒绝: %d %s", resp.StatusCode, body)
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("漂移请求不得调用上游，calls=%d", upstreamCalls)
+	}
+
+	resp, body = post(t, ts, "/connectors/billing/invoke", `{"operation":"refund","body":{"invoice":"inv-1","amount":100},"approvalId":"`+pending.Approval.ID+`"}`, idHeaders())
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("批准后的精确请求应执行: %d %s", resp.StatusCode, body)
+	}
+	if upstreamCalls != 1 {
+		t.Fatalf("应只调用一次上游，calls=%d", upstreamCalls)
+	}
+
+	resp, body = post(t, ts, "/connectors/billing/invoke", `{"operation":"refund","body":{"invoice":"inv-1","amount":100},"approvalId":"`+pending.Approval.ID+`"}`, idHeaders())
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(body, "approval_invalid") || upstreamCalls != 1 {
+		t.Fatalf("已消费批准不得重放: status=%d calls=%d body=%s", resp.StatusCode, upstreamCalls, body)
 	}
 }
 

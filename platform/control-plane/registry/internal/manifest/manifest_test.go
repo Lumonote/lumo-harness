@@ -40,6 +40,17 @@ func TestParseGood(t *testing.T) {
 	}
 }
 
+func TestParseRuntimeComponent(t *testing.T) {
+	raw := []byte(`{"apiVersion":"lumo.artifact/v1","kind":"Component","name":"runtime-demo","version":"1.0.0","publisher":"acme","scopes":["kb:query"],"payload_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","runtime":{"type":"process","entrypoint":"bin/server","args":["--port","8080"]}}`)
+	m, err := manifest.Parse(raw)
+	if err != nil {
+		t.Fatalf("合法运行时清单应解析成功: %v", err)
+	}
+	if m.Runtime == nil || m.Runtime.Entrypoint != "bin/server" || len(m.Runtime.Args) != 2 {
+		t.Fatalf("runtime 解析错误: %+v", m.Runtime)
+	}
+}
+
 // TestParseRejects 逐条校验拒绝理由——每条都要报出具体字段，
 // 否则发布者面对 400 只能猜。
 func TestParseRejects(t *testing.T) {
@@ -60,6 +71,10 @@ func TestParseRejects(t *testing.T) {
 		{"自依赖", `{"apiVersion":"lumo.artifact/v1","kind":"Skill","name":"a-b","version":"1.0.0","publisher":"p","scopes":["x:y"],"deps":[{"name":"a-b","version":"1.0.0"}]}`, "自依赖"},
 		{"依赖版本非法", `{"apiVersion":"lumo.artifact/v1","kind":"Skill","name":"a-b","version":"1.0.0","publisher":"p","scopes":["x:y"],"deps":[{"name":"c-d","version":"latest"}]}`, "deps"},
 		{"重复依赖", `{"apiVersion":"lumo.artifact/v1","kind":"Skill","name":"a-b","version":"1.0.0","publisher":"p","scopes":["x:y"],"deps":[{"name":"c-d","version":"1.0.0"},{"name":"c-d","version":"2.0.0"}]}`, "重复"},
+		{"runtime 非 Component", `{"apiVersion":"lumo.artifact/v1","kind":"Skill","name":"a-b","version":"1.0.0","publisher":"p","scopes":["x:y"],"payload_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","runtime":{"type":"process","entrypoint":"bin/run"}}`, "仅允许 Component"},
+		{"runtime 缺 payload", `{"apiVersion":"lumo.artifact/v1","kind":"Component","name":"a-b","version":"1.0.0","publisher":"p","scopes":["x:y"],"runtime":{"type":"process","entrypoint":"bin/run"}}`, "payload_digest"},
+		{"runtime 类型未知", `{"apiVersion":"lumo.artifact/v1","kind":"Component","name":"a-b","version":"1.0.0","publisher":"p","scopes":["x:y"],"payload_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","runtime":{"type":"container","entrypoint":"bin/run"}}`, "runtime.type"},
+		{"runtime 路径穿越", `{"apiVersion":"lumo.artifact/v1","kind":"Component","name":"a-b","version":"1.0.0","publisher":"p","scopes":["x:y"],"payload_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","runtime":{"type":"process","entrypoint":"../run"}}`, "runtime.entrypoint"},
 		{"空字节", ``, "空"},
 	}
 	for _, tc := range cases {

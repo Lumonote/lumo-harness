@@ -51,6 +51,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
 // require 权限执法：非成员 404（不可见）、无权 403、闭集漂移 500。
 func (s *Server) require(w http.ResponseWriter, r *http.Request, projectID string, action string) (domain.Project, string, bool) {
 	c, ok := s.authenticate(w, r)
@@ -178,8 +188,14 @@ func (s *Server) createTaskReport(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	reportID, err := newID("report_")
+	if err != nil {
+		s.log.Error("生成任务报告 ID 失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
 	report, err := s.store.CreateTaskReport(r.Context(), domain.TaskReport{
-		ID: newID("report"), Realm: c.realm, TaskID: r.PathValue("taskID"), RunID: req.RunID,
+		ID: reportID, Realm: c.realm, TaskID: r.PathValue("taskID"), RunID: req.RunID,
 		Sections: req.Sections, Status: domain.ReportDraft, CreatedBy: c.user,
 	}, liveHead)
 	if errors.Is(err, store.ErrReportStale) {

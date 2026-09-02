@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 )
@@ -54,6 +55,19 @@ type Requires struct {
 	GPU    bool `json:"gpu,omitempty"`
 }
 
+// Runtime is the signed, node-local execution contract for a Component.
+//
+// v1 intentionally supports only one adapter: process. The provisioner-side
+// adapter starts exactly one payload entrypoint with a fixed argument vector.
+// It cannot select a shell, mutate environment variables, mount paths, or
+// create Docker/Kubernetes workloads. Those platform-specific controls belong
+// to separately configured adapters rather than to an artifact manifest.
+type Runtime struct {
+	Type       string   `json:"type"`
+	Entrypoint string   `json:"entrypoint"`
+	Args       []string `json:"args,omitempty"`
+}
+
 // Manifest 制品清单。
 type Manifest struct {
 	APIVersion    string   `json:"apiVersion"`
@@ -65,6 +79,7 @@ type Manifest struct {
 	Requires      Requires `json:"requires,omitempty"`
 	Deps          []Dep    `json:"deps,omitempty"`
 	PayloadDigest string   `json:"payload_digest,omitempty"`
+	Runtime       *Runtime `json:"runtime,omitempty"`
 }
 
 var (
@@ -121,6 +136,9 @@ func (m *Manifest) validate() error {
 	if m.PayloadDigest != "" && !digestRe.MatchString(m.PayloadDigest) {
 		return fmt.Errorf("registry: payload_digest %q 非法（应为 sha256:<64 位十六进制>）", m.PayloadDigest)
 	}
+	if err := m.validateRuntime(); err != nil {
+		return err
+	}
 	for _, s := range m.Scopes {
 		if !scopeRe.MatchString(s) {
 			return fmt.Errorf("registry: scopes 中 %q 格式非法（应形如 kb:query 或 data:read:warehouse）", s)
@@ -143,4 +161,39 @@ func (m *Manifest) validate() error {
 		seen[d.Name] = true
 	}
 	return nil
+}
+
+func (m *Manifest) validateRuntime() error {
+	if m.Runtime == nil {
+		return nil
+	}
+	if m.Kind != KindComponent {
+		return fmt.Errorf("registry: runtime 仅允许 Component 制品声明")
+	}
+	if m.PayloadDigest == "" {
+		return fmt.Errorf("registry: runtime Component 必须声明 payload_digest")
+	}
+	if m.Runtime.Type != "process" {
+		return fmt.Errorf("registry: runtime.type 仅支持 %q", "process")
+	}
+	if !safePayloadPath(m.Runtime.Entrypoint) {
+		return fmt.Errorf("registry: runtime.entrypoint 必须是 payload 内的安全相对路径")
+	}
+	if len(m.Runtime.Args) > 32 {
+		return fmt.Errorf("registry: runtime.args 最多 32 项")
+	}
+	for _, arg := range m.Runtime.Args {
+		if len(arg) > 4096 || strings.IndexByte(arg, 0) >= 0 {
+			return fmt.Errorf("registry: runtime.args 包含超长或 NUL 参数")
+		}
+	}
+	return nil
+}
+
+func safePayloadPath(value string) bool {
+	if value == "" || len(value) > 256 || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || strings.IndexByte(value, 0) >= 0 {
+		return false
+	}
+	clean := path.Clean(value)
+	return clean == value && clean != "." && clean != ".." && !strings.HasPrefix(clean, "../")
 }

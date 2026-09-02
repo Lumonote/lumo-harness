@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,6 +17,8 @@ var (
 	ErrInvalidLogin    = errors.New("invalid login")
 	ErrLoginLocked     = errors.New("login locked")
 	ErrInvalidPassword = errors.New("invalid password")
+	ErrMFAUnavailable  = errors.New("MFA encryption key unavailable")
+	ErrInvalidMFA      = errors.New("invalid MFA code")
 )
 
 type BootstrapAuthUser struct {
@@ -33,6 +36,7 @@ type AuthPolicy struct {
 	LockFor     time.Duration
 	SessionTTL  time.Duration
 	CaptchaTTL  time.Duration
+	MFAKey      []byte
 }
 
 type AuthPrincipal struct {
@@ -43,6 +47,41 @@ type AuthPrincipal struct {
 	PrimaryDeptID    string    `json:"primary_dept_id,omitempty"`
 	Roles            []string  `json:"roles"`
 	SessionExpiresAt time.Time `json:"session_expires_at"`
+}
+
+// AuthSession is a safe device/session projection. It never returns the token
+// or its hash; session ID is a separately generated revocation handle.
+type AuthSession struct {
+	ID         string    `json:"id"`
+	ClientIP   string    `json:"client_ip"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	Current    bool      `json:"current"`
+}
+
+// AuthSecurityEvent is the safe, user-visible trail of account-security
+// actions. It intentionally stores neither token material nor password/MFA
+// inputs. Failed attempts for an unknown account retain an empty user ID and
+// therefore never become visible through a user's own history endpoint.
+type AuthSecurityEvent struct {
+	ID        int64          `json:"id"`
+	Event     string         `json:"event"`
+	ClientIP  string         `json:"client_ip,omitempty"`
+	Detail    map[string]any `json:"detail"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
+type AuthMFAStatus struct {
+	Configured       bool       `json:"configured"`
+	Enabled          bool       `json:"enabled"`
+	PendingExpiresAt *time.Time `json:"pending_expires_at,omitempty"`
+	EnrolledAt       *time.Time `json:"enrolled_at,omitempty"`
+}
+
+type TOTPEnrollment struct {
+	Secret    string    `json:"secret"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type CaptchaChallenge struct {
@@ -60,6 +99,7 @@ type LoginRequest struct {
 	CaptchaID   string
 	CaptchaCode string
 	ClientIP    string
+	MFACode     string
 }
 
 type LoginResult struct {
@@ -190,6 +230,9 @@ func (s *Store) Login(ctx context.Context, request LoginRequest, policy AuthPoli
 	if retry, locked, err := s.loginLock(ctx, realm, username, clientIP); err != nil {
 		return LoginResult{}, err
 	} else if locked {
+		if err := s.recordAuthSecurityEvent(ctx, realm, "", "login_locked", clientIP, map[string]any{"username": username, "retry_after_seconds": retry}); err != nil {
+			return LoginResult{}, err
+		}
 		return LoginResult{RetryAfterSeconds: retry}, ErrLoginLocked
 	}
 	captchaOK, err := s.consumeCaptcha(ctx, request.CaptchaID, request.CaptchaCode)
@@ -197,7 +240,7 @@ func (s *Store) Login(ctx context.Context, request LoginRequest, policy AuthPoli
 		return LoginResult{}, err
 	}
 	if !captchaOK {
-		return s.rejectLogin(ctx, realm, username, clientIP, policy)
+		return s.rejectLogin(ctx, realm, username, "", clientIP, policy)
 	}
 
 	var userID, passwordHash, status string
@@ -212,23 +255,44 @@ func (s *Store) Login(ctx context.Context, request LoginRequest, policy AuthPoli
 	}
 	passwordOK := authcrypto.VerifyPassword(passwordHash, request.Password)
 	if errors.Is(err, pgx.ErrNoRows) || status != "active" || !passwordOK {
-		return s.rejectLogin(ctx, realm, username, clientIP, policy)
+		return s.rejectLogin(ctx, realm, username, userID, clientIP, policy)
+	}
+	mfaRequired, mfaOK, err := s.verifyLoginMFA(ctx, realm, userID, request.MFACode, policy.MFAKey)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if mfaRequired && !mfaOK {
+		return s.rejectLogin(ctx, realm, username, userID, clientIP, policy)
 	}
 
 	if _, err := s.pool.Exec(ctx, `DELETE FROM governance_auth_failures WHERE realm=$1 AND username=$2 AND client_ip=$3`, realm, username, clientIP); err != nil {
 		return LoginResult{}, err
 	}
+	result, err := s.createAuthSession(ctx, realm, userID, clientIP, policy.SessionTTL)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if err := s.recordAuthSecurityEvent(ctx, realm, userID, "login_succeeded", clientIP, map[string]any{"session_expires_at": result.Principal.SessionExpiresAt.Format(time.RFC3339)}); err != nil {
+		return LoginResult{}, err
+	}
+	return result, nil
+}
+
+func (s *Store) createAuthSession(ctx context.Context, realm, userID, clientIP string, ttl time.Duration) (LoginResult, error) {
+	if ttl <= 0 {
+		ttl = 24 * time.Hour
+	}
 	token, err := authcrypto.RandomToken(32)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	expiresAt := time.Now().UTC().Add(policy.SessionTTL)
+	expiresAt := time.Now().UTC().Add(ttl)
 	if _, err := s.pool.Exec(ctx, `DELETE FROM governance_auth_sessions WHERE expires_at <= now()`); err != nil {
 		return LoginResult{}, err
 	}
 	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO governance_auth_sessions (token_hash,realm,user_id,client_ip,expires_at)
-		VALUES ($1,$2,$3,$4,$5)`, authcrypto.TokenHash(token), realm, userID, clientIP, expiresAt); err != nil {
+		VALUES ($1,$2,$3,$4,$5)`, authcrypto.TokenHash(token), realm, userID, strings.TrimSpace(clientIP), expiresAt); err != nil {
 		return LoginResult{}, fmt.Errorf("create session: %w", err)
 	}
 	principal, err := s.authPrincipal(ctx, realm, userID)
@@ -239,12 +303,18 @@ func (s *Store) Login(ctx context.Context, request LoginRequest, policy AuthPoli
 	return LoginResult{Token: token, Principal: principal}, nil
 }
 
-func (s *Store) rejectLogin(ctx context.Context, realm, username, clientIP string, policy AuthPolicy) (LoginResult, error) {
+func (s *Store) rejectLogin(ctx context.Context, realm, username, userID, clientIP string, policy AuthPolicy) (LoginResult, error) {
+	if err := s.recordAuthSecurityEvent(ctx, realm, userID, "login_failed", clientIP, map[string]any{"username": username}); err != nil {
+		return LoginResult{}, err
+	}
 	retry, locked, err := s.recordLoginFailure(ctx, realm, username, clientIP, policy.MaxAttempts, policy.LockFor)
 	if err != nil {
 		return LoginResult{}, err
 	}
 	if locked {
+		if err := s.recordAuthSecurityEvent(ctx, realm, userID, "login_locked", clientIP, map[string]any{"username": username, "retry_after_seconds": retry}); err != nil {
+			return LoginResult{}, err
+		}
 		return LoginResult{RetryAfterSeconds: retry}, ErrLoginLocked
 	}
 	return LoginResult{}, ErrInvalidLogin
@@ -353,12 +423,244 @@ func (s *Store) authPrincipal(ctx context.Context, realm, userID string) (AuthPr
 	return principal, rows.Err()
 }
 
+func (s *Store) verifyLoginMFA(ctx context.Context, realm, userID, code string, key []byte) (required, valid bool, err error) {
+	var nonce, ciphertext []byte
+	err = s.pool.QueryRow(ctx, `SELECT secret_nonce,secret_ciphertext FROM governance_auth_totp WHERE realm=$1 AND user_id=$2 AND enabled`, realm, userID).Scan(&nonce, &ciphertext)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, true, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	if len(key) != 32 {
+		return true, false, ErrMFAUnavailable
+	}
+	secret, err := authcrypto.OpenTOTPSecret(key, nonce, ciphertext)
+	if err != nil {
+		return true, false, err
+	}
+	return true, authcrypto.VerifyTOTP(secret, code, time.Now()), nil
+}
+
+func (s *Store) MFAStatus(ctx context.Context, token string, configured bool) (AuthMFAStatus, error) {
+	principal, err := s.Session(ctx, token)
+	if err != nil {
+		return AuthMFAStatus{}, err
+	}
+	status := AuthMFAStatus{Configured: configured}
+	err = s.pool.QueryRow(ctx, `SELECT enabled,pending_expires_at,enrolled_at FROM governance_auth_totp WHERE realm=$1 AND user_id=$2`, principal.Realm, principal.UserID).Scan(&status.Enabled, &status.PendingExpiresAt, &status.EnrolledAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return status, nil
+	}
+	return status, err
+}
+
+func (s *Store) BeginTOTPEnrollment(ctx context.Context, token string, key []byte) (TOTPEnrollment, error) {
+	if len(key) != 32 {
+		return TOTPEnrollment{}, ErrMFAUnavailable
+	}
+	principal, err := s.Session(ctx, token)
+	if err != nil {
+		return TOTPEnrollment{}, err
+	}
+	var enabled bool
+	err = s.pool.QueryRow(ctx, `SELECT enabled FROM governance_auth_totp WHERE realm=$1 AND user_id=$2`, principal.Realm, principal.UserID).Scan(&enabled)
+	if err == nil && enabled {
+		return TOTPEnrollment{}, ErrConflict
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return TOTPEnrollment{}, err
+	}
+	secret, err := authcrypto.NewTOTPSecret()
+	if err != nil {
+		return TOTPEnrollment{}, err
+	}
+	nonce, ciphertext, err := authcrypto.SealTOTPSecret(key, secret)
+	if err != nil {
+		return TOTPEnrollment{}, err
+	}
+	expiresAt := time.Now().UTC().Add(10 * time.Minute)
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO governance_auth_totp (realm,user_id,secret_nonce,secret_ciphertext,enabled,pending_expires_at,enrolled_at)
+		VALUES ($1,$2,$3,$4,false,$5,NULL)
+		ON CONFLICT (realm,user_id) DO UPDATE SET secret_nonce=EXCLUDED.secret_nonce,secret_ciphertext=EXCLUDED.secret_ciphertext,
+			enabled=false,pending_expires_at=EXCLUDED.pending_expires_at,enrolled_at=NULL,updated_at=now()`,
+		principal.Realm, principal.UserID, nonce, ciphertext, expiresAt)
+	if err != nil {
+		return TOTPEnrollment{}, err
+	}
+	return TOTPEnrollment{Secret: secret, ExpiresAt: expiresAt}, nil
+}
+
+func (s *Store) ConfirmTOTPEnrollment(ctx context.Context, token, code string, key []byte) (AuthMFAStatus, error) {
+	if len(key) != 32 {
+		return AuthMFAStatus{}, ErrMFAUnavailable
+	}
+	principal, err := s.Session(ctx, token)
+	if err != nil {
+		return AuthMFAStatus{}, err
+	}
+	var nonce, ciphertext []byte
+	var expiresAt *time.Time
+	err = s.pool.QueryRow(ctx, `SELECT secret_nonce,secret_ciphertext,pending_expires_at FROM governance_auth_totp WHERE realm=$1 AND user_id=$2 AND NOT enabled`, principal.Realm, principal.UserID).Scan(&nonce, &ciphertext, &expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AuthMFAStatus{}, ErrNotFound
+	}
+	if err != nil {
+		return AuthMFAStatus{}, err
+	}
+	if expiresAt == nil || !expiresAt.After(time.Now()) {
+		return AuthMFAStatus{}, fmt.Errorf("%w: enrollment expired", ErrBadRequest)
+	}
+	secret, err := authcrypto.OpenTOTPSecret(key, nonce, ciphertext)
+	if err != nil {
+		return AuthMFAStatus{}, err
+	}
+	if !authcrypto.VerifyTOTP(secret, code, time.Now()) {
+		return AuthMFAStatus{}, ErrInvalidMFA
+	}
+	now := time.Now().UTC()
+	if _, err := s.pool.Exec(ctx, `UPDATE governance_auth_totp SET enabled=true,pending_expires_at=NULL,enrolled_at=$3,updated_at=$3 WHERE realm=$1 AND user_id=$2`, principal.Realm, principal.UserID, now); err != nil {
+		return AuthMFAStatus{}, err
+	}
+	if err := s.recordAuthSecurityEvent(ctx, principal.Realm, principal.UserID, "mfa_enabled", "", map[string]any{"method": "totp"}); err != nil {
+		return AuthMFAStatus{}, err
+	}
+	return AuthMFAStatus{Configured: true, Enabled: true, EnrolledAt: &now}, nil
+}
+
+func (s *Store) DisableTOTP(ctx context.Context, token, code string, key []byte) error {
+	principal, err := s.Session(ctx, token)
+	if err != nil {
+		return err
+	}
+	required, valid, err := s.verifyLoginMFA(ctx, principal.Realm, principal.UserID, code, key)
+	if err != nil {
+		return err
+	}
+	if !required || !valid {
+		return ErrInvalidMFA
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM governance_auth_totp WHERE realm=$1 AND user_id=$2`, principal.Realm, principal.UserID); err != nil {
+		return err
+	}
+	return s.recordAuthSecurityEvent(ctx, principal.Realm, principal.UserID, "mfa_disabled", "", map[string]any{"method": "totp"})
+}
+
+func (s *Store) recordAuthSecurityEvent(ctx context.Context, realm, userID, event, clientIP string, detail map[string]any) error {
+	encoded, err := json.Marshal(detail)
+	if err != nil {
+		return fmt.Errorf("encode auth security event: %w", err)
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO governance_auth_security_events (realm,user_id,event,client_ip,detail)
+		VALUES ($1,$2,$3,$4,$5)`, realm, userID, event, strings.TrimSpace(clientIP), encoded)
+	return err
+}
+
+func (s *Store) ListAuthSecurityEvents(ctx context.Context, token string) ([]AuthSecurityEvent, error) {
+	principal, err := s.Session(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id,event,client_ip,detail,created_at
+		FROM governance_auth_security_events
+		WHERE realm=$1 AND user_id=$2
+		ORDER BY created_at DESC, id DESC LIMIT 100`, principal.Realm, principal.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := []AuthSecurityEvent{}
+	for rows.Next() {
+		var event AuthSecurityEvent
+		var detail []byte
+		if err := rows.Scan(&event.ID, &event.Event, &event.ClientIP, &detail, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(detail, &event.Detail); err != nil {
+			return nil, fmt.Errorf("decode auth security event: %w", err)
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
 func (s *Store) Logout(ctx context.Context, token string) error {
 	if token == "" {
 		return nil
 	}
-	_, err := s.pool.Exec(ctx, `DELETE FROM governance_auth_sessions WHERE token_hash=$1`, authcrypto.TokenHash(token))
-	return err
+	principal, err := s.Session(ctx, token)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM governance_auth_sessions WHERE token_hash=$1`, authcrypto.TokenHash(token)); err != nil {
+		return err
+	}
+	return s.recordAuthSecurityEvent(ctx, principal.Realm, principal.UserID, "logout", "", map[string]any{})
+}
+
+func (s *Store) ListAuthSessions(ctx context.Context, token string) ([]AuthSession, error) {
+	principal, err := s.Session(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	currentHash := authcrypto.TokenHash(token)
+	rows, err := s.pool.Query(ctx, `
+		SELECT session_id,client_ip,created_at,last_seen_at,expires_at,token_hash=$3
+		FROM governance_auth_sessions
+		WHERE realm=$1 AND user_id=$2 AND expires_at>now()
+		ORDER BY last_seen_at DESC, created_at DESC`, principal.Realm, principal.UserID, currentHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	sessions := []AuthSession{}
+	for rows.Next() {
+		var session AuthSession
+		if err := rows.Scan(&session.ID, &session.ClientIP, &session.CreatedAt, &session.LastSeenAt, &session.ExpiresAt, &session.Current); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, session)
+	}
+	return sessions, rows.Err()
+}
+
+func (s *Store) RevokeAuthSession(ctx context.Context, token, sessionID string) error {
+	principal, err := s.Session(ctx, token)
+	if err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `DELETE FROM governance_auth_sessions WHERE session_id=$1 AND realm=$2 AND user_id=$3`, strings.TrimSpace(sessionID), principal.Realm, principal.UserID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return s.recordAuthSecurityEvent(ctx, principal.Realm, principal.UserID, "session_revoked", "", map[string]any{"session_id": strings.TrimSpace(sessionID)})
+}
+
+func (s *Store) RevokeOtherAuthSessions(ctx context.Context, token string) (int64, error) {
+	principal, err := s.Session(ctx, token)
+	if err != nil {
+		return 0, err
+	}
+	tag, err := s.pool.Exec(ctx, `DELETE FROM governance_auth_sessions WHERE realm=$1 AND user_id=$2 AND token_hash<>$3`, principal.Realm, principal.UserID, authcrypto.TokenHash(token))
+	if err != nil {
+		return 0, err
+	}
+	if tag.RowsAffected() == 0 {
+		return 0, nil
+	}
+	if err := s.recordAuthSecurityEvent(ctx, principal.Realm, principal.UserID, "sessions_revoked", "", map[string]any{"count": tag.RowsAffected()}); err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (s *Store) ChangePassword(ctx context.Context, token, currentPassword, newPassword string) error {
@@ -390,5 +692,8 @@ func (s *Store) ChangePassword(ctx context.Context, token, currentPassword, newP
 	if _, err := tx.Exec(ctx, `DELETE FROM governance_auth_sessions WHERE realm=$1 AND user_id=$2`, principal.Realm, principal.UserID); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return s.recordAuthSecurityEvent(ctx, principal.Realm, principal.UserID, "password_changed", "", map[string]any{"sessions_revoked": true})
 }

@@ -14,8 +14,28 @@ import (
 func Pick(task domain.Task, nodes []domain.Node, active map[string]int) *domain.Node {
 	var best *domain.Node
 	bestRatio := math.Inf(1)
-	for i := range nodes {
-		n := &nodes[i]
+	eligible := EligibleNodes(task, nodes)
+	for i := range eligible {
+		n := &eligible[i]
+		a := active[n.NodeID]
+		if a >= n.Capacity {
+			continue
+		}
+		ratio := float64(a) / float64(n.Capacity)
+		if ratio < bestRatio || (ratio == bestRatio && best != nil && n.NodeID < best.NodeID) {
+			best, bestRatio = n, ratio
+		}
+	}
+	return best
+}
+
+// EligibleNodes returns hard-constraint-compatible nodes without applying
+// capacity. It is shared by normal placement and preemption so preemption
+// cannot bypass realm, cluster, residency, capability, or anti-affinity
+// constraints.
+func EligibleNodes(task domain.Task, nodes []domain.Node) []domain.Node {
+	out := make([]domain.Node, 0, len(nodes))
+	for _, n := range nodes {
 		if n.Realm != task.Realm {
 			continue
 		}
@@ -31,16 +51,23 @@ func Pick(task domain.Task, nodes []domain.Node, active map[string]int) *domain.
 		if !n.Satisfies(task.Requires) {
 			continue
 		}
-		a := active[n.NodeID]
-		if a >= n.Capacity {
-			continue
-		}
-		ratio := float64(a) / float64(n.Capacity)
-		if ratio < bestRatio || (ratio == bestRatio && best != nil && n.NodeID < best.NodeID) {
-			best, bestRatio = n, ratio
+		out = append(out, n)
+	}
+	return out
+}
+
+// FullEligibleNodes identifies compatible nodes that are currently full. It
+// does not select a victim; the store rechecks physical capacity and chooses
+// a lower-priority active task atomically close to the control request.
+func FullEligibleNodes(task domain.Task, nodes []domain.Node, active map[string]int) []domain.Node {
+	eligible := EligibleNodes(task, nodes)
+	out := make([]domain.Node, 0, len(eligible))
+	for _, n := range eligible {
+		if active[n.NodeID] >= n.Capacity {
+			out = append(out, n)
 		}
 	}
-	return best
+	return out
 }
 
 func contains(items []string, wanted string) bool {

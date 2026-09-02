@@ -25,6 +25,9 @@ func env(k, def string) string {
 
 func main() {
 	ctx := context.Background()
+	if _, err := observability.ConfigureOTelFromEnv(ctx, "lumo-registry"); err != nil {
+		log.Fatalf("registry: invalid OpenTelemetry configuration: %v", err)
+	}
 
 	dsn := os.Getenv("REGISTRY_PG_DSN")
 	if dsn == "" {
@@ -71,7 +74,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.Printf("registry: 监听 %s", addr)
-	if err := srv.ListenAndServe(); err != nil {
+	if err := observability.Serve(srv); err != nil {
 		log.Fatalf("registry: 服务退出: %v", err)
 	}
 }

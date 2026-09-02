@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS scheduler_nodes (
   capacity      INTEGER NOT NULL,
   capabilities  TEXT    NOT NULL,  -- JSON 数组文本（NUL 教训：payload 类列一律 TEXT）
   residency     TEXT    NOT NULL DEFAULT '',
+	control_url   TEXT    NOT NULL DEFAULT '',
   registered_at BIGINT  NOT NULL
 );
 
@@ -80,6 +81,7 @@ CREATE TABLE IF NOT EXISTS scheduler_dispatch_outbox (
 
 ALTER TABLE scheduler_dispatch_outbox ADD COLUMN IF NOT EXISTS delivered_at BIGINT;
 ALTER TABLE scheduler_nodes ADD COLUMN IF NOT EXISTS residency TEXT NOT NULL DEFAULT '';
+ALTER TABLE scheduler_nodes ADD COLUMN IF NOT EXISTS control_url TEXT NOT NULL DEFAULT '';
 ALTER TABLE scheduler_nodes ADD COLUMN IF NOT EXISTS realm TEXT NOT NULL DEFAULT '';
 ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS residency TEXT NOT NULL DEFAULT '';
 ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS deadline_ms BIGINT NOT NULL DEFAULT 0;
@@ -110,6 +112,27 @@ CREATE TABLE IF NOT EXISTS scheduler_task_attempts (
   updated_at    BIGINT NOT NULL,
   PRIMARY KEY (task_id, attempt)
 );
+
+-- Durable control-plane intent. The execution RPC is a delivery attempt, not
+-- the source of truth: retries and failures remain observable after a node or
+-- Scheduler restart.
+CREATE TABLE IF NOT EXISTS scheduler_control_commands (
+  task_id       TEXT NOT NULL,
+  command       TEXT NOT NULL CHECK (command IN ('CANCEL','PREEMPT')),
+  attempt       INTEGER NOT NULL DEFAULT 0,
+  node_id       TEXT NOT NULL DEFAULT '',
+  status        TEXT NOT NULL CHECK (status IN ('REQUESTED','ACKNOWLEDGED','FAILED')),
+  detail        TEXT NOT NULL DEFAULT '',
+  requested_at  BIGINT NOT NULL,
+  updated_at    BIGINT NOT NULL,
+  PRIMARY KEY (task_id, command)
+);
+
+-- Existing deployments originally accepted only CANCEL. Keep the migration
+-- explicit so PREEMPT is never silently treated as an ordinary cancellation.
+ALTER TABLE scheduler_control_commands DROP CONSTRAINT IF EXISTS scheduler_control_commands_command_check;
+ALTER TABLE scheduler_control_commands ADD CONSTRAINT scheduler_control_commands_command_check
+  CHECK (command IN ('CANCEL','PREEMPT'));
 `
 
 // Store 调度服务持久层。
@@ -269,7 +292,7 @@ func (s *Store) PlaceTask(ctx context.Context, lease *domain.Lease, task domain.
 	var active int
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*) FROM scheduler_tasks
-		WHERE node_id = $1 AND state IN ('PLACED', 'RUNNING')`, nodeID).Scan(&active); err != nil {
+		WHERE node_id = $1 AND state IN ('PLACED', 'RUNNING', 'CANCELLING')`, nodeID).Scan(&active); err != nil {
 		return domain.Placement{}, fmt.Errorf("scheduler: 槽位计数失败: %w", err)
 	}
 	if active >= capacity {
@@ -424,6 +447,196 @@ func (s *Store) QueueTask(ctx context.Context, lease *domain.Lease, task domain.
 	return domain.StatePending, nil
 }
 
+// RecordCancelIntent durably writes a user-requested control command before
+// any RPC is made to an execution node. Repeated calls retain a prior ACK and
+// reopen a failed request for delivery; no task lifecycle state changes here.
+func (s *Store) RecordCancelIntent(ctx context.Context, taskID string) error {
+	_, err := s.recordStopIntent(ctx, taskID, domain.ControlCommandCancel, "", false, 0)
+	return err
+}
+
+// RecordPreemptionIntent writes a distinct preemption command for an active
+// lower-priority task. The boolean is false if the task changed state between
+// selection and persistence, in which case callers must not contact its node.
+func (s *Store) RecordPreemptionIntent(ctx context.Context, taskID string, attempt int, byTaskID string) (bool, error) {
+	return s.recordStopIntent(ctx, taskID, domain.ControlCommandPreempt, "preempted_by="+byTaskID, true, attempt)
+}
+
+func (s *Store) recordStopIntent(ctx context.Context, taskID string, command domain.ControlCommand, detail string, activeOnly bool, expectedAttempt int) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO scheduler_control_commands
+		  (task_id,command,attempt,node_id,status,detail,requested_at,updated_at)
+		SELECT task_id,$2,attempt,COALESCE(node_id,''),'REQUESTED',$3,`+nowMS+`,`+nowMS+`
+		FROM scheduler_tasks WHERE task_id=$1
+		  AND (NOT $4::boolean OR state IN ('PLACED','RUNNING'))
+		  AND ($5::integer = 0 OR attempt = $5)
+		ON CONFLICT (task_id,command) DO UPDATE SET
+		  attempt=EXCLUDED.attempt, node_id=EXCLUDED.node_id,
+		  status=CASE WHEN scheduler_control_commands.status='ACKNOWLEDGED'
+		    AND scheduler_control_commands.attempt=EXCLUDED.attempt
+		    THEN scheduler_control_commands.status ELSE 'REQUESTED' END,
+		  detail=CASE WHEN scheduler_control_commands.status='ACKNOWLEDGED'
+		    AND scheduler_control_commands.attempt=EXCLUDED.attempt
+		    THEN scheduler_control_commands.detail ELSE EXCLUDED.detail END,
+		  updated_at=`+nowMS, taskID, string(command), detail, activeOnly, expectedAttempt)
+	if err != nil {
+		return false, fmt.Errorf("scheduler: 记录停止命令失败: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		if activeOnly {
+			return false, nil
+		}
+		return false, &domain.TaskNotFoundError{TaskID: taskID}
+	}
+	return true, nil
+}
+
+// MarkCancelDeliveryFailed preserves a failed node-control attempt without
+// touching the task state, allowing callers to retry a visible REQUESTED/FAILED
+// command instead of manufacturing a terminal cancellation.
+func (s *Store) MarkCancelDeliveryFailed(ctx context.Context, taskID, detail string) error {
+	return s.markStopDeliveryFailed(ctx, taskID, domain.ControlCommandCancel, detail)
+}
+
+// MarkPreemptionDeliveryFailed preserves an unsuccessful stop delivery
+// separately from user cancellation audit data. The task remains active.
+func (s *Store) MarkPreemptionDeliveryFailed(ctx context.Context, taskID, detail string) error {
+	return s.markStopDeliveryFailed(ctx, taskID, domain.ControlCommandPreempt, detail)
+}
+
+func (s *Store) markStopDeliveryFailed(ctx context.Context, taskID string, command domain.ControlCommand, detail string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE scheduler_control_commands
+		SET status='FAILED',detail=$2,updated_at=`+nowMS+`
+		WHERE task_id=$1 AND command=$3 AND status<>'ACKNOWLEDGED'`, taskID, detail, string(command))
+	if err != nil {
+		return fmt.Errorf("scheduler: 记录停止投递失败: %w", err)
+	}
+	return nil
+}
+
+// RequestCancel marks an already acknowledged cancellation control command as
+// effective. Pending work can become ABORTED immediately; active work stays
+// CANCELLING until the node reports a terminal result.
+func (s *Store) RequestCancel(ctx context.Context, taskID string) (domain.Placement, error) {
+	return s.requestStop(ctx, taskID, domain.ControlCommandCancel, 0)
+}
+
+// ConfirmPreemption records that the execution node accepted a preemption
+// stop request. It deliberately returns CANCELLING rather than ABORTED: only
+// the node's terminal report releases the slot for the waiting task.
+func (s *Store) ConfirmPreemption(ctx context.Context, taskID string, attempt int) (domain.Placement, error) {
+	return s.requestStop(ctx, taskID, domain.ControlCommandPreempt, attempt)
+}
+
+func (s *Store) requestStop(ctx context.Context, taskID string, command domain.ControlCommand, expectedAttempt int) (domain.Placement, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Placement{}, fmt.Errorf("scheduler: 开启停止事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var p domain.Placement
+	var state string
+	var nodeID *string
+	err = tx.QueryRow(ctx, `
+		SELECT realm,state,node_id,attempt,fencing_token FROM scheduler_tasks
+		WHERE task_id=$1 FOR UPDATE`, taskID).
+		Scan(&p.Realm, &state, &nodeID, &p.Attempt, &p.FencingToken)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Placement{}, &domain.TaskNotFoundError{TaskID: taskID}
+	}
+	if err != nil {
+		return domain.Placement{}, fmt.Errorf("scheduler: 读取待停止任务失败: %w", err)
+	}
+	p.TaskID = taskID
+	p.State = domain.TaskState(state)
+	if nodeID != nil {
+		p.NodeID = *nodeID
+	}
+	if expectedAttempt > 0 && p.Attempt != expectedAttempt {
+		// A delayed preemption request must never stop a newer retry of the
+		// same logical task. Returning its current placement lets the caller
+		// treat this as a harmless lost race.
+		return p, nil
+	}
+
+	switch p.State {
+	case domain.StatePending:
+		p.State = domain.StateAborted
+		if _, err := tx.Exec(ctx, `UPDATE scheduler_tasks SET state='ABORTED',updated_at=`+nowMS+` WHERE task_id=$1`, taskID); err != nil {
+			return domain.Placement{}, fmt.Errorf("scheduler: 取消排队任务失败: %w", err)
+		}
+	case domain.StatePlaced, domain.StateRunning:
+		p.State = domain.StateCancelling
+		if _, err := tx.Exec(ctx, `UPDATE scheduler_tasks SET state='CANCELLING',updated_at=`+nowMS+` WHERE task_id=$1`, taskID); err != nil {
+			return domain.Placement{}, fmt.Errorf("scheduler: 记录取消请求失败: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE scheduler_task_attempts SET state='CANCELLING',updated_at=`+nowMS+`
+			WHERE task_id=$1 AND attempt=$2`, taskID, p.Attempt); err != nil {
+			return domain.Placement{}, fmt.Errorf("scheduler: 更新取消 attempt 失败: %w", err)
+		}
+	case domain.StateCancelling, domain.StateCompleted, domain.StateFailed, domain.StateAborted:
+		// Replayed cancellation is idempotent; retain the observable current state.
+	default:
+		return domain.Placement{}, fmt.Errorf("scheduler: 不支持的任务状态 %q", p.State)
+	}
+	confirmed, err := tx.Exec(ctx, `
+		UPDATE scheduler_control_commands
+		SET status='ACKNOWLEDGED',updated_at=`+nowMS+`
+		WHERE task_id=$1 AND command=$2 AND attempt=$3`, taskID, string(command), p.Attempt)
+	if err != nil {
+		return domain.Placement{}, fmt.Errorf("scheduler: 确认停止命令失败: %w", err)
+	}
+	if confirmed.RowsAffected() != 1 {
+		return domain.Placement{}, fmt.Errorf("scheduler: 缺少已持久化的 %s 命令", command)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Placement{}, fmt.Errorf("scheduler: 提交取消事务失败: %w", err)
+	}
+	return p, nil
+}
+
+// FindPreemptionVictim returns one active, lower-priority task on a currently
+// full node that already satisfies the waiting task's hard constraints. The
+// caller supplies only those compatible full node IDs from the planner, while
+// this query rechecks the persisted capacity and avoids tasks with a stop
+// delivery already in flight. It never considers a different realm.
+func (s *Store) FindPreemptionVictim(ctx context.Context, task domain.Task, nodeIDs []string) (*domain.PreemptionCandidate, error) {
+	if len(nodeIDs) == 0 {
+		return nil, nil
+	}
+	row := s.pool.QueryRow(ctx, `
+		SELECT t.task_id,t.realm,t.node_id,t.attempt,t.priority,t.state
+		FROM scheduler_tasks t
+		JOIN scheduler_nodes n ON n.node_id=t.node_id AND n.realm=t.realm
+		WHERE t.realm=$1 AND t.node_id=ANY($2) AND t.priority < $3
+		  AND t.state IN ('PLACED','RUNNING')
+		  AND n.capacity <= (
+		    SELECT count(*) FROM scheduler_tasks occupying
+		    WHERE occupying.node_id=t.node_id
+		      AND occupying.state IN ('PLACED','RUNNING','CANCELLING')
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM scheduler_control_commands c
+		    WHERE c.task_id=t.task_id AND c.attempt=t.attempt
+		      AND c.status IN ('REQUESTED','ACKNOWLEDGED')
+		  )
+		ORDER BY t.priority ASC,t.updated_at DESC,t.task_id
+		LIMIT 1`, task.Realm, nodeIDs, task.Priority)
+	var candidate domain.PreemptionCandidate
+	var state string
+	if err := row.Scan(&candidate.TaskID, &candidate.Realm, &candidate.NodeID, &candidate.Attempt, &candidate.Priority, &state); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("scheduler: 查找抢占候选失败: %w", err)
+	}
+	candidate.State = domain.TaskState(state)
+	return &candidate, nil
+}
+
 // CompleteTask 保留旧调用面；不带 attempt 的本地调用按当前任务代处理。
 func (s *Store) CompleteTask(ctx context.Context, taskID string, final domain.TaskState) (domain.Placement, error) {
 	return s.CompleteTaskAttempt(ctx, taskID, 0, final)
@@ -437,7 +650,7 @@ func (s *Store) CompleteTaskAttempt(ctx context.Context, taskID string, attempt 
 	}
 	query := `
 		UPDATE scheduler_tasks SET state = $2, updated_at = ` + nowMS + `
-		WHERE task_id = $1 AND state IN ('PLACED', 'RUNNING')`
+		WHERE task_id = $1 AND state IN ('PLACED', 'RUNNING', 'CANCELLING')`
 	args := []any{taskID, string(final)}
 	if attempt > 0 {
 		query += ` AND attempt = $3`
@@ -535,7 +748,7 @@ func (s *Store) PendingCount(ctx context.Context) (int64, error) {
 func (s *Store) ActiveCounts(ctx context.Context) (map[string]int, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT node_id, count(*) FROM scheduler_tasks
-		WHERE state IN ('PLACED', 'RUNNING') GROUP BY node_id`)
+		WHERE state IN ('PLACED', 'RUNNING', 'CANCELLING') GROUP BY node_id`)
 	if err != nil {
 		return nil, fmt.Errorf("scheduler: 活跃计数失败: %w", err)
 	}
@@ -563,13 +776,14 @@ func (s *Store) SyncNodeSnapshot(ctx context.Context, n domain.Node) error {
 		return fmt.Errorf("scheduler: 序列化节点能力失败: %w", err)
 	}
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO scheduler_nodes (node_id, realm, cluster_id, capacity, capabilities, residency, registered_at)
-		VALUES ($1, $2, $3, $4, $5, $6, `+nowMS+`)
+		INSERT INTO scheduler_nodes (node_id, realm, cluster_id, capacity, capabilities, residency, control_url, registered_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, `+nowMS+`)
 		ON CONFLICT (node_id) DO UPDATE SET
 			realm = EXCLUDED.realm, cluster_id = EXCLUDED.cluster_id, capacity = EXCLUDED.capacity,
 			capabilities = EXCLUDED.capabilities, residency = EXCLUDED.residency,
+			control_url = EXCLUDED.control_url,
 			registered_at = EXCLUDED.registered_at`,
-		n.NodeID, n.Realm, n.ClusterID, n.Capacity, string(caps), n.Residency)
+		n.NodeID, n.Realm, n.ClusterID, n.Capacity, string(caps), n.Residency, n.ControlURL)
 	if err != nil {
 		return fmt.Errorf("scheduler: 同步节点快照失败: %w", err)
 	}
@@ -749,7 +963,7 @@ func (s *Store) reconcile(ctx context.Context, lease *domain.Lease, realm string
 
 func validState(state string) bool {
 	switch domain.TaskState(state) {
-	case domain.StatePending, domain.StatePlaced, domain.StateRunning, domain.StateCompleted, domain.StateFailed, domain.StateAborted:
+	case domain.StatePending, domain.StatePlaced, domain.StateRunning, domain.StateCancelling, domain.StateCompleted, domain.StateFailed, domain.StateAborted:
 		return true
 	}
 	return false
@@ -763,8 +977,10 @@ func stateRank(state string) int {
 		return 1
 	case domain.StateRunning:
 		return 2
-	case domain.StateCompleted, domain.StateFailed, domain.StateAborted:
+	case domain.StateCancelling:
 		return 3
+	case domain.StateCompleted, domain.StateFailed, domain.StateAborted:
+		return 4
 	}
 	return -1
 }

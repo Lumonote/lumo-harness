@@ -5,8 +5,10 @@ COPY observability /observability
 RUN go mod download
 COPY registry .
 RUN CGO_ENABLED=0 go build -o /out/provisioner ./cmd/provisioner
+RUN CGO_ENABLED=0 go build -o /out/artifact-runtime ./cmd/artifact-runtime
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/provisioner /usr/local/bin/provisioner
+COPY --from=build /out/artifact-runtime /usr/local/bin/artifact-runtime
 ENTRYPOINT ["provisioner"]

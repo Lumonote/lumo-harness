@@ -22,7 +22,8 @@ func newStore(t *testing.T) *store.Store {
 	}
 	if _, err := st.Pool().Exec(ctx, `
 		TRUNCATE scheduler_tasks, scheduler_dispatch_outbox, scheduler_nodes,
-		         scheduler_reconcile_ledger, scheduler_leader_lease`); err != nil {
+		         scheduler_reconcile_ledger, scheduler_task_attempts,
+		         scheduler_control_commands, scheduler_leader_lease`); err != nil {
 		t.Fatalf("清表失败: %v", err)
 	}
 	// TRUNCATE 删掉了预插租约行，重跑 DDL 恢复

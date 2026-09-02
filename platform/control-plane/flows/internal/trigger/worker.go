@@ -65,7 +65,11 @@ func (w *Worker) cycle(ctx context.Context) {
 		return
 	}
 	for _, record := range records {
-		err := w.bus.Publish(ctx, Event{ID: record.ID, Realm: record.Realm, Name: record.Name, Payload: record.Payload})
+		err := w.bus.Publish(ctx, Event{
+			ID: record.ID, Realm: record.Realm, Name: record.Name, Payload: record.Payload,
+			ReplayAutomationID: record.ReplayAutomationID, ReplayFlowID: record.ReplayFlowID,
+			ReplayFlowVersion: record.ReplayFlowVersion, ReplayOfRunID: record.ReplayOfRunID,
+		})
 		if err != nil {
 			w.report(err)
 			continue

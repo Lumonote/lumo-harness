@@ -14,22 +14,36 @@ import (
 )
 
 type Metrics struct {
-	requests    atomic.Uint64
-	errors      atomic.Uint64
-	inflight    atomic.Int64
-	latencySum  atomic.Uint64 // microseconds
-	latencyN    atomic.Uint64
-	latencyBuck [7]atomic.Uint64
-	gaugeMu     sync.RWMutex
-	gauges      map[string]float64
+	requests      atomic.Uint64
+	errors        atomic.Uint64
+	inflight      atomic.Int64
+	latencySum    atomic.Uint64 // microseconds
+	latencyN      atomic.Uint64
+	latencyBuck   [7]atomic.Uint64
+	droppedGauges atomic.Uint64
+	gaugeMu       sync.RWMutex
+	gauges        map[string]float64
 }
 
 var Default = &Metrics{gauges: make(map[string]float64)}
+
+var defaultMetricCardinalityLimit atomic.Int64
+
+func init() { defaultMetricCardinalityLimit.Store(defaultMetricCardinalityMax) }
 
 var metricName = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
 
 func Middleware(next http.Handler) http.Handler      { return Default.Middleware(next) }
 func Handler(w http.ResponseWriter, _ *http.Request) { Default.Write(w) }
+
+// SetMetricCardinalityLimit applies the deployment's hard cap to the global
+// manually-recorded gauges.  Those gauges intentionally have no labels; a new
+// name is one additional series and is rejected once the budget is exhausted.
+func SetMetricCardinalityLimit(limit int) {
+	if limit > 0 {
+		defaultMetricCardinalityLimit.Store(int64(limit))
+	}
+}
 
 // SetGauge 更新一个由服务主动采集的 Prometheus gauge。名称只接受合法的
 // Prometheus metric name，避免把外部输入拼入 /metrics 响应。
@@ -41,6 +55,11 @@ func SetGauge(name string, value float64) {
 	if Default.gauges == nil {
 		Default.gauges = make(map[string]float64)
 	}
+	if _, exists := Default.gauges[name]; !exists && len(Default.gauges) >= int(defaultMetricCardinalityLimit.Load()) {
+		Default.droppedGauges.Add(1)
+		Default.gaugeMu.Unlock()
+		return
+	}
 	Default.gauges[name] = value
 	Default.gaugeMu.Unlock()
 }
@@ -48,10 +67,18 @@ func SetGauge(name string, value float64) {
 func (m *Metrics) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
+		_, _, inboundTraceparent := parseTraceparent(r.Header.Get("traceparent"))
+		traceID, traceparent, correlationID := traceContextOfWithSampling(r.Header.Get("traceparent"), r.Header.Get("X-Lumo-Correlation-Id"), inboundTraceparent || sampleNewRootTrace())
+		w.Header().Set("traceparent", traceparent)
+		w.Header().Set("X-Lumo-Correlation-Id", correlationID)
+		r.Header.Set("traceparent", traceparent)
+		r = r.WithContext(withTraceContext(r.Context(), traceID, traceparent, correlationID))
+		span := startHTTPSpan(r)
+		defer span.End()
 		if origin := os.Getenv("LUMO_CORS_ORIGIN"); origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Lumo-Correlation-Id")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Lumo-Correlation-Id, traceparent")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
@@ -63,6 +90,7 @@ func (m *Metrics) Middleware(next http.Handler) http.Handler {
 		defer m.inflight.Add(-1)
 		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rw, r)
+		span.RecordStatus(rw.status)
 		if rw.status >= http.StatusInternalServerError {
 			m.errors.Add(1)
 		}
@@ -86,7 +114,7 @@ func (m *Metrics) Write(w http.ResponseWriter) {
 		gauges[name] = value
 	}
 	m.gaugeMu.RUnlock()
-	fmt.Fprintf(w, "# TYPE lumo_service_up gauge\nlumo_service_up 1\n# TYPE lumo_http_requests_total counter\nlumo_http_requests_total %d\n# TYPE lumo_http_errors_total counter\nlumo_http_errors_total %d\n# TYPE lumo_http_inflight gauge\nlumo_http_inflight %d\n# TYPE lumo_http_request_duration_seconds histogram\n", m.requests.Load(), m.errors.Load(), m.inflight.Load())
+	fmt.Fprintf(w, "# TYPE lumo_service_up gauge\nlumo_service_up 1\n# TYPE lumo_http_requests_total counter\nlumo_http_requests_total %d\n# TYPE lumo_http_errors_total counter\nlumo_http_errors_total %d\n# TYPE lumo_observability_metric_series_dropped_total counter\nlumo_observability_metric_series_dropped_total %d\n# TYPE lumo_http_inflight gauge\nlumo_http_inflight %d\n# TYPE lumo_http_request_duration_seconds histogram\n", m.requests.Load(), m.errors.Load(), m.droppedGauges.Load(), m.inflight.Load())
 	for i, bound := range bounds {
 		fmt.Fprintf(w, "lumo_http_request_duration_seconds_bucket{le=\"%s\"} %d\n", bound, m.latencyBuck[i].Load())
 	}

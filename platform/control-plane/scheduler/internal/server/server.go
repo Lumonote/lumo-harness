@@ -5,10 +5,14 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/scheduler/internal/catalog"
@@ -20,15 +24,23 @@ import (
 
 // Server 调度服务 HTTP 层。
 type Server struct {
-	store   *store.Store
-	elec    *election.State
-	catalog catalog.Catalog
-	log     *slog.Logger
+	store        *store.Store
+	elec         *election.State
+	catalog      catalog.Catalog
+	log          *slog.Logger
+	controlToken string
 }
 
 // New 装配 HTTP 层。
-func New(st *store.Store, elec *election.State, cat catalog.Catalog, log *slog.Logger) *Server {
-	return &Server{store: st, elec: elec, catalog: cat, log: log}
+// controlTokens is intentionally optional so existing in-process callers stay
+// source-compatible. In deployed environments it carries the shared token
+// expected by the execution node's /subagent/stop endpoint.
+func New(st *store.Store, elec *election.State, cat catalog.Catalog, log *slog.Logger, controlTokens ...string) *Server {
+	controlToken := ""
+	if len(controlTokens) > 0 {
+		controlToken = controlTokens[0]
+	}
+	return &Server{store: st, elec: elec, catalog: cat, log: log, controlToken: controlToken}
 }
 
 // Routes 路由表（Go 1.22+ 方法+通配语法）。
@@ -40,6 +52,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/nodes", s.handleNodes)
 	mux.HandleFunc("POST /v1/placements", s.handlePlace)
 	mux.HandleFunc("GET /v1/placements/{taskId}", s.handleGetPlacement)
+	mux.HandleFunc("POST /v1/tasks/{taskId}/cancel", s.handleCancel)
 	mux.HandleFunc("POST /v1/tasks/{taskId}/result", s.handleResult)
 	mux.HandleFunc("POST /v1/nodes", s.handleUpsertNode)
 	mux.HandleFunc("POST /v1/reconcile", s.handleReconcile)
@@ -139,12 +152,7 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 
 	n := planner.Pick(task, nodes, active)
 	if n == nil {
-		state, err := s.store.QueueTask(r.Context(), lease, task)
-		if err != nil {
-			s.respondStoreError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusAccepted, map[string]any{"task_id": task.TaskID, "state": state})
+		s.queueAndMaybePreempt(w, r, lease, task, nodes)
 		return
 	}
 
@@ -157,12 +165,7 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 	var ncap *domain.NoCapacityError
 	if errors.As(err, &ncap) {
 		// 规划后槽位被并发占用：转排队（罕见路径，drain 会接续）
-		state, err2 := s.store.QueueTask(r.Context(), lease, task)
-		if err2 != nil {
-			s.respondStoreError(w, err2)
-			return
-		}
-		writeJSON(w, http.StatusAccepted, map[string]any{"task_id": task.TaskID, "state": state})
+		s.queueAndMaybePreempt(w, r, lease, task, nodes)
 		return
 	}
 	if err != nil {
@@ -170,6 +173,82 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, p)
+}
+
+// queueAndMaybePreempt durably accepts work before considering preemption. A
+// successful stop request only changes the victim to CANCELLING; the new task
+// remains PENDING until the execution node reports a terminal result and the
+// leader drain loop obtains the released slot.
+func (s *Server) queueAndMaybePreempt(w http.ResponseWriter, r *http.Request, lease *domain.Lease, task domain.Task, nodes []domain.Node) {
+	state, err := s.store.QueueTask(r.Context(), lease, task)
+	if err != nil {
+		s.respondStoreError(w, err)
+		return
+	}
+	response := map[string]any{"task_id": task.TaskID, "state": state}
+	if state == domain.StatePending {
+		if victim, err := s.requestPreemption(r, task, nodes); err != nil {
+			// Queuing succeeded, so a transient control-plane failure must not be
+			// presented as a failed submission. The durable pending state remains
+			// eligible for a later normal drain or future preemption request.
+			s.log.Warn("抢占停止请求未送达", "task_id", task.TaskID, "err", err)
+		} else if victim != "" {
+			response["preemption_requested_task_id"] = victim
+		}
+	}
+	writeJSON(w, http.StatusAccepted, response)
+}
+
+// requestPreemption only targets a lower-priority task within the same realm
+// and only on a hard-constraint-compatible node that is still full. It shares
+// the exact node stop protocol used for an explicit cancellation and never
+// returns a false ABORTED state.
+func (s *Server) requestPreemption(r *http.Request, waiting domain.Task, nodes []domain.Node) (string, error) {
+	active, err := s.store.ActiveCounts(r.Context())
+	if err != nil {
+		return "", err
+	}
+	full := planner.FullEligibleNodes(waiting, nodes, active)
+	if len(full) == 0 {
+		return "", nil
+	}
+	nodeIDs := make([]string, 0, len(full))
+	for _, node := range full {
+		// The final victim query uses the transactional node snapshot for its
+		// capacity recheck. Refresh each candidate from the authoritative
+		// catalog before asking it to free a slot.
+		if err := s.store.SyncNodeSnapshot(r.Context(), node); err != nil {
+			return "", err
+		}
+		nodeIDs = append(nodeIDs, node.NodeID)
+	}
+	victim, err := s.store.FindPreemptionVictim(r.Context(), waiting, nodeIDs)
+	if err != nil || victim == nil {
+		return "", err
+	}
+	started, err := s.store.RecordPreemptionIntent(r.Context(), victim.TaskID, victim.Attempt, waiting.TaskID)
+	if err != nil || !started {
+		return "", err
+	}
+	node, err := s.controlNode(r.Context(), waiting.Realm, victim.NodeID)
+	if err != nil {
+		_ = s.store.MarkPreemptionDeliveryFailed(r.Context(), victim.TaskID, err.Error())
+		return "", err
+	}
+	if err := s.requestStop(r, node, waiting.Realm, victim.TaskID); err != nil {
+		_ = s.store.MarkPreemptionDeliveryFailed(r.Context(), victim.TaskID, err.Error())
+		return "", err
+	}
+	p, err := s.store.ConfirmPreemption(r.Context(), victim.TaskID, victim.Attempt)
+	if err != nil {
+		return "", err
+	}
+	if p.Attempt != victim.Attempt || p.State != domain.StateCancelling {
+		// The task completed or retried while the control RPC was in flight.
+		// It would be dishonest to claim a preemption in this response.
+		return "", nil
+	}
+	return victim.TaskID, nil
 }
 
 func (s *Server) handleGetPlacement(w http.ResponseWriter, r *http.Request) {
@@ -193,6 +272,110 @@ func (s *Server) handleGetPlacement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
+}
+
+// handleCancel first asks the exact execution node that owns the placement to
+// stop. Only after the node acknowledges the request do we persist CANCELLING.
+// This deliberately prevents a control-plane/UI request from falsely claiming
+// that already-running work was cancelled.
+func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
+	realm, ok := requestRealm(w, r)
+	if !ok {
+		return
+	}
+	taskID := r.PathValue("taskId")
+	current, err := s.store.GetPlacement(r.Context(), taskID)
+	var nf *domain.TaskNotFoundError
+	if errors.As(err, &nf) {
+		writeError(w, http.StatusNotFound, "task-not-found", nf.Error())
+		return
+	}
+	if err != nil {
+		s.log.Error("读取待取消任务失败", "task_id", taskID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "读取任务失败")
+		return
+	}
+	if current.Realm != realm {
+		writeError(w, http.StatusNotFound, "task-not-found", "任务不存在")
+		return
+	}
+	if err := s.store.RecordCancelIntent(r.Context(), taskID); err != nil {
+		s.log.Error("持久化取消命令失败", "task_id", taskID, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "无法持久化取消命令")
+		return
+	}
+
+	if current.State == domain.StatePlaced || current.State == domain.StateRunning {
+		node, err := s.controlNode(r.Context(), realm, current.NodeID)
+		if err != nil {
+			if markErr := s.store.MarkCancelDeliveryFailed(r.Context(), taskID, err.Error()); markErr != nil {
+				s.log.Warn("记录取消命令失败状态失败", "task_id", taskID, "err", markErr)
+			}
+			s.log.Warn("取消请求没有可用执行节点", "task_id", taskID, "node_id", current.NodeID, "err", err)
+			writeError(w, http.StatusServiceUnavailable, "cancel-unavailable", "执行节点不可用，未记录取消状态")
+			return
+		}
+		if err := s.requestStop(r, node, realm, taskID); err != nil {
+			if markErr := s.store.MarkCancelDeliveryFailed(r.Context(), taskID, err.Error()); markErr != nil {
+				s.log.Warn("记录取消命令失败状态失败", "task_id", taskID, "err", markErr)
+			}
+			s.log.Warn("执行节点拒绝取消请求", "task_id", taskID, "node_id", current.NodeID, "err", err)
+			writeError(w, http.StatusServiceUnavailable, "cancel-failed", "执行节点未确认停止，未记录取消状态")
+			return
+		}
+	}
+
+	p, err := s.store.RequestCancel(r.Context(), taskID)
+	if err != nil {
+		s.respondStoreError(w, err)
+		return
+	}
+	if p.State == domain.StateCancelling {
+		writeJSON(w, http.StatusAccepted, p)
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+func (s *Server) controlNode(ctx context.Context, realm, nodeID string) (domain.Node, error) {
+	nodes, err := s.catalog.List(ctx)
+	if err != nil {
+		return domain.Node{}, err
+	}
+	for _, node := range nodes {
+		if node.NodeID == nodeID && node.Realm == realm && strings.TrimSpace(node.ControlURL) != "" {
+			return node, nil
+		}
+	}
+	return domain.Node{}, errors.New("node is absent from the control catalog")
+}
+
+func (s *Server) requestStop(r *http.Request, node domain.Node, realm, taskID string) error {
+	payload, err := json.Marshal(map[string]string{"childId": taskID})
+	if err != nil {
+		return err
+	}
+	endpoint := strings.TrimRight(node.ControlURL, "/") + "/subagent/stop"
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Lumo-Realm", realm)
+	if s.controlToken != "" {
+		req.Header.Set("X-Lumo-Seam-Token", s.controlToken)
+	}
+	res, err := observability.ConfiguredHTTPClient(10 * time.Second).Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
+		return errors.New("execution node returned HTTP " + res.Status)
+	}
+	return nil
 }
 
 // resultRequest 终态回报体。

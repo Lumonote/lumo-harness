@@ -58,18 +58,29 @@ CREATE TABLE IF NOT EXISTS flow_reviews (
 
 -- TriggerBus 的持久入口：事件先落 outbox，再由投递 worker 发布到进程内 Bus。
 CREATE TABLE IF NOT EXISTS flow_trigger_outbox (
-  id          BIGSERIAL PRIMARY KEY,
-  realm       TEXT NOT NULL,
-  event_name  TEXT NOT NULL,
-  payload     JSONB NOT NULL,
-  claimed_by  TEXT,
-  claimed_at  BIGINT,
-  delivered_at BIGINT,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  id                    BIGSERIAL PRIMARY KEY,
+  realm                 TEXT NOT NULL,
+  event_name            TEXT NOT NULL,
+  payload               JSONB NOT NULL,
+  -- A replay is a new durable trigger pinned to one failed execution.  These
+  -- fields are intentionally stored beside the original payload rather than
+  -- recomputed from current automation bindings when the worker picks it up.
+  replay_automation_id  TEXT,
+  replay_flow_id        TEXT,
+  replay_flow_version   INT,
+  replay_of_run_id      BIGINT,
+  claimed_by            TEXT,
+  claimed_at            BIGINT,
+  delivered_at          BIGINT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT flow_trigger_replay_binding_complete CHECK (
+    (replay_of_run_id IS NULL AND replay_automation_id IS NULL AND replay_flow_id IS NULL AND replay_flow_version IS NULL)
+    OR
+    (replay_of_run_id IS NOT NULL AND replay_automation_id IS NOT NULL AND replay_flow_id IS NOT NULL AND replay_flow_version > 0)
+  )
 );
 CREATE INDEX IF NOT EXISTS idx_flow_trigger_pending
   ON flow_trigger_outbox (id) WHERE delivered_at IS NULL;
-
 -- 每个 (trigger, automation) 只允许一个成功运行；失败重投可复用同一行，
 -- 避免 outbox 至少一次语义把幂等问题推给每个流程作者。
 CREATE TABLE IF NOT EXISTS flow_runs (
@@ -87,16 +98,40 @@ CREATE TABLE IF NOT EXISTS flow_runs (
   UNIQUE (trigger_id, automation_id)
 );
 ALTER TABLE flow_runs ADD COLUMN IF NOT EXISTS claimed_at BIGINT;
+ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS replay_automation_id TEXT;
+ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS replay_flow_id TEXT;
+ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS replay_flow_version INT;
+ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS replay_of_run_id BIGINT;
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'flow_trigger_outbox'::regclass
+      AND conname = 'flow_trigger_replay_binding_complete'
+  ) THEN
+    ALTER TABLE flow_trigger_outbox
+      ADD CONSTRAINT flow_trigger_replay_binding_complete CHECK (
+        (replay_of_run_id IS NULL AND replay_automation_id IS NULL AND replay_flow_id IS NULL AND replay_flow_version IS NULL)
+        OR
+        (replay_of_run_id IS NOT NULL AND replay_automation_id IS NOT NULL AND replay_flow_id IS NOT NULL AND replay_flow_version > 0)
+      );
+  END IF;
+END $$;
+-- One explicit retry per failed run. If that retry fails, replay its failed
+-- child run instead; this preserves a simple, auditable attempt chain. This
+-- follows the ALTERs so an existing deployment gains the column before index.
+CREATE UNIQUE INDEX IF NOT EXISTS flow_trigger_replay_once
+  ON flow_trigger_outbox (replay_of_run_id) WHERE replay_of_run_id IS NOT NULL;
 `
 
 var (
-	ErrNotFound    = errors.New("流程不存在（或不可见）")
-	ErrNameTaken   = errors.New("同名流程已存在于本项目")
-	ErrNotAuthor   = errors.New("仅作者可操作草稿")
-	ErrOnlyDraft   = errors.New("仅 draft 态可改定义")
-	ErrSelfReview  = errors.New("作者不可自审（职责分离）")
-	ErrNotReviewer = errors.New("审核须 manager/admin 角色")
-	ErrVersionGone = errors.New("回滚目标版本不存在")
+	ErrNotFound         = errors.New("流程不存在（或不可见）")
+	ErrNameTaken        = errors.New("同名流程已存在于本项目")
+	ErrNotAuthor        = errors.New("仅作者可操作草稿")
+	ErrOnlyDraft        = errors.New("仅 draft 态可改定义")
+	ErrSelfReview       = errors.New("作者不可自审（职责分离）")
+	ErrNotReviewer      = errors.New("审核须 manager/admin 角色")
+	ErrVersionGone      = errors.New("回滚目标版本不存在")
+	ErrRunNotReplayable = errors.New("仅失败的运行可以重放")
 )
 
 type Store struct {
@@ -104,11 +139,17 @@ type Store struct {
 }
 
 type TriggerRecord struct {
-	ID      uint64          `json:"id"`
-	Realm   string          `json:"realm"`
-	Name    string          `json:"name"`
-	Payload json.RawMessage `json:"payload"`
+	ID                 uint64          `json:"id"`
+	Realm              string          `json:"realm"`
+	Name               string          `json:"name"`
+	Payload            json.RawMessage `json:"payload"`
+	ReplayAutomationID string          `json:"replay_automation_id,omitempty"`
+	ReplayFlowID       string          `json:"replay_flow_id,omitempty"`
+	ReplayFlowVersion  int             `json:"replay_flow_version,omitempty"`
+	ReplayOfRunID      int64           `json:"replay_of_run_id,omitempty"`
 }
+
+func (r TriggerRecord) IsReplay() bool { return r.ReplayOfRunID > 0 }
 
 type EventBinding struct {
 	AutomationID string
@@ -117,12 +158,22 @@ type EventBinding struct {
 }
 
 type TriggerRun struct {
-	ID           int64
-	TriggerID    uint64
-	AutomationID string
-	FlowID       string
-	FlowVersion  int
-	Status       string
+	ID              int64      `json:"id"`
+	TriggerID       uint64     `json:"trigger_id"`
+	AutomationID    string     `json:"automation_id"`
+	FlowID          string     `json:"flow_id"`
+	FlowVersion     int        `json:"flow_version"`
+	Status          string     `json:"status"`
+	OutputAvailable bool       `json:"output_available"`
+	Error           string     `json:"error,omitempty"`
+	ReplayOfRunID   *int64     `json:"replay_of_run_id,omitempty"`
+	StartedAt       time.Time  `json:"started_at"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+}
+
+type ReplayEnqueue struct {
+	TriggerID     uint64 `json:"trigger_id"`
+	AlreadyQueued bool   `json:"already_queued"`
 }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
@@ -156,9 +207,12 @@ func (s *Store) ClaimTriggers(ctx context.Context, worker string, limit int) ([]
 		), claimed AS (
 			UPDATE flow_trigger_outbox o SET claimed_by = $1, claimed_at = (EXTRACT(EPOCH FROM now()) * 1000)::bigint
 			FROM picked WHERE o.id = picked.id
-			RETURNING o.id, o.realm, o.event_name, o.payload
-		)
-		SELECT id, realm, event_name, payload FROM claimed ORDER BY id`, worker, limit)
+		RETURNING o.id, o.realm, o.event_name, o.payload,
+			COALESCE(o.replay_automation_id, ''), COALESCE(o.replay_flow_id, ''),
+			COALESCE(o.replay_flow_version, 0), COALESCE(o.replay_of_run_id, 0)
+	)
+	SELECT id, realm, event_name, payload, replay_automation_id, replay_flow_id,
+		replay_flow_version, replay_of_run_id FROM claimed ORDER BY id`, worker, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -166,12 +220,73 @@ func (s *Store) ClaimTriggers(ctx context.Context, worker string, limit int) ([]
 	out := []TriggerRecord{}
 	for rows.Next() {
 		var record TriggerRecord
-		if err := rows.Scan(&record.ID, &record.Realm, &record.Name, &record.Payload); err != nil {
+		if err := rows.Scan(&record.ID, &record.Realm, &record.Name, &record.Payload,
+			&record.ReplayAutomationID, &record.ReplayFlowID, &record.ReplayFlowVersion, &record.ReplayOfRunID); err != nil {
 			return nil, err
 		}
 		out = append(out, record)
 	}
 	return out, rows.Err()
+}
+
+// EnqueueReplay creates one new durable trigger from a failed run. It copies
+// the original event bytes and the binding/version captured by that run, so a
+// later automation edit, disable, rollback, or rebinding cannot change what a
+// replay executes. Repeating the request is idempotent and returns its already
+// queued trigger; a later retry must target the new failed run instead.
+func (s *Store) EnqueueReplay(ctx context.Context, flowID, realm string, runID int64) (ReplayEnqueue, error) {
+	if flowID == "" || realm == "" || runID < 1 {
+		return ReplayEnqueue{}, ErrNotFound
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ReplayEnqueue{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var (
+		status, eventName, automationID, pinnedFlowID string
+		payload                                       json.RawMessage
+		version                                       int
+	)
+	err = tx.QueryRow(ctx, `
+		SELECT r.status, t.event_name, t.payload, r.automation_id, r.flow_id, r.flow_version
+		FROM flow_runs r
+		JOIN flow_trigger_outbox t ON t.id = r.trigger_id
+		WHERE r.id = $1 AND r.flow_id = $2 AND t.realm = $3
+		FOR UPDATE OF r, t`, runID, flowID, realm).Scan(
+		&status, &eventName, &payload, &automationID, &pinnedFlowID, &version,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ReplayEnqueue{}, ErrNotFound
+	}
+	if err != nil {
+		return ReplayEnqueue{}, err
+	}
+	if status != "failed" {
+		return ReplayEnqueue{}, ErrRunNotReplayable
+	}
+
+	var queued ReplayEnqueue
+	err = tx.QueryRow(ctx, `
+		INSERT INTO flow_trigger_outbox
+		  (realm, event_name, payload, replay_automation_id, replay_flow_id, replay_flow_version, replay_of_run_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		ON CONFLICT (replay_of_run_id) WHERE replay_of_run_id IS NOT NULL DO NOTHING
+		RETURNING id`, realm, eventName, payload, automationID, pinnedFlowID, version, runID).Scan(&queued.TriggerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.QueryRow(ctx,
+			`SELECT id FROM flow_trigger_outbox WHERE replay_of_run_id = $1`, runID).Scan(&queued.TriggerID); err != nil {
+			return ReplayEnqueue{}, err
+		}
+		queued.AlreadyQueued = true
+	} else if err != nil {
+		return ReplayEnqueue{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ReplayEnqueue{}, err
+	}
+	return queued, nil
 }
 
 func (s *Store) AckTrigger(ctx context.Context, id uint64) error {
@@ -213,9 +328,9 @@ func (s *Store) ListEventBindings(ctx context.Context, realm, name string) ([]Ev
 	return bindings, rows.Err()
 }
 
-// StartTriggerRun 以 trigger+automation 为幂等键开启运行。已成功的运行不会重复执行；
-// failed 或超时的 running 行可被 stale outbox 重投接管，并用原子 UPDATE 避免双 worker
-// 同时执行同一个自动化。
+// StartTriggerRun 以 trigger+automation 为幂等键开启运行。成功与业务失败均是最终记录；
+// 只有超时 running 行可被 stale outbox 接管，避免投递确认失败时自动重复业务副作用。
+// 一个失败运行的人工重放总是使用新的 trigger id（见 EnqueueReplay）。
 func (s *Store) StartTriggerRun(ctx context.Context, triggerID uint64, automationID, flowID string, version int) (bool, error) {
 	if triggerID == 0 || automationID == "" || flowID == "" || version < 1 {
 		return false, fmt.Errorf("非法 flow run 标识")
@@ -229,8 +344,8 @@ func (s *Store) StartTriggerRun(ctx context.Context, triggerID uint64, automatio
 				flow_id = EXCLUDED.flow_id, flow_version = EXCLUDED.flow_version,
 				status = 'running', claimed_at = EXCLUDED.claimed_at,
 				error = NULL, output = NULL, started_at = now(), finished_at = NULL
-			WHERE flow_runs.status <> 'succeeded'
-			  AND (flow_runs.status <> 'running' OR flow_runs.claimed_at IS NULL OR flow_runs.claimed_at < (EXTRACT(EPOCH FROM now()) * 1000)::bigint - 300000)
+			WHERE flow_runs.status = 'running'
+			  AND (flow_runs.claimed_at IS NULL OR flow_runs.claimed_at < (EXTRACT(EPOCH FROM now()) * 1000)::bigint - 300000)
 			RETURNING 1
 		)
 		SELECT count(*) FROM claimed`, triggerID, automationID, flowID, version).Scan(&claimed)
@@ -253,6 +368,40 @@ func (s *Store) FinishTriggerRun(ctx context.Context, triggerID uint64, automati
 		UPDATE flow_runs SET status = $3, output = $4, error = $5, finished_at = now()
 		WHERE trigger_id = $1 AND automation_id = $2`, triggerID, automationID, status, output, errText)
 	return err
+}
+
+// ListTriggerRuns exposes the durable event/webhook execution ledger without
+// returning output payloads. Outputs can contain source-system data, so the
+// management view gets only their existence plus bounded operational metadata.
+func (s *Store) ListTriggerRuns(ctx context.Context, flowID string, limit int) ([]TriggerRun, error) {
+	if flowID == "" {
+		return nil, ErrNotFound
+	}
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT r.id, r.trigger_id, r.automation_id, r.flow_id, r.flow_version, r.status,
+		       r.output IS NOT NULL, COALESCE(left(r.error, 512), ''), o.replay_of_run_id,
+		       r.started_at, r.finished_at
+		FROM flow_runs r
+		JOIN flow_trigger_outbox o ON o.id = r.trigger_id
+		WHERE r.flow_id=$1
+		ORDER BY r.started_at DESC, r.id DESC LIMIT $2`, flowID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TriggerRun{}
+	for rows.Next() {
+		var run TriggerRun
+		if err := rows.Scan(&run.ID, &run.TriggerID, &run.AutomationID, &run.FlowID, &run.FlowVersion,
+			&run.Status, &run.OutputAvailable, &run.Error, &run.ReplayOfRunID, &run.StartedAt, &run.FinishedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
 }
 
 // ProjectRole 只读查 project_members（表属 projects 服务 DDL 真相源）。

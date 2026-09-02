@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -40,6 +41,10 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if _, err := observability.ConfigureOTelFromEnv(ctx, "lumo-flows"); err != nil {
+		log.Error("invalid OpenTelemetry configuration", "err", err)
+		os.Exit(2)
+	}
 
 	pool, err := pgxpool.New(ctx, *pgDSN)
 	if err != nil {
@@ -57,12 +62,27 @@ func main() {
 	bus := trigger.New()
 	flowEngine := engine.New()
 	bus.Subscribe("*", func(runCtx context.Context, event trigger.Event) error {
-		bindings, err := st.ListEventBindings(runCtx, event.Realm, event.Name)
-		if err != nil {
-			return err
+		var bindings []store.EventBinding
+		if event.IsReplay() {
+			if event.ReplayAutomationID == "" || event.ReplayFlowID == "" || event.ReplayFlowVersion < 1 {
+				return fmt.Errorf("replay trigger %d has incomplete pinned binding", event.ID)
+			}
+			bindings = []store.EventBinding{{
+				AutomationID: event.ReplayAutomationID,
+				FlowID:       event.ReplayFlowID,
+				FlowVersion:  event.ReplayFlowVersion,
+			}}
+		} else {
+			var err error
+			bindings, err = st.ListEventBindings(runCtx, event.Realm, event.Name)
+			if err != nil {
+				return err
+			}
 		}
 		for _, binding := range bindings {
-			definition, version, err := st.DefinitionSnapshot(runCtx, binding.FlowID, event.Realm)
+			// Run the binding snapshot selected at delivery time. In particular, a
+			// replay must never drift to a current rollback target or automation edit.
+			definition, _, err := st.GetVersion(runCtx, binding.FlowID, binding.FlowVersion)
 			if err != nil {
 				return err
 			}
@@ -70,7 +90,7 @@ func main() {
 			if err := json.Unmarshal(definition, &def); err != nil {
 				return err
 			}
-			shouldRun, err := st.StartTriggerRun(runCtx, event.ID, binding.AutomationID, binding.FlowID, version)
+			shouldRun, err := st.StartTriggerRun(runCtx, event.ID, binding.AutomationID, binding.FlowID, binding.FlowVersion)
 			if err != nil {
 				return err
 			}
@@ -79,8 +99,15 @@ func main() {
 			}
 			result, err := flowEngine.Run(runCtx, &def, event.Payload)
 			if err != nil {
-				_ = st.FinishTriggerRun(runCtx, event.ID, binding.AutomationID, "failed", nil, err)
-				return fmt.Errorf("automation %s: %w", binding.AutomationID, err)
+				if finishErr := st.FinishTriggerRun(runCtx, event.ID, binding.AutomationID, "failed", nil, err); finishErr != nil {
+					return finishErr
+				}
+				// Execution failure is a terminal ledger entry, not a delivery error.
+				// Ack the source event so only an authorized explicit replay creates a
+				// new business attempt; continue independent bindings on this event.
+				log.Warn("flow trigger failed", "trigger_id", event.ID, "automation_id", binding.AutomationID,
+					"flow_id", binding.FlowID, "replay_of_run_id", event.ReplayOfRunID, "err", err)
+				continue
 			}
 			output, err := json.Marshal(result)
 			if err != nil {
@@ -89,7 +116,8 @@ func main() {
 			if err := st.FinishTriggerRun(runCtx, event.ID, binding.AutomationID, "succeeded", output, nil); err != nil {
 				return err
 			}
-			log.Info("flow trigger executed", "trigger_id", event.ID, "automation_id", binding.AutomationID, "flow_id", binding.FlowID, "event", event.Name)
+			log.Info("flow trigger executed", "trigger_id", event.ID, "automation_id", binding.AutomationID,
+				"flow_id", binding.FlowID, "event", event.Name, "replay_of_run_id", event.ReplayOfRunID)
 		}
 		return nil
 	})
@@ -101,7 +129,8 @@ func main() {
 	server.New(st, log).Register(mux)
 
 	log.Info("flows 启动", "addr", *listen)
-	if err := http.ListenAndServe(*listen, observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux))); err != nil {
+	httpSrv := &http.Server{Addr: *listen, Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)), ReadHeaderTimeout: 10 * time.Second}
+	if err := observability.Serve(httpSrv); err != nil {
 		log.Error("退出", "err", err)
 		os.Exit(1)
 	}

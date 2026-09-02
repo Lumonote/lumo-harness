@@ -33,7 +33,7 @@ func testDSN(t *testing.T) string {
 
 // newTestServer 返回（测试服，种子函数）。种子函数直插 projects/project_members
 // 最小同构（表属 projects 服务 DDL 真相源——完整形状漂移由 integration 断言）。
-func newTestServer(t *testing.T) (*httptest.Server, func(pid string, members map[string]string)) {
+func newTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, func(pid string, members map[string]string)) {
 	t.Helper()
 	schema := fmt.Sprintf("flows_srv_%d", time.Now().UnixNano())
 	base := testDSN(t)
@@ -90,7 +90,7 @@ func newTestServer(t *testing.T) (*httptest.Server, func(pid string, members map
 			}
 		}
 	}
-	return ts, seed
+	return ts, pool, seed
 }
 
 func do(t *testing.T, method, target, body string, headers map[string]string) (*http.Response, string) {
@@ -140,7 +140,7 @@ func createFlow(t *testing.T, ts *httptest.Server, user, realm, pid, name, def s
 // 判据 1-5 全链（一个 schema 一个故事：建项目成员 → 草稿护栏 → 提审 → 审核 →
 // 定向 → 面板过滤 → 弃用）。
 func TestFullLifecycle(t *testing.T) {
-	ts, seed := newTestServer(t)
+	ts, _, seed := newTestServer(t)
 	seed("p1", map[string]string{"u1": "owner", "u2": "editor", "u3": "viewer"})
 	// m1 是 manager 但不是项目成员（审核人不必在项目内）
 
@@ -221,6 +221,15 @@ func TestFullLifecycle(t *testing.T) {
 	if !strings.Contains(body, `"version":1`) {
 		t.Fatalf("approve 应产生 v1: %s", body)
 	}
+	// 发布快照可由项目成员读取，便于审阅/差异对比；它不是公共流程发现面的泄漏。
+	resp, body = do(t, "GET", ts.URL+"/v1/flows/"+id+"/versions/1", "", auth("u1", "r1", nil))
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"reviewer":"m1"`) || !strings.Contains(body, `"definition"`) {
+		t.Fatalf("项目成员读取发布快照失败: %d %s", resp.StatusCode, body)
+	}
+	resp, _ = do(t, "GET", ts.URL+"/v1/flows/"+id+"/versions/1", "", auth("u9", "r1", nil))
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("非项目成员不得读取定义快照: %d", resp.StatusCode)
+	}
 	// 已发布不能再审（非法转移 409）
 	resp, _ = do(t, "POST", ts.URL+"/v1/flows/"+id+"/review",
 		`{"approve":true}`, auth("m1", "r1", map[string]string{"X-Lumo-Roles": "manager"}))
@@ -286,5 +295,51 @@ func TestFullLifecycle(t *testing.T) {
 	resp, _ = do(t, "GET", ts.URL+"/v1/flows/"+id, "", auth("u3", "r1", nil))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("deprecated 详情应可读: %d", resp.StatusCode)
+	}
+}
+
+func TestFailedRunReplayRequiresEditorAndIsIdempotent(t *testing.T) {
+	ts, pool, seed := newTestServer(t)
+	seed("p1", map[string]string{"u1": "owner", "u2": "editor", "u3": "viewer"})
+	id := createFlow(t, ts, "u2", "r1", "p1", "replay-flow", goodDAG)
+
+	resp, body := do(t, "POST", ts.URL+"/v1/flows/"+id+"/submit", "", auth("u2", "r1", nil))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("提交失败: %d %s", resp.StatusCode, body)
+	}
+	resp, body = do(t, "POST", ts.URL+"/v1/flows/"+id+"/review", `{"approve":true}`,
+		auth("m1", "r1", map[string]string{"X-Lumo-Roles": "manager"}))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("发布失败: %d %s", resp.StatusCode, body)
+	}
+
+	var triggerID uint64
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO flow_trigger_outbox (realm,event_name,payload)
+		VALUES ('r1','ticket.opened','{"ticket":"T-7"}') RETURNING id`).Scan(&triggerID); err != nil {
+		t.Fatalf("种子 trigger: %v", err)
+	}
+	var runID int64
+	if err := pool.QueryRow(context.Background(), `
+		INSERT INTO flow_runs (trigger_id,automation_id,flow_id,flow_version,status,error)
+		VALUES ($1,'automation-ticket',$2,1,'failed','upstream unavailable') RETURNING id`, triggerID, id).Scan(&runID); err != nil {
+		t.Fatalf("种子 failed run: %v", err)
+	}
+
+	resp, _ = do(t, "POST", fmt.Sprintf("%s/v1/flows/%s/runs/%d/replay", ts.URL, id, runID), "", auth("u3", "r1", nil))
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("viewer 重放应拒绝: %d", resp.StatusCode)
+	}
+	resp, body = do(t, "POST", fmt.Sprintf("%s/v1/flows/%s/runs/%d/replay", ts.URL, id, runID), "", auth("u2", "r1", nil))
+	if resp.StatusCode != http.StatusAccepted || !strings.Contains(body, `"status":"queued"`) || strings.Contains(body, `"already_queued":true`) {
+		t.Fatalf("editor 重放失败: %d %s", resp.StatusCode, body)
+	}
+	resp, body = do(t, "POST", fmt.Sprintf("%s/v1/flows/%s/runs/%d/replay", ts.URL, id, runID), "", auth("u2", "r1", nil))
+	if resp.StatusCode != http.StatusAccepted || !strings.Contains(body, `"already_queued":true`) {
+		t.Fatalf("重复重放应返回既有 trigger: %d %s", resp.StatusCode, body)
+	}
+	resp, _ = do(t, "POST", fmt.Sprintf("%s/v1/flows/%s/runs/999999/replay", ts.URL, id), "", auth("u2", "r1", nil))
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("未知运行应为 404: %d", resp.StatusCode)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/lumo-harness/platform/observability"
@@ -47,6 +48,8 @@ func New(s *store.Store, ts *trust.Store, objs objstore.Store) http.Handler {
 	mux.HandleFunc("/v1/blobs/", a.blob)
 	mux.HandleFunc("/v1/resolve", a.resolve)
 	mux.HandleFunc("/v1/plan", a.plan)
+	mux.HandleFunc("/v1/installations", a.installations)
+	mux.HandleFunc("/v1/rollouts/", a.rolloutPath)
 	return mux
 }
 
@@ -147,7 +150,13 @@ type publishEnvelope struct {
 }
 
 func (a *api) artifacts(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodGet:
+		a.catalog(w, r)
+		return
+	case http.MethodPost:
+		// Publication continues below.
+	default:
 		writeErr(w, http.StatusMethodNotAllowed, "registry: 只支持 POST")
 		return
 	}
@@ -182,6 +191,281 @@ func (a *api) artifacts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, code, map[string]any{
 		"name": rec.Name, "version": rec.Version, "kind": rec.Kind,
 		"publisher": rec.Publisher, "digest": rec.Digest, "idempotent": rec.Idempotent,
+	})
+}
+
+// catalog returns the latest discoverable release for every artifact name.
+// It deliberately exposes only registry-index state. An entry here is signed
+// and published, but is not evidence that any provisioner installed or started
+// it on a particular runtime.
+func (a *api) catalog(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 200 {
+			writeErr(w, http.StatusBadRequest, "registry: limit 必须是 1–200 的整数")
+			return
+		}
+		limit = parsed
+	}
+	recs, err := a.store.ListLatest(r.Context(), limit)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":    recs,
+		"source":   "registry_index",
+		"state":    "discoverable",
+		"advisory": advisory,
+	})
+}
+
+type installationReportRequest struct {
+	NodeID    string                    `json:"node_id"`
+	State     string                    `json:"state"`
+	Root      string                    `json:"root"`
+	Installed []store.InstalledArtifact `json:"installed"`
+	Shape     plan.Shape                `json:"shape"`
+}
+
+// installations is the Provisioner fact channel. POST reports what a node has
+// already verified and atomically installed; it is not a remote-install API.
+// GET exposes the latest report per node so product surfaces can distinguish
+// "not reported" from "reported installed".
+func (a *api) installations(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		a.listInstallations(w, r)
+	case http.MethodPost:
+		a.reportInstallation(w, r)
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "registry: installations 只支持 GET 或 POST")
+	}
+}
+
+func (a *api) listInstallations(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 200 {
+			writeErr(w, http.StatusBadRequest, "registry: limit 必须是 1–200 的整数")
+			return
+		}
+		limit = parsed
+	}
+	reports, err := a.store.ListInstallations(r.Context(), limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": reports, "source": "provisioner_reports",
+		"advisory": "节点回报只证明最近一次 Provisioner 对账结果；它不能证明制品进程已启用、健康或正在处理请求。",
+	})
+}
+
+func (a *api) reportInstallation(w http.ResponseWriter, r *http.Request) {
+	var req installationReportRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "registry: 节点安装回报解析失败")
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeErr(w, http.StatusBadRequest, "registry: 节点安装回报只能包含一个 JSON 对象")
+		return
+	}
+	if err := validateInstallationReport(req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	report, err := a.store.UpsertInstallation(r.Context(), store.InstallationReport{
+		NodeID: req.NodeID, State: req.State, Root: req.Root, Installed: req.Installed, Shape: req.Shape,
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, report)
+}
+
+func validateInstallationReport(req installationReportRequest) error {
+	if !validNodeID(req.NodeID) {
+		return errors.New("registry: node_id 格式非法")
+	}
+	if len(req.Root) == 0 || len(req.Root) > 256 {
+		return errors.New("registry: root 必须是 1–256 字节")
+	}
+	if req.State != "converged" && req.State != "failed" {
+		return errors.New("registry: state 必须是 converged 或 failed")
+	}
+	if req.State == "converged" && len(req.Installed) == 0 {
+		return errors.New("registry: converged 回报必须包含已安装制品")
+	}
+	if req.State == "failed" && len(req.Installed) != 0 {
+		return errors.New("registry: failed 回报不得把旧安装伪装成当前已收敛")
+	}
+	if len(req.Installed) > 200 {
+		return errors.New("registry: 单次回报最多 200 个制品")
+	}
+	seen := make(map[string]struct{}, len(req.Installed))
+	for _, item := range req.Installed {
+		if item.Name == "" || item.Version == "" || !objstore.ValidDigest(item.Digest) {
+			return errors.New("registry: 已安装制品回报不完整")
+		}
+		key := item.Name + "\x00" + item.Version
+		if _, exists := seen[key]; exists {
+			return errors.New("registry: 已安装制品回报存在重复版本")
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func validNodeID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-' || ch == ':' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validRolloutSegment(value string) bool {
+	if len(value) == 0 || len(value) > 64 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// requireRolloutAdmin relies on the same authenticated gateway assertions as
+// the other control-plane services. The Registry still has no browser-facing
+// listener: RequireControlPlaneToken protects it at process assembly and the
+// Lumo UI proxy signs and validates identity before forwarding these headers.
+func requireRolloutAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get("X-Lumo-User") == "" || r.Header.Get("X-Lumo-Realm") == "" {
+		writeErr(w, http.StatusUnauthorized, "registry: 修改期望状态需要已认证身份")
+		return false
+	}
+	for _, role := range strings.Split(r.Header.Get("X-Lumo-Roles"), ",") {
+		switch strings.TrimSpace(role) {
+		case "platform_admin", "realm_admin", "admin":
+			return true
+		}
+	}
+	writeErr(w, http.StatusForbidden, "registry: 只有 realm_admin 可以修改期望状态")
+	return false
+}
+
+type rolloutRequest struct {
+	Version string `json:"version"`
+	Percent *int   `json:"percent"`
+}
+
+// rolloutPath exposes one channel's desired versions. GET is safe for any
+// authenticated control-plane consumer; PUT is an admin command. A GET with
+// node_id receives the deterministic target/holdback selection that its
+// Provisioner must reconcile; a normal GET exposes only desired state.
+func (a *api) rolloutPath(w http.ResponseWriter, r *http.Request) {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/rollouts/"), "/")
+	parts := strings.Split(rest, "/")
+	if rest == "" || (len(parts) != 1 && len(parts) != 2) || !validRolloutSegment(parts[0]) || (len(parts) == 2 && !validRolloutSegment(parts[1])) {
+		writeErr(w, http.StatusBadRequest, "registry: rollout 路径非法")
+		return
+	}
+	switch {
+	case r.Method == http.MethodGet && len(parts) == 1:
+		a.listRollouts(w, r, parts[0])
+	case r.Method == http.MethodGet && len(parts) == 2:
+		a.getRollout(w, r, parts[0], parts[1])
+	case r.Method == http.MethodPut && len(parts) == 2:
+		a.putRollout(w, r, parts[0], parts[1])
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "registry: rollouts 只支持 GET，或由管理员 PUT 指定制品")
+	}
+}
+
+func (a *api) listRollouts(w http.ResponseWriter, r *http.Request, channel string) {
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 200 {
+			writeErr(w, http.StatusBadRequest, "registry: limit 必须是 1–200 的整数")
+			return
+		}
+		limit = parsed
+	}
+	rollouts, err := a.store.ListRollouts(r.Context(), channel, limit)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": rollouts, "channel": channel, "source": "desired_state",
+		"advisory": "期望状态只选择已发布版本；它不证明节点已安装、启用或健康。部分发布使用稳定 node_id 确定性分桶，未命中节点保留上一版本。",
+	})
+}
+
+func (a *api) getRollout(w http.ResponseWriter, r *http.Request, channel, name string) {
+	rollout, err := a.store.GetRollout(r.Context(), channel, name)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	body := map[string]any{
+		"rollout": rollout, "source": "desired_state",
+		"advisory": "Provisioner 只将版本作为查询提示，随后仍从原始签名字节重建 /v1/plan。部分发布按 node_id 稳定分桶；提高 percent 不会把已命中的节点移回 holdback。",
+	}
+	if nodeID := strings.TrimSpace(r.URL.Query().Get("node_id")); nodeID != "" {
+		version, cohort, err := store.SelectRolloutVersion(rollout, nodeID)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		body["selection"] = map[string]string{"node_id": nodeID, "version": version, "cohort": cohort}
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func (a *api) putRollout(w http.ResponseWriter, r *http.Request, channel, name string) {
+	if !requireRolloutAdmin(w, r) {
+		return
+	}
+	var req rolloutRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "registry: 期望状态解析失败")
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeErr(w, http.StatusBadRequest, "registry: 期望状态只能包含一个 JSON 对象")
+		return
+	}
+	if req.Version == "" || req.Percent == nil || *req.Percent < 0 || *req.Percent > 100 {
+		writeErr(w, http.StatusBadRequest, "registry: version 必填，percent 必须是 0–100 的整数")
+		return
+	}
+	rollout, err := a.store.UpsertRollout(r.Context(), store.Rollout{Channel: channel, Name: name, Version: req.Version, Percent: *req.Percent})
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rollout": rollout, "source": "desired_state",
+		"advisory": "已更新期望版本；节点会在下一次 Provisioner 周期中按稳定 node_id 选择目标或 holdback，并重新验证签名计划后收敛。",
 	})
 }
 

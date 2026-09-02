@@ -37,6 +37,10 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if _, err := observability.ConfigureOTelFromEnv(ctx, "lumo-llm-gateway"); err != nil {
+		log.Error("invalid OpenTelemetry configuration", "err", err)
+		os.Exit(2)
+	}
 
 	pool, err := pgxpool.New(ctx, *pgDSN)
 	if err != nil {
@@ -51,7 +55,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Minute} // 流式长连接：总时长上限
+	client := observability.ConfiguredHTTPClient(10 * time.Minute) // 流式长连接：总时长上限
 	gw := gateway.New(client, func(format string, args ...any) {
 		log.Warn("网关告警: "+format, args...)
 	})
@@ -61,7 +65,8 @@ func main() {
 	srv.Register(mux)
 
 	log.Info("llm-gateway 启动", "addr", *listen)
-	if err := http.ListenAndServe(*listen, observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux))); err != nil {
+	httpSrv := &http.Server{Addr: *listen, Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)), ReadHeaderTimeout: 10 * time.Second}
+	if err := observability.Serve(httpSrv); err != nil {
 		log.Error("退出", "err", err)
 		os.Exit(1)
 	}

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/lumo-harness/platform/observability"
 )
 
 type Config struct {
@@ -52,7 +54,7 @@ func New(cfg Config) *Client {
 		cfg.Table = "usage_cube_daily"
 	}
 	if cfg.Client == nil {
-		cfg.Client = &http.Client{Timeout: 20 * time.Second}
+		cfg.Client = observability.ConfiguredHTTPClient(20 * time.Second)
 	}
 	return &Client{cfg: cfg}
 }
