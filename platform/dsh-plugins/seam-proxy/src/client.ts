@@ -6,6 +6,7 @@
  * 与本地 Provider 的判定完全一致 —— 换成远程不该改变安全边界。
  */
 import { Balancer, type EndpointHealth } from './balancer.ts'
+import { request as httpsRequest } from 'node:https'
 import {
   RemoteSeamError,
   codeForStatus,
@@ -18,6 +19,17 @@ import {
   type BudgetMode,
   type BudgetViolation,
 } from '../../../shared/seam-contracts/turn-budget.ts'
+import {
+  assertIdentityAssertionConfig,
+  issueIdentityAssertion,
+  SEAM_IDENTITY_AUDIENCE,
+} from '../../../shared/seam-contracts/identity.ts'
+import {
+  assertMutualTLSEndpoint,
+  ReloadingMutualTLSCredentials,
+  type MutualTLSCredentials,
+  type MutualTLSFileConfig,
+} from '../../../shared/seam-contracts/mtls.ts'
 
 export interface SeamProxyConfig {
   /** 远端 seam host 地址列表（静态；Nacos 发现时经 setEndpoints 热更新） */
@@ -25,6 +37,12 @@ export interface SeamProxyConfig {
   /** 调用者身份，随每次调用透传给远端 Provider */
   realm: string
   userId?: string
+  /** 受限运行身份拥有的角色；配置签名身份时必填。 */
+  roles?: string[]
+  /** 与 seam-host 共享的断言密钥。配置后不再发送可伪造的身份头。 */
+  identityAssertionSecret?: string
+  /** 启用后只向 HTTPS mTLS Host 调用，并定期从绝对文件路径重载 Secret volume。 */
+  tls?: MutualTLSFileConfig
   /** 本 realm 的 seam 共享令牌（远端 host 配了 tokens 时必填） */
   token?: string
   /** 单次调用超时 ms（默认 15s） */
@@ -45,6 +63,9 @@ export class SeamProxyClient {
   private readonly maxAttempts: number
   private readonly realm: string
   private readonly userId: string
+  private readonly roles: readonly string[]
+  private readonly identityAssertionSecret: string | undefined
+  private readonly tls: ReloadingMutualTLSCredentials | undefined
   private readonly token: string | undefined
   private readonly budget: TurnCallBudget
   /**
@@ -70,6 +91,16 @@ export class SeamProxyClient {
     this.maxAttempts = Math.max(config.maxAttempts ?? 3, 1)
     this.realm = config.realm
     this.userId = config.userId ?? 'system'
+    this.roles = [...(config.roles ?? [])]
+    this.identityAssertionSecret = config.identityAssertionSecret || undefined
+    if (this.identityAssertionSecret !== undefined && this.roles.length === 0) {
+      throw new Error('seam-proxy: signed identity requires at least one role')
+    }
+    if (this.identityAssertionSecret !== undefined) {
+      assertIdentityAssertionConfig({ audience: SEAM_IDENTITY_AUDIENCE, secret: this.identityAssertionSecret })
+    }
+    this.tls = config.tls === undefined ? undefined : new ReloadingMutualTLSCredentials(config.tls)
+    if (this.tls !== undefined) config.endpoints.forEach(assertMutualTLSEndpoint)
     this.token = config.token
     this.budget = new TurnCallBudget({
       mode: config.budgetMode,
@@ -83,6 +114,7 @@ export class SeamProxyClient {
   }
 
   setEndpoints(urls: string[]): void {
+    if (this.tls !== undefined) urls.forEach(assertMutualTLSEndpoint)
     this.balancer.setEndpoints(urls)
   }
 
@@ -142,44 +174,103 @@ export class SeamProxyClient {
   }
 
   private async send(endpoint: string, seam: string, method: string, args: unknown[]): Promise<unknown> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'X-Lumo-Realm': this.realm,
-      'X-Lumo-User': this.userId,
-    }
-    if (this.token) headers['X-Lumo-Seam-Token'] = this.token
+    const headers = seamRequestHeaders({
+      realm: this.realm,
+      userId: this.userId,
+      roles: [...this.roles],
+      token: this.token,
+      identityAssertionSecret: this.identityAssertionSecret,
+    })
 
-    let res: Response
-    try {
-      res = await fetch(`${endpoint}/seam/${encodeURIComponent(seam)}/${encodeURIComponent(method)}`, {
-        method: 'POST',
-        signal: AbortSignal.timeout(this.timeoutMs),
-        headers,
-        body: JSON.stringify({ seam, method, args }),
-      })
-    } catch (e) {
-      // AbortSignal.timeout 抛 TimeoutError；其余是连接层失败
-      const timedOut = e instanceof Error && e.name === 'TimeoutError'
-      throw new RemoteSeamError(timedOut ? 'timeout' : 'unavailable', String(e), endpoint)
-    }
+    const url = `${endpoint}/seam/${encodeURIComponent(seam)}/${encodeURIComponent(method)}`
+    const body = JSON.stringify({ seam, method, args })
+    const result = this.tls === undefined
+      ? await plainRequest(url, headers, body, this.timeoutMs, endpoint)
+      : await mutualTLSRequest(url, headers, body, this.timeoutMs, this.tls.get(), endpoint)
 
     let payload: SeamResponse
-    try {
-      payload = (await res.json()) as SeamResponse
-    } catch {
-      throw new RemoteSeamError(codeForStatus(res.status),
-        `远端返回非 JSON（HTTP ${res.status}）`, endpoint)
+    try { payload = JSON.parse(result.body) as SeamResponse } catch {
+      throw new RemoteSeamError(codeForStatus(result.status),
+        `远端返回非 JSON（HTTP ${result.status}）`, endpoint)
     }
     if (!payload.ok) {
       throw new RemoteSeamError(payload.code, payload.message, endpoint)
     }
-    if (!res.ok) {
+    if (result.status < 200 || result.status >= 300) {
       // ok:true 却是错误状态码 —— 协议不一致，宁可失败也不接受歧义结果
-      throw new RemoteSeamError(codeForStatus(res.status),
-        `远端响应自相矛盾（HTTP ${res.status} 但 ok=true）`, endpoint)
+      throw new RemoteSeamError(codeForStatus(result.status),
+        `远端响应自相矛盾（HTTP ${result.status} 但 ok=true）`, endpoint)
     }
     return payload.value
   }
+}
+
+interface HTTPResult { status: number; body: string }
+
+async function plainRequest(
+  url: string, headers: Record<string, string>, body: string, timeoutMs: number, endpoint: string,
+): Promise<HTTPResult> {
+  let res: Response
+  try {
+    res = await fetch(url, { method: 'POST', signal: AbortSignal.timeout(timeoutMs), headers, body })
+  } catch (e) {
+    const timedOut = e instanceof Error && e.name === 'TimeoutError'
+    throw new RemoteSeamError(timedOut ? 'timeout' : 'unavailable', String(e), endpoint)
+  }
+  return { status: res.status, body: await res.text() }
+}
+
+function mutualTLSRequest(
+  rawURL: string,
+  headers: Record<string, string>,
+  body: string,
+  timeoutMs: number,
+  tls: MutualTLSCredentials,
+  endpoint: string,
+): Promise<HTTPResult> {
+  assertMutualTLSEndpoint(rawURL)
+  const url = new URL(rawURL)
+  return new Promise((resolve, reject) => {
+    const request = httpsRequest(url, {
+      method: 'POST', headers, ca: tls.ca, cert: tls.cert, key: tls.key,
+      servername: tls.serverName ?? url.hostname, rejectUnauthorized: true, minVersion: 'TLSv1.2',
+    }, (response) => {
+      const chunks: Buffer[] = []
+      response.on('data', (chunk: Buffer) => chunks.push(chunk))
+      response.on('end', () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }))
+      response.on('error', reject)
+    })
+    request.setTimeout(timeoutMs, () => request.destroy(new Error('mTLS request timed out')))
+    request.on('error', (e) => {
+      const timedOut = e instanceof Error && e.message === 'mTLS request timed out'
+      reject(new RemoteSeamError(timedOut ? 'timeout' : 'unavailable', String(e), endpoint))
+    })
+    request.end(body)
+  })
+}
+
+/**
+ * 生成一次出站调用的身份头。带签名的模式有意不携带 X-Lumo-Realm/User：
+ * Host 不能同时接受可信声明和可由任意 RPC 客户端伪造的回退字段。
+ */
+export function seamRequestHeaders(config: Pick<SeamProxyConfig,
+  'realm' | 'userId' | 'roles' | 'token' | 'identityAssertionSecret'>): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const userId = config.userId ?? 'system'
+  const secret = config.identityAssertionSecret || undefined
+  if (secret === undefined) {
+    headers['X-Lumo-Realm'] = config.realm
+    headers['X-Lumo-User'] = userId
+  } else {
+    const roles = config.roles ?? []
+    if (roles.length === 0) throw new Error('seam-proxy: signed identity requires at least one role')
+    Object.assign(headers, issueIdentityAssertion({ realm: config.realm, userId, roles }, {
+      audience: SEAM_IDENTITY_AUDIENCE,
+      secret,
+    }))
+  }
+  if (config.token) headers['X-Lumo-Seam-Token'] = config.token
+  return headers
 }
 
 function sleep(ms: number): Promise<void> {

@@ -28,6 +28,9 @@ const PATCHED = [
   'packages/client/ui-conversation/src/client/apply.ts',
   'packages/client/ui-conversation/src/client/contract/slots.ts',
   'packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx',
+  'packages/client/ui-sidebar/src/client/index.ts',
+  'packages/client/ui-sidebar/src/client/contract/slots.ts',
+  'packages/client/ui-sidebar/src/client/SidebarRoot.tsx',
 ]
 
 const temporaries: string[] = []
@@ -42,8 +45,11 @@ function temporaryRoot(label: string): string {
 }
 
 /**
- * 把 pin 版本的上游文件铺进临时目录。走 `git show` 而不是读工作区 —— 工作区可能
+ * 把上游当前 HEAD 的文件铺进临时目录。走 `git show` 而不是读工作区 —— 工作区可能
  * 带着尚未迁移的改动，那样测的就不是「覆盖层能否作用于干净上游」了。
+ *
+ * 走 HEAD 而不是某个固定 tag：上游 checkout 跟随 master，所以这份护栏会自动对着
+ * 最新上游跑，`git pull` 之后锚点若漂移，跑测试就红，不必等到打桌面包才发现。
  */
 function stagePristineUpstream(label: string): string {
   const root = temporaryRoot(label)
@@ -61,7 +67,7 @@ function read(root: string, relativePath: string): string {
 }
 
 describe('applyLumoDshOverrides', () => {
-  it('锚点在 pin 住的上游版本里仍然存在,三个文件都被打上扩展位', () => {
+  it('锚点在当前上游 HEAD 里仍然存在,会话与侧边栏都被打上扩展位', () => {
     const root = stagePristineUpstream('anchors')
     applyLumoDshOverrides(root)
 
@@ -71,12 +77,22 @@ describe('applyLumoDshOverrides', () => {
 
     const slots = read(root, PATCHED[1]!)
     expect(slots).toContain('HeroComposerOwnerProps')
+    expect(slots).toContain('LUMO_HERO_INPUT_BRIDGE')
+    expect(slots).toContain('readonly inputActions?: InputActions')
     expect(slots).toContain("| 'conversation.hero.input.left'")
     expect(slots).toContain("| 'conversation.hero.composer.dock'")
 
     const conversationRoot = read(root, PATCHED[2]!)
-    expect(conversationRoot).toContain("renderSlot('conversation.hero.input.left', {})")
-    expect(conversationRoot).toContain("renderSlot('conversation.hero.composer.dock', {})")
+    expect(conversationRoot).toContain("renderSlot('conversation.hero.input.left', { input: inputState, inputActions })")
+    expect(conversationRoot).toContain("renderSlot('conversation.hero.composer.dock', { input: inputState, inputActions })")
+
+    const sidebarApply = read(root, PATCHED[3]!)
+    expect(sidebarApply).toContain("'sidebar.navigation': { kind: 'list', scope: 'root' }")
+    const sidebarSlots = read(root, PATCHED[4]!)
+    expect(sidebarSlots).toContain('SidebarNavigationOwnerProps')
+    expect(sidebarSlots).toContain("| 'sidebar.navigation'")
+    const sidebarRoot = read(root, PATCHED[5]!)
+    expect(sidebarRoot).toContain("renderSlot('sidebar.navigation', { wide })")
   })
 
   it('首页无会话时左槽改渲染 hero 变体,有会话仍走上游的 session 作用域槽', () => {

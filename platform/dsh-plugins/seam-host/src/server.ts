@@ -7,13 +7,12 @@
  * 传输选型：当前 JSON over HTTP，回环/内网。§12.1 的目标形态是 gRPC/QUIC + mTLS；
  * 换传输只换本文件，dispatch.ts 的方法表与校验语义不变。
  *
- * 身份（当前形态的诚实说明）：realm 由**每 realm 一个共享令牌**证明 —— 拿不到
- * 该 realm 的令牌就无法以该 realm 身份调用，跨租户读取因此需要窃取密钥而不是
- * 改一个 JSON 字段。角色仍是调用方自述，与本地路径完全一致（本地 Consumer 的
- * roles 也来自插件配置）—— 远程没有削弱它，但也没有加强它；真正的收敛点是
- * §6.3 的 OPA + §12.1 的 mTLS 身份，那时令牌退化为传输层凭证。
+ * 身份：兼容模式以每 realm 一个共享令牌证明 realm；签名模式由 Proxy 用短时 HMAC
+ * 断言绑定 realm/user/roles，Host 绝不读取普通身份头，并拒绝请求体角色越出断言。
+ * 两种应用层形态均不替代 §12.1 的 mTLS：它才是节点身份、密钥隔离和网络边界。
  */
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { createServer, type IncomingMessage, type Server as HTTPServer, type ServerResponse } from 'node:http'
+import { createServer as createSecureServer, type Server as HTTPSServer } from 'node:https'
 import { timingSafeEqual } from 'node:crypto'
 
 import {
@@ -29,6 +28,14 @@ import {
 } from '../../../shared/seam-contracts/remote.ts'
 import type { KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
 import type { GraphSeam } from '../../../shared/seam-contracts/graph.ts'
+import {
+  SEAM_IDENTITY_AUDIENCE,
+  verifyIdentityAssertion,
+} from '../../../shared/seam-contracts/identity.ts'
+import {
+  loadMutualTLSCredentials,
+  type MutualTLSFileConfig,
+} from '../../../shared/seam-contracts/mtls.ts'
 import {
   callGraph,
   callKnowledge,
@@ -52,27 +59,47 @@ export interface SeamHostOptions {
   maxBodyBytes: number
   /** realm → 共享令牌。为空表示匿名放行（仅回环形态，启动时已告警） */
   tokens: ReadonlyMap<string, string>
+  /** 配置后只信任发给 lumo-seam-host 的短时签名调用方身份。 */
+  identityAssertionSecret?: string
+  /** Configured certificate bundle turns this listener into a mandatory-client-cert mTLS endpoint. */
+  tls?: MutualTLSFileConfig
   /** 惰性解析：能力可能在 host 之后才挂上，也可能这个节点压根没有 */
   resolveKnowledge: () => KnowledgeSeam | undefined
   resolveGraph: () => GraphSeam | undefined
   logger: SeamHostLogger
 }
 
-interface Caller {
+export interface Caller {
   realm: string
   userId: string
+  roles: readonly string[]
 }
 
-export function createSeamHost(options: SeamHostOptions): Server {
-  const server = createServer((req, res) => {
+export type SeamHostServer = HTTPServer | HTTPSServer
+
+export function createSeamHost(options: SeamHostOptions): SeamHostServer {
+  const handler = (req: IncomingMessage, res: ServerResponse) => {
     void handle(req, res, options).catch((e: unknown) => {
       // 兜底：handle 内部已把所有可预期错误转成响应，走到这里说明是写响应本身失败
       options.logger.error('seam-host: 请求处理异常: %s', e)
       if (!res.headersSent) respond(res, 500, { ok: false, code: 'internal', message: '内部错误' })
       else res.end()
     })
-  })
+  }
+  const server = options.tls === undefined
+    ? createServer(handler)
+    : createSecureServer({
+      ...serverTLSCredentials(options.tls),
+      requestCert: true,
+      rejectUnauthorized: true,
+      minVersion: 'TLSv1.2',
+    }, handler)
   return server
+}
+
+function serverTLSCredentials(config: MutualTLSFileConfig): Omit<ReturnType<typeof loadMutualTLSCredentials>, 'serverName'> {
+  const { serverName: _serverName, ...credentials } = loadMutualTLSCredentials(config)
+  return credentials
 }
 
 async function handle(req: IncomingMessage, res: ServerResponse, options: SeamHostOptions): Promise<void> {
@@ -134,6 +161,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: SeamHo
         throw forbidden(`调用方 realm=${caller.realm} 不得操作 realm=${realm} 的数据`)
       }
     }
+    // `roles` 存在于请求体中，因而本身不可信。只有签名身份模式才把它当作一项
+    // 可校验的、不能超出调用方授权范围的声明；旧协议保持其原有兼容语义。
+    if (options.identityAssertionSecret !== undefined && spec.roles !== undefined) {
+      assertRequestedRoles(caller.roles, spec.roles(payload.args))
+    }
 
     const value = await dispatch(seamName, method, payload.args, options)
     respondOk(res, { ok: true, value } satisfies SeamResponse)
@@ -174,23 +206,55 @@ function mountedSeams(options: SeamHostOptions): SeamName[] {
 }
 
 function authenticate(req: IncomingMessage, options: SeamHostOptions): Caller {
-  const realm = header(req, 'x-lumo-realm')
-  if (!realm) throw forbidden('缺少 X-Lumo-Realm：调用方身份不可省略')
-  const userId = header(req, 'x-lumo-user') ?? 'unknown'
+  return authenticateHeaders(req.headers, options)
+}
 
-  if (options.tokens.size === 0) return { realm, userId }
+/** 独立于 HTTP listener 的认证入口，供无端口单元测试和嵌入式 host 使用。 */
+export function authenticateHeaders(
+  headers: Readonly<Record<string, string | string[] | undefined>>,
+  options: Pick<SeamHostOptions, 'tokens' | 'identityAssertionSecret'>,
+): Caller {
+  const signed = options.identityAssertionSecret === undefined
+    ? undefined
+    : verifySignedCaller(headers, options.identityAssertionSecret)
+  const realm = signed?.realm ?? header(headers, 'x-lumo-realm')
+  if (!realm) throw forbidden('缺少 X-Lumo-Realm：调用方身份不可省略')
+  const userId = signed?.userId ?? header(headers, 'x-lumo-user') ?? 'unknown'
+  const roles = signed?.roles ?? []
+
+  if (options.tokens.size === 0) return { realm, userId, roles }
 
   const expected = options.tokens.get(realm)
-  const presented = header(req, 'x-lumo-seam-token')
+  const presented = header(headers, 'x-lumo-seam-token')
   // realm 未配置令牌与令牌不匹配返回同一个错误：否则错误码本身就成了 realm 探测器
   if (!expected || !presented || !constantTimeEqual(expected, presented)) {
     throw forbidden(`realm ${realm} 的 seam 令牌校验失败`)
   }
-  return { realm, userId }
+  return { realm, userId, roles }
 }
 
-function header(req: IncomingMessage, name: string): string | undefined {
-  const raw = req.headers[name]
+function verifySignedCaller(
+  headers: Readonly<Record<string, string | string[] | undefined>>,
+  secret: string,
+): Caller {
+  try {
+    return verifyIdentityAssertion(headers, { audience: SEAM_IDENTITY_AUDIENCE, secret })
+  } catch {
+    // 切勿回退到普通头；否则攻击者只需带一个坏签名便可降级回可伪造的 legacy 身份。
+    throw forbidden('调用方身份断言无效')
+  }
+}
+
+/** 签名身份只可缩小、绝不可由 RPC 请求本身扩大。 */
+export function assertRequestedRoles(callerRoles: readonly string[], requestedRoles: readonly string[]): void {
+  const allowed = new Set(callerRoles)
+  for (const role of requestedRoles) {
+    if (!allowed.has(role)) throw forbidden(`调用方无权以角色 ${role} 查询`)
+  }
+}
+
+function header(headers: Readonly<Record<string, string | string[] | undefined>>, name: string): string | undefined {
+  const raw = headers[name]
   const value = Array.isArray(raw) ? raw[0] : raw
   return value && value.length > 0 ? value : undefined
 }

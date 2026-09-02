@@ -11,6 +11,9 @@ import {
   type KnowledgeIngest,
   type KnowledgeQuery,
   type KnowledgeSeam,
+  type KnowledgeSourceManager,
+  type KnowledgeSourceSummary,
+  type KnowledgeSourceWrite,
 } from '../../../shared/seam-contracts/knowledge.ts'
 import { forbidden } from '../../../shared/seam-contracts/errors.ts'
 import type { EmbeddingClient } from './embedding.ts'
@@ -70,7 +73,32 @@ export interface PgProviderConfig {
   embeddingModel: string
 }
 
-export class PgKnowledgeProvider implements KnowledgeSeam {
+/** 供宿主 API 映射成 409，避免管理员在并发编辑时静默覆盖来源。 */
+export class KnowledgeSourceConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'KnowledgeSourceConflictError'
+  }
+}
+
+type LockedSource = { realm: string; source_version: number } | undefined
+type StoredSource = {
+  doc_id: string; realm: string; space: string; title: string; source_version: number
+  embedding_model: string; chunks: unknown
+}
+
+function readChunks(value: unknown): KnowledgeIngest['chunks'] {
+  const decoded: unknown = typeof value === 'string' ? JSON.parse(value) : value
+  if (!Array.isArray(decoded) || !decoded.every(chunk => typeof chunk === 'object' && chunk !== null && typeof (chunk as { text?: unknown }).text === 'string' && typeof (chunk as { metadata?: unknown }).metadata === 'object' && (chunk as { metadata?: unknown }).metadata !== null && !Array.isArray((chunk as { metadata?: unknown }).metadata))) {
+    throw new Error('knowledge source contains malformed chunks')
+  }
+  return decoded.map(chunk => ({
+    text: (chunk as { text: string }).text,
+    metadata: (chunk as { metadata: Record<string, unknown> }).metadata,
+  }))
+}
+
+export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManager {
   private pool: pg.Pool
   private readonly allowedRoles: ReadonlySet<string>
   private readonly embedding: EmbeddingClient
@@ -91,37 +119,85 @@ export class PgKnowledgeProvider implements KnowledgeSeam {
     return this.embedding.embed([text]).then(([v]) => v!)
   }
 
+  /**
+   * 给单个 doc_id 加事务级锁。source 表的主键是 doc_id，因此不允许同一
+   * doc_id 被另一 realm 抢占；锁还使来源管理的 compare-and-swap 可线性化。
+   */
+  private async lockSource(client: pg.PoolClient, docId: string): Promise<LockedSource> {
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [docId])
+    const current = await client.query<{ realm: string; source_version: number }>(
+      'SELECT realm, source_version FROM knowledge_sources WHERE doc_id = $1 FOR UPDATE', [docId],
+    )
+    return current.rows[0]
+  }
+
+  private assertOwner(current: LockedSource, docId: string, realm: string): void {
+    if (current !== undefined && current.realm !== realm) {
+      throw forbidden(`knowledge source ${docId} belongs to another realm`)
+    }
+  }
+
+  /** 写 source-of-truth、向量投影和图 outbox；调用方已持有该 doc 的锁。 */
+  private async writeSource(client: pg.PoolClient, entry: KnowledgeIngest, vectors: number[][]): Promise<KnowledgeSourceSummary> {
+    const { doc, chunks } = entry
+    const written = await client.query<{
+      doc_id: string; realm: string; space: string; title: string; source_version: number; embedding_model: string; updated_at: string
+    }>(
+      `INSERT INTO knowledge_sources
+         (doc_id, realm, space, title, source_version, embedding_model, chunks, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+       ON CONFLICT (doc_id) DO UPDATE SET realm = EXCLUDED.realm, space = EXCLUDED.space,
+         title = EXCLUDED.title, source_version = EXCLUDED.source_version,
+         embedding_model = EXCLUDED.embedding_model, chunks = EXCLUDED.chunks, updated_at = now()
+       RETURNING doc_id, realm, space, title, source_version, embedding_model, updated_at::text`,
+      [doc.docId, doc.realm, doc.space, doc.title, doc.sourceVersion, doc.embeddingModel, JSON.stringify(chunks)],
+    )
+    // 一次来源更新中的分片数可以变少；删掉尾部旧分片，防止它继续被召回。
+    await client.query(
+      'DELETE FROM knowledge_chunks WHERE doc_id = $1 AND realm = $2 AND chunk_index >= $3',
+      [doc.docId, doc.realm, chunks.length],
+    )
+    for (const [i, chunk] of chunks.entries()) {
+      await client.query(
+        `INSERT INTO knowledge_chunks
+           (chunk_id, doc_id, realm, space, title, source_version, embedding_model, chunk_index, text, vector)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         ON CONFLICT (doc_id, chunk_index) DO UPDATE SET
+           realm = EXCLUDED.realm, space = EXCLUDED.space, title = EXCLUDED.title,
+           text = EXCLUDED.text, vector = EXCLUDED.vector, source_version = EXCLUDED.source_version,
+           embedding_model = EXCLUDED.embedding_model`,
+        [`${doc.docId}:${i}`, doc.docId, doc.realm, doc.space, doc.title, doc.sourceVersion,
+         doc.embeddingModel, i, chunk.text, JSON.stringify(vectors[i])],
+      )
+    }
+    // 重新写入同 id 的来源应取消此前的墓碑，否则投影侧会把新文档误视为已删除。
+    await client.query('DELETE FROM knowledge_tombstones WHERE doc_id = $1 AND realm = $2', [doc.docId, doc.realm])
+    // 图投影意图与 chunk 写入同事务（outbox；跨存储无事务，见 graph-projector.ts）
+    await client.query(
+      `INSERT INTO knowledge_graph_outbox (doc_id, realm, op, payload) VALUES ($1,$2,'upsert',$3)`,
+      [doc.docId, doc.realm, JSON.stringify(collectProjection(doc, chunks))],
+    )
+    const row = written.rows[0]!
+    return {
+      docId: row.doc_id, realm: row.realm, space: row.space, title: row.title,
+      sourceVersion: row.source_version, embeddingModel: row.embedding_model,
+      chunkCount: chunks.length, updatedAt: row.updated_at,
+    }
+  }
+
   async ingest(entry: KnowledgeIngest): Promise<void> {
     const { doc, chunks } = entry
+    // 不在事务中等待 embedding，避免网络慢时长期锁住同一来源。
+    const vectors = await this.embedding.embed(chunks.map((c) => c.text))
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
-      const vectors = await this.embedding.embed(chunks.map((c) => c.text))
-      await client.query(
-        `INSERT INTO knowledge_sources
-           (doc_id, realm, space, title, source_version, embedding_model, chunks, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,now())
-         ON CONFLICT (doc_id) DO UPDATE SET realm = EXCLUDED.realm, space = EXCLUDED.space,
-           title = EXCLUDED.title, source_version = EXCLUDED.source_version,
-           embedding_model = EXCLUDED.embedding_model, chunks = EXCLUDED.chunks, updated_at = now()`,
-        [doc.docId, doc.realm, doc.space, doc.title, doc.sourceVersion, doc.embeddingModel, JSON.stringify(chunks)],
-      )
-      for (const [i, chunk] of chunks.entries()) {
-        await client.query(
-          `INSERT INTO knowledge_chunks
-             (chunk_id, doc_id, realm, space, title, source_version, embedding_model, chunk_index, text, vector)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-           ON CONFLICT (doc_id, chunk_index) DO UPDATE SET
-             text = EXCLUDED.text, vector = EXCLUDED.vector, source_version = EXCLUDED.source_version`,
-          [`${doc.docId}:${i}`, doc.docId, doc.realm, doc.space, doc.title, doc.sourceVersion,
-           doc.embeddingModel, i, chunk.text, JSON.stringify(vectors[i])],
-        )
+      const current = await this.lockSource(client, doc.docId)
+      this.assertOwner(current, doc.docId, doc.realm)
+      if (current !== undefined && doc.sourceVersion < current.source_version) {
+        throw new KnowledgeSourceConflictError(`knowledge source ${doc.docId} has a newer version`)
       }
-      // 图投影意图与 chunk 写入同事务（outbox；跨存储无事务，见 graph-projector.ts）
-      await client.query(
-        `INSERT INTO knowledge_graph_outbox (doc_id, realm, op, payload) VALUES ($1,$2,'upsert',$3)`,
-        [doc.docId, doc.realm, JSON.stringify(collectProjection(doc, chunks))],
-      )
+      await this.writeSource(client, entry, vectors)
       await client.query('COMMIT')
     } catch (e) {
       await client.query('ROLLBACK')
@@ -163,6 +239,8 @@ export class PgKnowledgeProvider implements KnowledgeSeam {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
+      const current = await this.lockSource(client, docId)
+      this.assertOwner(current, docId, realm)
       await client.query('DELETE FROM knowledge_chunks WHERE doc_id = $1 AND realm = $2', [docId, realm])
       await client.query('DELETE FROM knowledge_sources WHERE doc_id = $1 AND realm = $2', [docId, realm])
       await client.query(
@@ -184,20 +262,119 @@ export class PgKnowledgeProvider implements KnowledgeSeam {
   }
 
   async rebuild(realm: string): Promise<void> {
-    type SourceRow = {
-      doc_id: string; space: string; title: string; source_version: number
-      embedding_model: string; chunks: Array<{ text: string; metadata: Record<string, unknown> }>
-    }
-    const rows = await this.pool.query<SourceRow>(
-      `SELECT doc_id, space, title, source_version, embedding_model, chunks
+    const rows = await this.pool.query<StoredSource>(
+      `SELECT doc_id, realm, space, title, source_version, embedding_model, chunks
        FROM knowledge_sources WHERE realm = $1 ORDER BY doc_id`, [realm],
     )
-    await this.pool.query('DELETE FROM knowledge_chunks WHERE realm = $1', [realm])
+    // 不先清空整个 realm：否则某来源在快照与 DELETE 之间更新，会暂时或永久
+    // 丢失新投影。下面以 doc 为锁粒度，仅回放仍处于同一版本的来源。
     for (const row of rows.rows) {
-      await this.ingest({
-        doc: { docId: row.doc_id, realm, space: row.space, title: row.title, sourceVersion: row.source_version, embeddingModel: row.embedding_model },
-        chunks: row.chunks,
-      })
+      const chunks = readChunks(row.chunks)
+      const vectors = await this.embedding.embed(chunks.map(chunk => chunk.text))
+      const client = await this.pool.connect()
+      try {
+        await client.query('BEGIN')
+        const current = await this.lockSource(client, row.doc_id)
+        if (current === undefined || current.realm !== realm || current.source_version !== row.source_version) {
+          await client.query('COMMIT')
+          continue
+        }
+        await this.writeSource(client, {
+          doc: { docId: row.doc_id, realm, space: row.space, title: row.title, sourceVersion: row.source_version, embeddingModel: row.embedding_model },
+          chunks,
+        }, vectors)
+        await client.query('COMMIT')
+      } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+  }
+
+  async listSources(realm: string): Promise<KnowledgeSourceSummary[]> {
+    const rows = await this.pool.query<{
+      doc_id: string; realm: string; space: string; title: string; source_version: number; embedding_model: string; chunk_count: number; updated_at: string
+    }>(
+      `SELECT doc_id, realm, space, title, source_version, embedding_model,
+              jsonb_array_length(chunks) AS chunk_count, updated_at::text
+       FROM knowledge_sources WHERE realm = $1 ORDER BY updated_at DESC, doc_id`, [realm],
+    )
+    return rows.rows.map(row => ({
+      docId: row.doc_id, realm: row.realm, space: row.space, title: row.title,
+      sourceVersion: row.source_version, embeddingModel: row.embedding_model,
+      chunkCount: Number(row.chunk_count), updatedAt: row.updated_at,
+    }))
+  }
+
+  async getSource(docId: string, realm: string): Promise<KnowledgeIngest | undefined> {
+    const result = await this.pool.query<StoredSource>(
+      `SELECT doc_id, realm, space, title, source_version, embedding_model, chunks
+       FROM knowledge_sources WHERE doc_id = $1 AND realm = $2`, [docId, realm],
+    )
+    const row = result.rows[0]
+    if (row === undefined) return undefined
+    return {
+      doc: { docId: row.doc_id, realm: row.realm, space: row.space, title: row.title, sourceVersion: row.source_version, embeddingModel: row.embedding_model },
+      chunks: readChunks(row.chunks),
+    }
+  }
+
+  async upsertSource(entry: KnowledgeSourceWrite): Promise<KnowledgeSourceSummary> {
+    if (entry.chunks.length === 0) throw new TypeError('knowledge source requires at least one chunk')
+    const vectors = await this.embedding.embed(entry.chunks.map(chunk => chunk.text))
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const current = await this.lockSource(client, entry.docId)
+      this.assertOwner(current, entry.docId, entry.realm)
+      const expected = entry.expectedSourceVersion
+      if (current === undefined) {
+        if (expected !== undefined && expected !== 0) throw new KnowledgeSourceConflictError(`knowledge source ${entry.docId} does not exist at version ${expected}`)
+      } else if (expected === undefined || expected !== current.source_version) {
+        throw new KnowledgeSourceConflictError(`knowledge source ${entry.docId} changed; reload before saving`)
+      }
+      const sourceVersion = current === undefined ? 1 : current.source_version + 1
+      const summary = await this.writeSource(client, {
+        doc: { docId: entry.docId, realm: entry.realm, space: entry.space, title: entry.title, sourceVersion, embeddingModel: this.embeddingModel },
+        chunks: entry.chunks,
+      }, vectors)
+      await client.query('COMMIT')
+      return summary
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async removeSource(docId: string, realm: string, expectedSourceVersion: number): Promise<void> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const current = await this.lockSource(client, docId)
+      this.assertOwner(current, docId, realm)
+      if (current === undefined) throw new KnowledgeSourceConflictError(`knowledge source ${docId} no longer exists`)
+      if (current.source_version !== expectedSourceVersion) throw new KnowledgeSourceConflictError(`knowledge source ${docId} changed; reload before deleting`)
+      await client.query('DELETE FROM knowledge_chunks WHERE doc_id = $1 AND realm = $2', [docId, realm])
+      await client.query('DELETE FROM knowledge_sources WHERE doc_id = $1 AND realm = $2', [docId, realm])
+      await client.query(
+        `INSERT INTO knowledge_tombstones (doc_id, realm) VALUES ($1,$2)
+         ON CONFLICT (doc_id) DO UPDATE SET removed_at = now()`,
+        [docId, realm],
+      )
+      await client.query(
+        `INSERT INTO knowledge_graph_outbox (doc_id, realm, op) VALUES ($1,$2,'remove')`,
+        [docId, realm],
+      )
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
     }
   }
 

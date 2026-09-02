@@ -1,4 +1,4 @@
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { ThemeDefinition, ThemeTokens } from '@deepseek-ai/dsh-client-ui-theme/client'
 import {
   isLumoTheme, LUMO_DEFAULT_THEME, LUMO_THEME_STORAGE_KEY, type LumoThemeId,
@@ -9,6 +9,16 @@ import {
 export { isLumoTheme, LUMO_THEME_OPTIONS, LUMO_THEME_STORAGE_KEY, type LumoThemeId } from '../theme-catalog.ts'
 
 export const LUMO_THEME_EVENT = 'lumo:set-theme'
+
+function browserStorage(): Storage | undefined {
+  try {
+    if (typeof window === 'undefined') return undefined
+    const storage = window.localStorage
+    return typeof storage?.getItem === 'function' && typeof storage.setItem === 'function' ? storage : undefined
+  } catch {
+    return undefined
+  }
+}
 
 interface DarkThemePalette {
   base: string
@@ -135,13 +145,18 @@ const themes: readonly ThemeDefinition[] = Object.freeze([
 ])
 
 export function readLumoTheme(): LumoThemeId {
-  if (typeof localStorage === 'undefined') return LUMO_DEFAULT_THEME
-  const stored = localStorage.getItem(LUMO_THEME_STORAGE_KEY)
-  return isLumoTheme(stored) ? stored : LUMO_DEFAULT_THEME
+  const storage = browserStorage()
+  if (storage === undefined) return LUMO_DEFAULT_THEME
+  try {
+    const stored = storage.getItem(LUMO_THEME_STORAGE_KEY)
+    return isLumoTheme(stored) ? stored : LUMO_DEFAULT_THEME
+  } catch {
+    return LUMO_DEFAULT_THEME
+  }
 }
 
 function persistLumoTheme(id: LumoThemeId): void {
-  localStorage.setItem(LUMO_THEME_STORAGE_KEY, id)
+  try { browserStorage()?.setItem(LUMO_THEME_STORAGE_KEY, id) } catch { /* private browsing may reject writes */ }
   document.cookie = `${LUMO_THEME_STORAGE_KEY}=${encodeURIComponent(id)}; Path=/; Max-Age=31536000; SameSite=Lax`
 }
 
@@ -151,7 +166,13 @@ export function requestLumoTheme(id: LumoThemeId): void {
 
 export function installLumoThemes(ctx: ClientContext): void {
   ctx.effect(() => {
-    const disposers = themes.map(theme => ctx.theme.register(theme))
+    // Loader replays can evaluate a fresh copy of this bundle while the shared
+    // theme service still owns the previous copy's registrations. Only claim
+    // missing ids; registrations we did not create must not be disposed here.
+    const registered = new Set(ctx.theme.getTheme().themes.map(theme => theme.id))
+    const disposers = themes
+      .filter(theme => !registered.has(theme.id))
+      .map(theme => ctx.theme.register(theme))
     const activate = (id: LumoThemeId): void => {
       persistLumoTheme(id)
       ctx.theme.setTheme(id)

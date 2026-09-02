@@ -5,7 +5,7 @@ export const BUSINESS_STATES = [
 ] as const
 export type BusinessState = (typeof BUSINESS_STATES)[number]
 
-export const RUN_STATES = ['ASSIGNED', 'QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED', 'BLOCKED'] as const
+export const RUN_STATES = ['ASSIGNED', 'QUEUED', 'RUNNING', 'CANCELLING', 'COMPLETED', 'FAILED', 'CANCELLED', 'BLOCKED'] as const
 export type RunState = (typeof RUN_STATES)[number]
 
 export const TASK_EVENTS = [
@@ -36,4 +36,3 @@ export function transitionTask(state: BusinessState, event: TaskEvent): Business
   if (allowed[state].includes(next)) return next
   throw new Error(`业务任务状态不可从 ${state} 经 ${event} 转为 ${next}`)
 }
-

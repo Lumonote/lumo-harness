@@ -45,6 +45,8 @@ export interface InvokeRequest {
   headers?: Record<string, string>
   body?: unknown
   correlationId?: string
+  /** 一次性、精确绑定到本次调用的人工审批记录 ID。 */
+  approvalId?: string
 }
 
 export interface InvokeResult {
@@ -62,6 +64,8 @@ export type GatewayCode =
   | 'connector_not_found'
   | 'operation_invalid'
   | 'approval_required'
+  | 'approval_invalid'
+  | 'approval_unavailable'
   | 'egress_denied'
   | 'rate_limited'
   | 'circuit_open'
@@ -124,6 +128,7 @@ export class ConnectorClient {
         headers: req.headers,
         body: req.body,
         correlationId: req.correlationId,
+        approvalId: req.approvalId,
       }),
     })
     return (await res.json()) as InvokeResult

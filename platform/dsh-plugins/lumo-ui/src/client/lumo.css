@@ -114,7 +114,7 @@
 }
 
 .lumo-rail-brand { display: flex; align-items: center; gap: 11px; padding: 0 8px 26px; }
-.lumo-brand-mark { display: grid; place-items: center; width: 38px; height: 38px; overflow: hidden; flex: none; border: 1px solid var(--lumo-line-strong); border-radius: 12px; color: transparent; background: var(--lumo-bg) url("/branding/logo.png") center / cover no-repeat; box-shadow: 0 8px 26px rgba(0, 0, 0, .22); font-size: 0; }
+.lumo-brand-mark { display: grid; place-items: center; width: 38px; height: 38px; overflow: hidden; flex: none; border: 1px solid var(--lumo-line-strong); border-radius: 50%; color: transparent; background: var(--lumo-bg) url("/branding/logo.png") center / cover no-repeat; box-shadow: 0 8px 26px rgba(0, 0, 0, .22); font-size: 0; }
 .lumo-rail-brand b, .lumo-rail-brand small { display: block; }
 .lumo-rail-brand b { color: var(--lumo-ink); font-size: 15px; letter-spacing: -.03em; }
 .lumo-rail-brand small { margin-top: 4px; color: var(--lumo-faint); font: 8px/1 var(--lumo-mono); letter-spacing: .08em; }
@@ -311,9 +311,13 @@
 .lumo-skeleton-skill b { width: 56%; height: 12px; }
 .lumo-skeleton-skill i { width: 82%; }
 .lumo-governance-form { display: grid; grid-template-columns: minmax(0, 1fr) 170px auto; gap: 9px; align-items: end; }
+.lumo-governance-skill-form { grid-template-columns: minmax(0, 1fr) 140px 120px auto; }
+.lumo-governance-skill-form .wide { grid-column: 1 / -1; }
 .lumo-form-hint { margin: 10px 0 0; color: var(--lumo-faint); font-size: 9px; }
 .lumo-table-list { display: grid; }
-.lumo-table-list > div { display: grid; grid-template-columns: minmax(0, 1fr) 90px 150px; align-items: center; gap: 10px; padding: 11px 3px; border-top: 1px solid var(--lumo-line); }
+.lumo-table-list > div { display: grid; grid-template-columns: minmax(0, 1fr) 90px 150px auto; align-items: center; gap: 10px; padding: 11px 3px; border-top: 1px solid var(--lumo-line); }
+.lumo-table-list > div.selected { background: var(--lumo-cyan-soft); }
+.lumo-version-open { padding: 5px 7px; font-size: 9px; }
 .lumo-table-list > div:first-child { border-top: 0; }
 .lumo-table-list b, .lumo-table-list small { display: block; }
 .lumo-table-list b { color: var(--lumo-ink); font-size: 11px; }
@@ -321,6 +325,11 @@
 .lumo-table-list i, .lumo-table-list em { font: 8px/1 var(--lumo-mono); font-style: normal; }
 .lumo-table-list i { color: var(--lumo-cyan); }
 .lumo-table-list em { color: var(--lumo-faint); }
+.lumo-governed-version-layout { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(240px, .8fr); gap: 14px; }
+.lumo-governed-source, .lumo-version-form { padding: 12px; border: 1px solid var(--lumo-line); border-radius: 9px; background: var(--lumo-accent-2); }
+.lumo-governed-source p, .lumo-governed-source small, .lumo-version-form small { margin: 0; color: var(--lumo-faint); font-size: 9px; }
+.lumo-governed-source pre { max-height: 340px; margin: 10px 0; padding: 11px; overflow: auto; border-radius: 7px; background: var(--lumo-bg); color: var(--lumo-ink); font: 10px/1.55 var(--lumo-mono); white-space: pre-wrap; }
+.lumo-version-form { display: grid; gap: 9px; align-content: start; }
 
 .lumo-section-actions { display: flex; align-items: center; gap: 8px; }
 .lumo-connector-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -338,6 +347,7 @@
 .lumo-connector-card footer span:last-child { color: var(--lumo-cyan); }
 .lumo-connector-card > .lumo-button { align-self: flex-end; }
 .lumo-status-dot, .lumo-node-strip > span > i { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--lumo-mint); box-shadow: 0 0 10px var(--lumo-accent-80); }
+.lumo-status-dot.disabled { background: var(--lumo-faint); box-shadow: none; }
 .lumo-inline-confirm { display: grid; gap: 9px; margin-top: auto; padding: 9px; border: 1px solid rgba(243, 161, 155, .18); border-radius: 8px; background: rgba(243, 161, 155, .05); }
 .lumo-inline-confirm p { margin: 0; color: var(--lumo-danger); font-size: 9px; line-height: 1.4; }
 .lumo-inline-confirm > span { display: flex; justify-content: flex-end; gap: 6px; }
@@ -383,6 +393,11 @@
 .lumo-split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .lumo-flow-form { display: grid; grid-template-columns: 125px minmax(0, 1fr) auto; gap: 7px; align-items: end; }
 .lumo-flow-actions { display: inline-flex; align-items: center; gap: 5px; }
+.lumo-flow-version-diff { margin-top: 14px; padding: 14px; border: 1px solid color-mix(in srgb, var(--lumo-accent) 28%, transparent); border-radius: 14px; background: color-mix(in srgb, var(--lumo-panel) 86%, var(--lumo-accent) 14%); }
+.lumo-flow-version-diff header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.lumo-flow-version-diff header span { display: grid; gap: 3px; }
+.lumo-flow-version-diff header small, .lumo-flow-version-diff p { color: var(--lumo-muted); font-size: 12px; }
+.lumo-flow-version-diff ul { margin: 12px 0; padding-left: 18px; display: grid; gap: 6px; font-size: 13px; }
 .lumo-placement-form { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 9px; align-items: end; }
 .lumo-placement-form label { display: grid; gap: 7px; }
 .lumo-placement-form label > span, .lumo-delegation-form label > span { color: var(--lumo-muted); font-size: 10px; }
@@ -486,6 +501,16 @@
 .lumo-orchestration-row > i { color: var(--lumo-cyan); font: 10px/1 var(--lumo-mono); font-style: normal; text-align: center; }
 .lumo-orchestration-row > em { color: var(--lumo-muted); font: 8px/1.2 var(--lumo-mono); font-style: normal; text-align: right; }
 .lumo-profile-layout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(240px, .85fr); gap: 14px; align-items: stretch; }
+.lumo-agent-preset-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, .9fr); gap: 16px; align-items: start; }
+.lumo-agent-preset-form { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px; border: 1px solid var(--lumo-line); border-radius: 9px; background: var(--lumo-accent-2); }
+.lumo-agent-preset-form .wide { grid-column: 1 / -1; }
+.lumo-agent-preset-form .lumo-form-hint { grid-column: 1 / -1; margin: 0; }
+.lumo-organization-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.lumo-organization-grid > div { min-width: 0; }
+.lumo-organization-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: end; margin-bottom: 12px; }
+.lumo-organization-controls label { display: grid; gap: 6px; }
+.lumo-organization-controls span { color: var(--lumo-muted); font-size: 10px; }
+.lumo-organization-form { grid-template-columns: repeat(3, minmax(0, 1fr)) auto; margin-top: 12px; }
 .lumo-profile-form { display: grid; grid-template-columns: minmax(180px, .65fr) minmax(0, 1.35fr) auto; gap: 9px; align-items: end; }
 .lumo-profile-form label { display: grid; gap: 7px; }
 .lumo-profile-form label > span { color: var(--lumo-muted); font-size: 10px; }
@@ -568,6 +593,11 @@
 .lumo-session-facts > div { display: grid; gap: 6px; padding: 11px; border: 1px solid var(--lumo-line); border-radius: 8px; background: var(--lumo-accent-2); }
 .lumo-session-facts span { color: var(--lumo-faint); font: 8px/1 var(--lumo-mono); }
 .lumo-session-facts b { overflow: hidden; color: var(--lumo-mint); font: 10px/1.2 var(--lumo-mono); text-overflow: ellipsis; white-space: nowrap; }
+.lumo-mfa-panel { display: grid; gap: 10px; }
+.lumo-mfa-panel p, .lumo-mfa-panel small { margin: 0; color: var(--lumo-muted); font-size: 9px; line-height: 1.5; }
+.lumo-mfa-panel code { overflow-wrap: anywhere; padding: 10px; border: 1px dashed var(--lumo-accent-32); border-radius: 7px; color: var(--lumo-mint); background: var(--lumo-accent-2); font: 10px/1.45 var(--lumo-mono); }
+.lumo-mfa-panel label { display: grid; max-width: 230px; gap: 6px; }
+.lumo-mfa-panel label span { color: var(--lumo-faint); font-size: 9px; }
 
 @media (max-width: 1120px) {
   .lumo-workbench { grid-template-columns: 220px minmax(0, 1fr); }
@@ -593,7 +623,7 @@
   .lumo-workbench-header, .lumo-workbench-footer { padding-inline: 22px; }
   .lumo-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lumo-search-layout, .lumo-result-layout, .lumo-skill-layout, .lumo-connector-layout { grid-template-columns: 1fr; }
-  .lumo-delegation-layout, .lumo-profile-layout, .lumo-sheet-grid { grid-template-columns: 1fr; }
+  .lumo-delegation-layout, .lumo-profile-layout, .lumo-agent-preset-layout, .lumo-organization-grid, .lumo-sheet-grid { grid-template-columns: 1fr; }
   .lumo-placement-form { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .lumo-inspector { min-height: 0; }
   .lumo-skill-grid, .lumo-connector-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -628,6 +658,7 @@
   .lumo-section-actions, .lumo-filter { width: 100%; }
   .lumo-filter input { width: 100%; flex: 1; }
   .lumo-search-form, .lumo-governance-form, .lumo-flow-form, .lumo-delegation-form, .lumo-placement-form, .lumo-profile-form { grid-template-columns: 1fr; }
+  .lumo-organization-controls, .lumo-organization-form { grid-template-columns: 1fr; }
   .lumo-local-next { grid-template-columns: 1fr; }
   .lumo-local-next small { grid-column: 1; }
   .lumo-placement-form .wide, .lumo-delegation-form .wide { grid-column: auto; }
@@ -650,6 +681,8 @@
   .lumo-inline-form > .lumo-button, .lumo-account-hero > .lumo-button { align-self: flex-start; }
   .lumo-table-list > div { grid-template-columns: minmax(0, 1fr) auto; }
   .lumo-table-list em { grid-column: 1 / -1; }
+  .lumo-version-open { grid-column: 1 / -1; justify-self: start; }
+  .lumo-governed-version-layout { grid-template-columns: 1fr; }
   .lumo-session-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lumo-fact-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .lumo-sheet { inset-inline: 13px; max-height: calc(100% - 26px); overflow: auto; }
@@ -691,6 +724,14 @@
 .lumo-market-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px; }
 .lumo-market-actions .lumo-button { min-height: 31px; padding: 7px 9px; font-size: 9px; text-decoration: none; }
 .lumo-market-command { display: block; margin-top: 11px; padding: 8px 9px; overflow: auto; border: 1px solid var(--lumo-line); border-radius: 7px; color: var(--lumo-faint); background: rgba(0, 0, 0, .18); font: 8px/1.5 var(--lumo-mono); white-space: nowrap; }
+.lumo-market-plan { display: grid; gap: 12px; padding: 15px; border: 1px solid color-mix(in srgb, var(--lumo-accent) 35%, var(--lumo-line)); border-radius: 12px; background: linear-gradient(135deg, color-mix(in srgb, var(--lumo-accent) 9%, transparent), rgba(255, 255, 255, .018)); }
+.lumo-market-plan > div:first-child { display: grid; gap: 4px; }
+.lumo-market-plan small { color: var(--lumo-faint); font-size: 10px; line-height: 1.55; }
+.lumo-market-plan fieldset { display: flex; flex-wrap: wrap; gap: 7px 13px; margin: 0; padding: 9px 11px 11px; border: 1px solid var(--lumo-line); border-radius: 8px; }
+.lumo-market-plan legend { padding: 0 4px; color: var(--lumo-faint); font: 9px var(--lumo-mono); }
+.lumo-market-plan fieldset label { display: inline-flex; align-items: center; gap: 5px; color: var(--lumo-muted); font: 10px var(--lumo-mono); }
+.lumo-market-plan-result { display: grid; gap: 6px; padding: 10px; border-radius: 8px; background: rgba(0, 0, 0, .16); }
+.lumo-market-plan-result > span { display: grid; gap: 2px; padding-top: 6px; border-top: 1px solid var(--lumo-line); }
 .lumo-market-note-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
 .lumo-market-note-grid > div { display: grid; gap: 6px; min-height: 106px; padding: 12px; border: 1px solid var(--lumo-line); border-radius: 9px; background: var(--lumo-accent-4); }
 .lumo-market-note-grid span { color: var(--lumo-cyan); font: 8px/1 var(--lumo-mono); letter-spacing: .12em; }
@@ -804,4 +845,184 @@
   .lumo-design-composer-footer button { align-self: flex-end; }
   .lumo-design-examples { grid-template-columns: 1fr; }
   .lumo-design-preview { height: 54px; }
+}
+
+/* Product navigation lives above the untouched native workspace/history list. */
+.lumo-sidebar-navigation { display: grid; gap: 2px; padding: 10px 12px 9px; border-bottom: 1px solid var(--lumo-line); }
+.lumo-sidebar-navigation button { position: relative; display: flex; align-items: center; gap: 10px; width: 100%; min-height: 31px; padding: 0 9px; border: 0; border-radius: 7px; color: var(--lumo-muted); background: transparent; cursor: pointer; text-align: left; transition: color .16s ease, background .16s ease, transform .16s ease; }
+.lumo-sidebar-navigation button:hover { color: var(--lumo-ink); background: var(--lumo-accent-6); transform: translateX(1px); }
+.lumo-sidebar-navigation button.active { color: var(--lumo-ink); background: linear-gradient(90deg, var(--lumo-accent-12), var(--lumo-accent-4)); }
+.lumo-sidebar-navigation button.active::before { position: absolute; left: -12px; width: 3px; height: 20px; border-radius: 0 3px 3px 0; background: var(--lumo-mint); content: ""; }
+.lumo-sidebar-navigation .lumo-glyph { width: 16px; height: 16px; flex: none; }
+.lumo-sidebar-navigation button > span { min-width: 0; overflow: hidden; flex: 1; font-size: 11px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
+.lumo-sidebar-navigation button > small { color: var(--lumo-faint); font-size: 8px; white-space: nowrap; }
+.lumo-sidebar-navigation.rail { padding: 9px 10px; }
+.lumo-sidebar-navigation.rail button { justify-content: center; min-height: 35px; padding: 0; }
+.lumo-sidebar-navigation.rail button.active::before { left: -10px; }
+
+/* Keep the native sidebar visible while a feature page owns the main pane. */
+.lumo-click-spark { left: var(--lumo-native-sidebar-width, 0px); width: auto; }
+.lumo-workbench { grid-template-columns: minmax(0, 1fr); }
+.lumo-workbench-header { min-height: 64px; padding: 13px 32px; }
+.lumo-workbench-footer { padding-inline: 32px; }
+
+/* OpenDesign and PPT are sample-driven content below the native composer. */
+.lumo-home-creative { width: min(1080px, calc(100vw - 48px)); margin: 18px auto 0; padding: 15px 2px 20px; border-top: 1px solid var(--lumo-line); color: var(--lumo-ink); }
+.lumo-home-creative > header { display: flex; align-items: flex-end; justify-content: space-between; gap: 22px; margin-bottom: 13px; }
+.lumo-home-creative > header > div { display: grid; gap: 4px; }
+.lumo-home-creative > header > div b { font-size: 13px; letter-spacing: -.015em; }
+.lumo-home-creative > header > div span { color: var(--lumo-faint); font-size: 9px; }
+.lumo-home-creative > header nav { display: flex; gap: 4px; padding: 3px; border: 1px solid var(--lumo-line); border-radius: 9px; background: var(--lumo-accent-2); }
+.lumo-home-creative > header nav button { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 12px; border: 0; border-radius: 999px; color: var(--lumo-faint); background: transparent; cursor: pointer; font-size: 10px; }
+.lumo-home-creative > header nav button.active { color: var(--lumo-ink); background: var(--lumo-accent-12); box-shadow: inset 0 0 0 1px var(--lumo-accent-18); }
+.lumo-home-creative > header nav .lumo-glyph { width: 14px; height: 14px; }
+.lumo-home-mode-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.lumo-home-mode-row button { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 12px; border: 1px solid transparent; border-radius: 999px; color: var(--lumo-muted); background: var(--lumo-accent-4); cursor: pointer; font-size: 9px; transition: border-color .17s, background .17s, color .17s; }
+.lumo-home-mode-row button:hover { border-color: var(--lumo-accent-36); color: var(--lumo-ink); background: var(--lumo-accent-6); }
+.lumo-home-mode-row i { color: var(--lumo-mint); font-style: normal; }
+.lumo-home-example-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.lumo-home-example-grid > button { display: grid; grid-template-rows: 92px auto; overflow: hidden; min-width: 0; padding: 0; border: 1px solid var(--lumo-line); border-radius: 13px; color: var(--lumo-ink); background: linear-gradient(145deg, var(--lumo-accent-4), var(--lumo-accent-2)); cursor: pointer; text-align: left; transition: border-color .17s, transform .17s, background .17s, box-shadow .17s; }
+.lumo-home-example-grid > button:hover { border-color: var(--lumo-accent-36); background: var(--lumo-accent-6); transform: translateY(-2px); }
+.lumo-home-example-grid > button > span:last-child { display: grid; gap: 3px; padding: 9px 10px 10px; }
+.lumo-home-example-grid small { color: var(--lumo-faint); font-size: 8px; }
+.lumo-home-example-grid b { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.lumo-home-example-grid .lumo-design-preview { min-height: 76px; border: 0; border-radius: 0; }
+.lumo-home-presentation { display: grid; gap: 10px; }
+.lumo-home-presentation > label { display: flex; align-items: center; gap: 9px; min-height: 48px; padding: 0 13px; border: 1px solid var(--lumo-line-strong); border-radius: 13px; color: var(--lumo-mint); background: linear-gradient(145deg, var(--lumo-panel-raised), var(--lumo-panel)); box-shadow: 0 12px 32px rgba(0, 0, 0, .14), inset 0 1px var(--lumo-accent-6); }
+.lumo-home-presentation > label .lumo-glyph { width: 16px; height: 16px; }
+.lumo-home-presentation > label input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--lumo-ink); background: transparent; font-size: 10px; }
+.lumo-home-presentation > label input::placeholder { color: var(--lumo-faint); }
+.lumo-home-presentation > label kbd { display: grid; place-items: center; width: 23px; height: 23px; border: 1px solid var(--lumo-line); border-radius: 6px; color: var(--lumo-mint); background: var(--lumo-bg); font: 11px/1 var(--lumo-mono); }
+.lumo-home-presentation > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.lumo-home-presentation > div > button { display: flex; align-items: center; gap: 9px; min-width: 0; min-height: 48px; padding: 7px 9px; border: 1px solid var(--lumo-line); border-radius: 9px; color: var(--lumo-ink); background: var(--lumo-accent-2); cursor: pointer; text-align: left; }
+.lumo-home-presentation > div > button:hover { border-color: var(--lumo-accent-36); background: var(--lumo-accent-6); }
+.lumo-home-presentation > div > button > i, .lumo-example-popup button > i { width: 34px; height: 27px; flex: none; border-radius: 5px; background: linear-gradient(135deg, #a260ff, #3a1c66); }
+.lumo-home-presentation i.blue, .lumo-example-popup i.blue { background: linear-gradient(135deg, #4aa9f4, #153867); }
+.lumo-home-presentation i.green, .lumo-example-popup i.green { background: linear-gradient(135deg, #65d39b, #173f34); }
+.lumo-home-presentation i.orange, .lumo-example-popup i.orange { background: linear-gradient(135deg, #ff984d, #74331a); }
+.lumo-home-presentation i.cyan, .lumo-example-popup i.cyan { background: linear-gradient(135deg, #5bd6ce, #174d50); }
+.lumo-home-presentation i.purple, .lumo-example-popup i.purple { background: linear-gradient(135deg, #b068ff, #4c226d); }
+.lumo-home-presentation > div span { display: grid; gap: 3px; min-width: 0; }
+.lumo-home-presentation > div b { font-size: 10px; }
+.lumo-home-presentation > div small { overflow: hidden; color: var(--lumo-faint); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Standalone plugin pages, reached from the sample area rather than sidebar. */
+.lumo-studio-page { width: min(1180px, calc(100% - 56px)); margin: 0 auto; padding: 42px 0 58px; color: var(--lumo-ink); }
+.lumo-studio-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; margin-bottom: 28px; }
+.lumo-studio-heading h1 { margin: 8px 0 6px; font: 620 clamp(30px, 4vw, 46px)/1 "Avenir Next", Avenir, "Noto Sans SC", sans-serif; letter-spacing: -.05em; }
+.lumo-studio-heading p { margin: 0; color: var(--lumo-muted); font-size: 12px; }
+.lumo-plugin-readiness { display: inline-flex; align-items: center; gap: 7px; padding: 7px 9px; border: 1px solid var(--lumo-accent-24); border-radius: 7px; color: var(--lumo-muted); background: var(--lumo-accent-4); font: 8px/1 var(--lumo-mono); }
+.lumo-plugin-readiness i { width: 6px; height: 6px; border-radius: 50%; background: var(--lumo-cyan); box-shadow: 0 0 8px var(--lumo-cyan); }
+.lumo-plugin-readiness.waiting i { background: var(--lumo-warn); box-shadow: none; }
+.lumo-studio-tabs { display: flex; gap: 4px; overflow-x: auto; margin-bottom: 12px; border-bottom: 1px solid var(--lumo-line); }
+.lumo-studio-tabs button { position: relative; display: inline-flex; align-items: center; gap: 7px; min-height: 42px; padding: 0 14px; border: 0; color: var(--lumo-faint); background: transparent; cursor: pointer; white-space: nowrap; }
+.lumo-studio-tabs button::after { position: absolute; right: 10px; bottom: -1px; left: 10px; height: 2px; border-radius: 2px; background: transparent; content: ""; }
+.lumo-studio-tabs button.active { color: var(--lumo-ink); }
+.lumo-studio-tabs button.active::after { background: var(--lumo-mint); }
+.lumo-studio-tabs button i { color: var(--lumo-mint); font-style: normal; }
+.lumo-studio-composer, .lumo-presentation-composer { position: relative; overflow: hidden; border: 1px solid var(--lumo-line-strong); border-radius: 13px; background: linear-gradient(145deg, var(--lumo-panel-raised), var(--lumo-panel)); box-shadow: 0 18px 55px rgba(0, 0, 0, .18); }
+.lumo-studio-composer textarea, .lumo-presentation-composer textarea { display: block; width: 100%; min-height: 126px; padding: 18px 19px; border: 0; outline: 0; resize: none; color: var(--lumo-ink); background: transparent; font-size: 13px; line-height: 1.6; }
+.lumo-studio-composer textarea::placeholder, .lumo-presentation-composer textarea::placeholder { color: var(--lumo-faint); }
+.lumo-studio-tools { display: flex; align-items: center; gap: 7px; min-height: 48px; padding: 7px 9px; border-top: 1px solid var(--lumo-line); }
+.lumo-studio-tools > button:first-child { width: 32px; height: 32px; border: 1px solid var(--lumo-line); border-radius: 50%; color: var(--lumo-muted); background: transparent; cursor: pointer; font-size: 18px; }
+.lumo-studio-tools > span { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 8px; border: 1px solid var(--lumo-line); border-radius: 7px; color: var(--lumo-muted); background: var(--lumo-accent-2); font-size: 9px; }
+.lumo-studio-tools > span i { font-style: normal; }
+.lumo-studio-tools > em { margin-left: auto; color: var(--lumo-faint); font: 8px/1 var(--lumo-mono); font-style: normal; }
+.lumo-studio-send { display: grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 50%; color: #111; background: var(--lumo-mint); cursor: pointer; font-size: 19px; box-shadow: 0 8px 24px var(--lumo-accent-24); }
+.lumo-studio-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 9px; padding: 9px 11px; border-left: 2px solid var(--lumo-mint); color: var(--lumo-muted); background: var(--lumo-accent-6); font-size: 9px; }
+.lumo-studio-notice button { border: 0; color: var(--lumo-faint); background: transparent; cursor: pointer; }
+.lumo-studio-categories { display: flex; flex-wrap: wrap; gap: 6px; margin: 18px 0 15px; }
+.lumo-studio-categories button { min-height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 7px; color: var(--lumo-faint); background: transparent; cursor: pointer; font-size: 9px; }
+.lumo-studio-categories button.active { border-color: var(--lumo-line-strong); color: var(--lumo-ink); background: var(--lumo-accent-6); }
+.lumo-inspiration > header { display: flex; justify-content: space-between; gap: 18px; margin-bottom: 10px; }
+.lumo-inspiration > header b { font-size: 13px; }
+.lumo-inspiration > header span { color: var(--lumo-faint); font-size: 8px; }
+.lumo-inspiration > div { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 11px; }
+.lumo-inspiration-card { overflow: hidden; padding: 0; border: 1px solid var(--lumo-line); border-radius: 10px; color: var(--lumo-ink); background: var(--lumo-accent-2); cursor: pointer; text-align: left; transition: border-color .18s, transform .18s; }
+.lumo-inspiration-card:hover { border-color: var(--lumo-accent-36); transform: translateY(-2px); }
+.lumo-inspiration-card > .lumo-design-preview { min-height: 130px; border: 0; border-radius: 0; }
+.lumo-inspiration-card > span:last-child { display: grid; gap: 4px; padding: 10px 11px 12px; }
+.lumo-inspiration-card small { color: var(--lumo-faint); font-size: 8px; }
+.lumo-inspiration-card b { font-size: 11px; }
+.lumo-design-preview.mobile { background: linear-gradient(140deg, #111927, #27222f); }
+.lumo-design-preview.mobile i:first-child { width: 24%; height: 82%; border-radius: 9px; background: linear-gradient(#edf1f5, #a6b2bf); }
+.lumo-design-preview.mobile i:nth-child(2) { left: 38%; width: 24%; height: 82%; border-radius: 9px; background: linear-gradient(#252b33, #080a0d); }
+.lumo-design-preview.mobile i:nth-child(3) { left: 70%; width: 24%; height: 82%; border-radius: 9px; background: linear-gradient(#edf1f5, #b5c4ca); }
+
+/* PPT sample popup and native-conversation handoff. */
+.lumo-presentation-steps { display: flex; align-items: center; gap: 0; margin: -6px 0 28px; padding: 0; list-style: none; }
+.lumo-presentation-steps li { display: flex; align-items: center; min-width: 180px; color: var(--lumo-faint); font-size: 10px; }
+.lumo-presentation-steps li:not(:last-child)::after { height: 1px; margin: 0 14px; flex: 1; background: var(--lumo-line); content: ""; }
+.lumo-presentation-steps i { display: grid; place-items: center; width: 24px; height: 24px; margin-right: 7px; border: 1px solid var(--lumo-line); border-radius: 50%; font: 9px/1 var(--lumo-mono); font-style: normal; }
+.lumo-presentation-steps .active { color: var(--lumo-mint); }
+.lumo-presentation-steps .active i { border-color: var(--lumo-mint); color: #111; background: var(--lumo-mint); }
+.lumo-presentation-layout { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 22px; align-items: stretch; }
+.lumo-presentation-layout > main { min-width: 0; }
+.lumo-assistant-prompt { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.lumo-assistant-prompt > .lumo-glyph { width: 28px; height: 28px; padding: 5px; border: 1px solid var(--lumo-line); border-radius: 50%; color: var(--lumo-cyan); }
+.lumo-assistant-prompt p { margin: 0; padding: 10px 13px; border: 1px solid var(--lumo-line); border-radius: 9px; color: var(--lumo-muted); background: var(--lumo-accent-4); font-size: 10px; }
+.lumo-assistant-prompt p b { color: var(--lumo-mint); }
+.lumo-presentation-composer-wrap { position: relative; }
+.lumo-presentation-composer-wrap.popup-open { padding-top: min(330px, 33vh); }
+.lumo-presentation-composer { position: relative; }
+.lumo-selected-example { position: absolute; top: 12px; left: 14px; z-index: 1; display: inline-flex; align-items: center; gap: 6px; padding: 5px 7px; border: 1px solid var(--lumo-accent-36); border-radius: 6px; color: var(--lumo-mint); background: var(--lumo-bg); font-size: 9px; }
+.lumo-selected-example + textarea { padding-top: 50px; }
+.lumo-selected-example button { border: 0; color: inherit; background: transparent; cursor: pointer; }
+.lumo-example-popup { position: absolute; top: 0; right: 0; left: 0; z-index: 4; overflow: hidden; border: 1px solid var(--lumo-line-strong); border-radius: 11px; background: linear-gradient(145deg, var(--lumo-panel-raised), var(--lumo-panel)); box-shadow: 0 24px 70px rgba(0, 0, 0, .38); animation: lumo-command-in .2s ease both; }
+.lumo-example-popup > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border-bottom: 1px solid var(--lumo-line); }
+.lumo-example-popup > header b { font-size: 11px; }
+.lumo-example-popup > header span { color: var(--lumo-faint); font-size: 8px; }
+.lumo-example-popup > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; padding: 9px; }
+.lumo-example-popup button { display: flex; align-items: center; gap: 9px; min-width: 0; min-height: 54px; padding: 7px 8px; border: 1px solid transparent; border-radius: 7px; color: var(--lumo-ink); background: transparent; cursor: pointer; text-align: left; }
+.lumo-example-popup button:hover, .lumo-example-popup button.active { border-color: var(--lumo-accent-36); background: var(--lumo-accent-8); }
+.lumo-example-popup button > span { display: grid; gap: 4px; min-width: 0; }
+.lumo-example-popup button b { font-size: 10px; }
+.lumo-example-popup button small { overflow: hidden; color: var(--lumo-faint); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.lumo-example-popup > footer { padding: 9px 12px; border-top: 1px solid var(--lumo-line); color: var(--lumo-faint); text-align: center; font: 8px/1 var(--lumo-mono); }
+.lumo-deck-outline { display: flex; flex-direction: column; min-height: 360px; padding: 15px; border-left: 1px solid var(--lumo-line); background: linear-gradient(90deg, var(--lumo-accent-4), transparent); }
+.lumo-deck-outline > header { display: grid; gap: 5px; padding-bottom: 13px; border-bottom: 1px solid var(--lumo-line); }
+.lumo-deck-outline > header b { font-size: 12px; }
+.lumo-deck-outline > header span { color: var(--lumo-faint); font-size: 8px; }
+.lumo-deck-outline > div { display: flex; align-items: center; gap: 9px; padding: 11px 0; border-bottom: 1px solid var(--lumo-line); }
+.lumo-deck-outline > div > i { display: grid; place-items: center; width: 27px; height: 27px; border: 1px solid var(--lumo-line); border-radius: 6px; color: var(--lumo-faint); font: 9px/1 var(--lumo-mono); font-style: normal; }
+.lumo-deck-outline > div span { display: grid; gap: 4px; }
+.lumo-deck-outline > div b { font-size: 9px; }
+.lumo-deck-outline > div small { color: var(--lumo-faint); font-size: 8px; }
+.lumo-deck-outline > footer { margin-top: auto; color: var(--lumo-faint); font-size: 8px; line-height: 1.6; }
+
+/* Automation is a real read-through into project/flow data. */
+.lumo-automation-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
+.lumo-automation-summary span { display: flex; align-items: baseline; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--lumo-line); color: var(--lumo-faint); font-size: 9px; }
+.lumo-automation-summary b { color: var(--lumo-ink); font-size: 22px; }
+.lumo-automation-list { display: grid; gap: 4px; }
+.lumo-automation-list > button, .lumo-automation-list > div { display: flex; align-items: center; gap: 11px; min-height: 48px; padding: 7px 9px; border: 0; border-bottom: 1px solid var(--lumo-line); color: var(--lumo-ink); background: transparent; text-align: left; }
+.lumo-automation-list > button { cursor: pointer; }
+.lumo-automation-list > button:hover { background: var(--lumo-accent-4); }
+.lumo-automation-index { color: var(--lumo-mint); font: 9px/1 var(--lumo-mono); }
+.lumo-automation-list > :is(button, div) > span:nth-child(2) { display: grid; gap: 4px; flex: 1; }
+.lumo-automation-list b { font-size: 10px; }
+.lumo-automation-list small, .lumo-automation-list em { color: var(--lumo-faint); font-size: 8px; font-style: normal; }
+.lumo-automation-principles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.lumo-automation-principles > div { display: grid; grid-template-columns: auto 1fr; gap: 5px 9px; padding: 14px 4px; border-top: 1px solid var(--lumo-line); }
+.lumo-automation-principles .lumo-glyph { grid-row: span 2; width: 20px; height: 20px; color: var(--lumo-mint); }
+.lumo-automation-principles b { font-size: 10px; }
+.lumo-automation-principles span { color: var(--lumo-faint); font-size: 8px; line-height: 1.5; }
+
+@media (max-width: 980px) {
+  .lumo-home-example-grid, .lumo-inspiration > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lumo-home-presentation > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lumo-presentation-layout { grid-template-columns: 1fr; }
+  .lumo-deck-outline { min-height: 0; }
+  .lumo-header-actions .lumo-identity-chip, .lumo-header-location small { display: none; }
+}
+
+@media (max-width: 700px) {
+  .lumo-home-creative { width: calc(100vw - 24px); }
+  .lumo-home-creative > header { align-items: flex-start; flex-direction: column; }
+  .lumo-home-example-grid, .lumo-home-presentation > div, .lumo-inspiration > div, .lumo-example-popup > div, .lumo-automation-summary, .lumo-automation-principles { grid-template-columns: 1fr; }
+  .lumo-studio-page { width: calc(100% - 28px); padding-top: 24px; }
+  .lumo-studio-heading { align-items: flex-start; flex-direction: column; }
+  .lumo-studio-tools > span:nth-of-type(n+2), .lumo-studio-tools > em { display: none; }
+  .lumo-presentation-steps li { min-width: 0; flex: 1; }
+  .lumo-presentation-steps li::after { display: none; }
 }

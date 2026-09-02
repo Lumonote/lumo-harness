@@ -15,8 +15,9 @@
     "test": "vitest run",
     "typecheck": "tsc -b --noEmit",
     "kb:eval": "tsx dsh-plugins/knowledge/eval/run-eval.ts",
-    "desktop:dev": "cargo tauri dev --manifest-path desktop/Cargo.toml",
-    "desktop:build": "cargo tauri build --manifest-path desktop/Cargo.toml"
+    "desktop:dev": "cd desktop && cargo tauri dev",
+    "desktop:build": "cd desktop && cargo tauri build --bundles app",
+    "desktop:dmg": "cd desktop && cargo tauri build --bundles app && bash make-dmg.sh"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

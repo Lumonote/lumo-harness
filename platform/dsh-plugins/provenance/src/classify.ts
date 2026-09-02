@@ -11,20 +11,18 @@ import type { Provenance, ToolEffect } from '../../../shared/seam-contracts/prov
 /**
  * dsh 内置工具的默认来源档位。
  *
- * **一处有意的取舍**：`read` / `grep` / `glob` / `ls` 读工作区文件，判为 `internal`
- * 而非 `external`。工作区里的文件确实可能含注入（一个被投毒的仓库文件），但若判
- * `external`，几乎每个 turn 一开工就被污染，机制立刻退化成「永远受污染」，
- * 于事无补还会被整体绕开。判据仍是「谁能写这段字节」：工作区是用户自己选择打开的
- * 项目，知识库是跨用户共享的内容——后者的撰写者与当前用户无关。
- * **残余风险明写**：被投毒的工作区文件可绕过本机制。缓解手段（按路径细分来源）
- * 留待需要时再做，不在本次交付。
+ * `read` / `grep` / `glob` / `ls` 暴露的是工作区字节或路径名。即使当前用户选择了
+ * 项目，提交者、依赖下载、解压归档、协作者或攻击者仍可能写入其中；把它们标成
+ * `internal` 会让恶意仓库文件在模型上下文中绕过能力封闭。故它们一律是 `external`：
+ * 读取工作区后，同一 turn 的出平台写必须走人工确认。宁可增加一次确认，也不能把
+ * 可写工作区伪装成平台受控数据。
  */
 export const BUILTIN_PROVENANCE: Readonly<Record<string, Provenance>> = Object.freeze({
-  // 工作区读取：见上文取舍
-  read: 'internal',
-  glob: 'internal',
-  grep: 'internal',
-  ls: 'internal',
+  // 工作区内容与路径名可由非受信方写入，见上文
+  read: 'external',
+  glob: 'external',
+  grep: 'external',
+  ls: 'external',
 
   // 平台内受控数据：只有平台自己写得进去
   todo_write: 'internal',

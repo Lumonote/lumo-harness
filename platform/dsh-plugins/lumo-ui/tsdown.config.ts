@@ -21,7 +21,7 @@ const browser = {
   name: `${id}/client`,
   entry: { client: 'src/client/index.tsx' },
   outDir: 'lib', format: 'cjs', platform: 'browser', dts: false, sourcemap: true, clean: false,
-  external: [/^@deepseek-ai\/dsh-client-runtime(\/|$)/u, /^@deepseek-ai\/dsh-client-ui-theme(\/|$)/u],
+  external: [/^@deepseek-ai\/dsh-client-ui-renderer(\/|$)/u, /^@deepseek-ai\/dsh-client-ui-theme(\/|$)/u],
   plugins: [cssPlugin],
   outputOptions: {
     entryFileNames: 'client.js',

@@ -480,6 +480,7 @@ ${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
         flowsUrl: ${JSON.stringify(process.env['LUMO_FLOWS_URL'] ?? 'http://localhost:8087')}
         connectorUrl: ${JSON.stringify(process.env['LUMO_CONNECTOR_GATEWAY_URL'] ?? 'http://localhost:8082')}
         governanceUrl: ${JSON.stringify(governanceURL)}
+        registryUrl: ${JSON.stringify(process.env['LUMO_REGISTRY_URL'] ?? 'http://localhost:8084')}
         realm: ${JSON.stringify(platformRealm)}
         userId: ${JSON.stringify(userID)}
         roles: ${JSON.stringify([userRole])}
@@ -493,6 +494,7 @@ ${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
         middleware: ${JSON.stringify(deployment.middleware)}
         clusterStatus: ${JSON.stringify(deployment.clusterReady ? 'ready' : 'not_ready')}
         plugins: ${JSON.stringify(mountedPlugins)}
+        desktopHandoffFile: ${JSON.stringify(localMode ? (process.env['LUMO_DESKTOP_HANDOFF_FILE'] ?? '') : '')}
 ` : ''}
 ${workflowEngineOverlay(role)}
 ${skillFilesystemOverlay}

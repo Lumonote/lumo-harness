@@ -19,6 +19,7 @@ export interface AttachmentsConfig {
   maxMessageImageBytes?: number
   maxImagePixels?: number
   maxImageDimension?: number
+  normalizedImageMaxPixels?: number
   normalizedImageMaxDimension?: number
   normalizedImageMaxBytes?: number
 }
@@ -37,6 +38,7 @@ export const Config: z<AttachmentsConfig> = z.object({
   maxMessageImageBytes: z.number().step(1).min(1).default(200 * 1024 * 1024),
   maxImagePixels: z.number().step(1).min(1).default(64_000_000),
   maxImageDimension: z.number().step(1).min(1).default(8192),
+  normalizedImageMaxPixels: z.number().step(1).min(1).default(2048 * 2048),
   normalizedImageMaxDimension: z.number().step(1).min(1).default(2048),
   normalizedImageMaxBytes: z.number().step(1).min(1).default(4 * 1024 * 1024),
 })

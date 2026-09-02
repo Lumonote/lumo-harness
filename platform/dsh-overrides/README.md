@@ -43,25 +43,47 @@ workspace 链接把编译产物写回 `deepseek-harness/packages`——仓库里
 和浏览器侧的注册都读它。将来加一套浅色主题，引导脚本会自动跟着变，而不是继续硬编码
 `dark`。
 
-## 还原上游树
+## 上游树已还原,并改为跟随 master
 
-迁移已经完成，上游那 20 个改动可以还原了。**这几条命令会写 `deepseek-harness/`，按第一铁律
-须由你本人执行**：
+迁移已完成，上游那 20 个改动已还原：20 个已跟踪文件 `checkout`，345 个未跟踪残留（344 个
+tsc 泄漏的 `.js`/`.d.ts`/`.map`，外加一张 `apps/web/public/branding/logo.png`——它的真相源是
+`platform/desktop-assets/lumo-logo.png`，由 `brand-web.mjs` 在 dist 上重新落地）一并 `clean` 掉。
+随后 checkout 从 `dsh-v0.1.1-rc.2` 快进到 `origin/master`，**不再 pin 版本**。
+
+复核用的三条命令，任何时候都应当全绿：
 
 ```sh
-# 1. 还原 20 个已跟踪文件
-git -C deepseek-harness checkout -- .
-
-# 2. 删掉 345 个编译产物与品牌资源（-x 千万不要加：node_modules 和 lib 是 gitignore 的，
-#    加了 -x 会连它们一起删，得重跑 pnpm install）
-git -C deepseek-harness clean -fd apps packages
-
-# 3. 验证
-git -C deepseek-harness describe --tags --dirty   # 须为 dsh-v0.1.1-rc.2，无 -dirty
-git -C deepseek-harness status --porcelain -uno   # 须无输出
+git -C deepseek-harness status --porcelain -uno   # 无输出
+git -C deepseek-harness describe --tags --dirty   # 不以 -dirty 结尾（版本号本来就会动）
 node platform/dsh-overrides/assert-pristine.mjs deepseek-harness
 ```
 
-第 3 步全部通过之后，跑一次 `pnpm test` 与桌面预览（`platform/desktop/local-runtime.sh`）
-确认功能没丢。覆盖层的锚点回归由 `pnpm test` 覆盖：`__tests__/overlay.spec.ts` 直接对着
-`git show HEAD:` 的上游原文跑，锚点漂移会当场变红，而不是等到打包时才炸。
+`clean` 千万不要加 `-x`：`node_modules` 和 `lib` 是 gitignore 的，加了会连它们一起删，得重跑
+`pnpm install`。
+
+## 跟随 master 的代价落在哪
+
+第一次快进（1079 个提交，上游包数 236 → 256）暴露了两类成本，值得先知道找哪：
+
+| 类别 | 这次的实例 | 谁兜住 |
+|---|---|---|
+| **锚点漂移** | `InputZone.session` 的类型从 `ConversationSnapshot` 改回 `SessionSnapshot`，把整块当锚的写法失配。改成锚在稳定的 `export interface InputZone {` 声明行上并插到它之前 | `__tests__/overlay.spec.ts`（对着 `git show HEAD:` 的原文跑） |
+| **上游删包** | `be531688f3` 移除了整个 `@deepseek-ai/dsh-client-runtime`，`ctx.slots`(`SlotRegistry`) 迁到 `@deepseek-ai/dsh-client-ui-renderer`。lumo-ui 跟着改了 5 个声明面：两处 `ClientContext` 类型导入改走 `import type { Context as ClientContext } from '@deepseek-ai/cordis'`（上游 `ui-theme` 的同款写法）、`package.json` 的 `dependencies` 与 `dsh.client.inject`、`tsconfig.json` 的 `references`、`tsdown.config.ts` 的 `external` | `pnpm test` |
+
+覆盖层本身**零补丁 rebase** —— 这正是第一铁律要证的那一条（`docs/architecture.md` §22.1）。
+
+**快进之后必须在 dsh 树里重跑装配**，否则平台套件会撞上过期产物：
+
+```sh
+corepack pnpm -C deepseek-harness install     # 新的依赖边需要新的 workspace 软链
+corepack pnpm -C deepseek-harness run build   # lib/types 的 .d.ts 也得跟着重出
+```
+
+两条都是 CLAUDE.md 明确允许的「读与跑」——它们只写 `node_modules/` 和 `lib/`（都被 gitignore）。
+跑完照例查一遍上面那三条洁净度命令；`pnpm-lock.yaml` 若被改动，按「意外」处理并还原。
+
+覆盖层的锚点回归由 `pnpm test` 覆盖：`__tests__/overlay.spec.ts` 直接对着 `git show HEAD:`
+的上游原文跑，锚点漂移会当场变红，而不是等到打包时才炸。
+
+`platform/vitest.config.ts` 排除了 `.build/**`：暂存副本带着上游自己的用例，且
+`node_modules` 是软链回源树的，不排除就会把上游测试拖进平台套件里大面积失败。

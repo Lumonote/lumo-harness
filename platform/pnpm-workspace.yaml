@@ -2,6 +2,10 @@ packages:
   - dsh-plugins/*
   - data-plane/dsh-node
   - console
+
+# Desktop builds require target == host, so pnpm's default host filtering is
+# authoritative. Do not preload other architectures: `--force` and explicit
+# supportedArchitectures both make optional native packages cross-platform.
 allowBuilds:
   # tsx 依赖 esbuild 原生二进制（bootstrap 的 --import tsx 需要）
   '@claude-flow/cli': true

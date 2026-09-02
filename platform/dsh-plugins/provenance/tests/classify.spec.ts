@@ -6,8 +6,12 @@ describe('ProvenanceClassifier —— 来源档位', () => {
     expect(new ProvenanceClassifier().provenanceOf('knowledge_query')).toBe('external')
   })
 
-  it('工作区文件读取是 internal（有意的取舍，见 classify.ts 注释）', () => {
-    expect(new ProvenanceClassifier().provenanceOf('read')).toBe('internal')
+  it('工作区内容与路径名是 external：被投毒仓库不得绕过能力封闭', () => {
+    const classifier = new ProvenanceClassifier()
+    expect(classifier.provenanceOf('read')).toBe('external')
+    expect(classifier.provenanceOf('grep')).toBe('external')
+    expect(classifier.provenanceOf('glob')).toBe('external')
+    expect(classifier.provenanceOf('ls')).toBe('external')
   })
 
   it('未声明的工具按 external 处理（fail closed）', () => {

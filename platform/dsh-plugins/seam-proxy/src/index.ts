@@ -20,6 +20,7 @@ import { createRemoteGraph, createRemoteKnowledge } from './remote-seams.ts'
 import type { BudgetMode } from '../../../shared/seam-contracts/turn-budget.ts'
 import type { KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
 import type { GraphSeam } from '../../../shared/seam-contracts/graph.ts'
+import type { MutualTLSFileConfig } from '../../../shared/seam-contracts/mtls.ts'
 
 export interface SeamProxyPluginConfig {
   /**
@@ -31,6 +32,11 @@ export interface SeamProxyPluginConfig {
   endpoints?: string[]
   realm: string
   userId?: string
+  /** 签名运行身份可代表的角色；与 Host 端声明校验配对使用。 */
+  roles?: string[]
+  /** 共享的短时身份声明密钥；应通过部署密钥注入而非提交到配置仓库。 */
+  identityAssertionSecret?: string
+  tls?: MutualTLSFileConfig
   /** 本 realm 的 seam 共享令牌（远端 host 配了 tokens 时必填） */
   token?: string
   timeoutMs?: number
@@ -70,6 +76,15 @@ export const Config: z<SeamProxyPluginConfig> = z.object({
   endpoints: z.array(z.string()),
   realm: z.string(),
   userId: z.string(),
+  roles: z.array(z.string()),
+  identityAssertionSecret: z.string(),
+  tls: z.object({
+    caFile: z.string().required(),
+    certFile: z.string().required(),
+    keyFile: z.string().required(),
+    serverName: z.string(),
+    reloadIntervalMs: z.number(),
+  }),
   token: z.string(),
   timeoutMs: z.number(),
   maxAttempts: z.number(),
@@ -108,6 +123,9 @@ export function apply(ctx: Context, config: SeamProxyPluginConfig): void {
     endpoints,
     realm: config.realm,
     userId: config.userId,
+    roles: config.roles,
+    identityAssertionSecret: config.identityAssertionSecret,
+    tls: config.tls,
     token: config.token,
     timeoutMs: config.timeoutMs,
     maxAttempts: config.maxAttempts,

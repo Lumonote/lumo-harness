@@ -3,12 +3,13 @@ import {
   type ButtonHTMLAttributes, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent, type ReactNode,
 } from 'react'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+// ctx.slots 的 Context 增强随上游 be531688f3（移除 Runtime）搬到了 ui-renderer。
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { BASE_PLUGIN_BY_ID, BASE_PLUGIN_CATALOG } from '../base-plugins.ts'
 import {
   LUMO_THEME_EVENT,
   LUMO_THEME_OPTIONS,
@@ -20,15 +21,43 @@ import {
 } from './themes.ts'
 import './lumo.css'
 
+// A desktop WebView can evaluate more than one copy of this bundle while the
+// native shell is recovering from a loader replay. Keep the root-scoped mount
+// ledger on globalThis so separate bundle instances still share it.
+const LUMO_CLIENT_ROOTS = Symbol.for('@lumo/dsh-platform-ui/client-roots')
+
+function activeClientRoots(): WeakSet<object> {
+  const shared = globalThis as typeof globalThis & { [LUMO_CLIENT_ROOTS]?: WeakSet<object> }
+  return shared[LUMO_CLIENT_ROOTS] ??= new WeakSet<object>()
+}
+
 // Keep this UI package independently typecheckable. The running DSH shell
 // declares the same seats; importing its client entry here would pull the
 // entire conversation source project into this package's isolated compiler.
 interface ComposerInputOwner {
   readonly session: unknown
   readonly input: unknown
+  readonly inputActions?: ConversationInputActions
 }
 
-interface HeroComposerOwner {}
+interface HeroComposerOwner {
+  readonly input?: ConversationInputState
+  readonly inputActions?: ConversationInputActions
+}
+
+interface SidebarNavigationOwner {
+  readonly wide: boolean
+}
+
+interface ConversationInputState {
+  readonly draft?: string
+  readonly phase?: 'plain' | 'adjudicating' | 'claimed' | 'submitting'
+}
+
+interface ConversationInputActions {
+  setDraft(text: string): void
+  submit(): void
+}
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
@@ -36,12 +65,13 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'conversation.composer.dock': { kind: 'list'; scope: 'session'; owner: ComposerInputOwner }
     'conversation.hero.input.left': { kind: 'list'; scope: 'root'; owner: HeroComposerOwner }
     'conversation.hero.composer.dock': { kind: 'list'; scope: 'root'; owner: HeroComposerOwner }
+    'sidebar.navigation': { kind: 'list'; scope: 'root'; owner: SidebarNavigationOwner }
   }
 }
 
-type Surface = 'knowledge' | 'skills' | 'connectors' | 'operations' | 'account' | 'market'
+type Surface = 'knowledge' | 'skills' | 'connectors' | 'operations' | 'automation' | 'design' | 'presentation' | 'account' | 'market'
 type OverlayProps = PropsRuntime<'shell.overlay'>
-type SidebarProps = PropsRuntime<'sidebar.footer.action'>
+type SidebarNavigationProps = PropsRuntime<'sidebar.navigation'>
 type ComposerScopeProps = PropsRuntime<'conversation.input.left'>
 type ComposerDockProps = PropsRuntime<'conversation.composer.dock'>
 type HeroComposerScopeProps = PropsRuntime<'conversation.hero.input.left'>
@@ -53,14 +83,60 @@ interface DeploymentState { mode: 'local' | 'standalone' | 'cluster'; label: str
 interface Operation { name?: string; method?: string; write?: boolean; sensitivity?: string }
 interface Row { id?: string; name?: string; status?: string; realm?: string; version?: number; protocol?: string; operations?: Operation[]; projectId?: string; visibility?: string; author?: string; triggerKind?: string; triggerSpec?: string; flowRef?: string; enabled?: boolean; reviewComment?: string }
 interface Automation { automationId: string; projectId: string; triggerKind: string; triggerSpec: string; flowRef: string; enabled: boolean }
-interface Placement { task_id?: string; realm?: string; node_id?: string; attempt?: number; state?: string; fencing_token?: number }
+interface FlowRunResult { outputs?: Record<string, unknown>; order?: string[] }
+interface PersistedFlowRun { id: number; trigger_id: number; automation_id: string; flow_id: string; flow_version: number; status: 'running' | 'succeeded' | 'failed'; output_available: boolean; error?: string; replay_of_run_id?: number; started_at: string; finished_at?: string; flow_name?: string }
+interface ReplayQueued { status: 'queued'; replay_trigger_id: number; already_queued: boolean }
+interface FlowDefinition { nodes?: Array<{ id?: string; operator?: string }>; edges?: Array<{ from?: string; to?: string }> }
+interface FlowVersionSnapshot { flow_id: string; version: number; reviewer: string; definition: FlowDefinition }
+interface FlowVersionDiff { flow: Row; previous: FlowVersionSnapshot; current: FlowVersionSnapshot }
+interface Placement { task_id?: string; realm?: string; node_id?: string; attempt?: number; state?: string; fencing_token?: number; preemption_requested_task_id?: string }
 interface DelegationCandidate { user_id: string; worker_id: string; worker_kind?: 'human' | 'agent'; agent_ref?: string; display_name: string; department_id?: string; tags: string[]; skills: string[]; matched_tags: string[]; matched_skills: string[]; score: number; confidence_band?: 'AUTO' | 'SUGGESTED' | 'MANUAL'; score_breakdown?: Record<string, unknown>; score_weights?: Record<string, number>; active_tasks: number; eligible: boolean; rationale: string[] }
 interface DelegationPreview { title?: string; intent: string; project_id?: string; required_tags: string[]; required_skills: string[]; intent_terms: string[]; inferred_tags: string[]; inferred_skills: string[]; candidates: DelegationCandidate[] }
 interface DelegatedTask { id: string; title: string; intent: string; project_id?: string; requester_user_id: string; assignee_user_id: string; assignee_worker_id?: string; worker_id?: string; worker_kind?: 'human' | 'agent'; assignee_name?: string; business_state?: string; confidence_band?: 'AUTO' | 'SUGGESTED' | 'MANUAL'; state: string; match_score: number; selected_skills: string[]; scheduler_task_id?: string; assigned_node_id?: string; last_error?: string; created_at: string; updated_at: string }
 interface DelegationCreated { task?: DelegatedTask; run?: { id: string; state: string; worker_id: string; attempt: number }; id?: string; title?: string; state?: string }
+interface TaskRun { id: string; attempt: number; worker_id: string; session_ref?: string; scheduler_task_id?: string; assigned_node_id?: string; state: string; failure_kind?: string; last_error?: string; started_at?: string; ended_at?: string; created_at: string }
+interface TaskAuditEvent { id: string; event: string; actor: string; detail: Record<string, unknown>; created_at: string }
+interface PermissionDecision { allowed: boolean; action: string; reason: string; matched_policies: string[] }
+interface AgentPreset {
+  id: string; project_id?: string; name: string; description?: string; owner_user_id: string; status: 'active' | 'disabled'
+  version: string; revision: number; provider: string; model_ref: string; system_prompt_ref?: string; connector_ids: string[]; knowledge_space_ids: string[]
+  max_concurrency: number; trust_level?: string; residency?: string; max_budget_cents: number; timeout_seconds: number; max_delegation_depth: number
+}
+interface WorkerProfile { worker_id: string; worker_kind: 'human' | 'agent'; display_name: string; status: string; runtime_status?: string; runtime_updated_at?: string; active_tasks: number; load: number; max_concurrency: number; eligible: boolean }
+interface GovernanceRole { id: string; name: string; description?: string; status: string }
+interface GovernanceDepartment { id: string; name: string; parent_dept_id?: string; manager_user_id?: string; status: string }
 type AssignmentMode = 'auto' | 'manual'
 interface DirectoryUser { id: string; display_name: string; primary_dept_id?: string; status?: string }
 interface Plugin { id: string; label: string; description: string; surface: Surface; kind: 'runtime' | 'governance' }
+interface RegistryArtifact {
+  name: string; version: string; kind: 'Component' | 'Skill' | 'Agent' | 'Connector' | 'Flow'; publisher: string
+  digest: string; scopes: string[]; requires?: { olap?: boolean; graph?: boolean; vector?: boolean; object?: boolean; gpu?: boolean }
+  deps?: Array<{ name: string; version: string }>; published_at: string
+}
+interface RegistryCatalog { items: RegistryArtifact[]; source: 'registry_index'; state: 'discoverable'; advisory?: string }
+interface RegistryArtifactVersions { items: RegistryArtifact[]; advisory?: string }
+interface RegistryShape { olap: boolean; graph: boolean; vector: boolean; object: boolean; gpu: boolean }
+interface RegistryInstallation {
+  node_id: string; state: 'converged' | 'failed'; root: string
+  installed: Array<{ name: string; version: string; digest: string }>
+  shape: RegistryShape; reported_at: string
+}
+interface RegistryInstallations { items: RegistryInstallation[]; source: 'provisioner_reports'; advisory?: string }
+interface RegistryRollout { channel: string; name: string; version: string; previous_version?: string; percent: number; updated_at: string }
+interface RegistryRollouts { items: RegistryRollout[]; channel: string; source: 'desired_state'; advisory?: string }
+interface RegistryRolloutSelection { node_id: string; version: string; cohort: 'target' | 'holdback' }
+interface RegistryRolloutSelectionResponse { rollout: RegistryRollout; selection?: RegistryRolloutSelection; source: 'desired_state'; advisory?: string }
+interface ConnectorApproval {
+  id: string; requester_user_id: string; project_id?: string; connector_id: string; connector_version: number; operation: string
+  status: 'pending' | 'approved' | 'rejected' | 'consumed' | 'expired'; approver_user_id?: string; created_at: string; expires_at: string
+}
+interface ConnectorApprovals { approvals: ConnectorApproval[] }
+interface RegistryInstallPlan {
+  root: string
+  items: Array<{ name: string; version: string; kind: RegistryArtifact['kind']; publisher: string; digest: string; scopes: string[]; requires?: RegistryArtifact['requires'] }>
+  scopes: string[]
+  shape: RegistryShape
+}
 interface Overview {
   generatedAt: string
   deployment: DeploymentState
@@ -75,34 +151,51 @@ interface Dashboard { project?: Row; yourRole?: string; members?: unknown[]; art
 interface ProbeResult { status?: number; url?: string; durationMs?: number; redacted?: boolean; contentType?: string; body?: unknown; headers?: Record<string, string>; encoding?: string }
 interface KnowledgeHit { docId: string; sourceVersion: number; score: number; text: string }
 interface KnowledgeResult { query: string; scope: 'published'; hits: KnowledgeHit[] }
+interface KnowledgeSourceSummary {
+  docId: string; realm: string; space: string; title: string; sourceVersion: number
+  embeddingModel: string; chunkCount: number; updatedAt: string
+}
+interface KnowledgeSource {
+  doc: { docId: string; realm: string; space: string; title: string; sourceVersion: number; embeddingModel: string }
+  chunks: Array<{ text: string; metadata: Record<string, unknown> }>
+}
+interface KnowledgeSources { realm: string; state: 'synchronized'; sources: KnowledgeSourceSummary[] }
 interface RuntimeSkill { name: string; description: string; whenToUse?: string; invocation: { modelInvocable: boolean; userInvocable: boolean }; source: string; provider: string }
-interface SkillSnapshot { complete: boolean; skills: RuntimeSkill[] }
-interface GovernedSkill { id: string; realm: string; name: string; kind: 'prompt' | 'workflow' | 'tool' | 'connector'; visibility: string; current_version: string; created_by: string }
+interface SkillSnapshot { complete: boolean; skills: RuntimeSkill[]; error?: string }
+interface GovernedSkill { id: string; realm: string; name: string; description?: string; kind: 'prompt' | 'workflow' | 'tool' | 'connector'; visibility: string; current_version: string; published_version?: string; published_digest?: string; published_by?: string; published_at?: string; created_by: string }
+interface GovernedSkillVersion { realm: string; skill_id: string; version: string; content: string; digest: string; created_by: string; created_at: string }
 interface UpstreamResult { ok: boolean; status: number; data?: unknown; error?: string }
 interface StudioSpace { id: string; label: string; description: string; accent: string }
 interface StudioProject { id: string; label: string; summary: string; spaces: StudioSpace[] }
 interface StudioScope { projectId: string; spaceId: string }
-interface GovernanceSnapshot { features: UpstreamResult; departments: UpstreamResult; roles: UpstreamResult; catalog: UpstreamResult; effective: UpstreamResult }
+interface GovernanceSnapshot { features: UpstreamResult; departments: UpstreamResult; roles: UpstreamResult; catalog: UpstreamResult; effective: UpstreamResult; permissions: UpstreamResult }
 type AuthAccount = {
   mode: 'session'; provider: 'lumo-governance'; username: string; displayName: string; userId: string
   realm: string; roles: string[]; department: string; clientIp: string; captchaMode: 'always'
 }
+type AuthSession = { id: string; client_ip: string; created_at: string; last_seen_at: string; expires_at: string; current: boolean }
+type AuthSecurityEvent = { id: number; event: string; client_ip?: string; detail: Record<string, unknown>; created_at: string }
+type AuthMFAStatus = { configured: boolean; enabled: boolean; pending_expires_at?: string; enrolled_at?: string }
+type TOTPEnrollment = { secret: string; expires_at: string }
+type AuthPasskey = { id: string; label?: string; created_at: string; last_used_at?: string }
+type AuthPasskeyStatus = { configured: boolean; rp_id?: string; require_user_verification?: boolean; passkeys?: AuthPasskey[] }
 
 const emptyOverview: Overview = { generatedAt: '', deployment: { mode: 'standalone', label: '服务器单例', storage: 'postgres', middleware: [], distributed: false, desktop: false, clusterReady: false, clusterOnly: false }, services: {}, cluster: { nodes: [] }, projects: [], flows: [], connectors: [], plugins: [] }
 const surfaceMeta: Record<Surface, { label: string; eyebrow: string; description: string; short: string }> = {
-  operations: { label: '运营管理', eyebrow: '运营工作台', description: '项目、流程、节点和治理状态集中在一个工作区。', short: '总览' },
-  knowledge: { label: '知识库', eyebrow: '知识连接', description: '检索已发布知识，保留来源、版本与相关度。', short: '知识' },
-  skills: { label: '专家技能', eyebrow: '技能目录', description: '查看可调用技能，并进入治理目录创建受控能力。', short: '技能' },
+  operations: { label: '项目', eyebrow: '项目工作台', description: '项目、流程、节点和治理状态集中在一个工作区。', short: '项目' },
+  skills: { label: '专家 · 技能 · 连接器', eyebrow: '能力目录', description: '查看可调用专家、技能与连接器，并进入治理目录管理能力。', short: '能力' },
+  automation: { label: '自动化', eyebrow: '自动化工作流', description: '查看真实流程与调度入口，在项目边界内继续配置。', short: '流程' },
+  knowledge: { label: '资料库', eyebrow: '知识连接', description: '检索已发布知识，保留来源、版本与相关度。', short: '资料' },
+  design: { label: '开放设计', eyebrow: 'OpenDesign', description: '组织设计上下文，并把任务交给原有 open-design 插件执行。', short: '设计' },
+  presentation: { label: 'PPT 生成', eyebrow: 'PPT Master', description: '通过 # 选择样例，再交给原有 ppt-master 插件继续对话生成。', short: '演示' },
   connectors: { label: '连接器', eyebrow: '连接器网关', description: '检查能力清单、调用协议与受控 Web 出站。', short: '连接' },
   account: { label: '用户中心', eyebrow: '身份与安全', description: '查看治理用户身份、安全策略与当前会话。', short: '账户' },
-  market: { label: '插件市场', eyebrow: '基础插件中心', description: '查看已随桌面本地运行时装配的能力，并打开对应功能。', short: '市场' },
+  market: { label: '更多', eyebrow: '应用与灵感', description: '查看已随桌面本地运行时装配的能力，并打开对应功能。', short: '更多' },
 }
 const surfaces = Object.keys(surfaceMeta) as Surface[]
-const surfaceGroups: Array<{ label: string; items: Surface[] }> = [
-  { label: '工作区', items: ['operations', 'knowledge', 'skills', 'connectors', 'market'] },
-  { label: '控制中心', items: ['account'] },
-]
+const sidebarSurfaces: Surface[] = ['operations', 'skills', 'automation', 'knowledge', 'market']
 const OPEN_EVENT = 'lumo:open-workbench'
+const CLOSE_EVENT = 'lumo:close-workbench'
 const skillNameLabels: Record<string, string> = {
   'open-design': '开放设计',
   '@lumo/open-design': '开放设计',
@@ -147,7 +240,8 @@ function localizedSkillName(name: string): string {
   if (normalized.includes('context')) return '上下文洞察'
   if (normalized.includes('cost-meter') || normalized.includes('costmeter')) return '费用统计'
   if (normalized.includes('dshmarket') || normalized.includes('dsh-market')) return '插件市场'
-  return skillNameLabels[name] ?? skillNameLabels[name.replace(/^.*\//, '')] ?? '未命名技能'
+  const fallback = name.replace(/^.*\//u, '').replace(/[-_]+/gu, ' ').trim()
+  return skillNameLabels[name] ?? skillNameLabels[name.replace(/^.*\//u, '')] ?? (fallback || '未命名技能')
 }
 
 function localizedProvider(provider: string): string {
@@ -182,9 +276,22 @@ function localizedTaskState(state: string): string {
   return ({
     DRAFT: '草稿', ROUTING: '路由中', ASSIGNED: '已分派', EXECUTING: '执行中',
     VERIFYING: '核验中', IN_REVIEW: '待审核', DONE: '已完成', REJECTED: '已驳回', ARCHIVED: '已归档',
-    QUEUED: '排队中', RUNNING: '运行中', COMPLETED: '运行完成', FAILED: '运行失败',
+    QUEUED: '排队中', RUNNING: '运行中', CANCELLING: '取消中', COMPLETED: '运行完成', FAILED: '运行失败',
     CANCELLED: '已取消', BLOCKED: '已阻塞',
   } as Record<string, string>)[state] ?? state
+}
+
+// Cancellation is an execution-state safety signal and must not be hidden by
+// the independently tracked business state (for example, ASSIGNED).
+function localizedTaskDisplayState(task: DelegatedTask): string {
+  return localizedTaskState(task.state === 'CANCELLING' ? task.state : task.business_state ?? task.state)
+}
+
+function localizedSecurityEvent(event: string): string {
+  return ({
+    login_succeeded: '登录成功', login_failed: '登录失败', login_locked: '登录锁定', logout: '主动登出',
+    session_revoked: '会话已撤销', sessions_revoked: '其他会话已撤销', password_changed: '密码已更新',
+  } as Record<string, string>)[event] ?? event
 }
 
 function localizedSource(source: string): string {
@@ -291,6 +398,13 @@ function errorMessage(body: unknown, fallback: string): string {
   return fallback
 }
 
+class ApiError extends Error {
+  constructor(readonly status: number, readonly body: unknown, fallback: string) {
+    super(errorMessage(body, fallback))
+    this.name = 'ApiError'
+  }
+}
+
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -299,12 +413,75 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const text = await response.text()
   let body: unknown = null
   try { body = text === '' ? null : JSON.parse(text) } catch { body = text }
-  if (!response.ok) throw new Error(errorMessage(body, `请求失败 (${response.status})`))
+  if (!response.ok) throw new ApiError(response.status, body, `请求失败 (${response.status})`)
   return body as T
 }
 
-async function optionalApi<T>(path: string, fallback: T): Promise<T> {
-  try { return await api<T>(path) } catch { return fallback }
+type OptionalApiResult<T> = { data: T; state: 'ok' | 'forbidden' | 'unsupported' | 'unavailable' | 'error'; error?: string }
+
+// A feature may be unavailable in a deployment, but its failure must never be
+// rendered as an indistinguishable empty list. Callers choose a fallback data
+// shape while retaining the actual reason for an explicit UI state.
+async function optionalApi<T>(path: string, fallback: T): Promise<OptionalApiResult<T>> {
+  try { return { data: await api<T>(path), state: 'ok' } } catch (reason) {
+    const error = reason instanceof Error ? reason.message : String(reason)
+    const status = reason instanceof ApiError ? reason.status : 0
+    const state = status === 401 || status === 403 ? 'forbidden' : status === 501 ? 'unsupported' : status === 502 || status === 503 || status === 504 ? 'unavailable' : 'error'
+    return { data: fallback, state, error }
+  }
+}
+
+function base64URLToBuffer(value: string): ArrayBuffer {
+  if (!/^[A-Za-z0-9_-]+$/u.test(value)) throw new Error('Passkey 数据格式无效')
+  const normalized = value.replace(/-/gu, '+').replace(/_/gu, '/')
+  const binary = atob(normalized + '='.repeat((4 - normalized.length % 4) % 4))
+  const bytes = Uint8Array.from(binary, byte => byte.charCodeAt(0))
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+}
+
+function bufferToBase64URL(value: ArrayBuffer): string {
+  const bytes = new Uint8Array(value)
+  let binary = ''
+  bytes.forEach(byte => { binary += String.fromCharCode(byte) })
+  return btoa(binary).replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/gu, '')
+}
+
+function requiredPasskeyString(source: Record<string, unknown>, name: string): string {
+  const value = source[name]
+  if (typeof value !== 'string' || value === '') throw new Error(`Passkey 选项缺少 ${name}`)
+  return value
+}
+
+function passkeyCreationOptions(source: Record<string, unknown>): PublicKeyCredentialCreationOptions {
+  const rp = source.rp as Record<string, unknown> | undefined
+  const user = source.user as Record<string, unknown> | undefined
+  const selection = source.authenticator_selection as Record<string, unknown> | undefined
+  const parameters = Array.isArray(source.pub_key_cred_params) ? source.pub_key_cred_params : []
+  const exclude = Array.isArray(source.exclude_credentials) ? source.exclude_credentials : []
+  if (rp === undefined || user === undefined || parameters.length === 0) throw new Error('Passkey 注册选项无效')
+  return {
+    challenge: base64URLToBuffer(requiredPasskeyString(source, 'challenge')),
+    rp: { id: requiredPasskeyString(rp, 'id'), name: requiredPasskeyString(rp, 'name') },
+    user: {
+      id: base64URLToBuffer(requiredPasskeyString(user, 'id')),
+      name: requiredPasskeyString(user, 'name'),
+      displayName: requiredPasskeyString(user, 'display_name'),
+    },
+    pubKeyCredParams: parameters.map(parameter => {
+      const value = parameter as Record<string, unknown>
+      return { type: requiredPasskeyString(value, 'type') as PublicKeyCredentialType, alg: Number(value.alg) }
+    }),
+    timeout: typeof source.timeout === 'number' ? source.timeout : 300_000,
+    attestation: source.attestation === 'none' ? 'none' : 'none',
+    ...(selection === undefined ? {} : { authenticatorSelection: {
+      residentKey: selection.resident_key === 'required' || selection.resident_key === 'discouraged' ? selection.resident_key : 'preferred',
+      userVerification: selection.user_verification === 'required' || selection.user_verification === 'discouraged' ? selection.user_verification : 'preferred',
+    } }),
+    excludeCredentials: exclude.map(credential => {
+      const value = credential as Record<string, unknown>
+      return { type: requiredPasskeyString(value, 'type') as PublicKeyCredentialType, id: base64URLToBuffer(requiredPasskeyString(value, 'id')) }
+    }),
+  }
 }
 
 function querySurface(): Surface | null {
@@ -330,14 +507,77 @@ function Glyph({ surface }: { surface: Surface }) {
     skills: <><path d="m12 3 1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5z" /><path d="m18.5 15 .75 2.25L21.5 18l-2.25.75L18.5 21l-.75-2.25L15.5 18z" /></>,
     connectors: <><path d="M8 7V4M16 7V4M6 7h12v4a6 6 0 0 1-12 0z" /><path d="M12 17v4" /></>,
     operations: <><path d="M4 6h16M4 12h16M4 18h16" /><circle cx="8" cy="6" r="2" /><circle cx="16" cy="12" r="2" /><circle cx="10" cy="18" r="2" /></>,
+    automation: <><path d="M13 2 5 13h6l-1 9 8-12h-6z" /></>,
+    design: <><path d="m4 20 4.5-1 9.8-9.8a2.1 2.1 0 0 0-3-3L5.5 16z" /><path d="m13.8 7.7 2.5 2.5" /></>,
+    presentation: <><rect x="4" y="4" width="16" height="12" rx="2" /><path d="M8 20h8M12 16v4M8 8h8M8 11h5" /></>,
     account: <><circle cx="12" cy="8" r="4" /><path d="M4.5 21a7.5 7.5 0 0 1 15 0" /></>,
     market: <><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z" /><path d="m8 9 4 2.25L16 9M12 11.25V17" /></>,
   }
   return <svg className="lumo-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>{paths[surface]}</svg>
 }
 
-function SidebarEntry({ wide, surface }: SidebarProps & { surface: Surface }) {
-  return <button type="button" className="lumo-sidebar-entry" title="打开 Lumo 工作区" aria-label="打开 Lumo 工作区" onClick={() => openSurface(surface)}><span className="lumo-sidebar-orb"><Glyph surface={surface} /></span>{wide ? <span><b>Lumo 工作区</b><small>市场 · 知识 · 技能 · 连接器</small></span> : null}<i /></button>
+function SidebarNavigation({ wide }: SidebarNavigationProps) {
+  const rootRef = useRef<HTMLElement>(null)
+  const [active, setActive] = useState<Surface | null>(() => querySurface())
+  useEffect(() => {
+    const node = rootRef.current
+    const sidebar = node?.parentElement
+    if (sidebar === null || sidebar === undefined) return
+    const publishWidth = () => document.documentElement.style.setProperty('--lumo-native-sidebar-width', `${sidebar.getBoundingClientRect().width}px`)
+    publishWidth()
+    if (typeof ResizeObserver === 'undefined') return () => { document.documentElement.style.removeProperty('--lumo-native-sidebar-width') }
+    const observer = new ResizeObserver(publishWidth)
+    observer.observe(sidebar)
+    return () => { observer.disconnect(); document.documentElement.style.removeProperty('--lumo-native-sidebar-width') }
+  }, [])
+  useEffect(() => {
+    const open = (event: Event) => setActive((event as CustomEvent<Surface>).detail)
+    const close = () => setActive(null)
+    window.addEventListener(OPEN_EVENT, open)
+    window.addEventListener(CLOSE_EVENT, close)
+    return () => { window.removeEventListener(OPEN_EVENT, open); window.removeEventListener(CLOSE_EVENT, close) }
+  }, [])
+  return <nav ref={rootRef} className={`lumo-sidebar-navigation ${wide ? 'wide' : 'rail'}`} aria-label="Lumo 功能菜单">
+    {sidebarSurfaces.map(surface => <button type="button" key={surface} className={active === surface ? 'active' : ''} title={surfaceMeta[surface].label} aria-label={surfaceMeta[surface].label} onClick={() => openSurface(surface)}><Glyph surface={surface} />{wide ? <span>{surfaceMeta[surface].label}</span> : null}{wide && surface === 'market' ? <small>应用 · 灵感</small> : null}</button>)}
+  </nav>
+}
+
+interface NativeConversationBridge {
+  setDraft(text: string): void
+  submit(): void
+}
+
+let nativeConversationBridge: NativeConversationBridge | null = null
+const nativeConversationListeners = new Set<() => void>()
+
+function publishNativeConversationBridge(next: NativeConversationBridge | null): void {
+  nativeConversationBridge = next
+  nativeConversationListeners.forEach(listener => listener())
+}
+
+function useNativeConversationBridge(): NativeConversationBridge | null {
+  return useSyncExternalStore(
+    listener => { nativeConversationListeners.add(listener); return () => { nativeConversationListeners.delete(listener) } },
+    () => nativeConversationBridge,
+    () => null,
+  )
+}
+
+function NativeConversationBridgeMount({ inputActions }: { inputActions: ConversationInputActions | undefined }) {
+  useEffect(() => {
+    if (inputActions === undefined) return
+    const bridge: NativeConversationBridge = { setDraft: text => inputActions.setDraft(text), submit: () => inputActions.submit() }
+    publishNativeConversationBridge(bridge)
+    return () => { if (nativeConversationBridge === bridge) publishNativeConversationBridge(null) }
+  }, [inputActions])
+  return null
+}
+
+function invokeNativeSkill(bridge: NativeConversationBridge | null, skill: string, prompt: string): boolean {
+  if (bridge === null) return false
+  bridge.setDraft(`/${skillCommandName(skill)} ${prompt}`)
+  bridge.submit()
+  return true
 }
 
 function ComposerScopeControl(_props: ComposerScopeProps) {
@@ -367,53 +607,148 @@ const designFormats = [
   { id: 'ui', label: '界面原型', icon: '⌘', prompt: '为当前项目建立一个清晰的核心任务界面，先锁定信息层级、状态与主操作。' },
   { id: 'wireframe', label: '线框图', icon: '▦', prompt: '梳理关键流程的低保真线框，标出用户决策点与异常分支。' },
   { id: 'mobile', label: '移动应用', icon: '▯', prompt: '把核心流程压缩为移动端单手可完成的任务路径，并定义反馈状态。' },
-  { id: 'deck', label: '演示文稿', icon: '▤', prompt: '把当前主题变成一份可汇报的故事线，先定义开场、证据和结论。' },
+  { id: 'brand', label: '品牌视觉', icon: '◇', prompt: '建立品牌视觉方向、字体、色彩和可复用图形语言。' },
+  { id: 'deck', label: '演示文稿', icon: '▤', prompt: '为演示文稿建立版式与视觉叙事，产物仍由开放设计工作流执行。' },
+  { id: 'document', label: '文档', icon: '▧', prompt: '把内容组织成清晰、可阅读并可继续编辑的视觉文档。' },
 ] as const
 
-const designExamples = [
-  { id: 'focus', kind: '产品落地页', title: 'Lumo 产品控制台', className: 'sunset' },
-  { id: 'flow', kind: '工作流', title: '项目控制流程', className: 'blueprint' },
-  { id: 'board', kind: '数据看板', title: '创意评审看板', className: 'mosaic' },
-] as const
-
-function OpenDesignDock(_props: ComposerDockProps) {
-  const { project, space } = useStudioScope()
-  const [expanded, setExpanded] = useState(true)
-  const [format, setFormat] = useState<(typeof designFormats)[number]['id']>('ui')
-  const [brief, setBrief] = useState('')
-  const [notice, setNotice] = useState('')
-  const active = designFormats.find(item => item.id === format) ?? designFormats[0]
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    const intent = brief.trim() || active.prompt
-    setNotice(`已为 ${project.label} / ${space.label} 准备 ${active.label}：${intent}`)
-  }
-  const useExample = (example: (typeof designExamples)[number]) => {
-    setBrief(`参考「${example.title}」的结构，为${project.label}的${space.label}制作一个可继续迭代的${active.label}。`)
-    setNotice(`已载入 ${example.title} 的创作方向。`)
-  }
-  return <section className={`lumo-opendesign-dock ${expanded ? 'expanded' : ''}`} aria-label="开放设计嵌入式创作面板">
-    <button type="button" className="lumo-opendesign-bar" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}><span className="lumo-opendesign-mark">◢</span><span><b>开放设计</b><small>在当前项目空间内创建可预览的设计产物</small></span><em>{project.label} · {space.label}</em><i>{expanded ? '收起' : '展开'}⌄</i></button>
-    {expanded ? <div className="lumo-opendesign-body">
-      <div className="lumo-opendesign-heading"><div><span className="lumo-eyebrow">嵌入式创作面</span><h2>把想法变成可以继续编辑的产物</h2></div><span className="lumo-scope-readout"><i style={{ background: space.accent }} />{project.label}<b>/</b>{space.label}</span></div>
-      <div className="lumo-design-format-row" role="tablist" aria-label="开放设计产物类型">{designFormats.map(item => <button type="button" role="tab" aria-label={`选择开放设计类型：${item.label}`} aria-selected={item.id === format} key={item.id} className={item.id === format ? 'active' : ''} onClick={() => { setFormat(item.id); setNotice('') }}><i>{item.icon}</i>{item.label}</button>)}</div>
-      <form className="lumo-design-composer" onSubmit={submit}><label><span>创作意图</span><textarea value={brief} onChange={event => setBrief(event.target.value)} placeholder={`${active.prompt} 也可在原生输入框继续补充任务。`} aria-label="开放设计创作意图" rows={3} /></label><div className="lumo-design-composer-footer"><span><i>✦</i> 设计上下文会跟随当前项目与空间</span><button type="submit" aria-label="准备设计意图">准备设计意图 <b>↑</b></button></div></form>
-      {notice ? <div className="lumo-design-notice" role="status"><span>✓</span>{notice}<button type="button" aria-label="关闭创作提示" onClick={() => setNotice('')}>×</button></div> : null}
-      <div className="lumo-design-example-head"><span>从一个方向开始</span><small>点击示例会填充创作意图</small></div><div className="lumo-design-examples">{designExamples.map(example => <button type="button" key={example.id} className="lumo-design-example" onClick={() => useExample(example)}><span className={`lumo-design-preview ${example.className}`}><i /><i /><i /><b /></span><span><small>{example.kind}</small><b>{example.title}</b></span></button>)}</div>
-    </div> : null}
-  </section>
+type CreativeSurface = 'design' | 'presentation'
+type CreativeExample = {
+  id: string
+  skillName: string
+  kind: string
+  title: string
+  description: string
+  className: string
+  prompt: string
+  seed: string
 }
 
-function HeroOpenDesignDock(_props: HeroComposerDockProps) {
-  return <OpenDesignDock {...(_props as unknown as ComposerDockProps)} />
+const creativePreviewClasses: Record<CreativeSurface, readonly string[]> = {
+  design: ['sunset', 'blueprint', 'mosaic', 'mobile'],
+  presentation: ['violet', 'blue', 'green', 'orange', 'cyan', 'purple'],
+}
+
+function isCreativeSkill(skill: RuntimeSkill, surface: CreativeSurface): boolean {
+  const searchable = `${skill.name} ${skill.description} ${skill.whenToUse ?? ''}`.toLowerCase()
+  if (surface === 'presentation') {
+    if (skillCommandName(skill.name) === 'open-design') return false
+    return /ppt|presentation|slide|deck|演示|幻灯/u.test(searchable)
+  }
+  return /open[- ]?design|prototype|landing|dashboard|visual|design|image|原型|落地页|看板|视觉/u.test(searchable)
+}
+
+function skillCommandName(name: string): string {
+  return name.replace(/^.*\//u, '')
+}
+
+function creativeExamples(snapshot: SkillSnapshot, surface: CreativeSurface): CreativeExample[] {
+  const classes = creativePreviewClasses[surface]
+  return snapshot.skills
+    .filter(skill => skill.invocation.userInvocable && isCreativeSkill(skill, surface))
+    .map((skill, index) => {
+      const title = localizedSkillName(skill.name)
+      const description = localizedSkillDescription(skill)
+      const seed = localizedSkillWhenToUse(skill)
+      return {
+        id: `${surface}:${skill.name}`,
+        skillName: skill.name,
+        kind: localizedProvider(skill.provider),
+        title,
+        description,
+        className: classes[index % classes.length]!,
+        prompt: seed,
+        seed,
+      }
+    })
+}
+
+function useRuntimeSkills(): SkillSnapshot | null {
+  const [snapshot, setSnapshot] = useState<SkillSnapshot | null>(null)
+  useEffect(() => {
+    let mounted = true
+    void optionalApi<SkillSnapshot>('/lumo/api/skills', { complete: false, skills: [] }).then(next => {
+      if (mounted) setSnapshot({ ...next.data, ...(next.error === undefined ? {} : { error: next.error }) })
+    })
+    return () => { mounted = false }
+  }, [])
+  return snapshot
+}
+
+type DesignFormatId = (typeof designFormats)[number]['id']
+type CreativeSeed = { kind: 'design'; skillName?: string; formatId?: DesignFormatId } | { kind: 'presentation'; skillName?: string; openHash?: boolean }
+let creativeSeed: CreativeSeed | null = null
+
+function openCreativeSurface(seed: CreativeSeed): void {
+  creativeSeed = seed
+  openSurface(seed.kind === 'design' ? 'design' : 'presentation')
+}
+
+function takeCreativeSeed<T extends CreativeSeed['kind']>(kind: T): Extract<CreativeSeed, { kind: T }> | null {
+  if (creativeSeed?.kind !== kind) return null
+  const seed = creativeSeed as Extract<CreativeSeed, { kind: T }>
+  creativeSeed = null
+  return seed
+}
+
+const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+function focusableChildren(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+}
+
+// aria-modal alone does not retain keyboard focus. The command palette is a
+// nested modal, so its own trap temporarily supersedes the workbench trap.
+function useFocusTrap(ref: { current: HTMLElement | null }, active: boolean): void {
+  useEffect(() => {
+    const container = ref.current
+    if (!active || container === null) return
+    focusableChildren(container)[0]?.focus()
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Tab') return
+      const items = focusableChildren(container)
+      if (!items.length) { event.preventDefault(); container.focus(); return }
+      const current = document.activeElement
+      const index = items.indexOf(current as HTMLElement)
+      if (event.shiftKey && (index <= 0 || !container.contains(current))) {
+        event.preventDefault(); items[items.length - 1]?.focus()
+      } else if (!event.shiftKey && (index === items.length - 1 || !container.contains(current))) {
+        event.preventDefault(); items[0]?.focus()
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [active, ref])
+}
+
+function OpenDesignDock(props: ComposerDockProps) {
+  return <NativeConversationBridgeMount inputActions={props.inputActions} />
+}
+
+function HeroOpenDesignDock(props: HeroComposerDockProps) {
+  const [mode, setMode] = useState<'design' | 'presentation'>('design')
+  const [hash, setHash] = useState('')
+  const runtime = useRuntimeSkills()
+  const designExamples = runtime === null ? [] : creativeExamples(runtime, 'design')
+  const presentationExamples = runtime === null ? [] : creativeExamples(runtime, 'presentation')
+  const onHashChange = (value: string) => {
+    setHash(value)
+    if (value.includes('#')) { setHash(''); openCreativeSurface({ kind: 'presentation', openHash: true }) }
+  }
+  return <><NativeConversationBridgeMount inputActions={props.inputActions} /><section className="lumo-home-creative" aria-label="开放设计与 PPT 样例">
+    <header><div><b>创作工作台</b><span>基于现有插件能力，在 AI 对话中继续完成真实产物</span></div><nav aria-label="创作能力"><button type="button" className={mode === 'design' ? 'active' : ''} onClick={() => setMode('design')}><Glyph surface="design" />开放设计</button><button type="button" className={mode === 'presentation' ? 'active' : ''} onClick={() => setMode('presentation')}><Glyph surface="presentation" />PPT 生成</button></nav></header>
+    {mode === 'design' ? <div className="lumo-home-design"><div className="lumo-home-mode-row">{designFormats.map(item => <button type="button" key={item.id} onClick={() => openCreativeSurface({ kind: 'design', formatId: item.id })}><i>{item.icon}</i>{item.label}</button>)}</div><div className="lumo-home-example-grid">{runtime === null ? <p role="status">正在同步创作技能…</p> : designExamples.length ? designExamples.map(example => <button type="button" key={example.id} onClick={() => openCreativeSurface({ kind: 'design', skillName: example.skillName })}><span className={`lumo-design-preview ${example.className}`}><i /><i /><i /><b /></span><span><small>{example.kind}</small><b>{example.title}</b></span></button>) : <p role="status">{runtime.error || '当前运行时没有可用的设计技能。'}</p>}</div></div> : <div className="lumo-home-presentation"><label><Glyph surface="presentation" /><input aria-label="用 # 选择 PPT 样例" value={hash} onChange={event => onHashChange(event.target.value)} placeholder="输入 # 选择演示样例，然后进入 AI 对话" /><kbd>#</kbd></label><div>{runtime === null ? <p role="status">正在同步演示技能…</p> : presentationExamples.length ? presentationExamples.map(example => <button type="button" key={example.id} onClick={() => openCreativeSurface({ kind: 'presentation', skillName: example.skillName })}><i className={example.className} /><span><b>{example.title}</b><small>{example.description}</small></span></button>) : <p role="status">{runtime.error || '当前运行时没有可用的 PPT 技能。'}</p>}</div></div>}
+  </section></>
 }
 
 function CommandPalette({ open, surface, select, close }: { open: boolean; surface: Surface; select: (surface: Surface) => void; close: () => void }) {
+  const ref = useRef<HTMLDivElement>(null)
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   const matches = surfaces.filter(item => `${surfaceMeta[item].label} ${surfaceMeta[item].eyebrow}`.toLowerCase().includes(query.trim().toLowerCase()))
   useEffect(() => { if (open) setQuery('') }, [open])
   useEffect(() => { setActiveIndex(index => Math.min(index, Math.max(matches.length - 1, 0))) }, [matches.length])
+  useFocusTrap(ref, open)
   if (!open) return null
   const choose = (item: Surface | undefined) => { if (item === undefined) return; select(item); close() }
   const onKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -421,7 +756,7 @@ function CommandPalette({ open, surface, select, close }: { open: boolean; surfa
     else if (event.key === 'ArrowUp') { event.preventDefault(); setActiveIndex(index => matches.length ? (index - 1 + matches.length) % matches.length : 0) }
     else if (event.key === 'Enter') { event.preventDefault(); choose(matches[activeIndex]) }
   }
-  return <div className="lumo-command-layer" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) close() }}><section className="lumo-command" role="dialog" aria-modal="true" aria-label="Lumo 工作区菜单"><header><div><span className="lumo-eyebrow">快速跳转</span><b>跳转到工作区</b></div><kbd>ESC</kbd></header><label className="lumo-command-search"><span>⌘</span><input autoFocus value={query} onChange={event => setQuery(event.target.value)} onKeyDown={onKeyDown} placeholder="搜索知识、技能、连接器、插件市场或运营管理" aria-label="搜索工作区" /></label><div className="lumo-command-list">{matches.length ? matches.map((item, index) => <button type="button" key={item} className={surface === item || activeIndex === index ? 'active' : ''} onClick={() => choose(item)}><Glyph surface={item} /><span><b>{surfaceMeta[item].label}</b><small>{surfaceMeta[item].description}</small></span><kbd>{item === 'operations' ? '⌘ 1' : item === 'knowledge' ? '⌘ 2' : item === 'skills' ? '⌘ 3' : item === 'connectors' ? '⌘ 4' : item === 'market' ? '⌘ 5' : '⌘ 6'}</kbd></button>) : <Empty>没有匹配的工作区。</Empty>}</div><footer><span>↑↓ 选择</span><span>Enter 打开</span><span>Esc 关闭</span></footer></section></div>
+  return <div ref={ref} className="lumo-command-layer" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) close() }}><section className="lumo-command" role="dialog" aria-modal="true" aria-label="Lumo 工作区菜单"><header><div><span className="lumo-eyebrow">快速跳转</span><b>跳转到工作区</b></div><kbd>ESC</kbd></header><label className="lumo-command-search"><span>⌘</span><input autoFocus value={query} onChange={event => setQuery(event.target.value)} onKeyDown={onKeyDown} placeholder="搜索知识、技能、连接器、插件市场或运营管理" aria-label="搜索工作区" /></label><div className="lumo-command-list">{matches.length ? matches.map((item, index) => <button type="button" key={item} className={surface === item || activeIndex === index ? 'active' : ''} onClick={() => choose(item)}><Glyph surface={item} /><span><b>{surfaceMeta[item].label}</b><small>{surfaceMeta[item].description}</small></span><kbd>{item === 'operations' ? '⌘ 1' : item === 'knowledge' ? '⌘ 2' : item === 'skills' ? '⌘ 3' : item === 'connectors' ? '⌘ 4' : item === 'market' ? '⌘ 5' : '⌘ 6'}</kbd></button>) : <Empty>没有匹配的工作区。</Empty>}</div><footer><span>↑↓ 选择</span><span>Enter 打开</span><span>Esc 关闭</span></footer></section></div>
 }
 
 function DeploymentBanner({ deployment }: { deployment: DeploymentState }) {
@@ -476,6 +811,38 @@ function countOnline(data: Overview): number { return Object.values(data.service
 function rowsOf<T>(result: UpstreamResult | undefined, key: string): T[] { const data = result?.data; if (typeof data !== 'object' || data === null) return []; const value = (data as Record<string, unknown>)[key]; return Array.isArray(value) ? value as T[] : [] }
 function formatSync(value: string): string { return value ? new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '尚未同步' }
 
+function parseKnowledgeChunks(value: string): Array<{ text: string; metadata: Record<string, unknown> }> {
+  let decoded: unknown
+  try { decoded = JSON.parse(value) } catch { throw new Error('来源分片必须是合法 JSON 数组。') }
+  if (!Array.isArray(decoded) || decoded.length === 0) throw new Error('来源至少需要一个分片。')
+  return decoded.map((item, index) => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) throw new Error(`第 ${index + 1} 个分片必须是对象。`)
+    const chunk = item as Record<string, unknown>
+    if (typeof chunk.text !== 'string' || chunk.text.trim() === '') throw new Error(`第 ${index + 1} 个分片缺少文本。`)
+    if (typeof chunk.metadata !== 'object' || chunk.metadata === null || Array.isArray(chunk.metadata)) throw new Error(`第 ${index + 1} 个分片的 metadata 必须是对象。`)
+    return { text: chunk.text, metadata: chunk.metadata as Record<string, unknown> }
+  })
+}
+
+function flowVersionChanges(previous: FlowDefinition, current: FlowDefinition): string[] {
+  const nodeMap = (definition: FlowDefinition) => new Map((definition.nodes ?? []).filter(node => node.id).map(node => [node.id!, node.operator ?? '']))
+  const edgeSet = (definition: FlowDefinition) => new Set((definition.edges ?? []).filter(edge => edge.from && edge.to).map(edge => `${edge.from}→${edge.to}`))
+  const beforeNodes = nodeMap(previous); const afterNodes = nodeMap(current)
+  const added = [...afterNodes.keys()].filter(id => !beforeNodes.has(id))
+  const removed = [...beforeNodes.keys()].filter(id => !afterNodes.has(id))
+  const changed = [...afterNodes.entries()].filter(([id, operator]) => beforeNodes.has(id) && beforeNodes.get(id) !== operator).map(([id, operator]) => `${id}（${beforeNodes.get(id)} → ${operator}）`)
+  const beforeEdges = edgeSet(previous); const afterEdges = edgeSet(current)
+  const edgeAdded = [...afterEdges].filter(edge => !beforeEdges.has(edge))
+  const edgeRemoved = [...beforeEdges].filter(edge => !afterEdges.has(edge))
+  const changes: string[] = []
+  if (added.length) changes.push(`新增节点：${added.join('、')}`)
+  if (removed.length) changes.push(`移除节点：${removed.join('、')}`)
+  if (changed.length) changes.push(`节点算子变更：${changed.join('、')}`)
+  if (edgeAdded.length) changes.push(`新增连线：${edgeAdded.join('、')}`)
+  if (edgeRemoved.length) changes.push(`移除连线：${edgeRemoved.join('、')}`)
+  return changes.length ? changes : ['两个发布快照的节点、算子和连线一致。']
+}
+
 function SurfaceIntro({ surface, trailing }: { surface: Surface; trailing?: ReactNode }) {
   const meta = surfaceMeta[surface]
   return <div className="lumo-surface-intro"><div><span className="lumo-eyebrow">{meta.eyebrow}</span><h1>{meta.label}</h1><p>{meta.description}</p></div>{trailing}</div>
@@ -492,6 +859,23 @@ function KnowledgeSurface() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [selectedHit, setSelectedHit] = useState<KnowledgeHit | null>(null)
+  const [sources, setSources] = useState<KnowledgeSourceSummary[] | null>(null)
+  const [sourcesLoading, setSourcesLoading] = useState(true)
+  const [sourcesError, setSourcesError] = useState('')
+  const [sourceBusy, setSourceBusy] = useState('')
+  const [sourceNotice, setSourceNotice] = useState('')
+  const [loadedSource, setLoadedSource] = useState<KnowledgeSource | null>(null)
+  const [sourceDocID, setSourceDocID] = useState('')
+  const [sourceSpace, setSourceSpace] = useState('general')
+  const [sourceTitle, setSourceTitle] = useState('')
+  const [sourceChunks, setSourceChunks] = useState('[\n  {\n    "text": "",\n    "metadata": {}\n  }\n]')
+  const loadSources = useCallback(async () => {
+    setSourcesLoading(true); setSourcesError('')
+    try { setSources((await api<KnowledgeSources>('/lumo/api/knowledge/sources')).sources) }
+    catch (reason) { setSources(null); setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setSourcesLoading(false) }
+  }, [])
+  useEffect(() => { void loadSources() }, [loadSources])
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const text = queryText.trim()
@@ -502,6 +886,63 @@ function KnowledgeSurface() {
     finally { setBusy(false) }
   }
   const useExample = (text: string) => { setQueryText(text); setError('') }
+  const resetSourceForm = () => {
+    setLoadedSource(null); setSourceDocID(''); setSourceSpace('general'); setSourceTitle('')
+    setSourceChunks('[\n  {\n    "text": "",\n    "metadata": {}\n  }\n]')
+    setSourceNotice(''); setSourcesError('')
+  }
+  const editSource = async (summary: KnowledgeSourceSummary) => {
+    setSourceBusy(`load-${summary.docId}`); setSourcesError(''); setSourceNotice('')
+    try {
+      const response = await api<{ source: KnowledgeSource }>(`/lumo/api/knowledge/sources/${encodeURIComponent(summary.docId)}`)
+      const source = response.source
+      setLoadedSource(source); setSourceDocID(source.doc.docId); setSourceSpace(source.doc.space)
+      setSourceTitle(source.doc.title); setSourceChunks(JSON.stringify(source.chunks, null, 2))
+    } catch (reason) { setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setSourceBusy('') }
+  }
+  const saveSource = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setSourceBusy('save'); setSourcesError(''); setSourceNotice('')
+    try {
+      const chunks = parseKnowledgeChunks(sourceChunks)
+      const existing = loadedSource !== null
+      const path = existing ? `/lumo/api/knowledge/sources/${encodeURIComponent(loadedSource.doc.docId)}` : '/lumo/api/knowledge/sources'
+      const response = await api<{ source: KnowledgeSourceSummary }>(path, {
+        method: existing ? 'PUT' : 'POST',
+        body: JSON.stringify({
+          ...(existing ? {} : { docId: sourceDocID.trim() }), space: sourceSpace.trim(), title: sourceTitle.trim(), chunks,
+          ...(existing ? { expectedSourceVersion: loadedSource.doc.sourceVersion } : {}),
+        }),
+      })
+      const summary = response.source
+      setLoadedSource({ doc: { docId: summary.docId, realm: summary.realm, space: summary.space, title: summary.title, sourceVersion: summary.sourceVersion, embeddingModel: summary.embeddingModel }, chunks })
+      setSourceDocID(summary.docId); setSourceSpace(summary.space); setSourceTitle(summary.title)
+      setSourceNotice(`已保存 ${summary.docId} 的 v${summary.sourceVersion}；源内容与向量投影已在同一事务中同步。`)
+      await loadSources()
+    } catch (reason) { setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setSourceBusy('') }
+  }
+  const removeSource = async () => {
+    if (loadedSource === null) return
+    setSourceBusy('remove'); setSourcesError(''); setSourceNotice('')
+    try {
+      await api(`/lumo/api/knowledge/sources/${encodeURIComponent(loadedSource.doc.docId)}`, { method: 'DELETE', body: JSON.stringify({ expectedSourceVersion: loadedSource.doc.sourceVersion }) })
+      const removedDocID = loadedSource.doc.docId
+      resetSourceForm(); setSourceNotice(`已删除 ${removedDocID}；其向量投影和图投影删除意图已同步写入。`)
+      await loadSources()
+    } catch (reason) { setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setSourceBusy('') }
+  }
+  const rebuildSources = async () => {
+    setSourceBusy('rebuild'); setSourcesError(''); setSourceNotice('')
+    try {
+      await api('/lumo/api/knowledge/rebuild', { method: 'POST' })
+      setSourceNotice('当前 realm 的来源已按保存版本完成安全回放；并发更新的来源不会被旧快照覆盖。')
+      await loadSources()
+    } catch (reason) { setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setSourceBusy('') }
+  }
   return <div className="lumo-surface lumo-knowledge-surface">
     <SurfaceIntro surface="knowledge" trailing={<div className="lumo-scope-card"><span>检索范围</span><b>已发布知识</b><small>按 realm / 角色校验</small></div>} />
     <div className="lumo-context-strip"><span><i className="lumo-live-dot" /> 当前身份可见</span><span>语义召回</span><span>来源可追溯</span><span className="lumo-context-end">查询不会改变知识内容</span></div>
@@ -509,6 +950,12 @@ function KnowledgeSurface() {
     {error ? <Notice error>{error}</Notice> : null}
     <Section title="检索结果" meta={result === null ? '等待查询' : `${result.hits.length} 个来源片段`} actions={result ? <span className="lumo-query-summary">“{result.query}”</span> : null}>
       {busy ? <div className="lumo-hit-list">{[0, 1, 2].map(index => <div className="lumo-skeleton-hit" key={index}><span /><b /><i /></div>)}</div> : result === null ? <div className="lumo-hero-empty"><Glyph surface="knowledge" /><b>知识结果会在这里展开</b><p>查询会带入当前会话 realm 与角色，只读已发布知识，并保留 docId、源版本和相关度。</p></div> : result.hits.length === 0 ? <Empty>没有命中可见的已发布知识。可以调整问题表达后重试。</Empty> : <div className="lumo-result-layout"><div className="lumo-hit-list">{result.hits.map((hit, index) => <SpotlightCard className={`lumo-hit ${selectedHit?.docId === hit.docId && selectedHit.sourceVersion === hit.sourceVersion ? 'selected' : ''}`} index={index} key={`${hit.docId}-${hit.sourceVersion}-${index}`} onClick={() => setSelectedHit(hit)}><div className="lumo-hit-meta"><span>{hit.docId} · v{hit.sourceVersion}</span><b>{Math.round(hit.score * 100)}%</b></div><p>{hit.text}</p><footer><span>来源版本 {hit.sourceVersion}</span><span>查看来源详情 ↗</span></footer></SpotlightCard>)}</div><aside className="lumo-inspector">{selectedHit ? <><span className="lumo-inspector-label">来源检查</span><h3>{selectedHit.docId}</h3><p>该片段来自已发布知识版本 {selectedHit.sourceVersion}，当前相关度为 {Math.round(selectedHit.score * 100)}%。</p><div className="lumo-detail-stack"><div><span>来源 ID</span><b>{selectedHit.docId}</b></div><div><span>源版本</span><b>v{selectedHit.sourceVersion}</b></div><div><span>相关度</span><b>{Math.round(selectedHit.score * 100)}%</b></div></div></> : <div className="lumo-inspector-empty"><span>选择一个来源片段</span><p>右侧会展示该片段的版本和相关度信息。</p></div>}</aside></div>}
+    </Section>
+    <Section title="来源管理" meta={sources === null ? (sourcesLoading ? '正在确认管理权限与来源存储' : '当前身份或向量 Provider 不支持来源管理') : `${sources.length} 个来源 · 版本化真相源`} actions={<span className="lumo-surface-actions"><BusyButton className="lumo-secondary" busy={sourcesLoading} onClick={() => void loadSources()}>刷新来源</BusyButton><BusyButton className="lumo-secondary" busy={sourceBusy === 'rebuild'} onClick={() => void rebuildSources()}>重建当前 Realm</BusyButton></span>}>
+      <p className="lumo-section-note">来源内容、版本和向量投影由管理 API 一起写入；重建只从已保存来源回放，不会暴露 embedding 或索引参数。</p>
+      {sourcesError ? <Notice error close={() => setSourcesError('')}>{sourcesError}</Notice> : null}
+      {sourceNotice ? <Notice close={() => setSourceNotice('')}>{sourceNotice}</Notice> : null}
+      {sources === null ? <Empty>{sourcesLoading ? '正在读取来源目录。' : '仅 realm_admin、platform_admin 或 admin 可管理 PostgreSQL 来源；Milvus 投影模式会明确显示为不支持。'}</Empty> : <div className="lumo-governed-version-layout"><div className="lumo-table-list">{sources.length ? sources.map(source => <div key={source.docId} className={loadedSource?.doc.docId === source.docId ? 'selected' : ''}><span><b>{source.title}</b><small>{source.docId} · 空间 {source.space} · {source.chunkCount} 个分片 · {source.embeddingModel}</small></span><em>v{source.sourceVersion} · 已同步 · {formatSync(source.updatedAt)}</em><BusyButton className="lumo-small lumo-secondary" busy={sourceBusy === `load-${source.docId}`} onClick={() => void editSource(source)}>查看 / 编辑</BusyButton></div>) : <Empty>还没有来源。新建一条来源后，系统会生成首个不可覆盖版本。</Empty>}</div><form className="lumo-stacked-form lumo-version-form" onSubmit={saveSource}><div className="lumo-form-head"><b>{loadedSource ? `编辑 ${loadedSource.doc.docId} · v${loadedSource.doc.sourceVersion}` : '登记知识来源'}</b><button type="button" className="lumo-quiet" onClick={resetSourceForm}>新建来源</button></div><label><span>来源 ID</span><input aria-label="知识来源 ID" value={sourceDocID} disabled={loadedSource !== null} maxLength={128} required placeholder="例如：connector-policy" onChange={event => setSourceDocID(event.target.value)} /></label><label><span>知识空间</span><input aria-label="知识空间" value={sourceSpace} maxLength={128} required placeholder="例如：operations" onChange={event => setSourceSpace(event.target.value)} /></label><label><span>标题</span><input aria-label="知识来源标题" value={sourceTitle} maxLength={512} required placeholder="例如：生产连接器审批规范" onChange={event => setSourceTitle(event.target.value)} /></label><label><span>来源分片</span><textarea aria-label="来源分片 JSON" value={sourceChunks} rows={9} onChange={event => setSourceChunks(event.target.value)} /></label><small>每个分片包含 text 与 metadata；保存已有来源会创建下一个版本。并发更新会返回冲突，需重新加载后再提交。</small><div className="lumo-form-actions"><BusyButton type="submit" busy={sourceBusy === 'save'} className="lumo-primary">{loadedSource ? '保存新版本' : '登记来源'}</BusyButton>{loadedSource ? <BusyButton type="button" busy={sourceBusy === 'remove'} className="lumo-danger" onClick={() => void removeSource()}>删除来源</BusyButton> : null}</div></form></div>}
     </Section>
   </div>
 }
@@ -522,6 +969,11 @@ function SkillsSurface() {
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
   const [selectedName, setSelectedName] = useState('')
+  const [selectedGoverned, setSelectedGoverned] = useState<GovernedSkill | null>(null)
+  const [selectedVersion, setSelectedVersion] = useState<GovernedSkillVersion | null>(null)
+  const [versionLoading, setVersionLoading] = useState(false)
+  const [publishingVersion, setPublishingVersion] = useState(false)
+  const [promotingVersion, setPromotingVersion] = useState(false)
   const load = useCallback(async () => {
     setLoading(true); setError('')
     try {
@@ -538,13 +990,50 @@ function SkillsSurface() {
     const fields = new FormData(form)
     const name = String(fields.get('name') ?? '').trim()
     const kind = String(fields.get('kind') ?? 'prompt')
+    const description = String(fields.get('description') ?? '').trim()
+    const version = String(fields.get('version') ?? '1.0.0').trim()
+    const content = String(fields.get('content') ?? '').trim()
     if (!name) { setNotice('请输入技能名称。'); return }
+    if (!content) { setNotice('请填写技能版本内容；治理目录不会创建没有来源内容的技能。'); return }
     setCreating(true)
     try {
-      await api<GovernedSkill>('/lumo/api/governance/skills', { method: 'POST', body: JSON.stringify({ name, kind, visibility: 'private' }) })
-      form.reset(); setNotice(`私有${kind === 'workflow' ? '工作流' : '提示词'}技能「${name}」已进入治理目录。`); await load()
+      await api<GovernedSkill>('/lumo/api/governance/skills', { method: 'POST', body: JSON.stringify({ name, kind, description, current_version: version, content, visibility: 'private' }) })
+      form.reset(); setNotice(`私有${kind === 'workflow' ? '工作流' : '提示词'}技能「${name}」的 ${version} 内容已进入治理目录。`); await load()
     } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
     finally { setCreating(false) }
+  }
+  const viewGoverned = async (skill: GovernedSkill) => {
+    setSelectedGoverned(skill); setSelectedVersion(null); setVersionLoading(true)
+    try {
+      setSelectedVersion(await api<GovernedSkillVersion>(`/lumo/api/governance/skills/${encodeURIComponent(skill.id)}/versions/${encodeURIComponent(skill.current_version)}`))
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setVersionLoading(false) }
+  }
+  const createVersion = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (selectedGoverned === null) return
+    const fields = new FormData(event.currentTarget)
+    const version = String(fields.get('version') ?? '').trim()
+    const content = String(fields.get('content') ?? '').trim()
+    if (!version || !content) { setNotice('新版本号和内容均为必填。'); return }
+    setPublishingVersion(true)
+    try {
+      const next = await api<GovernedSkillVersion>(`/lumo/api/governance/skills/${encodeURIComponent(selectedGoverned.id)}/versions`, { method: 'POST', body: JSON.stringify({ version, content }) })
+      setSelectedVersion(next); setSelectedGoverned({ ...selectedGoverned, current_version: next.version }); event.currentTarget.reset()
+      setNotice(`已保存不可覆盖的治理版本 ${next.version}；它尚未自动发布到运行时。`); await load()
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setPublishingVersion(false) }
+  }
+  const publishVersion = async () => {
+    if (selectedGoverned === null || selectedVersion === null) return
+    setPromotingVersion(true)
+    try {
+      const published = await api<GovernedSkill>(`/lumo/api/governance/skills/${encodeURIComponent(selectedGoverned.id)}/versions/${encodeURIComponent(selectedVersion.version)}/publish`, { method: 'POST' })
+      setSelectedGoverned(published)
+      setNotice(`已将不可变版本 ${selectedVersion.version} 发布为运行时快照。节点仍需由 Provisioner 对账并安装后才会实际调用。`)
+      await load()
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setPromotingVersion(false) }
   }
   const governed = rowsOf<GovernedSkill>(governance?.catalog, 'skills')
   const effective = rowsOf<GovernedSkill>(governance?.effective, 'skills')
@@ -552,55 +1041,154 @@ function SkillsSurface() {
   const filteredSkills = useMemo(() => skills.filter(skill => `${localizedSkillName(skill.name)} ${localizedSkillDescription(skill)} ${localizedProvider(skill.provider)}`.toLowerCase().includes(filter.toLowerCase())), [filter, skills])
   const selected = skills.find(skill => skill.name === selectedName) ?? filteredSkills[0]
   return <div className="lumo-surface">
-    <SurfaceIntro surface="skills" trailing={<BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>重新同步</BusyButton>} />
+    <SurfaceIntro surface="skills" trailing={<span className="lumo-surface-actions"><button type="button" className="lumo-button lumo-secondary" onClick={() => openSurface('connectors')}>连接器管理</button><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>重新同步</BusyButton></span>} />
     {error ? <Notice error>{error}</Notice> : null}{notice ? <Notice close={() => setNotice('')}>{notice}</Notice> : null}
     <div className="lumo-metric-grid"><Metric label="运行时可见" value={String(skills.length)} note={runtime?.complete === false ? '目录仍在收敛' : '目录已完整'} tone="mint" /><Metric label="治理目录" value={String(governed.length)} note={governance?.catalog.ok ? '集群目录' : '当前模式不可用'} /><Metric label="模型可调用" value={String(skills.filter(skill => skill.invocation.modelInvocable).length)} note="调用策略" /><Metric label="当前生效" value={String(effective.length)} note="生效策略" /></div>
     <Section title="运行时技能" meta={loading ? '正在读取技能目录' : '当前运行时快照'} actions={<label className="lumo-filter"><span>筛选</span><input value={filter} onChange={event => setFilter(event.target.value)} placeholder="技能名或提供方" /></label>}>
       {loading ? <div className="lumo-skill-grid">{[0, 1, 2, 3].map(index => <div className="lumo-skeleton-skill" key={index}><span /><div><b /><i /><i /></div></div>)}</div> : filteredSkills.length ? <div className="lumo-skill-layout"><div className="lumo-skill-grid">{filteredSkills.map((skill, index) => <SpotlightCard className={`lumo-skill-card ${selected?.name === skill.name ? 'selected' : ''}`} index={index} key={skill.name} onClick={() => setSelectedName(skill.name)}><span className="lumo-skill-mark">{localizedSkillName(skill.name).slice(0, 1)}</span><div><b>{localizedSkillName(skill.name)}</b><p>{localizedSkillDescription(skill)}</p><small>{localizedSkillWhenToUse(skill)}</small><footer><i>{localizedProvider(skill.provider)}</i><span>{skill.invocation.modelInvocable ? '模型可调用' : '仅用户可调用'}</span></footer></div></SpotlightCard>)}</div><aside className="lumo-inspector lumo-skill-inspector">{selected ? <><span className="lumo-inspector-label">技能检查</span><h3>技能详情 · {localizedSkillName(selected.name)}</h3><p>{localizedSkillDescription(selected)}</p><div className="lumo-detail-stack"><div><span>技能状态</span><b>运行时目录</b></div><div><span>来源</span><b>{localizedSource(selected.source)}</b></div><div><span>提供方</span><b>{localizedProvider(selected.provider)}</b></div><div><span>用户可调用</span><b>{selected.invocation.userInvocable ? '允许' : '关闭'}</b></div><div><span>模型可调用</span><b>{selected.invocation.modelInvocable ? '允许' : '关闭'}</b></div></div></> : <Empty>选择技能查看详细策略。</Empty>}</aside></div> : <Empty>当前技能目录没有匹配项。</Empty>}
     </Section>
-    <Section title="创建受控专家能力" meta="私有 prompt / workflow 可直接进入治理目录"><form className="lumo-governance-form" onSubmit={create}><label><span>技能名称</span><input name="name" maxLength={120} placeholder="例如：campaign-review" /></label><label><span>能力类型</span><select name="kind" defaultValue="prompt"><option value="prompt">提示词技能</option><option value="workflow">工作流技能</option></select></label><BusyButton type="submit" busy={creating} className="lumo-primary">写入治理目录</BusyButton></form><p className="lumo-form-hint">Tool / Connector 或非私有发布仍由治理插件执行 realm_admin 闸门。</p></Section>
+    <Section title="创建受控专家能力" meta="创建首个不可覆盖版本；初始为未发布草稿"><form className="lumo-governance-form lumo-governance-skill-form" onSubmit={create}><label><span>技能名称</span><input name="name" maxLength={120} placeholder="例如：campaign-review" /></label><label><span>能力类型</span><select name="kind" defaultValue="prompt"><option value="prompt">提示词技能</option><option value="workflow">工作流技能</option></select></label><label><span>首个版本</span><input name="version" defaultValue="1.0.0" maxLength={64} /></label><label className="wide"><span>用途说明</span><input name="description" maxLength={500} placeholder="说明它解决什么问题，以及何时使用" /></label><label className="wide"><span>版本内容</span><textarea name="content" aria-label="技能版本内容" maxLength={131072} rows={7} placeholder={'---\nname: campaign-review\ndescription: 审核营销活动内容\n---\n\n写入提示词、工作流约定或 Markdown 技能说明。'} /></label><BusyButton type="submit" busy={creating} className="lumo-primary">保存治理版本</BusyButton></form><p className="lumo-form-hint">保存只创建治理草稿。发布要求内容含有效 SKILL.md frontmatter（名称须与技能名称一致、必须有 description）；realm_admin 选择的发布源仍须在受保护发布环境中签名为 Registry 制品，之后 Provisioner 才会验签、对账并安装到节点。</p></Section>
     <Section title="治理技能目录" meta={governance?.catalog.ok ? `${governed.length} 条` : `HTTP ${governance?.catalog.status ?? '未连接'}`}>
-      {governed.length ? <div className="lumo-table-list">{governed.map(skill => <div key={skill.id}><span><b>{localizedSkillName(skill.name)}</b><small>{skill.id} · 创建者 {skill.created_by}</small></span><i>{localizedSkillKind(skill.kind)}</i><em>{localizedVisibility(skill.visibility)} · {skill.current_version}</em></div>)}</div> : <Empty>{governance?.catalog.error || '当前部署模式没有治理技能目录，运行时技能目录仍可独立使用。'}</Empty>}
+      {governed.length ? <div className="lumo-table-list">{governed.map(skill => <div key={skill.id} className={selectedGoverned?.id === skill.id ? 'selected' : ''}><span><b>{localizedSkillName(skill.name)}</b><small>{skill.description || '未填写用途说明'} · 创建者 {skill.created_by}</small></span><i>{localizedSkillKind(skill.kind)}</i><em>{localizedVisibility(skill.visibility)} · 草稿 {skill.current_version}{skill.published_version ? ` · 已发布 ${skill.published_version}` : ' · 未发布'}</em><button type="button" className="lumo-button lumo-secondary lumo-version-open" onClick={() => void viewGoverned(skill)}>查看内容</button></div>)}</div> : <Empty>{governance?.catalog.error || '当前部署模式没有治理技能目录，运行时技能目录仍可独立使用。'}</Empty>}
     </Section>
+    {selectedGoverned ? <Section title={`治理版本 · ${localizedSkillName(selectedGoverned.name)}`} meta={versionLoading ? '正在读取不可变来源内容' : `当前草稿 ${selectedGoverned.current_version}${selectedGoverned.published_version ? ` · 已发布治理源 ${selectedGoverned.published_version}` : ' · 尚未发布治理源'}`}><div className="lumo-governed-version-layout"><div className="lumo-governed-source"><p>{selectedVersion ? `来源摘要 ${selectedVersion.digest} · 创建者 ${selectedVersion.created_by}` : '版本内容会显示在这里。'}</p><pre>{selectedVersion?.content ?? (versionLoading ? '正在读取…' : '未能读取该版本内容。')}</pre><small>{selectedGoverned.published_version === selectedVersion?.version ? `此版本已选为治理运行时源${selectedGoverned.published_digest ? ` · ${selectedGoverned.published_digest}` : ''}；还需由受信任发布器签名为 Registry Bundle，节点安装事实以 Provisioner 回报为准。` : '这是治理草稿内容，尚未成为可构建的运行时源。'}</small></div><form className="lumo-stacked-form lumo-version-form" onSubmit={createVersion}><b>保存新草稿版本</b><label><span>新版本号</span><input name="version" maxLength={64} placeholder="例如：1.1.0" /></label><label><span>新版本内容</span><textarea name="content" aria-label="新技能版本内容" maxLength={131072} rows={7} placeholder={'---\nname: campaign-review\ndescription: 审核营销活动内容\n---\n\n版本一经保存不能覆盖。'} /></label><div className="lumo-form-actions"><BusyButton type="submit" busy={publishingVersion} className="lumo-primary">保存新版本</BusyButton><BusyButton type="button" busy={promotingVersion} disabled={selectedVersion === null || selectedVersion.version === selectedGoverned.published_version} className="lumo-secondary" onClick={() => void publishVersion()}>发布为运行时源</BusyButton></div><small>仅创建者或 realm_admin 可以读取和写入来源；发布运行时源仅限 realm_admin。签名制品构建与节点实际安装分别由受保护发布器和 Provisioner 完成。</small></form></div></Section> : null}
   </div>
 }
 
 function MarketSurface() {
   const [query, setQuery] = useState('')
-  const [category, setCategory] = useState('全部')
-  const [selectedId, setSelectedId] = useState(BASE_PLUGIN_CATALOG[0]?.id ?? 'dshmarket')
-  const [notice, setNotice] = useState('')
-  const categories = ['全部', ...Array.from(new Set(BASE_PLUGIN_CATALOG.map(plugin => plugin.category)))]
-  const filtered = BASE_PLUGIN_CATALOG.filter(plugin => {
-    const matchesCategory = category === '全部' || plugin.category === category
-    const searchable = `${plugin.label} ${plugin.id} ${plugin.packageName} ${plugin.summary} ${plugin.tags.join(' ')}`.toLowerCase()
-    return matchesCategory && searchable.includes(query.trim().toLowerCase())
+  const [kind, setKind] = useState('全部')
+  const [selectedName, setSelectedName] = useState('')
+  const [catalog, setCatalog] = useState<RegistryCatalog | null>(null)
+  const [installations, setInstallations] = useState<RegistryInstallations | null>(null)
+  const [rollouts, setRollouts] = useState<RegistryRollouts | null>(null)
+  const [artifactVersions, setArtifactVersions] = useState<RegistryArtifact[]>([])
+  const [runtime, setRuntime] = useState<Overview | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [installShape, setInstallShape] = useState<RegistryShape>({ olap: false, graph: false, vector: false, object: false, gpu: false })
+  const [installPlan, setInstallPlan] = useState<RegistryInstallPlan | null>(null)
+  const [planning, setPlanning] = useState(false)
+  const [planError, setPlanError] = useState('')
+  const [updatingDesired, setUpdatingDesired] = useState(false)
+  const [desiredNotice, setDesiredNotice] = useState('')
+  const [desiredVersion, setDesiredVersion] = useState('')
+  const [desiredPercent, setDesiredPercent] = useState('100')
+  const [rolloutSelections, setRolloutSelections] = useState<Record<string, RegistryRolloutSelection>>({})
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    const [catalogResult, installationsResult, rolloutsResult, runtimeResult] = await Promise.allSettled([
+      api<RegistryCatalog>('/lumo/api/registry/artifacts?limit=100'),
+      api<RegistryInstallations>('/lumo/api/registry/installations?limit=100'),
+      api<RegistryRollouts>('/lumo/api/registry/rollouts'),
+      api<Overview>('/lumo/api/overview'),
+    ])
+    const failures: string[] = []
+    if (catalogResult.status === 'fulfilled') setCatalog(catalogResult.value)
+    else { setCatalog(null); failures.push(catalogResult.reason instanceof Error ? catalogResult.reason.message : '注册表目录不可用') }
+    if (installationsResult.status === 'fulfilled') setInstallations(installationsResult.value)
+    else { setInstallations(null); failures.push(installationsResult.reason instanceof Error ? installationsResult.reason.message : 'Provisioner 节点回报不可用') }
+    if (rolloutsResult.status === 'fulfilled') setRollouts(rolloutsResult.value)
+    else { setRollouts(null); failures.push(rolloutsResult.reason instanceof Error ? rolloutsResult.reason.message : '部署期望状态不可用') }
+    if (runtimeResult.status === 'fulfilled') setRuntime(runtimeResult.value)
+    else { setRuntime(null); failures.push(runtimeResult.reason instanceof Error ? runtimeResult.reason.message : '运行时配置不可用') }
+    setError(failures.join('；'))
+    setLoading(false)
+  }, [])
+  useEffect(() => { void load() }, [load])
+  const items = catalog?.items ?? []
+  const kinds = ['全部', ...Array.from(new Set(items.map(item => item.kind)))]
+  const filtered = items.filter(item => {
+    const matchesKind = kind === '全部' || item.kind === kind
+    const searchable = `${item.name} ${item.version} ${item.kind} ${item.publisher} ${item.scopes.join(' ')}`.toLowerCase()
+    return matchesKind && searchable.includes(query.trim().toLowerCase())
   })
-  const selected = BASE_PLUGIN_BY_ID[selectedId] ?? filtered[0] ?? BASE_PLUGIN_CATALOG[0]
-  const bundledByLumo = selected?.packageName.startsWith('@lumo/') ?? false
-  const installCommand = selected === undefined
-    ? ''
-    : bundledByLumo
-      ? '已随 Lumo 运行时安装，无需单独执行命令'
-      : `dsh plugin --profile web add ${selected.packageName}@${selected.version}`
-  const copyCommand = async () => {
-    if (!installCommand || bundledByLumo) return
-    try {
-      await navigator.clipboard.writeText(installCommand)
-      setNotice('安装命令已复制。桌面版已预装这些基础插件，无需再次安装。')
-    } catch {
-      setNotice(installCommand)
+  const selected = filtered.find(item => item.name === selectedName) ?? filtered[0]
+  const accentFor = (value: RegistryArtifact['kind']) => ({ Component: '#7da9ed', Skill: '#63c9b9', Agent: '#b796e8', Connector: '#e4c66f', Flow: '#f29a62' }[value])
+  const requirementLabels = (item: RegistryArtifact) => Object.entries(item.requires ?? {}).filter(([, enabled]) => enabled).map(([name]) => name.toUpperCase())
+  const runtimePlugins = runtime?.plugins ?? []
+  const installationReports = installations?.items ?? []
+  const desiredRollout = selected === undefined ? undefined : rollouts?.items.find(item => item.name === selected.name)
+  const rolloutNodeIDs = useMemo(() => Array.from(new Set(installationReports.map(report => report.node_id))).sort(), [installationReports])
+  const rolloutNodeKey = rolloutNodeIDs.join('\u0000')
+  const selectedInstallations = selected === undefined ? [] : installationReports.filter(report => report.state === 'converged' && report.installed.some(item => item.name === selected.name && item.version === selected.version))
+  const selectedFailures = selected === undefined ? [] : installationReports.filter(report => report.state === 'failed' && report.root === `${selected.name}@${selected.version}`)
+  useEffect(() => {
+    if (selected === undefined) { setArtifactVersions([]); return }
+    let active = true
+    void api<RegistryArtifactVersions>(`/lumo/api/registry/artifacts/${encodeURIComponent(selected.name)}`)
+      .then(result => { if (active) setArtifactVersions(result.items) })
+      .catch(() => { if (active) setArtifactVersions([selected]) })
+    return () => { active = false }
+  }, [selected?.name, selected?.version])
+  useEffect(() => {
+    setDesiredVersion(desiredRollout?.version ?? selected?.version ?? '')
+    setDesiredPercent(String(desiredRollout?.percent ?? 100))
+  }, [desiredRollout?.version, desiredRollout?.percent, selected?.name, selected?.version])
+  useEffect(() => {
+    if (selected === undefined || desiredRollout === undefined || rolloutNodeIDs.length === 0) {
+      setRolloutSelections({})
+      return
     }
+    let active = true
+    void Promise.all(rolloutNodeIDs.map(async (nodeID) => {
+      const result = await api<RegistryRolloutSelectionResponse>(`/lumo/api/registry/rollouts/${encodeURIComponent(selected.name)}?node_id=${encodeURIComponent(nodeID)}`)
+      return result.selection
+    })).then(selections => {
+      if (!active) return
+      setRolloutSelections(Object.fromEntries(selections.filter((selection): selection is RegistryRolloutSelection => selection !== undefined).map(selection => [selection.node_id, selection])))
+    }).catch(() => { if (active) setRolloutSelections({}) })
+    return () => { active = false }
+  }, [selected?.name, desiredRollout?.version, desiredRollout?.percent, rolloutNodeKey])
+  useEffect(() => { setInstallPlan(null); setPlanError('') }, [selected?.name, selected?.version])
+  const buildPlan = async () => {
+    if (selected === undefined) return
+    setPlanning(true); setPlanError(''); setInstallPlan(null)
+    try {
+      setInstallPlan(await api<RegistryInstallPlan>('/lumo/api/registry/plan', { method: 'POST', body: JSON.stringify({ name: selected.name, version: selected.version, shape: installShape }) }))
+    } catch (reason) { setPlanError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setPlanning(false) }
   }
+  const setDesiredTarget = async () => {
+    if (selected === undefined || desiredVersion === '') return
+    const percent = Number(desiredPercent)
+    if (!Number.isInteger(percent) || percent < 0 || percent > 100) {
+      setDesiredNotice('灰度比例必须是 0 到 100 的整数。')
+      return
+    }
+    setUpdatingDesired(true); setDesiredNotice('')
+    try {
+      await api(`/lumo/api/registry/rollouts/${encodeURIComponent(selected.name)}`, { method: 'PUT', body: JSON.stringify({ version: desiredVersion, percent }) })
+      setDesiredNotice(percent === 100
+        ? `Stable 通道已全量指向 ${selected.name}@${desiredVersion}；节点将在下一次对账时重新验证签名计划。`
+        : percent === 0
+          ? `Stable 通道已将 ${selected.name}@${desiredVersion} 置为 0% 目标；所有节点继续使用保留版本。`
+          : `Stable 通道已将 ${selected.name}@${desiredVersion} 灰度至 ${percent}%；目标 cohort 由稳定节点 ID 确定。`)
+      await load()
+    } catch (reason) { setDesiredNotice(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setUpdatingDesired(false) }
+  }
+  const setShape = (capability: keyof RegistryShape, enabled: boolean) => setInstallShape(current => ({ ...current, [capability]: enabled }))
   return <div className="lumo-surface lumo-market-surface">
-    <SurfaceIntro surface="market" trailing={<div className="lumo-market-status"><i className="lumo-live-dot" /><span>基础插件已装配</span><small>离线可见 · 版本已固定</small></div>} />
-    <div className="lumo-context-strip"><span><i className="lumo-live-dot" /> 桌面本地运行时随包提供</span><span>5 个基础插件 · 5 个创作与编排能力</span><span>上游功能可追溯</span><span className="lumo-context-end">点击卡片查看能力入口</span></div>
-    {notice ? <Notice close={() => setNotice('')}>{notice}</Notice> : null}
-    <Section title="基础插件" meta={`${filtered.length} / ${BASE_PLUGIN_CATALOG.length} 个能力`} actions={<label className="lumo-filter"><span>搜索</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="插件名称、功能或标签" /></label>}>
-      <div className="lumo-market-category-row" role="tablist" aria-label="插件分类">{categories.map(item => <button type="button" role="tab" aria-selected={category === item} className={category === item ? 'active' : ''} key={item} onClick={() => setCategory(item)}>{item}</button>)}</div>
-      {filtered.length ? <div className="lumo-market-layout"><div className="lumo-market-grid">{filtered.map((plugin, index) => <button type="button" className={`lumo-market-card ${selected?.id === plugin.id ? 'selected' : ''}`} style={{ '--market-accent': plugin.accent, '--lumo-order': String(index) } as CSSProperties} key={plugin.id} onClick={() => setSelectedId(plugin.id)}><span className="lumo-market-mark">{plugin.label.slice(0, 1)}</span><span className="lumo-market-card-main"><span className="lumo-market-card-head"><b>{plugin.label}</b><i>已内置</i></span><small>{plugin.packageName} · v{plugin.version}</small><p>{plugin.summary}</p><span className="lumo-market-tags">{plugin.tags.map(tag => <em key={tag}>{tag}</em>)}</span></span><span className="lumo-market-arrow">↗</span></button>)}</div><aside className="lumo-market-inspector">{selected ? <><span className="lumo-inspector-label">插件详情</span><div className="lumo-market-detail-title"><span className="lumo-market-mark" style={{ background: selected.accent }}>{selected.label.slice(0, 1)}</span><div><h3>{selected.label}</h3><small>{selected.packageName} · v{selected.version}</small></div></div><p>{selected.summary}</p><div className="lumo-detail-stack"><div><span>能力入口</span><b>{selected.capability}</b></div><div><span>分类</span><b>{selected.category}</b></div><div><span>装配状态</span><b className="lumo-ready-text">桌面基础插件</b></div><div><span>许可证</span><b>{selected.license}</b></div></div><div className="lumo-market-actions"><button type="button" className="lumo-button lumo-primary" disabled={bundledByLumo} onClick={() => void copyCommand()}>{bundledByLumo ? '已随运行时安装' : '复制安装命令'}</button><a className="lumo-button" href={selected.repository} target="_blank" rel="noreferrer">查看上游仓库 ↗</a></div><code className="lumo-market-command">{installCommand}</code></> : <Empty>没有匹配的基础插件。</Empty>}</aside></div> : <Empty>没有匹配的基础插件。</Empty>}
+    <SurfaceIntro surface="market" trailing={<div className="lumo-market-status">{catalog === null ? null : <i className="lumo-live-dot" />}<span>{catalog === null ? '注册表目录不可用' : '已连接制品注册表'}</span><small>{catalog === null ? '不会把运行时配置伪装成已安装' : '仅显示已签名、已发布、可发现版本'}</small></div>} />
+    <div className="lumo-context-strip"><span>{catalog === null ? 'Registry 未连接或当前形态不支持' : `${items.length} 个可发现制品`}</span><span>“可发现”不等于“已安装”或“正在运行”</span><span>安装需由 Provisioner 的签名计划执行</span><span className="lumo-context-end">状态按数据源分别展示</span></div>
+    {error ? <Notice error>{error}</Notice> : null}
+    <Section title="注册表制品" meta={loading ? '正在读取目录' : `${filtered.length} / ${items.length} 个可发现版本`} actions={<span className="lumo-surface-actions"><label className="lumo-filter"><span>搜索</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="制品名、发布者或 scope" /></label><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>刷新</BusyButton></span>}>
+      <div className="lumo-market-category-row" role="tablist" aria-label="制品类型">{kinds.map(item => <button type="button" role="tab" aria-selected={kind === item} className={kind === item ? 'active' : ''} key={item} onClick={() => setKind(item)}>{item}</button>)}</div>
+      {filtered.length ? <div className="lumo-market-layout"><div className="lumo-market-grid">{filtered.map((item, index) => <button type="button" className={`lumo-market-card ${selected?.name === item.name ? 'selected' : ''}`} style={{ '--market-accent': accentFor(item.kind), '--lumo-order': String(index) } as CSSProperties} key={item.name} onClick={() => setSelectedName(item.name)}><span className="lumo-market-mark">{item.name.slice(0, 1).toUpperCase()}</span><span className="lumo-market-card-main"><span className="lumo-market-card-head"><b>{item.name}</b><i>可发现</i></span><small>{item.kind} · v{item.version}</small><p>发布者 {item.publisher} · {item.scopes.length} 个权限 scope</p><span className="lumo-market-tags">{item.scopes.slice(0, 3).map(scope => <em key={scope}>{scope}</em>)}</span></span><span className="lumo-market-arrow">›</span></button>)}</div><aside className="lumo-market-inspector">{selected ? <><span className="lumo-inspector-label">制品详情</span><div className="lumo-market-detail-title"><span className="lumo-market-mark" style={{ background: accentFor(selected.kind) }}>{selected.name.slice(0, 1).toUpperCase()}</span><div><h3>{selected.name}</h3><small>{selected.kind} · v{selected.version}</small></div></div><p>这个条目来自 Registry 索引，表示 manifest 已验签并发布；它不能证明某个节点已安装、启用或运行。</p><div className="lumo-detail-stack"><div><span>发布者</span><b>{selected.publisher}</b></div><div><span>发现状态</span><b className="lumo-ready-text">已发布 · 可发现</b></div><div><span>部署要求</span><b>{requirementLabels(selected).join('、') || '无额外声明'}</b></div><div><span>依赖</span><b>{selected.deps?.length ? selected.deps.map(dep => `${dep.name}@${dep.version}`).join('、') : '无'}</b></div></div><div className="lumo-market-actions"><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>重新读取状态</BusyButton></div><code className="lumo-market-command">digest: {selected.digest}</code></> : <Empty>选择一个制品查看 manifest 索引。</Empty>}</aside></div> : <Empty>{loading ? '正在加载注册表目录。' : catalog === null ? '当前没有可用的注册表目录。' : '注册表中没有匹配的制品。'}</Empty>}
     </Section>
-    <Section title="装配说明" meta="桌面版启动时直接读取本地运行时"><div className="lumo-market-note-grid"><div><span>本地优先</span><b>首次打开不再执行插件下载</b><small>构建阶段已把插件包和生产依赖放进 Lumo.app，配置只建立本地链接。</small></div><div><span>可追溯</span><b>每张卡片保留上游仓库</b><small>插件的包名、版本、许可证与能力入口都在这里显示，方便升级和审计。</small></div><div><span>中文界面</span><b>产品文案统一使用中文</b><small>技术包名保留在次要信息位，避免把可读的功能名直接显示成英文。</small></div></div></Section>
+    <Section title="Stable 通道期望状态" meta={rollouts === null ? '期望状态不可读取' : `${rollouts.items.length} 个制品目标；支持稳定分桶灰度`}>
+      {selected === undefined ? <Empty>先选择一个制品设置或查看 Stable 通道的目标版本。</Empty> : <div className="lumo-market-plan"><div><b>{desiredRollout ? `${desiredRollout.name}@${desiredRollout.version} · ${desiredRollout.percent}% 目标 cohort` : '尚未声明目标版本'}</b><small>{desiredRollout ? `最近更新于 ${desiredRollout.updated_at}；比例为 0% 时所有节点使用保留版本，100% 时全量使用目标版本。这不是节点已安装或进程健康的证明。` : '选择下方操作可将一个已发布版本设为目标；Registry 会拒绝未发布版本。'}</small></div><label className="lumo-compact-field"><span>Stable 期望版本</span><select aria-label="Stable 期望版本" value={desiredVersion} onChange={event => setDesiredVersion(event.target.value)}>{(artifactVersions.length ? artifactVersions : [selected]).map(item => <option key={item.version} value={item.version}>{item.version === selected.version ? `${item.version}（最新）` : item.version}</option>)}</select></label><label className="lumo-compact-field"><span>Stable 灰度比例</span><input aria-label="Stable 灰度比例" type="number" min="0" max="100" step="1" value={desiredPercent} onChange={event => setDesiredPercent(event.target.value)} /></label><BusyButton className="lumo-primary" busy={updatingDesired} onClick={() => void setDesiredTarget()}>设为 Stable 期望版本</BusyButton><small>仅 realm_admin、platform_admin 或 admin 可修改。目标 cohort 按稳定节点 ID 分桶；提高比例只会扩大目标 cohort，0% 会使所有节点回到保留版本。设置目标不会在浏览器中安装制品，Provisioner 将于下一周期重新验签、对账并回报事实状态。</small>{desiredNotice ? <Notice close={() => setDesiredNotice('')}>{desiredNotice}</Notice> : null}{desiredRollout && installationReports.length ? <div className="lumo-market-note-grid">{installationReports.map(report => { const selection = rolloutSelections[report.node_id]; const installed = report.installed.find(item => item.name === selected.name); return <div key={report.node_id}><span>{selection?.cohort === 'target' ? '目标 cohort' : selection?.cohort === 'holdback' ? '保留 cohort' : '正在读取 cohort'}</span><b>{report.node_id}</b><small>{selection ? `期望 ${selection.version} · ${selection.cohort === 'target' ? '应收敛至目标版本' : '应保留上一版本'}` : '尚未取得该节点的确定性选择'}{installed ? `；最近回报已安装 ${installed.name}@${installed.version}` : report.state === 'failed' ? '；最近一次对账未收敛' : '；尚无该制品安装回报'}</small></div> })}</div> : null}</div>}
+    </Section>
+    <Section title="节点实际安装回报" meta={installations === null ? 'Provisioner 状态未接入或不可读取' : `${installationReports.length} 个节点的最近一次对账`}>
+      {selected === undefined ? <Empty>先选择一个制品查看节点回报。</Empty> : installations === null ? <Empty>没有可读取的 Provisioner 回报，因此不能将该制品标为已部署。</Empty> : selectedInstallations.length || selectedFailures.length ? <div className="lumo-market-note-grid">{selectedInstallations.map(report => <div key={report.node_id}><span>已原子安装 · 已对账</span><b>{report.node_id}</b><small>{report.root} · {report.installed.length} 个签名制品 · {report.reported_at}</small></div>)}{selectedFailures.map(report => <div key={report.node_id}><span>最近一次对账未收敛</span><b>{report.node_id}</b><small>{report.root} · 该状态不证明任何旧版本仍可用或正在运行。</small></div>)}</div> : <Empty>没有节点回报此制品。它仍只是 Registry 中可发现的签名版本。</Empty>}
+    </Section>
+    <Section title="签名安装计划" meta="解析依赖、权限范围与目标部署形态；不会修改节点">
+      {selected ? <div className="lumo-market-plan"><div><b>{selected.name}@{selected.version}</b><small>先选择目标节点实际具备的能力，再由 Registry 从已签名字节重建闭包。</small></div><fieldset><legend>目标部署能力</legend>{(Object.keys(installShape) as Array<keyof RegistryShape>).map(capability => <label key={capability}><input type="checkbox" checked={installShape[capability]} onChange={event => setShape(capability, event.target.checked)} />{capability.toUpperCase()}</label>)}</fieldset><BusyButton className="lumo-primary" busy={planning} onClick={() => void buildPlan()}>生成签名计划</BusyButton><small>此操作只预览；安装、启用、升级、回滚和卸载仍需由 Provisioner 在目标节点执行并回报真实状态。</small>{planError ? <Notice error>{planError}</Notice> : null}{installPlan ? <div className="lumo-market-plan-result"><b>计划闭包 · {installPlan.items.length} 个制品</b><small>聚合 scope：{installPlan.scopes.join('、') || '无'}</small>{installPlan.items.map(item => <span key={`${item.name}-${item.version}`}><b>{item.name}@{item.version}</b><small>{item.kind} · {item.publisher} · {item.scopes.length} scopes</small></span>)}</div> : null}</div> : <Empty>先从上方选择一个可发现制品。</Empty>}
+    </Section>
+    <Section title="当前运行时配置" meta="来自启动器的有效配置，不等价于进程健康"><div className="lumo-market-note-grid">{runtimePlugins.length ? runtimePlugins.map(plugin => <div key={plugin.id}><span>{plugin.kind === 'governance' ? '治理入口' : '运行时入口'}</span><b>{plugin.label}</b><small>{plugin.description} · 配置 ID: {plugin.id}</small></div>) : <Empty>{runtime === null ? '运行时配置暂不可读取。' : '当前启动配置没有声明额外挂载插件。'}</Empty>}</div></Section>
+    <Section title="生命周期边界" meta="状态必须由对应系统证明"><div className="lumo-market-note-grid"><div><span>Registry</span><b>已签名、已发布、可发现</b><small>目录只读取 Registry 索引；scope、摘要和发布者可审计。</small></div><div><span>Provisioner</span><b>已安装与对账结果</b><small>节点回报证明最近一次签名计划已原子落盘；它不等价于启用、健康或请求处理。</small></div><div><span>Runtime</span><b>启用、健康、日志与重启</b><small>启动器配置仅说明已声明入口，不能替代进程健康或实际运行版本。</small></div></div></Section>
   </div>
 }
 
@@ -637,13 +1225,15 @@ function ConnectorsSurface() {
   const [confirm, setConfirm] = useState<string | null>(null)
   const [probe, setProbe] = useState<ProbeResult | null>(null)
   const [invokeResult, setInvokeResult] = useState<ProbeResult | null>(null)
+  const [approvals, setApprovals] = useState<ConnectorApproval[]>([])
+  const [approvalBusy, setApprovalBusy] = useState('')
   const [filter, setFilter] = useState('')
   const [selectedId, setSelectedId] = useState('')
   const [invokeOperation, setInvokeOperation] = useState('')
   const [pathParams, setPathParams] = useState('')
   const [queryParams, setQueryParams] = useState('')
   const [invokeBody, setInvokeBody] = useState('')
-  const load = useCallback(async () => { setLoading(true); try { const next = await api<Overview>('/lumo/api/overview'); setData(next); setSelectedId(current => current || next.connectors[0]?.id || ''); setError('') } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) } finally { setLoading(false) } }, [])
+  const load = useCallback(async () => { setLoading(true); try { const [next, approvalData, connectorData] = await Promise.all([api<Overview>('/lumo/api/overview'), api<ConnectorApprovals>('/lumo/api/connector-approvals').catch(() => null), api<{ connectors: Row[] }>('/lumo/api/connectors?includeDisabled=true').catch(() => null)]); const merged = { ...next, connectors: connectorData?.connectors ?? next.connectors }; setData(merged); setApprovals(approvalData?.approvals ?? []); setSelectedId(current => current || merged.connectors[0]?.id || ''); setError('') } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) } finally { setLoading(false) } }, [])
   useEffect(() => { void load() }, [load])
   const connectors = useMemo(() => data.connectors.filter(connector => `${connector.name ?? ''} ${connector.id ?? ''} ${connector.protocol ?? ''}`.toLowerCase().includes(filter.toLowerCase())), [data.connectors, filter])
   const selected = data.connectors.find(connector => connector.id === selectedId) ?? connectors[0]
@@ -654,15 +1244,30 @@ function ConnectorsSurface() {
     try { await api(`/lumo/api/connectors/${encodeURIComponent(connector.id)}`, { method: 'DELETE' }); setConfirm(null); setNotice(`连接器「${connector.name ?? connector.id}」已停用。`); await load() }
     catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
   }
-  const invoke = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
+  const enable = async (connector: Row) => {
+    if (!connector.id) return
+    try { await api(`/lumo/api/connectors/${encodeURIComponent(connector.id)}/enable`, { method: 'POST' }); setNotice(`连接器「${connector.name ?? connector.id}」已恢复。`); await load() }
+    catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
+  }
+  const invokeCurrent = async (approvalId?: string) => {
     if (!selected?.id || !invokeOperation) { setNotice('请选择一个可调用操作。'); return }
     setInvokeBusy(true); setNotice(''); setInvokeResult(null)
     try {
-      const result = await api<ProbeResult>(`/lumo/api/connectors/${encodeURIComponent(selected.id)}/invoke`, { method: 'POST', body: JSON.stringify({ operation: invokeOperation, pathParams: parseOptionalObject(pathParams, '路径参数'), query: parseOptionalObject(queryParams, '查询参数'), body: parseOptionalJSON(invokeBody, '请求体'), correlationId: `lumo-ui-${Date.now()}` }) })
+      const result = await api<ProbeResult>(`/lumo/api/connectors/${encodeURIComponent(selected.id)}/invoke`, { method: 'POST', body: JSON.stringify({ operation: invokeOperation, pathParams: parseOptionalObject(pathParams, '路径参数'), query: parseOptionalObject(queryParams, '查询参数'), body: parseOptionalJSON(invokeBody, '请求体'), correlationId: `lumo-ui-${Date.now()}`, ...(approvalId === undefined ? {} : { approvalId }) }) })
       setInvokeResult(result); setNotice('连接器调用已完成，结果经过网关脱敏。')
-    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
+    } catch (reason) {
+      const approval = reason instanceof ApiError && reason.status === 428 && typeof reason.body === 'object' && reason.body !== null ? (reason.body as { approval?: ConnectorApproval }).approval : undefined
+      if (approval !== undefined) { setApprovals(current => [approval, ...current.filter(item => item.id !== approval.id)]); setNotice(`高敏感写操作已创建审批「${approval.id}」。管理员批准后，使用下方“按已批准请求执行”按钮重试同一请求。`) }
+      else setNotice(reason instanceof Error ? reason.message : String(reason))
+    }
     finally { setInvokeBusy(false) }
+  }
+  const invoke = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void invokeCurrent() }
+  const decideApproval = async (approval: ConnectorApproval, decision: 'approve' | 'reject') => {
+    setApprovalBusy(`${decision}:${approval.id}`); setNotice('')
+    try { await api(`/lumo/api/connector-approvals/${encodeURIComponent(approval.id)}/${decision}`, { method: 'POST' }); setNotice(decision === 'approve' ? '审批已通过；申请人可按原请求执行一次。' : '审批已拒绝。'); await load() }
+    catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setApprovalBusy('') }
   }
   const probeWeb = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const url = String(new FormData(event.currentTarget).get('url') ?? '').trim(); if (!url) { setNotice('请输入需要检查的 URL。'); return }
@@ -675,7 +1280,10 @@ function ConnectorsSurface() {
     <SurfaceIntro surface="connectors" trailing={<div className="lumo-gateway-status"><i className="lumo-live-dot" /><span>网关已就绪</span></div>} />
     {error ? <Notice error>{error}</Notice> : null}{notice ? <Notice close={() => setNotice('')}>{notice}</Notice> : null}
     <Section title="连接器目录" meta={`${connectors.length} 个可见能力`} actions={<label className="lumo-filter"><span>搜索</span><input value={filter} onChange={event => setFilter(event.target.value)} placeholder="连接器名称、协议或 ID" /></label>}>
-      {connectors.length ? <div className="lumo-connector-layout"><div className="lumo-connector-grid">{connectors.map((connector, index) => <SpotlightCard className={`lumo-connector-card ${selected?.id === connector.id ? 'selected' : ''}`} index={index} key={connector.id} onClick={() => setSelectedId(connector.id ?? '')}><header><span className="lumo-connector-mark">{(connector.name ?? connector.id ?? 'C').slice(0, 1).toUpperCase()}</span><div><b>{connector.name ?? connector.id}</b><small>{connector.protocol ?? '未知协议'} · {connector.operations?.length ?? 0} 项操作</small></div><i className="lumo-status-dot" /></header><div className="lumo-operation-list">{connector.operations?.slice(0, 5).map(operation => <span key={operation.name}>{operation.method || '调用'} · {operation.name}</span>)}</div><footer><span>{connector.version ? `能力清单 v${connector.version}` : '能力清单已启用'}</span><span>查看能力 ↗</span></footer>{confirm === connector.id ? <div className="lumo-inline-confirm" onClick={event => event.stopPropagation()}><p>停用后运行中的工作流将无法调用它。</p><span><BusyButton onClick={() => setConfirm(null)}>取消</BusyButton><BusyButton className="lumo-danger" onClick={() => void remove(connector)}>确认停用</BusyButton></span></div> : <BusyButton className="lumo-danger lumo-small" onClick={event => { event.stopPropagation(); setConfirm(connector.id ?? null) }}>停用连接器</BusyButton>}</SpotlightCard>)}</div><aside className="lumo-inspector lumo-connector-inspector">{selected ? <><span className="lumo-inspector-label">连接器检查</span><h3>连接器详情 · {selected.name ?? selected.id}</h3><p>所有外部调用都经过网关策略、凭证闸门、限流、熔断和审计。</p><div className="lumo-detail-stack"><div><span>连接器 ID</span><b>{selected.id}</b></div><div><span>协议</span><b>{selected.protocol ?? '未声明'}</b></div><div><span>版本</span><b>{selected.version ?? '未声明'}</b></div><div><span>可用操作</span><b>{selected.operations?.length ?? 0}</b></div></div><div className="lumo-operation-detail"><span>操作面</span>{selected.operations?.length ? selected.operations.map(operation => <div key={operation.name}><b>{operation.name}</b><small>{operation.method || '调用'} · {operation.write ? '写入需审批' : '只读'}</small></div>) : <Empty>该能力清单没有声明操作。</Empty>}</div><form className="lumo-invoke-form" onSubmit={invoke}><label><span>操作</span><select value={invokeOperation} onChange={event => setInvokeOperation(event.target.value)}><option value="" disabled>选择操作</option>{operations.map(operation => <option key={operation.name} value={operation.name}>{operation.name} · {operation.method || '调用'}</option>)}</select></label><label><span>路径参数 JSON</span><textarea rows={2} value={pathParams} onChange={event => setPathParams(event.target.value)} placeholder='{"id":"order-42"}' /></label><label><span>查询参数 JSON</span><textarea rows={2} value={queryParams} onChange={event => setQueryParams(event.target.value)} placeholder='{"limit":"20"}' /></label><label><span>请求体 JSON</span><textarea rows={3} value={invokeBody} onChange={event => setInvokeBody(event.target.value)} placeholder='{"dryRun":true}' /></label><BusyButton type="submit" busy={invokeBusy} className="lumo-primary">受控调用</BusyButton></form>{invokeResult ? <div className="lumo-invoke-result"><div><b>{invokeResult.status ?? '未返回'}</b><span>{invokeResult.contentType ?? '响应'} · {invokeResult.durationMs ?? 0} ms</span></div><small>{invokeResult.redacted ? '响应已按策略脱敏' : '响应未脱敏'}</small><pre>{typeof invokeResult.body === 'string' ? invokeResult.body : JSON.stringify(invokeResult.body ?? {}, null, 2)}</pre></div> : null}</> : <Empty>当前没有可见连接器。</Empty>}</aside></div> : <Empty>{loading ? '正在读取连接器能力清单' : '连接器清单为空；登记成功的能力清单会出现在这里。'}</Empty>}
+      {connectors.length ? <div className="lumo-connector-layout"><div className="lumo-connector-grid">{connectors.map((connector, index) => <SpotlightCard className={`lumo-connector-card ${selected?.id === connector.id ? 'selected' : ''}`} index={index} key={connector.id} onClick={() => setSelectedId(connector.id ?? '')}><header><span className="lumo-connector-mark">{(connector.name ?? connector.id ?? 'C').slice(0, 1).toUpperCase()}</span><div><b>{connector.name ?? connector.id}</b><small>{connector.protocol ?? '未知协议'} · {connector.operations?.length ?? 0} 项操作</small></div><i className={`lumo-status-dot ${connector.enabled === false ? 'disabled' : ''}`} /></header><div className="lumo-operation-list">{connector.operations?.slice(0, 5).map(operation => <span key={operation.name}>{operation.method || '调用'} · {operation.name}</span>)}</div><footer><span>{connector.enabled === false ? '已停用 · 可恢复' : connector.version ? `能力清单 v${connector.version}` : '能力清单已启用'}</span><span>查看能力 ↗</span></footer>{connector.enabled === false ? <BusyButton className="lumo-primary lumo-small" onClick={event => { event.stopPropagation(); void enable(connector) }}>恢复连接器</BusyButton> : confirm === connector.id ? <div className="lumo-inline-confirm" onClick={event => event.stopPropagation()}><p>停用后运行中的工作流将无法调用它。</p><span><BusyButton onClick={() => setConfirm(null)}>取消</BusyButton><BusyButton className="lumo-danger" onClick={() => void remove(connector)}>确认停用</BusyButton></span></div> : <BusyButton className="lumo-danger lumo-small" onClick={event => { event.stopPropagation(); setConfirm(connector.id ?? null) }}>停用连接器</BusyButton>}</SpotlightCard>)}</div><aside className="lumo-inspector lumo-connector-inspector">{selected ? <><span className="lumo-inspector-label">连接器检查</span><h3>连接器详情 · {selected.name ?? selected.id}</h3><p>所有外部调用都经过网关策略、凭证闸门、限流、熔断和审计。</p><div className="lumo-detail-stack"><div><span>连接器 ID</span><b>{selected.id}</b></div><div><span>协议</span><b>{selected.protocol ?? '未声明'}</b></div><div><span>版本</span><b>{selected.version ?? '未声明'}</b></div><div><span>可用操作</span><b>{selected.operations?.length ?? 0}</b></div></div><div className="lumo-operation-detail"><span>操作面</span>{selected.operations?.length ? selected.operations.map(operation => <div key={operation.name}><b>{operation.name}</b><small>{operation.method || '调用'} · {operation.write ? '写入需审批' : '只读'}</small></div>) : <Empty>该能力清单没有声明操作。</Empty>}</div>{selected.enabled === false ? <Empty>该连接器已停用，恢复后才能再次调用。</Empty> : <form className="lumo-invoke-form" onSubmit={invoke}><label><span>操作</span><select value={invokeOperation} onChange={event => setInvokeOperation(event.target.value)}><option value="" disabled>选择操作</option>{operations.map(operation => <option key={operation.name} value={operation.name}>{operation.name} · {operation.method || '调用'}</option>)}</select></label><label><span>路径参数 JSON</span><textarea rows={2} value={pathParams} onChange={event => setPathParams(event.target.value)} placeholder='{"id":"order-42"}' /></label><label><span>查询参数 JSON</span><textarea rows={2} value={queryParams} onChange={event => setQueryParams(event.target.value)} placeholder='{"limit":"20"}' /></label><label><span>请求体 JSON</span><textarea rows={3} value={invokeBody} onChange={event => setInvokeBody(event.target.value)} placeholder='{"dryRun":true}' /></label><BusyButton type="submit" busy={invokeBusy} className="lumo-primary">受控调用</BusyButton></form>}{invokeResult ? <div className="lumo-invoke-result"><div><b>{invokeResult.status ?? '未返回'}</b><span>{invokeResult.contentType ?? '响应'} · {invokeResult.durationMs ?? 0} ms</span></div><small>{invokeResult.redacted ? '响应已按策略脱敏' : '响应未脱敏'}</small><pre>{typeof invokeResult.body === 'string' ? invokeResult.body : JSON.stringify(invokeResult.body ?? {}, null, 2)}</pre></div> : null}</> : <Empty>当前没有可见连接器。</Empty>}</aside></div> : <Empty>{loading ? '正在读取连接器能力清单' : '连接器清单为空；登记成功的能力清单会出现在这里。'}</Empty>}
+    </Section>
+    <Section title="高敏感写入审批" meta="审批绑定连接器版本、操作和请求参数；每次批准只能执行一次" actions={<BusyButton busy={loading} onClick={() => void load()}>刷新</BusyButton>}>
+      {approvals.length ? <div className="lumo-market-note-grid">{approvals.map(approval => <div key={approval.id}><span>{approval.status === 'pending' ? '等待管理员处理' : approval.status === 'approved' ? '已批准 · 等待一次执行' : approval.status === 'consumed' ? '已使用' : approval.status === 'expired' ? '已过期' : '已拒绝'}</span><b>{approval.connector_id} · {approval.operation}</b><small>申请人 {approval.requester_user_id} · v{approval.connector_version} · 到期 {approval.expires_at}{approval.approver_user_id ? ` · 处理人 ${approval.approver_user_id}` : ''}</small>{approval.status === 'pending' ? <span className="lumo-surface-actions"><BusyButton busy={approvalBusy === `approve:${approval.id}`} onClick={() => void decideApproval(approval, 'approve')}>批准</BusyButton><BusyButton className="lumo-danger" busy={approvalBusy === `reject:${approval.id}`} onClick={() => void decideApproval(approval, 'reject')}>拒绝</BusyButton></span> : null}{approval.status === 'approved' && selected?.id === approval.connector_id && invokeOperation === approval.operation ? <BusyButton className="lumo-primary" busy={invokeBusy} onClick={() => void invokeCurrent(approval.id)}>按已批准请求执行</BusyButton> : null}</div>)}</div> : <Empty>没有待展示的连接器审批。高敏感写操作会在网关策略命中后创建一次性审批。</Empty>}
     </Section>
     <Section title="Web 出站诊断" meta="复用连接器网关的 SSRF / 出站策略"><form className="lumo-inline-form" onSubmit={probeWeb}><label><span>目标 URL</span><input name="url" type="url" placeholder="https://api.example.com/health" /></label><BusyButton type="submit" busy={probeBusy} className="lumo-primary">检查策略</BusyButton></form>{probe ? <div className="lumo-probe-result"><b>{probe.status ?? '未返回'}</b><span>{probe.contentType ?? '响应'} · {probe.durationMs ?? 0} ms</span><small>{probe.redacted ? '响应已按策略脱敏' : probe.url ?? '策略允许访问'}</small></div> : <div className="lumo-diagnostic-empty"><span>输入公网 URL 进行一次受控探测</span><small>私有网络、凭证和未经允许的请求会被网关拒绝。</small></div>}</Section>
   </div>
@@ -704,7 +1312,7 @@ function archifyTaskTopology(tasks: DelegatedTask[]) {
     const workerNode = `worker-${diagramID(workerID)}-${index}`
     const executionNode = `node-${diagramID(task.assigned_node_id ?? 'pending')}-${index}`
     nodes.push(
-      { id: taskNode, lane: 'task', col: 2, type: 'messagebus', label: task.title.slice(0, 48), sublabel: `${task.id} · ${localizedTaskState(task.business_state ?? task.state)}` },
+      { id: taskNode, lane: 'task', col: 2, type: 'messagebus', label: task.title.slice(0, 48), sublabel: `${task.id} · ${localizedTaskDisplayState(task)}` },
       { id: workerNode, lane: 'worker', col: 3, type: 'backend', label: task.assignee_name ?? workerID, sublabel: task.selected_skills.join(' / ') || '意图匹配' },
       { id: executionNode, lane: 'runtime', col: 5, type: task.assigned_node_id ? 'cloud' : 'external', label: task.assigned_node_id ?? '等待执行节点', sublabel: task.state },
     )
@@ -734,12 +1342,33 @@ function downloadArchifyTopology(tasks: DelegatedTask[]): void {
   URL.revokeObjectURL(url)
 }
 
-function OrchestrationTopology({ tasks, busy, cancel }: { tasks: DelegatedTask[]; busy: string; cancel: (task: DelegatedTask) => Promise<void> }) {
+function OrchestrationTopology({ tasks, busy, cancel, retry, reassign, showRuns }: {
+  tasks: DelegatedTask[]
+  busy: string
+  cancel: (task: DelegatedTask) => Promise<void>
+  retry: (task: DelegatedTask) => Promise<void>
+  reassign: (task: DelegatedTask) => Promise<void>
+  showRuns: (task: DelegatedTask) => Promise<void>
+}) {
   const visible = tasks.slice(0, 8)
   return <div className="lumo-orchestration" data-archify-diagram="workflow">
-    <header><div><span className="lumo-inspector-label">Ruflo 编排 · Archify 视图</span><b>多智能体调度拓扑</b><small>Lumo 保留任务事实；Ruflo 组织运行内子群；Archify 导出可验证视图。</small></div><button type="button" className="lumo-button lumo-secondary lumo-small" disabled={!visible.length} onClick={() => downloadArchifyTopology(visible)}>导出 Archify JSON</button></header>
+    <header><div><span className="lumo-inspector-label">任务执行投影 · Archify 导出</span><b>Task → 当前 Run 视图</b><small>展示任务、当前执行者和节点；尚未接入真实子 Agent 运行树。</small></div><button type="button" className="lumo-button lumo-secondary lumo-small" disabled={!visible.length} onClick={() => downloadArchifyTopology(visible)}>导出任务视图 JSON</button></header>
     <div className="lumo-orchestration-lanes"><span>控制面</span><span>业务任务</span><span>智能体 / 执行者</span><span>运行节点</span><span>控制</span></div>
-    {visible.length ? <div className="lumo-orchestration-rows">{visible.map(task => <div className="lumo-orchestration-row" key={task.id}><span className="control"><b>Lumo</b><small>授权 · 调度</small></span><i>→</i><span><b>{task.title}</b><small>{task.id} · {localizedTaskState(task.business_state ?? task.state)}</small></span><i>→</i><span className={task.selected_skills.includes('ruflo-orchestration') ? 'ruflo' : ''}><b>{task.assignee_name ?? task.assignee_worker_id ?? task.assignee_user_id}</b><small>{task.selected_skills.includes('ruflo-orchestration') ? 'Ruflo 子群' : task.selected_skills.join(' / ') || '单执行者'}</small></span><i>→</i><span><b>{task.assigned_node_id ?? '等待节点'}</b><small>{task.last_error || task.state}</small></span>{['ASSIGNED', 'QUEUED', 'RUNNING'].includes(task.state) ? <BusyButton busy={busy === `task-${task.id}`} className="lumo-small lumo-danger" onClick={() => void cancel(task)}>取消</BusyButton> : <em>{localizedTaskState(task.state)}</em>}</div>)}</div> : <Empty>还没有可展示的任务；创建委派后会生成真实任务、执行者和节点拓扑。</Empty>}
+    {visible.length ? <div className="lumo-orchestration-rows">{visible.map(task => {
+      const terminal = ['FAILED', 'CANCELLED', 'BLOCKED'].includes(task.state)
+      return <div className="lumo-orchestration-row" key={task.id}>
+        <span className="control"><b>Lumo</b><small>授权 · 调度</small></span><i>→</i>
+        <span><b>{task.title}</b><small>{task.id} · {localizedTaskDisplayState(task)}</small></span><i>→</i>
+        <span className={task.selected_skills.includes('ruflo-orchestration') ? 'ruflo' : ''}><b>{task.assignee_name ?? task.assignee_worker_id ?? task.assignee_user_id}</b><small>{task.selected_skills.includes('ruflo-orchestration') ? 'Ruflo 子群' : task.selected_skills.join(' / ') || '单执行者'}</small></span><i>→</i>
+        <span><b>{task.assigned_node_id ?? '等待节点'}</b><small>{task.last_error || task.state}</small></span>
+        <span className="lumo-orchestration-actions">
+          <BusyButton busy={busy === `runs-${task.id}`} className="lumo-small" onClick={() => void showRuns(task)}>历史</BusyButton>
+          {['ASSIGNED', 'QUEUED', 'RUNNING'].includes(task.state) ? <BusyButton busy={busy === `task-${task.id}`} className="lumo-small lumo-danger" onClick={() => void cancel(task)}>取消</BusyButton> : null}
+          {task.state === 'CANCELLING' ? <em>取消中</em> : null}
+          {terminal ? <><BusyButton busy={busy === `retry-${task.id}`} className="lumo-small" onClick={() => void retry(task)}>重试</BusyButton><BusyButton busy={busy === `reassign-${task.id}`} className="lumo-small" onClick={() => void reassign(task)}>改派</BusyButton></> : null}
+        </span>
+      </div>
+    })}</div> : <Empty>还没有可展示的任务；创建委派后会生成真实任务、执行者和节点拓扑。</Empty>}
   </div>
 }
 
@@ -757,11 +1386,21 @@ function OperationsSurface() {
   const [governance, setGovernance] = useState<GovernanceSnapshot | null>(null)
   const [delegations, setDelegations] = useState<DelegatedTask[]>([])
   const [directory, setDirectory] = useState<DirectoryUser[]>([])
+	const [delegationError, setDelegationError] = useState('')
+	const [directoryError, setDirectoryError] = useState('')
+	const [agentPresets, setAgentPresets] = useState<AgentPreset[]>([])
+	const [agentPresetError, setAgentPresetError] = useState('')
+	const [agentWorkers, setAgentWorkers] = useState<WorkerProfile[]>([])
+	const [agentRuntimeError, setAgentRuntimeError] = useState('')
   const [profileUserID, setProfileUserID] = useState('')
   const [profileTags, setProfileTags] = useState('')
   const [profileNotice, setProfileNotice] = useState('')
   const [profileBusy, setProfileBusy] = useState(false)
   const [delegationPreview, setDelegationPreview] = useState<DelegationPreview | null>(null)
+	const [runsTask, setRunsTask] = useState<DelegatedTask | null>(null)
+	const [taskRuns, setTaskRuns] = useState<TaskRun[]>([])
+	const [taskAudit, setTaskAudit] = useState<TaskAuditEvent[]>([])
+	const [flowVersionDiff, setFlowVersionDiff] = useState<FlowVersionDiff | null>(null)
   const [selectedAssignee, setSelectedAssignee] = useState('')
   const [assignmentMode, setAssignmentMode] = useState<AssignmentMode>('auto')
   const [placement, setPlacement] = useState<Placement | null>(null)
@@ -773,12 +1412,18 @@ function OperationsSurface() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [overview, governed, taskData, directoryData] = await Promise.all([
+      const [overview, governed, taskData, directoryData, presetResult, workerResult] = await Promise.all([
         api<Overview>('/lumo/api/overview'), api<GovernanceSnapshot>('/lumo/api/governance'),
         optionalApi<{ tasks?: DelegatedTask[] }>('/lumo/api/delegations', { tasks: [] }),
         optionalApi<{ users?: DirectoryUser[] }>('/lumo/api/users', { users: [] }),
+			api<{ agent_presets?: AgentPreset[] }>('/lumo/api/agent-presets')
+				.then(result => ({ presets: result.agent_presets ?? [], error: '' }))
+				.catch(reason => ({ presets: [] as AgentPreset[], error: reason instanceof Error ? reason.message : String(reason) })),
+			api<{ workers?: WorkerProfile[] }>('/lumo/api/workers')
+				.then(result => ({ workers: (result.workers ?? []).filter(worker => worker.worker_kind === 'agent'), error: '' }))
+				.catch(reason => ({ workers: [] as WorkerProfile[], error: reason instanceof Error ? reason.message : String(reason) })),
       ])
-      setData(overview); setGovernance(governed); setDelegations(taskData.tasks ?? []); setDirectory(directoryData.users ?? [])
+		setData(overview); setGovernance(governed); setDelegations(taskData.data.tasks ?? []); setDirectory(directoryData.data.users ?? []); setDelegationError(taskData.error ?? ''); setDirectoryError(directoryData.error ?? ''); setAgentPresets(presetResult.presets); setAgentPresetError(presetResult.error); setAgentWorkers(workerResult.workers); setAgentRuntimeError(workerResult.error)
     }
     catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
     finally { setLoading(false) }
@@ -789,7 +1434,7 @@ function OperationsSurface() {
     if (!profileUserID) { setProfileTags(''); return }
     let alive = true
     void optionalApi<{ tags?: string[] }>(`/lumo/api/users/${encodeURIComponent(profileUserID)}/tags`, { tags: [] }).then(result => {
-      if (alive) { setProfileTags((result.tags ?? []).join(', ')); setProfileNotice('') }
+		if (alive) { setProfileTags((result.data.tags ?? []).join(', ')); setProfileNotice(result.error ?? '') }
     })
     return () => { alive = false }
   }, [profileUserID])
@@ -802,6 +1447,18 @@ function OperationsSurface() {
     const body = action === 'review' ? { approve: true, comment: '运营端审核通过' } : action === 'run' ? { input: { source: 'lumo-operations' } } : action === 'rollback' ? { version: Math.max(1, (flow.version ?? 1) - 1) } : {}
     const message = action === 'submit' ? `流程「${flow.name ?? flowID}」已提交审核。` : action === 'review' ? `流程「${flow.name ?? flowID}」已通过审核。` : action === 'deprecate' ? `流程「${flow.name ?? flowID}」已停用。` : action === 'rollback' ? `流程「${flow.name ?? flowID}」已回滚。` : `流程「${flow.name ?? flowID}」试运行完成。`
     await run(flowID, message, () => api(`/lumo/api/flows/${encodeURIComponent(flowID)}/${action}`, { method: 'POST', body: JSON.stringify(body) }))
+  }
+  const compareFlowVersions = async (flow: Row) => {
+    const flowID = flow.id; const currentVersion = flow.version ?? 0
+    if (!flowID || currentVersion < 2) { setNotice('至少需要两个已发布快照才能比较版本差异。'); return }
+    setBusy(`flow-diff-${flowID}`)
+    try {
+      const [previous, current] = await Promise.all([
+        api<FlowVersionSnapshot>(`/lumo/api/flows/${encodeURIComponent(flowID)}/versions/${currentVersion - 1}`),
+        api<FlowVersionSnapshot>(`/lumo/api/flows/${encodeURIComponent(flowID)}/versions/${currentVersion}`),
+      ])
+      setFlowVersionDiff({ flow, previous, current })
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy('') }
   }
   const scheduleTask = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const fields = new FormData(event.currentTarget); const taskID = String(fields.get('task_id') ?? '').trim(); if (!taskID) { setNotice('请输入任务 ID。'); return }
@@ -830,8 +1487,31 @@ function OperationsSurface() {
     })
     if (result) { setDelegationPreview(null); setSelectedAssignee(''); form.reset() }
   }
-  const updateTaskStatus = async (task: DelegatedTask, state: string) => { await run(`task-${task.id}`, `任务「${task.title}」状态已更新为 ${state}。`, () => api(`/lumo/api/delegations/${encodeURIComponent(task.id)}/status`, { method: 'POST', body: JSON.stringify({ state }) })) }
-  const cancelTask = async (task: DelegatedTask) => { await updateTaskStatus(task, 'CANCELLED') }
+  const cancelTask = async (task: DelegatedTask) => {
+    await run(`task-${task.id}`, `已向执行节点请求取消「${task.title}」；将在收到终态回报后显示最终结果。`, () =>
+      api(`/lumo/api/delegations/${encodeURIComponent(task.id)}/cancel`, { method: 'POST' }),
+    )
+  }
+	const retryTask = async (task: DelegatedTask) => {
+		await run(`retry-${task.id}`, `任务「${task.title}」已创建新的执行尝试；历史 Run 已保留。`, () =>
+			api(`/lumo/api/delegations/${encodeURIComponent(task.id)}/retry`, { method: 'POST', body: JSON.stringify({ reason: '从运营台重试' }) }),
+		)
+	}
+	const reassignTask = async (task: DelegatedTask) => {
+		await run(`reassign-${task.id}`, `任务「${task.title}」已改派给下一位合格执行者；原 Run 已保留。`, () =>
+			api(`/lumo/api/delegations/${encodeURIComponent(task.id)}/reassign`, { method: 'POST', body: JSON.stringify({ reason: '从运营台改派' }) }),
+		)
+	}
+	const showTaskRuns = async (task: DelegatedTask) => {
+		setBusy(`runs-${task.id}`)
+		try {
+			const [runs, audit] = await Promise.all([
+				api<{ runs?: TaskRun[] }>(`/lumo/api/tasks/${encodeURIComponent(task.id)}/runs`),
+				api<{ events?: TaskAuditEvent[] }>(`/lumo/api/tasks/${encodeURIComponent(task.id)}/audit`),
+			])
+			setRunsTask(task); setTaskRuns(runs.runs ?? []); setTaskAudit(audit.events ?? [])
+		} catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy('') }
+	}
   const saveProfileTags = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (!profileUserID) return
     setProfileBusy(true); setProfileNotice('')
@@ -840,11 +1520,39 @@ function OperationsSurface() {
       setProfileTags((result.tags ?? []).join(', ')); setProfileNotice('人员标签已保存，后续意图分发会使用最新画像。')
     } catch (reason) { setProfileNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setProfileBusy(false) }
   }
+	const createAgentPreset = async (event: FormEvent<HTMLFormElement>) => {
+		event.preventDefault(); const form = event.currentTarget; const fields = new FormData(form)
+		const name = String(fields.get('name') ?? '').trim(); const provider = String(fields.get('provider') ?? '').trim(); const modelRef = String(fields.get('model_ref') ?? '').trim()
+		if (!name || !provider || !modelRef) { setNotice('请填写 Agent 名称、Provider 和模型引用。'); return }
+		const result = await run<AgentPreset>('agent-preset-create', `Agent「${name}」已作为治理资产创建。`, () => api<AgentPreset>('/lumo/api/agent-presets', {
+			method: 'POST', body: JSON.stringify({
+				name, description: String(fields.get('description') ?? '').trim(), project_id: String(fields.get('project_id') ?? '').trim(), provider, model_ref: modelRef,
+				system_prompt_ref: String(fields.get('system_prompt_ref') ?? '').trim(), connector_ids: splitCSV(String(fields.get('connector_ids') ?? '')), knowledge_space_ids: splitCSV(String(fields.get('knowledge_space_ids') ?? '')),
+				max_concurrency: Math.max(1, Number(fields.get('max_concurrency') ?? 1) || 1), trust_level: String(fields.get('trust_level') ?? '').trim(), residency: String(fields.get('residency') ?? '').trim(),
+				max_budget_cents: Math.max(0, Number(fields.get('max_budget_cents') ?? 0) || 0), timeout_seconds: Math.max(1, Number(fields.get('timeout_seconds') ?? 3600) || 3600), max_delegation_depth: Math.max(0, Number(fields.get('max_delegation_depth') ?? 0) || 0),
+			}),
+		}))
+		if (result) form.reset()
+	}
+	const toggleAgentPreset = async (preset: AgentPreset) => {
+		const nextStatus = preset.status === 'active' ? 'disabled' : 'active'
+		await run(`agent-preset-${preset.id}`, `Agent「${preset.name}」已${nextStatus === 'active' ? '启用' : '停用'}；新的委派匹配会立即遵循该状态。`, () =>
+			api(`/lumo/api/agent-presets/${encodeURIComponent(preset.id)}`, { method: 'PATCH', body: JSON.stringify({ revision: preset.revision, status: nextStatus }) }),
+		)
+	}
   const refreshDashboard = async () => { const projectID = dashboard?.project?.id; if (!projectID) return; try { setDashboard(await api<Dashboard>(`/lumo/api/projects/${encodeURIComponent(projectID)}/dashboard`)) } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } }
   const projectLifecycle = async (action: 'archive' | 'unarchive') => { const projectID = dashboard?.project?.id; if (!projectID) return; const result = await run(`project-${action}`, action === 'archive' ? '项目已归档。' : '项目已恢复。', () => api(`/lumo/api/projects/${encodeURIComponent(projectID)}/${action}`, { method: 'POST' })); if (result !== undefined) setDashboard(null) }
   const online = countOnline(data)
   const roles = rowsOf<Record<string, unknown>>(governance?.roles, 'roles')
   const departments = rowsOf<Record<string, unknown>>(governance?.departments, 'departments')
+  const permissionDecisions = rowsOf<PermissionDecision>(governance?.permissions, 'decisions')
+	const agentWorkerByPreset = new Map(agentWorkers.map(worker => [worker.worker_id.replace(/^agent:/u, ''), worker]))
+	const agentRuntimeLabel = (preset: AgentPreset) => {
+		const worker = agentWorkerByPreset.get(preset.id)
+		if (!worker) return agentRuntimeError ? '执行态不可读取' : '执行态未上报'
+		if (worker.runtime_status === 'not_reported') return '执行态未上报'
+		return `执行态 ${worker.runtime_status ?? worker.status} · ${worker.active_tasks}/${worker.max_concurrency} 运行中`
+	}
   const configured = data.plugins
   const grouped = capabilityGroups.map(group => ({ ...group, plugins: configured.filter(plugin => group.ids.includes(plugin.id)) })).filter(group => group.plugins.length > 0)
   const ungrouped = configured.filter(plugin => !capabilityGroups.some(group => group.ids.includes(plugin.id)) && plugin.id !== 'platform-ui')
@@ -857,12 +1565,15 @@ function OperationsSurface() {
     {notice ? <Notice error={notice.includes('失败') || notice.includes('unavailable')} close={() => setNotice('')}>{notice}</Notice> : null}
     <div className="lumo-metric-grid"><Metric label="控制服务" value={`${online}/${Object.keys(data.services).length || 5}`} note={loading ? '同步中' : '实时健康'} tone="mint" /><Metric label="执行节点" value={String(data.cluster.nodes.length)} note={data.cluster.leader?.holder ?? '等待主节点'} /><Metric label="装配插件" value={String(data.plugins.length)} note="生效装配" /><Metric label="当前项目" value={String(data.projects.length)} note={data.generatedAt ? `同步 ${formatSync(data.generatedAt)}` : '尚未同步'} /></div>
     <Section title="服务与调度" meta={data.generatedAt ? `同步 ${formatSync(data.generatedAt)}` : '尚未同步'}><div className="lumo-service-grid">{Object.entries(data.services).map(([name, service], index) => <SpotlightCard className="lumo-service-card" index={index} key={name}><i className={service.ok ? 'online' : 'offline'} /><span><b>{localizedServiceName(name)}</b><small>{service.ok ? '就绪' : service.error || '不可用'}</small></span><em>{service.ok ? '在线' : '未连接'}</em></SpotlightCard>)}</div>{data.cluster.nodes.length ? <div className="lumo-node-strip">{data.cluster.nodes.map(node => <span key={node.node_id}><i />{node.node_id}<small>{node.capacity ?? 0} 个名额</small></span>)}</div> : <div className="lumo-inline-empty">调度目录暂时没有执行节点。</div>}</Section>
-    <Section title="提交调度任务" meta="调度放置 · 支持能力、驻留和队列约束"><form className="lumo-placement-form" onSubmit={scheduleTask}><label><span>任务 ID</span><input name="task_id" required placeholder="例如 report-2026-001" /></label><label><span>集群 ID</span><input name="cluster_id" placeholder="cluster-a" /></label><label><span>队列</span><input name="queue" defaultValue="default" /></label><label><span>优先级</span><input name="priority" type="number" defaultValue="0" /></label><label><span>截止时间戳</span><input name="deadline_ms" type="number" placeholder="可选，Unix ms" /></label><label><span>权重</span><input name="weight" type="number" min="1" defaultValue="1" /></label><label className="wide"><span>能力要求</span><input name="requires" placeholder="gpu=1, region=cn-east" /></label><label><span>数据驻留</span><input name="residency" placeholder="cn-east" /></label><label><span>避让节点</span><input name="avoid_nodes" placeholder="node-b, node-c" /></label><BusyButton type="submit" busy={busy === 'placement'} className="lumo-primary">提交调度</BusyButton></form>{placement ? <div className="lumo-placement-result"><div><b>{placement.state ?? '等待中'}</b><span>{placement.task_id} · {placement.node_id ?? '等待节点'} · 尝试 {placement.attempt ?? 0}</span></div><small>隔离令牌 {placement.fencing_token ?? '未分配'}</small><BusyButton className="lumo-secondary lumo-small" busy={busy === 'placement-refresh'} onClick={() => void refreshPlacement()}>刷新任务状态</BusyButton></div> : null}</Section>
-    <div className="lumo-split"><Section title="项目边界" meta={`${data.projects.length} 个`}><form className="lumo-inline-form" onSubmit={createProject}><label><span>新项目</span><input name="name" placeholder="项目名称" /></label><BusyButton type="submit" busy={busy === 'project'} className="lumo-primary">创建</BusyButton></form><div className="lumo-compact-list">{data.projects.length ? data.projects.map(project => <button type="button" key={project.id} onClick={() => void openProject(project)}><span><b>{project.name ?? project.id}</b><small>{project.realm ?? '当前 realm'}</small></span><em>{busy === project.id ? '读取中' : '详情 ↗'}</em></button>) : <Empty>还没有项目。创建一个项目后，流程、知识空间和用量会在这里汇总。</Empty>}</div></Section><Section title="流程管理" meta={`${data.flows.length} 条`}><form className="lumo-flow-form" onSubmit={createFlow}><label><span>归属项目</span><select name="project" defaultValue="" aria-label="归属项目"><option value="" disabled>选择项目</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name ?? project.id}</option>)}</select></label><label><span>流程名称</span><input name="name" placeholder="流程名称" /></label><BusyButton type="submit" busy={busy === 'flow'} className="lumo-primary">新建</BusyButton></form><div className="lumo-compact-list">{data.flows.length ? data.flows.map(flow => <div key={flow.id}><span><b>{flow.name ?? flow.id}</b><small>{flow.status === 'unknown' || !flow.status ? '未声明状态' : flow.status} · v{flow.version ?? 1}</small></span>{flow.status === 'draft' ? <BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'submit')}>提交审核</BusyButton> : flow.status === 'submitted' ? <BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'review')}>审核通过</BusyButton> : ['published', 'targeted'].includes(flow.status ?? '') ? <span className="lumo-flow-actions"><BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'run')}>试运行</BusyButton><BusyButton busy={busy === flow.id} className="lumo-small lumo-danger" onClick={() => void triggerFlow(flow, 'deprecate')}>停用</BusyButton></span> : flow.status === 'deprecated' ? <em>已停用</em> : <em>治理中</em>}</div>) : <Empty>还没有流程。流程从草稿开始，提交后进入治理审核。</Empty>}</div></Section></div>
-    <Section title="上下游任务协同" meta={governance?.features.ok ? '集群已就绪 · 意图、标签、有效技能交集' : '仅集群已就绪时开放跨用户委派'}><div className="lumo-delegation-layout"><form ref={delegationFormRef} className="lumo-delegation-form" onSubmit={previewDelegation}><label><span>任务标题</span><input name="title" placeholder="例如：华东客户合同复核" /></label><label className="wide"><span>工作意图</span><textarea name="intent" rows={3} required placeholder="描述交付结果、业务范围和约束，例如：跟进华东客户的合同复核并标出高风险条款。" /></label><label><span>项目边界</span><select name="project_id" defaultValue=""><option value="">不绑定项目</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name ?? project.id}</option>)}</select></label><label><span>必须标签</span><input name="required_tags" placeholder="华东, 客户" /></label><label><span>必须技能</span><input name="required_skills" placeholder="合同复核" /></label><label><span>调度集群</span><input name="cluster_id" placeholder="cluster-a" /></label><label className="wide"><span>节点能力</span><input name="requires" placeholder="cpu, region=cn-east" /></label><label><span>优先级</span><input name="priority" type="number" defaultValue="0" /></label><label><span>数据驻留</span><input name="residency" placeholder="cn-east" /></label><BusyButton type="submit" busy={busy === 'delegation-preview'} className="lumo-primary">识别候选人</BusyButton></form><div className="lumo-delegation-preview">{delegationPreview ? <><div className="lumo-preview-head"><div><span className="lumo-inspector-label">匹配预览</span><b>{delegationPreview.candidates.filter(candidate => candidate.eligible).length} 个可分发对象</b></div><small>{delegationPreview.intent_terms.join(' · ') || '未提取词项'}</small></div><div className="lumo-inference"><span>识别标签：{delegationPreview.inferred_tags.join('、') || '无'}</span><span>识别技能：{delegationPreview.inferred_skills.join('、') || '无'}</span></div><div className="lumo-assignment-mode"><label><input type="checkbox" checked={assignmentMode === 'auto'} onChange={event => setAssignmentMode(event.target.checked ? 'auto' : 'manual')} /> <b>自动分发</b><span>按意图 · 标签 · 技能 · 当前负载选择</span></label><small>{assignmentMode === 'auto' ? '系统将在服务端再次计算候选集并写入审计理由。' : '手动指定仅可选择满足硬约束的候选人。'}</small></div><div className="lumo-candidate-list">{delegationPreview.candidates.slice(0, 8).map(candidate => <button type="button" disabled={!candidate.eligible} className={assignmentMode === 'manual' && selectedAssignee === candidate.user_id ? 'selected' : ''} key={candidate.user_id} onClick={() => { setSelectedAssignee(candidate.user_id); setAssignmentMode('manual') }}><span><b>{candidate.display_name}</b><small>{candidate.user_id} · {candidate.active_tasks} 个进行中任务</small></span><em>{candidate.eligible ? `${candidate.score} · ${candidate.matched_tags.concat(candidate.matched_skills).join(' / ') || '可接收'}` : candidate.rationale[0] ?? '不满足条件'}</em></button>)}</div><BusyButton busy={busy === 'delegation'} disabled={assignmentMode === 'manual' && !selectedAssignee} className="lumo-primary" onClick={() => void dispatchDelegation()}>{assignmentMode === 'auto' ? `自动分发${delegationPreview.candidates.find(candidate => candidate.eligible)?.display_name ? ` · 推荐 ${delegationPreview.candidates.find(candidate => candidate.eligible)?.display_name}` : ''}` : `确认分发给 ${delegationPreview.candidates.find(candidate => candidate.user_id === selectedAssignee)?.display_name ?? '候选人'}`}</BusyButton></> : <div className="lumo-delegation-empty"><Glyph surface="operations" /><b>先描述任务，再生成可解释分发建议</b><p>系统只使用当前 realm 的启用用户、用户标签和已生效技能；没有满足交集时不会强行分发。</p></div>}</div></div><div className="lumo-task-tracker"><header><b>任务跟踪</b><span>{delegations.length} 条记录 · 30 秒同步</span></header>{delegations.length ? delegations.map(task => <div className="lumo-task-row" key={task.id}><span className="lumo-task-state"><i className={task.state === 'COMPLETED' ? 'done' : task.state === 'FAILED' || task.state === 'BLOCKED' ? 'bad' : 'live'} />{localizedTaskState(task.business_state ?? task.state)}</span><span className="lumo-task-main"><b>{task.title}</b><small>{task.assignee_name ?? task.assignee_user_id} · {task.selected_skills.join(' / ') || '意图匹配'} · {task.assigned_node_id ?? '等待节点'}</small></span><em>{task.updated_at ? formatSync(task.updated_at) : '刚刚'}</em>{['ASSIGNED', 'QUEUED', 'RUNNING'].includes(task.state) ? <BusyButton busy={busy === `task-${task.id}`} className="lumo-small lumo-danger" onClick={() => void updateTaskStatus(task, 'CANCELLED')}>取消任务</BusyButton> : null}</div>) : <Empty>还没有委派任务。识别候选人后，系统会保留委派、技能快照和节点调度状态。</Empty>}</div></Section>
-    <Section title="人员画像" meta="标签直接参与意图分发与负载排序"><div className="lumo-profile-layout">{directory.length ? <form className="lumo-profile-form" onSubmit={saveProfileTags}><label><span>人员</span><select value={profileUserID} onChange={event => setProfileUserID(event.target.value)}>{directory.map(user => <option value={user.id} key={user.id}>{user.display_name} · {user.id}</option>)}</select></label><label className="wide"><span>标签</span><input value={profileTags} onChange={event => setProfileTags(event.target.value)} placeholder="华东, 合同, 客户成功" /></label><BusyButton type="submit" busy={profileBusy} className="lumo-primary">保存标签</BusyButton>{profileNotice ? <small className="lumo-form-note">{profileNotice}</small> : null}</form> : <div className="lumo-profile-empty"><b>人员目录不可用</b><span>只有集群已就绪且当前身份具备 task:delegate 权限时，才能编辑人员画像。</span></div>}<div className="lumo-profile-hint"><span>分发判定</span><b>标签硬约束 + 技能交集 + 当前负载</b><small>保存后立即影响下一次预览；已经分发的任务保留当时的技能快照与匹配理由，便于审计。</small></div></div></Section>
+    <Section title="提交调度任务" meta="调度放置 · 支持能力、驻留和队列约束"><form className="lumo-placement-form" onSubmit={scheduleTask}><label><span>任务 ID</span><input name="task_id" required placeholder="例如 report-2026-001" /></label><label><span>集群 ID</span><input name="cluster_id" placeholder="cluster-a" /></label><label><span>队列</span><input name="queue" defaultValue="default" /></label><label><span>优先级</span><input name="priority" type="number" defaultValue="0" /></label><label><span>截止时间戳</span><input name="deadline_ms" type="number" placeholder="可选，Unix ms" /></label><label><span>权重</span><input name="weight" type="number" min="1" defaultValue="1" /></label><label className="wide"><span>能力要求</span><input name="requires" placeholder="gpu=1, region=cn-east" /></label><label><span>数据驻留</span><input name="residency" placeholder="cn-east" /></label><label><span>避让节点</span><input name="avoid_nodes" placeholder="node-b, node-c" /></label><BusyButton type="submit" busy={busy === 'placement'} className="lumo-primary">提交调度</BusyButton></form>{placement ? <div className="lumo-placement-result"><div><b>{placement.state ?? '等待中'}</b><span>{placement.task_id} · {placement.node_id ?? '等待节点'} · 尝试 {placement.attempt ?? 0}{placement.preemption_requested_task_id ? ` · 已向 ${placement.preemption_requested_task_id} 请求抢占，等待其终态释放名额` : ''}</span></div><small>隔离令牌 {placement.fencing_token ?? '未分配'}</small><BusyButton className="lumo-secondary lumo-small" busy={busy === 'placement-refresh'} onClick={() => void refreshPlacement()}>刷新任务状态</BusyButton></div> : null}</Section>
+    <div className="lumo-split"><Section title="项目边界" meta={`${data.projects.length} 个`}><form className="lumo-inline-form" onSubmit={createProject}><label><span>新项目</span><input name="name" placeholder="项目名称" /></label><BusyButton type="submit" busy={busy === 'project'} className="lumo-primary">创建</BusyButton></form><div className="lumo-compact-list">{data.projects.length ? data.projects.map(project => <button type="button" key={project.id} onClick={() => void openProject(project)}><span><b>{project.name ?? project.id}</b><small>{project.realm ?? '当前 realm'}</small></span><em>{busy === project.id ? '读取中' : '详情 ↗'}</em></button>) : <Empty>还没有项目。创建一个项目后，流程、知识空间和用量会在这里汇总。</Empty>}</div></Section><Section title="流程管理" meta={`${data.flows.length} 条`}><form className="lumo-flow-form" onSubmit={createFlow}><label><span>归属项目</span><select name="project" defaultValue="" aria-label="归属项目"><option value="" disabled>选择项目</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name ?? project.id}</option>)}</select></label><label><span>流程名称</span><input name="name" placeholder="流程名称" /></label><BusyButton type="submit" busy={busy === 'flow'} className="lumo-primary">新建</BusyButton></form><div className="lumo-compact-list">{data.flows.length ? data.flows.map(flow => <div key={flow.id}><span><b>{flow.name ?? flow.id}</b><small>{flow.status === 'unknown' || !flow.status ? '未声明状态' : flow.status} · v{flow.version ?? 1}</small></span>{flow.status === 'draft' ? <BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'submit')}>提交审核</BusyButton> : flow.status === 'submitted' ? <BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'review')}>审核通过</BusyButton> : ['published', 'targeted'].includes(flow.status ?? '') ? <span className="lumo-flow-actions"><BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'run')}>试运行</BusyButton><BusyButton busy={busy === `flow-diff-${flow.id}`} disabled={(flow.version ?? 0) < 2} className="lumo-small lumo-secondary" onClick={() => void compareFlowVersions(flow)}>版本差异</BusyButton><BusyButton busy={busy === flow.id} className="lumo-small lumo-danger" onClick={() => void triggerFlow(flow, 'deprecate')}>停用</BusyButton></span> : flow.status === 'deprecated' ? <em>已停用</em> : <em>治理中</em>}</div>) : <Empty>还没有流程。流程从草稿开始，提交后进入治理审核。</Empty>}</div>{flowVersionDiff ? <div className="lumo-flow-version-diff"><header><span><b>流程版本对比</b><small>{flowVersionDiff.flow.name ?? flowVersionDiff.flow.id} · v{flowVersionDiff.previous.version} → v{flowVersionDiff.current.version} · 审核人 {flowVersionDiff.previous.reviewer || '未记录'} / {flowVersionDiff.current.reviewer || '未记录'}</small></span><button type="button" className="lumo-quiet" onClick={() => setFlowVersionDiff(null)} aria-label="关闭版本对比">×</button></header><ul>{flowVersionChanges(flowVersionDiff.previous.definition, flowVersionDiff.current.definition).map(change => <li key={change}>{change}</li>)}</ul><p>对比的是已发布不可变快照；草稿编辑不会改变此结果。</p></div> : null}</Section></div>
+    <Section title="上下游任务协同" meta={governance?.features.ok ? '集群已就绪 · 意图、标签、有效技能交集' : '仅集群已就绪时开放跨用户委派'}><div className="lumo-delegation-layout"><form ref={delegationFormRef} className="lumo-delegation-form" onSubmit={previewDelegation}><label><span>任务标题</span><input name="title" placeholder="例如：华东客户合同复核" /></label><label className="wide"><span>工作意图</span><textarea name="intent" rows={3} required placeholder="描述交付结果、业务范围和约束，例如：跟进华东客户的合同复核并标出高风险条款。" /></label><label><span>项目边界</span><select name="project_id" defaultValue=""><option value="">不绑定项目</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name ?? project.id}</option>)}</select></label><label><span>必须标签</span><input name="required_tags" placeholder="华东, 客户" /></label><label><span>必须技能</span><input name="required_skills" placeholder="合同复核" /></label><label><span>调度集群</span><input name="cluster_id" placeholder="cluster-a" /></label><label className="wide"><span>节点能力</span><input name="requires" placeholder="cpu, region=cn-east" /></label><label><span>优先级</span><input name="priority" type="number" defaultValue="0" /></label><label><span>数据驻留</span><input name="residency" placeholder="cn-east" /></label><BusyButton type="submit" busy={busy === 'delegation-preview'} className="lumo-primary">识别候选人</BusyButton></form><div className="lumo-delegation-preview">{delegationPreview ? <><div className="lumo-preview-head"><div><span className="lumo-inspector-label">匹配预览</span><b>{delegationPreview.candidates.filter(candidate => candidate.eligible).length} 个可分发对象</b></div><small>{delegationPreview.intent_terms.join(' · ') || '未提取词项'}</small></div><div className="lumo-inference"><span>识别标签：{delegationPreview.inferred_tags.join('、') || '无'}</span><span>识别技能：{delegationPreview.inferred_skills.join('、') || '无'}</span></div><div className="lumo-assignment-mode"><label><input type="checkbox" checked={assignmentMode === 'auto'} onChange={event => setAssignmentMode(event.target.checked ? 'auto' : 'manual')} /> <b>自动分发</b><span>按意图 · 标签 · 技能 · 当前负载选择</span></label><small>{assignmentMode === 'auto' ? '系统将在服务端再次计算候选集并写入审计理由。' : '手动指定仅可选择满足硬约束的候选人。'}</small></div><div className="lumo-candidate-list">{delegationPreview.candidates.slice(0, 8).map(candidate => <button type="button" disabled={!candidate.eligible} className={assignmentMode === 'manual' && selectedAssignee === candidate.user_id ? 'selected' : ''} key={candidate.user_id} onClick={() => { setSelectedAssignee(candidate.user_id); setAssignmentMode('manual') }}><span><b>{candidate.display_name}</b><small>{candidate.user_id} · {candidate.active_tasks} 个进行中任务</small></span><em>{candidate.eligible ? `${candidate.score} · ${candidate.matched_tags.concat(candidate.matched_skills).join(' / ') || '可接收'}` : candidate.rationale[0] ?? '不满足条件'}</em></button>)}</div><BusyButton busy={busy === 'delegation'} disabled={assignmentMode === 'manual' && !selectedAssignee} className="lumo-primary" onClick={() => void dispatchDelegation()}>{assignmentMode === 'auto' ? `自动分发${delegationPreview.candidates.find(candidate => candidate.eligible)?.display_name ? ` · 推荐 ${delegationPreview.candidates.find(candidate => candidate.eligible)?.display_name}` : ''}` : `确认分发给 ${delegationPreview.candidates.find(candidate => candidate.user_id === selectedAssignee)?.display_name ?? '候选人'}`}</BusyButton></> : <div className="lumo-delegation-empty"><Glyph surface="operations" /><b>先描述任务，再生成可解释分发建议</b><p>系统只使用当前 realm 的启用用户、用户标签和已生效技能；没有满足交集时不会强行分发。</p></div>}</div></div><div className="lumo-task-tracker"><header><b>任务跟踪</b><span>{delegationError ? '请求未完成' : `${delegations.length} 条记录 · 30 秒同步`}</span></header>{delegations.length ? delegations.map(task => <div className="lumo-task-row" key={task.id}><span className="lumo-task-state"><i className={task.state === 'COMPLETED' ? 'done' : task.state === 'FAILED' || task.state === 'BLOCKED' ? 'bad' : 'live'} />{localizedTaskDisplayState(task)}</span><span className="lumo-task-main"><b>{task.title}</b><small>{task.assignee_name ?? task.assignee_user_id} · {task.selected_skills.join(' / ') || '意图匹配'} · {task.assigned_node_id ?? '等待节点'}</small></span><em>{task.updated_at ? formatSync(task.updated_at) : '刚刚'}</em>{['ASSIGNED', 'QUEUED', 'RUNNING'].includes(task.state) ? <BusyButton busy={busy === `task-${task.id}`} className="lumo-small lumo-danger" onClick={() => void cancelTask(task)}>取消任务</BusyButton> : task.state === 'CANCELLING' ? <em>取消中，等待执行节点确认</em> : null}</div>) : <Empty>{delegationError || '还没有委派任务。识别候选人后，系统会保留委派、技能快照和节点调度状态。'}</Empty>}</div></Section>
+    <Section title="人员画像" meta="标签直接参与意图分发与负载排序"><div className="lumo-profile-layout">{directory.length ? <form className="lumo-profile-form" onSubmit={saveProfileTags}><label><span>人员</span><select value={profileUserID} onChange={event => setProfileUserID(event.target.value)}>{directory.map(user => <option value={user.id} key={user.id}>{user.display_name} · {user.id}</option>)}</select></label><label className="wide"><span>标签</span><input value={profileTags} onChange={event => setProfileTags(event.target.value)} placeholder="华东, 合同, 客户成功" /></label><BusyButton type="submit" busy={profileBusy} className="lumo-primary">保存标签</BusyButton>{profileNotice ? <small className="lumo-form-note">{profileNotice}</small> : null}</form> : <div className="lumo-profile-empty"><b>{directoryError ? '人员目录请求失败' : '人员目录不可用'}</b><span>{directoryError || '只有集群已就绪且当前身份具备 task:delegate 权限时，才能编辑人员画像。'}</span></div>}<div className="lumo-profile-hint"><span>分发判定</span><b>标签硬约束 + 技能交集 + 当前负载</b><small>保存后立即影响下一次预览；已经分发的任务保留当时的技能快照与匹配理由，便于审计。</small></div></div></Section>
+    <Section title="Agent 资产" meta={agentPresetError ? '资产目录不可用' : `${agentPresets.length} 个可管理 preset · 配置与运行态分离`}><div className="lumo-agent-preset-layout"><div className="lumo-table-list">{agentPresets.length ? agentPresets.map(preset => <div key={preset.id}><span><b>{preset.name}</b><small>{preset.provider} · {preset.model_ref} · v{preset.version} · 所有者 {preset.owner_user_id}{preset.project_id ? ` · 项目 ${preset.project_id}` : ' · 全 Realm'}</small></span><em>{preset.status === 'active' ? `启用 · ${preset.max_concurrency} 并发 · ${agentRuntimeLabel(preset)}` : `已停用 · ${agentRuntimeLabel(preset)}`}</em><BusyButton className={preset.status === 'active' ? 'lumo-danger lumo-small' : 'lumo-secondary lumo-small'} busy={busy === `agent-preset-${preset.id}`} onClick={() => void toggleAgentPreset(preset)}>{preset.status === 'active' ? '停用' : '启用'}</BusyButton></div>) : <Empty>{agentPresetError || '尚未创建可管理的 Agent preset。普通成员只能看到自己拥有的 preset。'}</Empty>}</div><form className="lumo-governance-form lumo-agent-preset-form" onSubmit={createAgentPreset}><label><span>名称</span><input name="name" maxLength={160} required placeholder="例如：合同复核 Agent" /></label><label><span>Provider</span><input name="provider" required placeholder="例如：openai" /></label><label><span>模型引用</span><input name="model_ref" required placeholder="例如：gpt-5" /></label><label><span>项目范围</span><input name="project_id" placeholder="留空即全 Realm" /></label><label><span>最大并发</span><input name="max_concurrency" type="number" min="1" defaultValue="1" /></label><label><span>预算上限（分）</span><input name="max_budget_cents" type="number" min="0" defaultValue="0" /></label><label><span>超时（秒）</span><input name="timeout_seconds" type="number" min="1" max="86400" defaultValue="3600" /></label><label><span>最大下授深度</span><input name="max_delegation_depth" type="number" min="0" max="16" defaultValue="0" /></label><label><span>信任等级</span><input name="trust_level" placeholder="例如：trusted" /></label><label><span>数据驻留</span><input name="residency" placeholder="例如：cn-east" /></label><label className="wide"><span>说明</span><input name="description" maxLength={500} placeholder="此 Agent 的职责与边界" /></label><label className="wide"><span>系统提示引用</span><input name="system_prompt_ref" maxLength={256} placeholder="受保护配置引用，不提交提示词正文" /></label><label className="wide"><span>连接器范围</span><input name="connector_ids" placeholder="crm, contract-api" /></label><label className="wide"><span>知识空间范围</span><input name="knowledge_space_ids" placeholder="legal, customer-success" /></label><BusyButton type="submit" busy={busy === 'agent-preset-create'} className="lumo-primary">创建 Agent 资产</BusyButton><small className="lumo-form-hint">仅 realm_admin 可创建；运行健康和活动 Run 来自执行态，不由此表伪造。</small></form></div></Section>
+    <Section title="当前有效权限" meta="Realm ∩ Project ∩ Space · 未知边界默认拒绝"><div className="lumo-compact-list">{governance?.permissions?.ok ? permissionDecisions.map(decision => <div key={decision.action}><span><b>{decision.action}</b><small>{decision.reason}</small></span><em>{decision.allowed ? `允许 · ${decision.matched_policies.join(' + ')}` : '拒绝'}</em></div>) : <Empty>{governance?.permissions?.error || '权限策略版本尚未部署；当前不会将其伪装为空权限。'}</Empty>}</div></Section>
     <Section title="平台能力" meta="根据当前装配状态自动分组"><div className="lumo-platform-groups">{grouped.map(group => <div className="lumo-platform-group" key={group.label}><header><b>{group.label}</b><span>{group.plugins.length} 个模块</span></header><div>{group.plugins.map(plugin => <button type="button" key={plugin.id} onClick={() => openSurface(plugin.surface)}><span>{plugin.label.slice(0, 1)}</span><b>{plugin.label}</b><small>{plugin.description}</small><i>{localizedPluginKind(plugin.kind)}</i></button>)}</div></div>)}{ungrouped.length ? <div className="lumo-platform-group"><header><b>其他已装配能力</b><span>{ungrouped.length} 个模块</span></header><div>{ungrouped.map(plugin => <button type="button" key={plugin.id} onClick={() => openSurface(plugin.surface)}><span>{plugin.label.slice(0, 1)}</span><b>{plugin.label}</b><small>{plugin.description}</small><i>{localizedPluginKind(plugin.kind)}</i></button>)}</div></div> : null}{!grouped.length && !ungrouped.length ? <Empty>当前没有额外的插件声明。</Empty> : null}</div><div className="lumo-governance-strip"><span><b>{roles.length}</b>角色策略</span><span><b>{departments.length}</b>组织节点</span><span className={governance?.features.ok ? 'ready' : ''}><b>{governance?.features.ok ? '已启用' : '未启用'}</b>治理特性</span></div></Section>
-    <Section title="多智能体调度图" meta="Ruflo 运行内编排 · Archify 可验证导出"><OrchestrationTopology tasks={delegations} busy={busy} cancel={cancelTask} /></Section>
+    <Section title="任务执行视图" meta="Task → 当前 Run 投影 · 非子 Agent 运行树"><OrchestrationTopology tasks={delegations} busy={busy} cancel={cancelTask} retry={retryTask} reassign={reassignTask} showRuns={showTaskRuns} /></Section>
+    {runsTask ? <Section title={`执行尝试 · ${runsTask.title}`} meta={`${taskRuns.length} 次不可变 Run`} actions={<BusyButton className="lumo-secondary lumo-small" onClick={() => { setRunsTask(null); setTaskRuns([]); setTaskAudit([]) }}>关闭</BusyButton>}><div className="lumo-compact-list">{taskRuns.length ? taskRuns.map(run => <div key={run.id}><span><b>尝试 {run.attempt} · {localizedTaskState(run.state)}</b><small>{run.worker_id} · {run.assigned_node_id ?? '等待节点'}{run.last_error ? ` · ${run.last_error}` : ''}</small></span><em>{run.ended_at ? `结束 ${formatSync(run.ended_at)}` : run.started_at ? `开始 ${formatSync(run.started_at)}` : formatSync(run.created_at)}</em></div>) : <Empty>该任务尚未生成 Run；创建新尝试时会保留旧调度记录。</Empty>}</div><div className="lumo-compact-list"><header><b>操作审计</b><span>{taskAudit.length} 条</span></header>{taskAudit.length ? taskAudit.map(event => <div key={event.id}><span><b>{event.event}</b><small>{event.actor} · {Object.entries(event.detail).map(([key, value]) => `${key}=${String(value)}`).join(' · ') || '无额外详情'}</small></span><em>{formatSync(event.created_at)}</em></div>) : <Empty>尚无可显示的控制操作。</Empty>}</div></Section> : null}
     {dashboard ? <DashboardSheet data={dashboard} close={() => setDashboard(null)} refresh={refreshDashboard} lifecycle={projectLifecycle} /> : null}
   </div>
 }
@@ -887,20 +1598,328 @@ function DashboardSheet({ data, close, refresh, lifecycle }: { data: Dashboard; 
 
 function AccountSurface() {
   const [account, setAccount] = useState<AuthAccount | null>(null)
+  const [sessions, setSessions] = useState<AuthSession[]>([])
+	const [securityEvents, setSecurityEvents] = useState<AuthSecurityEvent[]>([])
+	const [mfa, setMFA] = useState<AuthMFAStatus | null>(null)
+	const [totpEnrollment, setTOTPEnrollment] = useState<TOTPEnrollment | null>(null)
+	const [mfaCode, setMFACode] = useState('')
+  const [passkeyStatus, setPasskeyStatus] = useState<AuthPasskeyStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const authHeaders = { 'X-Lumo-Auth-Request': '1' }
-  const load = useCallback(async () => { setLoading(true); try { setAccount(await api<AuthAccount>('/auth/account', { headers: authHeaders })); setNotice('') } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setLoading(false) } }, [])
+  const load = useCallback(async () => { setLoading(true); try {
+    const passkeyResult = api<AuthPasskeyStatus>('/auth/account/passkeys', { headers: authHeaders }).catch(reason => {
+      if (reason instanceof ApiError && reason.status === 503 && errorMessage(reason.body, '') === 'passkey_unavailable') return { configured: false, passkeys: [] }
+      throw reason
+    })
+    const [nextAccount, sessionResult, eventResult, mfaResult, nextPasskeys] = await Promise.all([
+      api<AuthAccount>('/auth/account', { headers: authHeaders }),
+      api<{ sessions?: AuthSession[] }>('/auth/account/sessions', { headers: authHeaders }),
+      api<{ events?: AuthSecurityEvent[] }>('/auth/account/security-events', { headers: authHeaders }),
+      api<AuthMFAStatus>('/auth/account/mfa', { headers: authHeaders }), passkeyResult,
+    ])
+    setAccount(nextAccount); setSessions(sessionResult.sessions ?? []); setSecurityEvents(eventResult.events ?? []); setMFA(mfaResult); setPasskeyStatus(nextPasskeys); setNotice('')
+  } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setLoading(false) } }, [])
   useEffect(() => { void load() }, [load])
   const savePassword = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = event.currentTarget; const fields = new FormData(form); const currentPassword = String(fields.get('currentPassword') ?? ''); const newPassword = String(fields.get('newPassword') ?? ''); const confirmation = String(fields.get('confirmation') ?? ''); if (newPassword !== confirmation) { setNotice('两次输入的新密码不一致。'); return } setBusy(true); try { await api('/auth/account/password', { method: 'POST', headers: authHeaders, body: JSON.stringify({ currentPassword, newPassword }) }); location.assign('/auth/login?state=password-changed') } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy(false) } }
   const logout = async () => { setBusy(true); try { await api('/auth/logout', { method: 'POST', headers: authHeaders }); location.assign('/auth/login') } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)); setBusy(false) } }
+  const revoke = async (session: AuthSession) => { setBusy(true); try { await api(`/auth/account/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE', headers: authHeaders }); if (session.current) { location.assign('/auth/login?state=expired'); return }; setNotice('会话已撤销。'); await load() } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy(false) } }
+  const revokeOthers = async () => { setBusy(true); try { const result = await api<{ revoked?: number }>('/auth/account/sessions/revoke-others', { method: 'POST', headers: authHeaders }); setNotice(`已撤销 ${result.revoked ?? 0} 个其他会话。`); await load() } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy(false) } }
+  const beginMFA = async () => { setBusy(true); try { const enrollment = await api<TOTPEnrollment>('/auth/account/mfa/enroll', { method: 'POST', headers: authHeaders }); setTOTPEnrollment(enrollment); setMFACode(''); setNotice('请将密钥添加到验证器，再输入当前 6 位验证码确认。') } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy(false) } }
+  const confirmMFA = async () => { if (!/^\d{6}$/u.test(mfaCode)) { setNotice('请输入 6 位动态验证码。'); return }; setBusy(true); try { setMFA(await api<AuthMFAStatus>('/auth/account/mfa/confirm', { method: 'POST', headers: authHeaders, body: JSON.stringify({ code: mfaCode }) })); setTOTPEnrollment(null); setMFACode(''); setNotice('TOTP MFA 已启用。后续登录需要动态验证码。'); await load() } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy(false) } }
+  const disableMFA = async () => { if (!/^\d{6}$/u.test(mfaCode)) { setNotice('请输入当前 6 位动态验证码以停用 MFA。'); return }; setBusy(true); try { await api('/auth/account/mfa', { method: 'DELETE', headers: authHeaders, body: JSON.stringify({ code: mfaCode }) }); setMFA({ configured: true, enabled: false }); setMFACode(''); setNotice('TOTP MFA 已停用。'); await load() } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy(false) } }
+  const enrollPasskey = async () => {
+    if (!window.PublicKeyCredential || !navigator.credentials?.create) { setNotice('当前浏览器不支持 Passkey。'); return }
+    const label = window.prompt('为此 Passkey 命名（可留空，例如“工作电脑”）')
+    if (label === null) return
+    setBusy(true)
+    try {
+      const options = await api<{ public_key: Record<string, unknown> }>('/auth/account/passkeys/register/options', { method: 'POST', headers: authHeaders })
+      const credential = await navigator.credentials.create({ publicKey: passkeyCreationOptions(options.public_key) })
+      if (credential === null || credential.type !== 'public-key') throw new Error('未获得 Passkey 凭据')
+      const passkey = credential as PublicKeyCredential
+      const response = passkey.response as AuthenticatorAttestationResponse
+      if (typeof response.attestationObject === 'undefined') throw new Error('浏览器未返回 Passkey 注册证明')
+      await api<AuthPasskey>('/auth/account/passkeys/register', {
+        method: 'POST', headers: authHeaders, body: JSON.stringify({
+          challenge: requiredPasskeyString(options.public_key, 'challenge'), id: passkey.id, raw_id: bufferToBase64URL(passkey.rawId), type: passkey.type,
+          client_data_json: bufferToBase64URL(response.clientDataJSON), attestation_object: bufferToBase64URL(response.attestationObject), label: label.trim(),
+        }),
+      })
+      setNotice('Passkey 已添加。'); await load()
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy(false) }
+  }
+  const removePasskey = async (passkey: AuthPasskey) => {
+    if (!window.confirm(`移除 Passkey「${passkey.label || passkey.id.slice(0, 12)}」？移除后该设备不能再用它登录。`)) return
+    setBusy(true)
+    try { await api(`/auth/account/passkeys/${encodeURIComponent(passkey.id)}`, { method: 'DELETE', headers: authHeaders }); setNotice('Passkey 已移除。'); await load() } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy(false) }
+  }
   return <div className="lumo-surface">
     <SurfaceIntro surface="account" trailing={<div className="lumo-account-state"><i className="lumo-live-dot" /> 会话受保护</div>} />
     {notice ? <Notice error={account === null && !loading} close={() => setNotice('')}>{notice}</Notice> : null}
     <Section title="身份概览" meta="治理用户"><div className="lumo-account-hero"><div className="lumo-avatar"><Glyph surface="account" /></div><div><span>{account?.displayName ?? (loading ? '读取中' : '未读取')}</span><b>{account?.username ?? 'lumo-governance'}</b><small>{account ? `${account.realm} · ${account.department || '未分配部门'} · ${account.clientIp}` : '正在读取当前身份'}</small></div><BusyButton busy={busy} className="lumo-danger" onClick={() => void logout()}>退出登录</BusyButton></div></Section>
     <div className="lumo-account-grid"><Section title="登录保护" meta="固定安全基线"><div className="lumo-security-list"><div><i className="ready" /><span><b>交互式验证码</b><small>每次登录必填点选，一张验证码仅验证一次</small></span><em>始终开启</em></div><div><i className="ready" /><span><b>会话凭据</b><small>HttpOnly Cookie，服务端仅存令牌摘要</small></span><em>不可见令牌</em></div><div><i className="ready" /><span><b>权限来源</b><small>{account?.roles.join(' · ') || '读取中'}</small></span><em>角色权限</em></div></div></Section><Section title="修改密码" meta="更新后撤销全部旧会话"><form className="lumo-stacked-form" onSubmit={savePassword}><label><span>当前密码</span><input name="currentPassword" type="password" autoComplete="current-password" required /></label><label><span>新密码</span><input name="newPassword" type="password" autoComplete="new-password" minLength={10} maxLength={256} required /></label><label><span>确认新密码</span><input name="confirmation" type="password" autoComplete="new-password" minLength={10} maxLength={256} required /></label><BusyButton type="submit" busy={busy} className="lumo-primary">更新并重新登录</BusyButton></form></Section></div>
+    <Section title="双重验证（TOTP）" meta={mfa === null ? '正在读取 MFA 状态' : mfa.configured ? mfa.enabled ? '已启用 · 登录时要求 6 位动态验证码' : '可配置 · 尚未启用' : '当前部署未配置 MFA 加密密钥'}>{mfa?.configured ? <div className="lumo-mfa-panel">{totpEnrollment ? <><p>在验证器中手动添加以下密钥；它仅在本页显示一次。</p><code>{totpEnrollment.secret}</code><small>待确认至 {formatSync(totpEnrollment.expires_at)}；输入验证器当前显示的 6 位代码。</small></> : <p>{mfa.enabled ? `已于 ${mfa.enrolled_at ? formatSync(mfa.enrolled_at) : '此前'} 启用。停用需要当前动态验证码。` : '启用后，密码和交互验证码通过后还必须提供 TOTP 动态验证码。'}</p>}<label><span>动态验证码</span><input value={mfaCode} onChange={event => setMFACode(event.target.value.replace(/\D/gu, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" placeholder="6 位验证码" /></label><div>{totpEnrollment ? <BusyButton busy={busy} className="lumo-primary" onClick={() => void confirmMFA()}>确认启用</BusyButton> : mfa.enabled ? <BusyButton busy={busy} className="lumo-danger" onClick={() => void disableMFA()}>停用 MFA</BusyButton> : <BusyButton busy={busy} className="lumo-primary" onClick={() => void beginMFA()}>开始绑定验证器</BusyButton>}</div></div> : <Empty>MFA 未启用：管理员需要设置 `LUMO_AUTH_MFA_KEY`（base64 编码的 32 字节密钥）后，系统才会保存加密的 TOTP 因子。</Empty>}</Section>
+    <Section title="Passkey" meta={passkeyStatus === null ? '正在读取配置' : passkeyStatus.configured ? `${passkeyStatus.passkeys?.length ?? 0} 个已绑定 · ${passkeyStatus.rp_id}` : '当前部署未配置可信 RPID/origin'}>{passkeyStatus?.configured ? <div className="lumo-mfa-panel"><p>Passkey 仅接受当前可信域的 ES256 凭据；启用用户验证时，设备必须完成本地生物识别或 PIN 校验。</p>{passkeyStatus.passkeys?.length ? <div className="lumo-table-list">{passkeyStatus.passkeys.map(passkey => <div key={passkey.id}><span><b>{passkey.label || '未命名 Passkey'}</b><small>添加于 {formatSync(passkey.created_at)}{passkey.last_used_at ? ` · 最近使用 ${formatSync(passkey.last_used_at)}` : ''}</small></span><BusyButton busy={busy} className="lumo-danger lumo-small" onClick={() => void removePasskey(passkey)}>移除</BusyButton></div>)}</div> : <Empty>尚未添加 Passkey。</Empty>}<div><BusyButton busy={busy} className="lumo-primary" onClick={() => void enrollPasskey()}>添加 Passkey</BusyButton></div></div> : <Empty>管理员需要设置 `LUMO_AUTH_WEBAUTHN_RP_ID`、`LUMO_AUTH_WEBAUTHN_RP_NAME` 与精确的 `LUMO_AUTH_WEBAUTHN_ORIGINS`；未完成可信配置时不会降级启用。</Empty>}</Section>
+    <Section title="活跃会话" meta={loading ? '正在读取已认证会话' : `${sessions.length} 个未过期会话`} actions={<BusyButton className="lumo-secondary" busy={busy || loading} disabled={!sessions.some(session => !session.current)} onClick={() => void revokeOthers()}>退出其他设备</BusyButton>}>{sessions.length ? <div className="lumo-table-list lumo-session-list">{sessions.map(session => <div key={session.id}><span><b>{session.current ? '当前浏览器' : '已登录设备'}</b><small>{session.client_ip || 'IP 未记录'} · 最近活跃 {formatSync(session.last_seen_at)}</small></span><i>{session.current ? '当前会话' : `到期 ${formatSync(session.expires_at)}`}</i><BusyButton className={session.current ? 'lumo-danger lumo-small' : 'lumo-secondary lumo-small'} busy={busy} onClick={() => void revoke(session)}>{session.current ? '退出此会话' : '撤销'}</BusyButton></div>)}</div> : <Empty>{loading ? '正在读取会话。' : '没有可撤销的活跃会话。'}</Empty>}</Section>
+    <Section title="安全事件" meta={loading ? '正在读取账户审计' : `${securityEvents.length} 条最近事件`}><div className="lumo-table-list">{securityEvents.length ? securityEvents.map(event => <div key={event.id}><span><b>{localizedSecurityEvent(event.event)}</b><small>{event.client_ip || '当前会话'}{Object.keys(event.detail).length ? ` · ${Object.entries(event.detail).map(([key, value]) => `${key}=${String(value)}`).join(' · ')}` : ''}</small></span><em>{formatSync(event.created_at)}</em></div>) : <Empty>{loading ? '正在读取安全事件。' : '暂无可显示的账户安全事件。'}</Empty>}</div></Section>
     <Section title="会话详情" meta="服务端解析结果"><div className="lumo-session-facts"><div><span>用户 ID</span><b>{account?.userId ?? '读取中'}</b></div><div><span>Realm</span><b>{account?.realm ?? '读取中'}</b></div><div><span>部门</span><b>{account?.department || '未分配'}</b></div><div><span>验证码模式</span><b>{account?.captchaMode ?? '读取中'}</b></div></div></Section>
+    {account?.roles.some(role => ['platform_admin', 'realm_admin', 'admin'].includes(role)) ? <OrganizationManagement /> : null}
+  </div>
+}
+
+function OrganizationManagement() {
+  const [users, setUsers] = useState<DirectoryUser[]>([])
+  const [roles, setRoles] = useState<GovernanceRole[]>([])
+  const [departments, setDepartments] = useState<GovernanceDepartment[]>([])
+  const [selectedUserID, setSelectedUserID] = useState('')
+  const [selectedRoleID, setSelectedRoleID] = useState('')
+  const [busy, setBusy] = useState('')
+  const [notice, setNotice] = useState('')
+  const load = useCallback(async () => {
+    try {
+      const [userResult, roleResult, departmentResult] = await Promise.all([
+        api<{ users?: DirectoryUser[] }>('/lumo/api/users'), api<{ roles?: GovernanceRole[] }>('/lumo/api/roles'), api<{ departments?: GovernanceDepartment[] }>('/lumo/api/departments'),
+      ])
+      setUsers(userResult.users ?? []); setRoles(roleResult.roles ?? []); setDepartments(departmentResult.departments ?? [])
+      setSelectedUserID(current => current || userResult.users?.[0]?.id || ''); setSelectedRoleID(current => current || roleResult.roles?.[0]?.id || '')
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
+  }, [])
+  useEffect(() => { void load() }, [load])
+  const run = async (key: string, success: string, operation: () => Promise<unknown>) => { setBusy(key); try { await operation(); setNotice(success); await load() } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy('') } }
+  const createUser = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); const form = event.currentTarget; const fields = new FormData(form); const id = String(fields.get('id') ?? '').trim(); const displayName = String(fields.get('display_name') ?? '').trim()
+    if (!id || !displayName) { setNotice('请填写用户 ID 和显示名称。'); return }
+    await run('org-user-create', `治理用户「${displayName}」已写入目录。`, () => api(`/lumo/api/users/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ display_name: displayName, primary_dept_id: String(fields.get('primary_dept_id') ?? '').trim(), status: 'active' }) })); form.reset()
+  }
+  const toggleUser = async (user: DirectoryUser) => {
+    const status = user.status === 'disabled' ? 'active' : 'disabled'
+    await run(`org-user-${user.id}`, `用户「${user.display_name}」已${status === 'active' ? '启用' : '停用'}。`, () => api(`/lumo/api/users/${encodeURIComponent(user.id)}`, { method: 'PUT', body: JSON.stringify({ display_name: user.display_name, primary_dept_id: user.primary_dept_id ?? '', status }) }))
+  }
+  const assignRole = async () => { if (!selectedUserID || !selectedRoleID) return; await run('org-role', '角色分配已保存。', () => api(`/lumo/api/users/${encodeURIComponent(selectedUserID)}/roles/${encodeURIComponent(selectedRoleID)}`, { method: 'PUT', body: '{}' })) }
+  const createDepartment = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); const form = event.currentTarget; const fields = new FormData(form); const name = String(fields.get('name') ?? '').trim(); if (!name) return
+    await run('org-department', `部门「${name}」已创建。`, () => api('/lumo/api/departments', { method: 'POST', body: JSON.stringify({ name, parent_dept_id: String(fields.get('parent_dept_id') ?? '').trim(), manager_user_id: String(fields.get('manager_user_id') ?? '').trim() }) })); form.reset()
+  }
+  return <Section title="组织管理" meta="仅 realm_admin · 用户目录、部门与角色分配"><div className="lumo-organization-grid"><div><div className="lumo-table-list">{users.length ? users.map(user => <div key={user.id}><span><b>{user.display_name}</b><small>{user.id} · {user.primary_dept_id || '未分配部门'}</small></span><em>{user.status ?? 'active'}</em><BusyButton className={user.status === 'disabled' ? 'lumo-secondary lumo-small' : 'lumo-danger lumo-small'} busy={busy === `org-user-${user.id}`} onClick={() => void toggleUser(user)}>{user.status === 'disabled' ? '启用' : '停用'}</BusyButton></div>) : <Empty>正在读取治理用户目录。</Empty>}</div><form className="lumo-governance-form lumo-organization-form" onSubmit={createUser}><label><span>用户 ID</span><input name="id" required maxLength={128} placeholder="例如：lin" /></label><label><span>显示名称</span><input name="display_name" required maxLength={160} placeholder="例如：林青" /></label><label><span>主部门</span><input name="primary_dept_id" placeholder="可选部门 ID" /></label><BusyButton type="submit" busy={busy === 'org-user-create'} className="lumo-primary">写入治理用户</BusyButton></form></div><div><div className="lumo-organization-controls"><label><span>用户</span><select value={selectedUserID} onChange={event => setSelectedUserID(event.target.value)}>{users.map(user => <option key={user.id} value={user.id}>{user.display_name}</option>)}</select></label><label><span>角色</span><select value={selectedRoleID} onChange={event => setSelectedRoleID(event.target.value)}>{roles.filter(role => role.status === 'active').map(role => <option key={role.id} value={role.id}>{role.name}</option>)}</select></label><BusyButton className="lumo-primary" busy={busy === 'org-role'} disabled={!selectedUserID || !selectedRoleID} onClick={() => void assignRole()}>分配角色</BusyButton></div><div className="lumo-compact-list">{departments.length ? departments.map(department => <div key={department.id}><span><b>{department.name}</b><small>{department.id}{department.parent_dept_id ? ` · 上级 ${department.parent_dept_id}` : ''}</small></span><em>{department.status}</em></div>) : <Empty>尚无部门；可创建根部门。</Empty>}</div><form className="lumo-governance-form lumo-organization-form" onSubmit={createDepartment}><label><span>部门名称</span><input name="name" required maxLength={160} placeholder="例如：交付部" /></label><label><span>上级部门 ID</span><input name="parent_dept_id" placeholder="留空即根部门" /></label><label><span>负责人用户 ID</span><input name="manager_user_id" placeholder="可选" /></label><BusyButton type="submit" busy={busy === 'org-department'} className="lumo-primary">创建部门</BusyButton></form></div></div>{notice ? <Notice error={notice.includes('forbidden')} close={() => setNotice('')}>{notice}</Notice> : null}<p className="lumo-form-hint">此处管理的是已存在的治理身份与组织归属；系统尚未实现邮箱/企业目录邀请和凭证发放，因此不会把“写入目录”标称为“已邀请”。</p></Section>
+}
+
+function AutomationSurface() {
+  const [overview, setOverview] = useState<Overview>(emptyOverview)
+  const [automations, setAutomations] = useState<Array<Automation & { projectName: string }>>([])
+  const [loading, setLoading] = useState(true)
+  const [busyID, setBusyID] = useState('')
+  const [notice, setNotice] = useState('')
+  const [lastRun, setLastRun] = useState<{ flow: Row; result: FlowRunResult } | null>(null)
+  const [triggerRuns, setTriggerRuns] = useState<PersistedFlowRun[]>([])
+  const [historyIssue, setHistoryIssue] = useState('')
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const next = await api<Overview>('/lumo/api/overview')
+      setOverview(next)
+      const projectRows = next.projects.filter(project => project.id !== undefined)
+      const results = await Promise.allSettled(projectRows.map(async project => {
+        const result = await api<{ automations?: Automation[] }>(`/lumo/api/projects/${encodeURIComponent(project.id!)}/automations`)
+        return (result.automations ?? []).map(automation => ({ ...automation, projectName: project.name ?? project.id! }))
+      }))
+      const loaded: Array<Automation & { projectName: string }> = []
+      const failures: string[] = []
+      for (const result of results) {
+        if (result.status === 'fulfilled') loaded.push(...result.value)
+        else failures.push(result.reason instanceof Error ? result.reason.message : '自动化目录读取失败')
+      }
+      setAutomations(loaded)
+      const history = await Promise.allSettled(next.flows.filter(flow => flow.id !== undefined).map(async flow => {
+        const result = await api<{ runs?: PersistedFlowRun[] }>(`/lumo/api/flows/${encodeURIComponent(flow.id!)}/runs`)
+        return (result.runs ?? []).map(run => ({ ...run, flow_name: flow.name ?? flow.id! }))
+      }))
+      const actualRuns: PersistedFlowRun[] = []
+      const historyFailures: string[] = []
+      for (const result of history) {
+        if (result.status === 'fulfilled') actualRuns.push(...result.value)
+        else historyFailures.push(result.reason instanceof Error ? result.reason.message : '自动化运行历史不可读取')
+      }
+      actualRuns.sort((left, right) => right.started_at.localeCompare(left.started_at))
+      setTriggerRuns(actualRuns)
+      setHistoryIssue(historyFailures.length ? `部分流程运行历史不可读取：${historyFailures.join('；')}` : '')
+      setNotice(failures.length ? `部分项目的自动化不可读取：${failures.join('；')}` : '')
+    } catch (reason) {
+      setOverview(emptyOverview)
+      setAutomations([])
+      setTriggerRuns([])
+      setHistoryIssue('')
+      setNotice(reason instanceof Error ? reason.message : String(reason))
+    } finally { setLoading(false) }
+  }, [])
+  useEffect(() => { void load() }, [load])
+  const toggle = async (automation: Automation & { projectName: string }) => {
+    setBusyID(`${automation.projectId}:${automation.automationId}`)
+    try {
+      const updated = await api<Automation>(`/lumo/api/projects/${encodeURIComponent(automation.projectId)}/automations/${encodeURIComponent(automation.automationId)}`, {
+        method: 'PUT', body: JSON.stringify({ triggerKind: automation.triggerKind, triggerSpec: automation.triggerSpec, flowRef: automation.flowRef, enabled: !automation.enabled }),
+      })
+      setAutomations(current => current.map(item => item.projectId === updated.projectId && item.automationId === updated.automationId ? { ...item, ...updated } : item))
+      setNotice(`${automation.automationId} 已${updated.enabled ? '启用' : '停用'}。`)
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusyID('') }
+  }
+  const runPublishedFlow = async (flow: Row) => {
+    if (!flow.id) return
+    setBusyID(`flow:${flow.id}`)
+    try {
+      const result = await api<FlowRunResult>(`/lumo/api/flows/${encodeURIComponent(flow.id)}/run`, { method: 'POST', body: JSON.stringify({ input: { source: 'lumo-ui-manual' } }) })
+      setLastRun({ flow, result })
+      setNotice(`流程「${flow.name ?? flow.id}」已执行已发布快照。`)
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusyID('') }
+  }
+	const replayFailedRun = async (run: PersistedFlowRun) => {
+		if (run.status !== 'failed') return
+		setBusyID(`replay:${run.id}`)
+		try {
+			const queued = await api<ReplayQueued>(`/lumo/api/flows/${encodeURIComponent(run.flow_id)}/runs/${run.id}/replay`, { method: 'POST' })
+			setNotice(queued.already_queued ? `失败运行 #${run.id} 已在重放队列中。` : `失败运行 #${run.id} 已排入重放队列。`)
+			await load()
+		} catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusyID('') }
+	}
+  return <div className="lumo-surface lumo-automation-surface">
+    <SurfaceIntro surface="automation" trailing={<span className="lumo-surface-actions"><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>刷新</BusyButton><button type="button" className="lumo-button lumo-primary" onClick={() => openSurface('operations')}>新建或编辑规则</button></span>} />
+    <div className="lumo-automation-summary"><span><b>{automations.length}</b> 条自动化</span><span><b>{overview.projects.length}</b> 个项目</span><span><b>{automations.filter(automation => automation.enabled).length}</b> 条已启用</span></div>
+    {notice ? <Notice error={notice.includes('失败') || notice.includes('不可')} close={() => setNotice('')}>{notice}</Notice> : null}
+    <Section title="项目自动化" meta={loading ? '正在读取项目规则' : '可直接启停；编辑触发器与流程引用在项目页完成'}><div className="lumo-automation-list">{automations.length ? automations.map((automation, index) => <div key={`${automation.projectId}:${automation.automationId}`}><span className="lumo-automation-index">{String(index + 1).padStart(2, '0')}</span><span><b>{automation.automationId}</b><small>{automation.projectName} · {automation.triggerKind} · {automation.flowRef} · {automation.enabled ? '已启用' : '已停用'}</small></span><BusyButton className={automation.enabled ? 'lumo-secondary lumo-small' : 'lumo-primary lumo-small'} busy={busyID === `${automation.projectId}:${automation.automationId}`} onClick={() => void toggle(automation)}>{automation.enabled ? '停用' : '启用'}</BusyButton></div>) : <Empty>{loading ? '正在同步项目自动化。' : '当前项目没有自动化规则；进入项目工作台创建第一条受治理规则。'}</Empty>}</div></Section>
+    <Section title="自动化实际运行" meta={historyIssue || '仅事件 / Webhook 的持久化执行记录；失败项可由项目 editor/owner 显式重放'}><div className="lumo-automation-list">{triggerRuns.length ? triggerRuns.slice(0, 50).map((run, index) => <div key={run.id}><span className="lumo-automation-index">{String(index + 1).padStart(2, '0')}</span><span><b>{run.flow_name ?? run.flow_id} · v{run.flow_version}</b><small>{run.automation_id} · 触发 {run.trigger_id}{run.replay_of_run_id ? ` · 重放自运行 #${run.replay_of_run_id}` : ''} · {run.started_at}{run.finished_at ? ` · 完成 ${run.finished_at}` : ''}{run.error ? ` · ${run.error}` : ''}</small></span><span className="lumo-surface-actions"><em className={`lumo-run-state ${run.status}`}>{run.status === 'succeeded' ? '已成功' : run.status === 'failed' ? '已失败' : '运行中'}{run.output_available ? ' · 有输出' : ''}</em>{run.status === 'failed' ? <BusyButton className="lumo-secondary lumo-small" busy={busyID === `replay:${run.id}`} onClick={() => void replayFailedRun(run)}>重放失败运行</BusyButton> : null}</span></div>) : <Empty>{loading ? '正在读取自动化运行记录。' : historyIssue || '尚无可见的事件或 Webhook 自动化运行记录。手动执行结果仅在当前会话回显。'}</Empty>}</div></Section>
+    <Section title="流程目录" meta="只允许执行已发布快照；草稿与已弃用流程不能从这里启动"><div className="lumo-automation-list">{overview.flows.length ? overview.flows.map((flow, index) => <div key={flow.id ?? index}><span className="lumo-automation-index">{String(index + 1).padStart(2, '0')}</span><span><b>{flow.name ?? flow.id}</b><small>{flow.projectId ?? '未绑定项目'} · {flow.status ?? '未声明状态'} · v{flow.version ?? 1}</small></span><span className="lumo-surface-actions"><BusyButton className="lumo-primary lumo-small" busy={busyID === `flow:${flow.id}`} disabled={flow.status !== 'published' && flow.status !== 'targeted'} onClick={() => void runPublishedFlow(flow)}>执行已发布版本</BusyButton><button type="button" className="lumo-button lumo-secondary lumo-small" onClick={() => openSurface('operations')}>在项目中编辑</button></span></div>) : <Empty>{loading ? '正在同步流程。' : '当前没有流程；进入项目工作台创建第一条受治理流程。'}</Empty>}</div></Section>
+    {lastRun ? <Section title="最近一次手动执行" meta={`${lastRun.flow.name ?? lastRun.flow.id} · 已发布快照`}><div className="lumo-invoke-result"><div><b>已完成</b><span>{lastRun.result.order?.join(' → ') || '没有节点顺序回显'}</span></div><pre>{JSON.stringify(lastRun.result.outputs ?? {}, null, 2)}</pre></div></Section> : null}
+    <div className="lumo-automation-principles"><div><Glyph surface="automation" /><b>事件触发</b><span>在项目边界中绑定事件、定时或 Webhook。</span></div><div><Glyph surface="skills" /><b>技能执行</b><span>复用已注册技能，不复制插件执行逻辑。</span></div><div><Glyph surface="operations" /><b>可追踪</b><span>规则启停写入项目服务；流程版本仍由流程服务负责。</span></div></div>
+  </div>
+}
+
+const designCategories = ['全部', '应用', '数据看板', '品牌设计'] as const
+
+function OpenDesignSurface({ onConversationStart }: { onConversationStart: () => void }) {
+  const { project, space } = useStudioScope()
+  const bridge = useNativeConversationBridge()
+  const runtime = useRuntimeSkills()
+  const designExamples = runtime === null ? [] : creativeExamples(runtime, 'design')
+  const [seed] = useState(() => takeCreativeSeed('design'))
+  const seededExample = designExamples.find(example => example.skillName === seed?.skillName) ?? null
+  const [selectedExample, setSelectedExample] = useState<CreativeExample | null>(null)
+  const [format, setFormat] = useState<DesignFormatId>(() => seed?.formatId ?? 'ui')
+  const [category, setCategory] = useState<(typeof designCategories)[number]>('全部')
+  const [brief, setBrief] = useState('')
+  const [notice, setNotice] = useState('')
+  useEffect(() => {
+    if (selectedExample !== null || seededExample === null) return
+    setSelectedExample(seededExample)
+    setBrief(`${seededExample.prompt} 参考「${seededExample.title}」的信息层级，但保持当前项目的品牌与内容。`)
+    setNotice(`已从首页载入「${seededExample.title}」，可继续补充后发送。`)
+  }, [seededExample?.skillName, selectedExample])
+  const active = designFormats.find(item => item.id === format) ?? designFormats[0]
+  const visibleExamples = category === '全部' ? designExamples : designExamples.filter(example => {
+    const searchable = `${example.title} ${example.description} ${example.prompt}`.toLowerCase()
+    if (category === '应用') return /app|mobile|prototype|应用|原型/u.test(searchable)
+    if (category === '数据看板') return /dashboard|chart|data|看板|数据/u.test(searchable)
+    return /brand|visual|image|品牌|视觉/u.test(searchable)
+  })
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const skill = selectedExample ?? designExamples[0]
+    if (skill === undefined) {
+      setNotice(runtime === null ? '正在同步设计技能，请稍后再试。' : '当前运行时没有可用的设计技能，请先同步技能目录。')
+      return
+    }
+    const intent = brief.trim() || active.prompt
+    const creation = skillCommandName(skill.skillName) === 'open-design' ? `创建${active.label}` : `使用「${skill.title}」能力创建${active.label}`
+    const workflow = skillCommandName(skill.skillName) === 'open-design' ? '请遵循 open-design 产物优先工作流' : '请遵循产物优先工作流'
+    const prompt = `在项目「${project.label}」的空间「${space.label}」中${creation}。${intent} ${workflow}，创建真实可预览、可继续编辑的文件，并报告实际产物路径。`
+    if (!invokeNativeSkill(bridge, skill.skillName, prompt)) {
+      setNotice('请先选择工作区并创建会话，再把任务交给当前设计技能。')
+      return
+    }
+    onConversationStart()
+  }
+  const useExample = (example: CreativeExample) => {
+    setSelectedExample(example)
+    setBrief(`${example.prompt} 参考「${example.title}」的信息层级，但保持当前项目的品牌与内容。`)
+    setNotice(`已载入「${example.title}」，可继续补充后发送。`)
+  }
+  return <div className="lumo-studio-page lumo-design-studio">
+    <header className="lumo-studio-heading"><div><span className="lumo-eyebrow">OPEN DESIGN · 原有插件能力</span><h1>开放设计</h1><p>从一句想法开始，生成可继续编辑的设计方案。</p></div><span className={`lumo-plugin-readiness ${bridge === null || runtime === null ? 'waiting' : ''}`}><i />{bridge === null ? '等待会话' : runtime === null ? '同步技能目录' : designExamples.length ? `/${skillCommandName(designExamples[0]!.skillName)} 已就绪` : '暂无设计技能'}</span></header>
+    <div className="lumo-studio-tabs" role="tablist" aria-label="开放设计产物类型">{designFormats.map(item => <button type="button" role="tab" aria-selected={item.id === format} aria-label={`选择开放设计类型：${item.label}`} key={item.id} className={item.id === format ? 'active' : ''} onClick={() => { setFormat(item.id); setNotice('') }}><i>{item.icon}</i>{item.label}</button>)}</div>
+    <form className="lumo-studio-composer" onSubmit={submit}>{selectedExample ? <span className="lumo-selected-example">{selectedExample.title}<button type="button" aria-label="移除设计样例" onClick={() => { setSelectedExample(null); setBrief('') }}>×</button></span> : null}<textarea aria-label="开放设计创作意图" rows={5} value={brief} onChange={event => setBrief(event.target.value)} placeholder="描述你想设计的产品、页面或流程" /><div className="lumo-studio-tools"><button type="button" aria-label="添加设计上下文">＋</button><span><i>{active.icon}</i>{active.label}</span><span>◉ 设计系统</span><span>⌁ 工作目录</span><em>{selectedExample ? `/${skillCommandName(selectedExample.skillName)}` : '/open-design'}</em><button type="submit" className="lumo-studio-send" aria-label="发送到 OpenDesign">↑</button></div></form>
+    {notice ? <div className="lumo-studio-notice" role="status">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div> : null}
+    <div className="lumo-studio-categories" aria-label="设计样例分类">{designCategories.map(item => <button type="button" key={item} className={category === item ? 'active' : ''} onClick={() => setCategory(item)}>{item}</button>)}</div>
+    <section className="lumo-inspiration"><header><b>灵感样例</b><span>样例来自当前运行时技能目录，点击后只组织上下文，最终仍由原生技能生成真实产物</span></header><div>{runtime === null ? <p role="status">正在同步创作技能…</p> : visibleExamples.length ? visibleExamples.map(example => <button type="button" key={example.id} className="lumo-inspiration-card" onClick={() => useExample(example)}><span className={`lumo-design-preview ${example.className}`}><i /><i /><i /><b /></span><span><small>{example.kind}</small><b>{example.title}</b></span></button>) : <Empty>{runtime.error || '当前分类没有匹配的运行时技能。'}</Empty>}</div></section>
+  </div>
+}
+
+function presentationHashQuery(value: string): string | null {
+  const match = value.match(/(?:^|\s)#([^\s#]*)$/u)
+  return match?.[1] ?? null
+}
+
+function PresentationSurface({ onConversationStart }: { onConversationStart: () => void }) {
+  const { project, space } = useStudioScope()
+  const bridge = useNativeConversationBridge()
+  const runtime = useRuntimeSkills()
+  const presentationExamples = runtime === null ? [] : creativeExamples(runtime, 'presentation')
+  const [seed] = useState(() => takeCreativeSeed('presentation'))
+  const seededExample = presentationExamples.find(example => example.skillName === seed?.skillName) ?? null
+  const [draft, setDraft] = useState(seed?.openHash ? '#' : '')
+  const [selected, setSelected] = useState<CreativeExample | null>(null)
+  const [popup, setPopup] = useState(seed?.openHash === true)
+  const [activeIndex, setActiveIndex] = useState(0)
+  const [notice, setNotice] = useState('')
+  useEffect(() => {
+    if (selected !== null || seededExample === null) return
+    setSelected(seededExample)
+    setDraft(`#${seededExample.title} `)
+  }, [seededExample?.skillName, selected])
+  const query = presentationHashQuery(draft) ?? ''
+  const matches = presentationExamples.filter(example => `${example.title}${example.description}`.includes(query))
+  useEffect(() => { setActiveIndex(index => Math.min(index, Math.max(matches.length - 1, 0))) }, [matches.length])
+  const changeDraft = (value: string) => {
+    setDraft(value)
+    const hash = presentationHashQuery(value)
+    setPopup(hash !== null)
+    if (!value.startsWith(`#${selected?.title ?? ''}`)) setSelected(null)
+  }
+  const choose = (example: CreativeExample | undefined) => {
+    if (example === undefined) return
+    setSelected(example)
+    setDraft(`#${example.title} `)
+    setPopup(false)
+    setNotice(`已插入「${example.title}」样例，继续描述听众、时长和重点后发送。`)
+  }
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const example = selected ?? presentationExamples.find(item => draft.startsWith(`#${item.title}`)) ?? presentationExamples[0]
+    if (example === undefined) {
+      setNotice(runtime === null ? '正在同步演示技能，请稍后再试。' : '当前运行时没有可用的 PPT 技能，请先同步技能目录。')
+      return
+    }
+    const detail = draft.replace(/^#[^\s]+\s*/u, '').trim()
+    const prompt = `在项目「${project.label}」的空间「${space.label}」中，使用「${example.title}」样例生成原生可编辑 PPTX。${example.seed}${detail ? ` 用户补充：${detail}` : ''} 请遵循 ppt-master 的内容确认、设计确认和生成审阅门禁，所有源文件、预览和导出都保存在当前工作区。`
+    if (!invokeNativeSkill(bridge, example.skillName, prompt)) {
+      setNotice('请先选择工作区并创建会话，再把任务交给当前 PPT 技能。')
+      return
+    }
+    onConversationStart()
+  }
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (popup && event.key === 'ArrowDown') { event.preventDefault(); setActiveIndex(index => matches.length ? (index + 1) % matches.length : 0) }
+    else if (popup && event.key === 'ArrowUp') { event.preventDefault(); setActiveIndex(index => matches.length ? (index - 1 + matches.length) % matches.length : 0) }
+    else if (popup && event.key === 'Enter') { event.preventDefault(); choose(matches[activeIndex]) }
+    else if (popup && event.key === 'Escape') { event.preventDefault(); setPopup(false) }
+    else if (!popup && event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() }
+  }
+  return <div className="lumo-studio-page lumo-presentation-studio">
+    <header className="lumo-studio-heading"><div><span className="lumo-eyebrow">PPT MASTER · 原有插件能力</span><h1>PPT 生成</h1><p>先选故事结构，再和 AI 一起完成整套演示。</p></div><span className={`lumo-plugin-readiness ${bridge === null ? 'waiting' : ''}`}><i />{bridge === null ? '等待会话' : '/ppt-master 已就绪'}</span></header>
+    <ol className="lumo-presentation-steps"><li className="active"><i>1</i>选择样例</li><li><i>2</i>对话完善</li><li><i>3</i>生成文稿</li></ol>
+    <div className="lumo-presentation-layout"><main><div className="lumo-assistant-prompt"><Glyph surface="skills" /><p>告诉我这次演示的主题、听众和预计时长。你也可以输入 <b>#</b> 从样例开始。</p></div><div className={`lumo-presentation-composer-wrap ${popup ? 'popup-open' : ''}`}>
+      {popup ? <section className="lumo-example-popup" role="dialog" aria-label="选择演示样例"><header><b># 选择演示样例</b><span>{query ? `筛选：${query}` : '输入样例名可筛选'}</span></header><div>{matches.map((example, index) => <button type="button" key={example.id} className={activeIndex === index ? 'active' : ''} onMouseEnter={() => setActiveIndex(index)} onClick={() => choose(example)}><i className={example.className} /><span><b>{example.title}</b><small>{example.description}</small></span></button>)}</div><footer>↑↓ 选择 · Enter 插入 · Esc 关闭</footer></section> : null}
+      <form className="lumo-presentation-composer" onSubmit={submit}>{selected ? <span className="lumo-selected-example">#{selected.title}<button type="button" aria-label="移除演示样例" onClick={() => { setSelected(null); setDraft('') }}>×</button></span> : null}<textarea autoFocus aria-label="PPT 对话输入" rows={5} value={draft} onChange={event => changeDraft(event.target.value)} onKeyDown={onKeyDown} placeholder="输入 # 选择样例，然后继续描述听众、时长和重点" /><div className="lumo-studio-tools"><button type="button" aria-label="添加演示材料">＋</button><span>▤ 演示文稿</span><span>◉ 黑曜石信号</span><span><i className="lumo-live-dot" /> {space.label}</span><em>/ppt-master</em><button type="submit" className="lumo-studio-send" aria-label="发送到 PPT Master">↑</button></div></form>
+    </div>{notice ? <div className="lumo-studio-notice" role="status">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div> : null}</main><aside className="lumo-deck-outline"><header><b>演示大纲</b><span>{project.label}</span></header>{['封面页', '问题与机遇', '方案介绍', '价值与数据', '总结与展望'].map((title, index) => <div key={title}><i>{index + 1}</i><span><b>{title}</b><small>等待 AI 对话生成</small></span></div>)}<footer>AI 将根据对话内容生成完整大纲与页面</footer></aside></div>
   </div>
 }
 
@@ -918,10 +1937,11 @@ function LumoThemePicker() {
 }
 
 function Workbench({ surface, close, select, commandOpen, toggleCommand }: { surface: Surface; close: () => void; select: (surface: Surface) => void; commandOpen: boolean; toggleCommand: () => void }) {
+  const ref = useRef<HTMLElement>(null)
   const meta = surfaceMeta[surface]
-  return <div className="lumo-backdrop"><section className="lumo-workbench" role="dialog" aria-modal="true" aria-label={`${meta.label}工作台`}>
-    <aside className="lumo-workbench-rail"><button type="button" className="lumo-workspace-switch" onClick={toggleCommand} aria-haspopup="dialog" aria-expanded={commandOpen}><span className="lumo-brand-mark">L</span><span><b>Lumo 工作区</b><small>本地能力与运营面</small></span><kbd>⌘ K</kbd></button><div className="lumo-rail-menu-head"><span>能力菜单</span><small>快捷跳转</small></div><nav aria-label="Lumo 能力工作台">{surfaceGroups.map(group => <div className="lumo-nav-group" key={group.label}><span className="lumo-nav-label">{group.label}</span>{group.items.map(item => <button type="button" key={item} className={surface === item ? 'active' : ''} aria-label={surfaceMeta[item].label} title={surfaceMeta[item].label} onClick={() => select(item)}><Glyph surface={item} /><span>{surfaceMeta[item].label}</span><small>{surfaceMeta[item].short}</small></button>)}</div>)}</nav><div className="lumo-rail-footer"><span><i className="lumo-live-dot" /> Lumo 服务</span><small>权限和状态由服务端执法</small></div></aside>
-    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>工作区</span><i>›</i><b>{meta.label}</b><small>当前模块</small></div><div className="lumo-header-actions"><LumoThemePicker /><button type="button" className="lumo-command-trigger" onClick={toggleCommand}><span>跳转</span><kbd>⌘ K</kbd></button><span className="lumo-identity-chip"><i className="lumo-live-dot" /> 会话受保护</span><MagneticButton className="lumo-quiet" aria-label="关闭工作台" onClick={close}>×</MagneticButton></div></header><main>{surface === 'knowledge' ? <KnowledgeSurface /> : surface === 'skills' ? <SkillsSurface /> : surface === 'connectors' ? <ConnectorsSurface /> : surface === 'operations' ? <OperationsSurface /> : surface === 'market' ? <MarketSurface /> : <AccountSurface />}</main><footer className="lumo-workbench-footer"><span>身份、realm 与权限由各插件服务端执法</span><span>按 Esc 返回原生 DSH</span></footer></div>
+  useFocusTrap(ref, !commandOpen)
+  return <div className="lumo-backdrop"><section ref={ref} tabIndex={-1} className="lumo-workbench" role="dialog" aria-modal="true" aria-label={`${meta.label}工作台`}>
+    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>Lumo 工作台</span><i>›</i><b>{meta.label}</b><small>{meta.eyebrow}</small></div><div className="lumo-header-actions"><LumoThemePicker /><button type="button" className="lumo-command-trigger" onClick={toggleCommand}><span>跳转</span><kbd>⌘ K</kbd></button><span className="lumo-identity-chip"><i className="lumo-live-dot" /> 原生会话</span><MagneticButton className="lumo-quiet" aria-label="关闭工作台" onClick={close}>×</MagneticButton></div></header><main>{surface === 'knowledge' ? <KnowledgeSurface /> : surface === 'skills' ? <SkillsSurface /> : surface === 'connectors' ? <ConnectorsSurface /> : surface === 'operations' ? <OperationsSurface /> : surface === 'automation' ? <AutomationSurface /> : surface === 'design' ? <OpenDesignSurface onConversationStart={close} /> : surface === 'presentation' ? <PresentationSurface onConversationStart={close} /> : surface === 'market' ? <MarketSurface /> : <AccountSurface />}</main><footer className="lumo-workbench-footer"><span>开放设计与 PPT 分别调用 /open-design 和 /ppt-master 原有插件能力</span><span>按 Esc 返回原生 DSH</span></footer></div>
     <CommandPalette open={commandOpen} surface={surface} select={select} close={toggleCommand} />
   </section></div>
 }
@@ -932,17 +1952,33 @@ export function LumoOverlay(_props: OverlayProps) {
   // now an on-demand operations workbench rather than a full-screen takeover.
   const [surface, setSurface] = useState<Surface | null>(() => querySurface())
   const [commandOpen, setCommandOpen] = useState(false)
+  const openerRef = useRef<HTMLElement | null>(null)
+  const openedRef = useRef(surface !== null)
+  const captureOpener = () => {
+    if (openedRef.current) return
+    const active = document.activeElement
+    openerRef.current = active instanceof HTMLElement ? active : null
+    openedRef.current = true
+  }
   useEffect(() => {
-    const open = (event: Event) => { const next = (event as CustomEvent<Surface>).detail; setSurface(next); setQuerySurface(next) }
+    if (surface !== null) return
+    if (openedRef.current && openerRef.current?.isConnected) openerRef.current.focus()
+    openerRef.current = null
+    openedRef.current = false
+  }, [surface])
+  useEffect(() => {
+    const open = (event: Event) => { const next = (event as CustomEvent<Surface>).detail; captureOpener(); setSurface(next); setQuerySurface(next) }
+    const closeWorkbench = () => { setSurface(null); setQuerySurface(null) }
     const key = (event: globalThis.KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
+        captureOpener()
         setSurface(current => current ?? 'operations')
         setCommandOpen(current => !current)
       } else if (event.key === 'Escape') { if (commandOpen) setCommandOpen(false); else { setSurface(null); setQuerySurface(null) } }
     }
-    window.addEventListener(OPEN_EVENT, open); window.addEventListener('keydown', key)
-    return () => { window.removeEventListener(OPEN_EVENT, open); window.removeEventListener('keydown', key) }
+    window.addEventListener(OPEN_EVENT, open); window.addEventListener(CLOSE_EVENT, closeWorkbench); window.addEventListener('keydown', key)
+    return () => { window.removeEventListener(OPEN_EVENT, open); window.removeEventListener(CLOSE_EVENT, closeWorkbench); window.removeEventListener('keydown', key) }
   }, [commandOpen])
   const close = () => { setSurface(null); setQuerySurface(null) }
   const select = (next: Surface) => { setSurface(next); setQuerySurface(next) }
@@ -952,10 +1988,15 @@ export function LumoOverlay(_props: OverlayProps) {
 
 export const inject = ['slots', 'theme']
 export function apply(ctx: ClientContext): void {
+  const root = ((ctx as ClientContext & { root?: object }).root ?? ctx) as object
+  const roots = activeClientRoots()
+  if (roots.has(root)) return
+  roots.add(root)
+  ctx.effect(() => () => { roots.delete(root) }, 'lumo-ui: singleton client mount')
   installLumoThemes(ctx)
-  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register(
-    { name: 'sidebar.footer.action', id: 'lumo-workspace', order: 10, label: 'Lumo 工作区' },
-    props => <SidebarEntry {...props} surface="operations" />,
+  ctx.slots.inject('sidebar.navigation', () => ctx.slots.register(
+    { name: 'sidebar.navigation', id: 'lumo-navigation', order: 10, label: 'Lumo 功能菜单' },
+    SidebarNavigation,
   ))
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'lumo-platform', order: 100 }, LumoOverlay))
   ctx.slots.inject('conversation.input.left', () => ctx.slots.register(
@@ -967,11 +2008,11 @@ export function apply(ctx: ClientContext): void {
     HeroComposerScopeControl,
   ))
   ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register(
-    { name: 'conversation.composer.dock', id: 'lumo-open-design', order: 20, label: '开放设计' },
+    { name: 'conversation.composer.dock', id: 'lumo-native-skill-bridge', order: 20, label: 'Lumo 原生技能桥' },
     OpenDesignDock,
   ))
   ctx.slots.inject('conversation.hero.composer.dock', () => ctx.slots.register(
-    { name: 'conversation.hero.composer.dock', id: 'lumo-open-design-hero', order: 20, label: '开放设计' },
+    { name: 'conversation.hero.composer.dock', id: 'lumo-capability-launchers', order: 20, label: 'Lumo 功能入口' },
     HeroOpenDesignDock,
   ))
 }

@@ -34,6 +34,8 @@ export interface MethodSpec {
    * 参数结构非法时抛 invalid（不返回空数组 —— 空数组会被误当作「无 realm 可校验」）。
    */
   realms(args: unknown[]): string[]
+  /** 仅查询类调用会从载荷中声明角色；Host 将其收束到签名调用方的角色集合。 */
+  roles?(args: unknown[]): string[]
 }
 
 const KNOWLEDGE_METHODS: Record<string, MethodSpec> = {
@@ -68,6 +70,10 @@ const KNOWLEDGE_METHODS: Record<string, MethodSpec> = {
         throw invalid('query.request.scope 只能是 published / draft')
       }
       return [asString(q['realm'], 'query.request.realm')]
+    },
+    roles(args) {
+      const q = asObject(args[0], 'query.request')
+      return asStringArray(q['roles'], 'query.request.roles')
     },
   },
   remove: {
@@ -124,6 +130,10 @@ const GRAPH_METHODS: Record<string, MethodSpec> = {
         asStringArray(q['edgeKinds'], 'neighborhood.query.edgeKinds')
       }
       return [asString(q['realm'], 'neighborhood.query.realm')]
+    },
+    roles(args) {
+      const q = asObject(args[0], 'neighborhood.query')
+      return asStringArray(q['roles'], 'neighborhood.query.roles')
     },
   },
   removeNode: {

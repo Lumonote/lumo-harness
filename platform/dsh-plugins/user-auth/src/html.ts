@@ -42,7 +42,7 @@ export function loginPage(options: LoginPageOptions = {}): string {
     .shell{position:relative;z-index:1;display:grid;grid-template-columns:minmax(280px,.88fr) minmax(520px,1.12fr);min-height:100vh}
     .manifest{position:relative;display:flex;flex-direction:column;justify-content:space-between;min-height:100vh;padding:42px clamp(34px,6vw,92px);border-right:1px solid var(--line);overflow:hidden}
     .manifest:after{content:"L";position:absolute;right:-28px;bottom:-138px;color:transparent;-webkit-text-stroke:1px rgba(255,145,77,.12);font:440px/.8 Georgia,serif;transform:rotate(-7deg)}
-    .brand{display:flex;align-items:center;gap:13px;letter-spacing:.14em;text-transform:uppercase;font:700 11px/1 "SFMono-Regular","Cascadia Mono",monospace}.brand-mark{display:grid;place-items:center;width:38px;height:38px;overflow:hidden;border:1px solid var(--line);border-radius:11px;color:transparent;background:var(--base) url('/branding/logo.png') center/cover no-repeat;box-shadow:0 8px 24px rgba(0,0,0,.24);font-size:0}
+    .brand{display:flex;align-items:center;gap:13px;letter-spacing:.14em;text-transform:uppercase;font:700 11px/1 "SFMono-Regular","Cascadia Mono",monospace}.brand-mark{display:grid;place-items:center;width:38px;height:38px;overflow:hidden;border:1px solid var(--line);border-radius:50%;color:transparent;background:var(--base) url('/branding/logo.png') center/cover no-repeat;box-shadow:0 8px 24px rgba(0,0,0,.24);font-size:0}
     .copy{position:relative;max-width:520px;margin:70px 0}.kicker{display:flex;align-items:center;gap:12px;color:var(--mint);font:700 10px/1 "SFMono-Regular","Cascadia Mono",monospace;letter-spacing:.18em}.kicker:before{content:"";width:38px;height:1px;background:var(--mint)}
     h1{max-width:470px;margin:24px 0 20px;font:400 clamp(48px,6.2vw,92px)/.9 "Bodoni 72","Songti SC","STSong",serif;letter-spacing:-.055em}.copy>p{max-width:440px;margin:0;color:var(--muted);font-size:14px;line-height:1.85}
     .system-note{display:grid;grid-template-columns:auto 1fr;gap:14px;max-width:420px;padding-top:18px;border-top:1px solid var(--line);color:var(--dim);font:10px/1.7 "SFMono-Regular","Cascadia Mono",monospace}.system-note i{width:7px;height:7px;margin-top:5px;border-radius:50%;background:var(--mint);box-shadow:0 0 0 5px rgba(255,145,77,.08)}
@@ -58,7 +58,7 @@ export function loginPage(options: LoginPageOptions = {}): string {
     .captcha-grid .tile[data-order]::after{content:attr(data-order);position:absolute;top:-7px;right:-7px;display:grid;place-items:center;width:19px;height:19px;border-radius:50%;background:var(--mint);color:#0b0e11;font:800 10px/1 "SFMono-Regular","Cascadia Mono",monospace;box-shadow:0 2px 8px rgba(0,0,0,.35)}.captcha-grid .tile{position:relative}
     .captcha-tools{display:flex;align-items:center;justify-content:space-between;margin:-6px 0 0;color:var(--dim);font:10px/1 "SFMono-Regular","Cascadia Mono",monospace}.captcha-refresh{border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);padding:7px 12px;cursor:pointer;font:600 10px/1 "SFMono-Regular","Cascadia Mono",monospace;letter-spacing:.06em}.captcha-refresh:hover{border-color:var(--mint);color:var(--mint)}
     .hint{display:flex;align-items:center;gap:8px;margin:-8px 0 22px;color:var(--dim);font-size:10px}.hint:before{content:"↻";color:var(--amber)}
-    .submit{display:flex;align-items:center;justify-content:space-between;width:100%;height:50px;padding:0 17px;border:1px solid var(--mint);border-radius:10px;background:var(--mint);color:#0b0e11;cursor:pointer;font:800 12px "Avenir Next","Trebuchet MS",sans-serif;letter-spacing:.04em;transition:transform .18s,box-shadow .18s,filter .18s}.submit:hover{transform:translateY(-2px);box-shadow:0 12px 26px rgba(255,145,77,.18)}.submit:disabled{cursor:wait;filter:saturate(.45);transform:none}.submit span:last-child{font-size:18px;font-weight:400}
+    .submit{display:flex;align-items:center;justify-content:space-between;width:100%;height:50px;padding:0 17px;border:1px solid var(--mint);border-radius:10px;background:var(--mint);color:#0b0e11;cursor:pointer;font:800 12px "Avenir Next","Trebuchet MS",sans-serif;letter-spacing:.04em;transition:transform .18s,box-shadow .18s,filter .18s}.submit:hover{transform:translateY(-2px);box-shadow:0 12px 26px rgba(255,145,77,.18)}.submit:disabled{cursor:wait;filter:saturate(.45);transform:none}.submit span:last-child{font-size:18px;font-weight:400}.passkey-submit{width:100%;height:44px;margin-top:10px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--ink);cursor:pointer;font:700 11px "Avenir Next","Trebuchet MS",sans-serif;letter-spacing:.03em}.passkey-submit:hover{border-color:var(--mint);color:var(--mint)}.passkey-submit:disabled{cursor:wait;opacity:.55}
     .alert{display:grid;grid-template-columns:24px 1fr;gap:10px;margin:0 0 14px;padding:12px 13px;border:1px solid rgba(241,153,136,.28);border-radius:10px;background:rgba(130,48,42,.12);color:#efb2a6}.alert span{display:grid;place-items:center;width:20px;height:20px;border:1px solid currentColor;border-radius:50%;font:700 11px Georgia,serif}.alert p{margin:1px 0 0;font-size:11px;line-height:1.55}
     .trust{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-top:18px;color:var(--dim);font:9px/1.5 "SFMono-Regular","Cascadia Mono",monospace}.trust b{color:var(--muted);font-weight:500}
     @keyframes land{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
@@ -81,9 +81,11 @@ export function loginPage(options: LoginPageOptions = {}): string {
         <form method="post" action="/auth/login" id="login-form">
           <div class="field"><label for="username">用户账号</label><input id="username" name="username" autocomplete="username" maxlength="128" placeholder="输入账号" required autofocus></div>
           <div class="field"><label for="password">访问密码</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="256" placeholder="输入密码" required></div>
+		  <div class="field"><label for="mfa">动态验证码 <small>已启用 MFA 时必填</small></label><input id="mfa" name="mfa" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="6 位动态验证码（如未启用可留空）"></div>
           <div class="field"><label for="captcha">交互验证</label><p class="captcha-prompt" id="captcha-prompt">正在加载验证码…</p><div class="captcha-grid" id="captcha-grid" role="group" aria-label="按提示顺序点击数字"><button type="button" class="tile" data-index="0" aria-label="第 1 格"></button><button type="button" class="tile" data-index="1" aria-label="第 2 格"></button><button type="button" class="tile" data-index="2" aria-label="第 3 格"></button><button type="button" class="tile" data-index="3" aria-label="第 4 格"></button><button type="button" class="tile" data-index="4" aria-label="第 5 格"></button><button type="button" class="tile" data-index="5" aria-label="第 6 格"></button><button type="button" class="tile" data-index="6" aria-label="第 7 格"></button><button type="button" class="tile" data-index="7" aria-label="第 8 格"></button><button type="button" class="tile" data-index="8" aria-label="第 9 格"></button></div><input type="hidden" id="captcha" name="captcha" autocomplete="off" required><div class="captcha-tools"><span id="captcha-count">已选 0 / 3</span><button type="button" class="captcha-refresh" id="captcha-refresh">换一张</button></div></div>
           <div class="hint">按提示顺序点击数字，每张验证码仅可使用一次</div>
           <button class="submit" id="submit" type="submit"><span>进入 Lumo</span><span>→</span></button>
+          <button class="passkey-submit" id="passkey-submit" type="button">使用 Passkey 登录</button>
         </form>
         <footer class="trust"><span>受保护的本地入口</span><b>HTTPONLY · SAMESITE · ONE-TIME CAPTCHA</b></footer>
       </div>
@@ -101,6 +103,7 @@ export const loginScript = `(() => {
   const refresh = document.getElementById('captcha-refresh');
   const form = document.getElementById('login-form');
   const submit = document.getElementById('submit');
+  const passkeySubmit = document.getElementById('passkey-submit');
   let sequence = [];
   const renderPrompt = (digits) => {
     if (promptEl) promptEl.innerHTML = '请按顺序点击：<b>' + digits.split('').join(' \u2192 ') + '</b>';
@@ -154,6 +157,46 @@ export const loginScript = `(() => {
       return;
     }
     if (submit) { submit.disabled = true; submit.firstElementChild.textContent = '正在验证\u2026'; }
+  });
+  const b64url = (buffer) => {
+    const bytes = new Uint8Array(buffer);
+    let value = '';
+    bytes.forEach((byte) => { value += String.fromCharCode(byte); });
+    return btoa(value).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/g, '');
+  };
+  const bytes = (value) => {
+    const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+    const binary = atob(normalized + '='.repeat((4 - normalized.length % 4) % 4));
+    return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  };
+  const passkeyOptions = (source) => ({
+    challenge: bytes(source.challenge), rpId: source.rp_id,
+    timeout: source.timeout, userVerification: source.user_verification,
+    allowCredentials: (source.allow_credentials || []).map((credential) => ({ type: credential.type, id: bytes(credential.id) })),
+  });
+  passkeySubmit.addEventListener('click', async () => {
+    const username = document.getElementById('username').value.trim();
+    if (!window.PublicKeyCredential) { if (promptEl) promptEl.textContent = '当前浏览器不支持 Passkey。'; return; }
+    if (!username || sequence.length < 3) { if (promptEl) promptEl.textContent = '请输入账号并完成点选验证码后使用 Passkey。'; return; }
+    passkeySubmit.disabled = true;
+    try {
+      const optionsResponse = await fetch('/auth/passkey/login/options', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, captcha_code: sequence.join('') }) });
+      const options = await optionsResponse.json();
+      if (!optionsResponse.ok || !options.public_key) throw new Error(options.message || 'Passkey 登录不可用');
+      const credential = await navigator.credentials.get({ publicKey: passkeyOptions(options.public_key) });
+      if (!credential || credential.type !== 'public-key') throw new Error('未获得 Passkey 凭据');
+      const response = credential.response;
+      const finish = await fetch('/auth/passkey/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        challenge: options.public_key.challenge, id: credential.id, raw_id: b64url(credential.rawId), type: credential.type,
+        client_data_json: b64url(response.clientDataJSON), authenticator_data: b64url(response.authenticatorData), signature: b64url(response.signature),
+      }) });
+      const body = await finish.json();
+      if (!finish.ok) throw new Error(body.message || 'Passkey 验证失败');
+      location.assign('/');
+    } catch (error) {
+      if (promptEl) promptEl.textContent = error instanceof Error ? error.message : 'Passkey 登录失败，请重新获取验证码后重试';
+      load();
+    } finally { passkeySubmit.disabled = false; }
   });
   load();
 })();`

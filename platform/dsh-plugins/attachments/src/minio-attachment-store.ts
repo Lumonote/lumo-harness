@@ -50,6 +50,8 @@ export interface MinioAttachmentOptions {
   maxImageDimension?: number
   /** 归一化后长边上限。默认 2048px。 */
   normalizedImageMaxDimension?: number
+  /** 归一化后总像素预算。默认 2048×2048。 */
+  normalizedImageMaxPixels?: number
   /** 归一化后编码字节安全上限。默认 4 MiB。 */
   normalizedImageMaxBytes?: number
 }
@@ -59,6 +61,7 @@ const DEFAULT_MAX_IMAGES_PER_MESSAGE = 20
 const DEFAULT_MAX_MESSAGE_IMAGE_BYTES = 200 * 1024 * 1024
 const DEFAULT_MAX_IMAGE_PIXELS = 64_000_000
 const DEFAULT_MAX_IMAGE_DIMENSION = 8192
+const DEFAULT_NORMALIZED_MAX_PIXELS = 2048 * 2048
 const DEFAULT_NORMALIZED_MAX_DIMENSION = 2048
 const DEFAULT_NORMALIZED_MAX_BYTES = 4 * 1024 * 1024
 
@@ -90,6 +93,7 @@ export class MinioAttachmentStore extends AttachmentStore {
       mediaTypes: Object.freeze(['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const),
     })
     this.normalizationPolicy = Object.freeze({
+      maxPixels: options.normalizedImageMaxPixels ?? DEFAULT_NORMALIZED_MAX_PIXELS,
       maxDimension: options.normalizedImageMaxDimension ?? DEFAULT_NORMALIZED_MAX_DIMENSION,
       maxBytes: options.normalizedImageMaxBytes ?? DEFAULT_NORMALIZED_MAX_BYTES,
     })

@@ -101,7 +101,7 @@ function hostContextDouble(): { ctx: unknown; listeners: Map<string, Array<(tabl
 }
 
 const LOCAL_CONFIG = {
-  schedulerUrl: '', projectsUrl: '', flowsUrl: '', connectorUrl: '', governanceUrl: '',
+  schedulerUrl: '', projectsUrl: '', flowsUrl: '', connectorUrl: '', governanceUrl: '', registryUrl: '',
   realm: 'realm-a', userId: 'u1', roles: [], projectId: '', deptId: '',
   controlPlaneToken: '', identityAssertionSecret: '', timeoutMs: 5000,
   deploymentMode: 'local', storageBackend: 'sqlite', middleware: [], clusterStatus: 'not_ready', plugins: [],

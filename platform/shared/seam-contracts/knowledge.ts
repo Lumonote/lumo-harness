@@ -38,6 +38,45 @@ export interface KnowledgeHit {
   text: string
 }
 
+/**
+ * 管理面展示的源文档摘要。它不是 KnowledgeSeam 的一部分：检索/写入
+ * consumer 仍只能看到四个 seam 操作，来源管理必须经由受身份保护的宿主 API。
+ */
+export interface KnowledgeSourceSummary {
+  docId: string
+  realm: string
+  space: string
+  title: string
+  sourceVersion: number
+  embeddingModel: string
+  chunkCount: number
+  updatedAt: string
+}
+
+/** 管理面写入的源内容。更新时必须携带此前读取到的版本，避免静默覆盖。 */
+export interface KnowledgeSourceWrite {
+  docId: string
+  realm: string
+  space: string
+  title: string
+  chunks: KnowledgeIngest['chunks']
+  /** 新建时省略；更新时必须等于当前 sourceVersion。 */
+  expectedSourceVersion?: number
+}
+
+/**
+ * 可选的来源管理能力。
+ *
+ * PG provider 同时保存 source-of-truth，因而实现此接口；纯 Milvus 投影
+ * provider 不实现。调用方必须在运行时检测，而不能把它扩散进 KnowledgeSeam。
+ */
+export interface KnowledgeSourceManager {
+  listSources(realm: string): Promise<KnowledgeSourceSummary[]>
+  getSource(docId: string, realm: string): Promise<KnowledgeIngest | undefined>
+  upsertSource(entry: KnowledgeSourceWrite): Promise<KnowledgeSourceSummary>
+  removeSource(docId: string, realm: string, expectedSourceVersion: number): Promise<void>
+}
+
 export interface KnowledgeSeam {
   ingest(entry: KnowledgeIngest): Promise<void>
   /** realm 过滤由 Provider 强制注入；传入的 realm 与注入不符必须拒绝（§5.4.1） */

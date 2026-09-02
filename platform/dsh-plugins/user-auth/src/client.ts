@@ -21,6 +21,36 @@ export interface LoginResponse {
   principal: Principal
 }
 
+export interface AuthSession {
+  id: string
+  client_ip: string
+  created_at: string
+  last_seen_at: string
+  expires_at: string
+  current: boolean
+}
+
+export interface AuthSecurityEvent {
+  id: number
+  event: string
+  client_ip?: string
+  detail: Record<string, unknown>
+  created_at: string
+}
+
+export interface MFAStatus {
+  configured: boolean
+  enabled: boolean
+  pending_expires_at?: string
+  enrolled_at?: string
+}
+
+export interface TOTPEnrollment { secret: string; expires_at: string }
+
+export interface PasskeyCredential { id: string; label?: string; created_at: string; last_used_at?: string }
+export interface PasskeyStatus { configured: boolean; rp_id?: string; require_user_verification?: boolean; passkeys?: PasskeyCredential[] }
+export interface WebAuthnPublicKeyOptions { [key: string]: unknown; challenge: string }
+
 export class GovernanceApiError extends Error {
   constructor(
     readonly status: number,
@@ -60,15 +90,29 @@ export class GovernanceAuthClient {
   }
 
   async login(input: {
-    realm: string; username: string; password: string; captchaId: string; captchaCode: string; clientIp: string
+    realm: string; username: string; password: string; captchaId: string; captchaCode: string; clientIp: string; mfaCode?: string
   }): Promise<LoginResponse> {
     return this.json<LoginResponse>('/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Lumo-Client-IP': input.clientIp },
       body: JSON.stringify({
         realm: input.realm, username: input.username, password: input.password,
-        captcha_id: input.captchaId, captcha_code: input.captchaCode,
+        captcha_id: input.captchaId, captcha_code: input.captchaCode, mfa_code: input.mfaCode ?? '',
       }),
+    })
+  }
+
+  async beginPasskeyLogin(input: { realm: string; username: string; captchaId: string; captchaCode: string; clientIp: string }): Promise<WebAuthnPublicKeyOptions> {
+    const body = await this.json<{ public_key: WebAuthnPublicKeyOptions }>('/v1/auth/passkey/login/options', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Lumo-Client-IP': input.clientIp },
+      body: JSON.stringify({ realm: input.realm, username: input.username, captcha_id: input.captchaId, captcha_code: input.captchaCode }),
+    })
+    return body.public_key
+  }
+
+  async completePasskeyLogin(input: Record<string, string>, clientIp: string): Promise<LoginResponse> {
+    return this.json<LoginResponse>('/v1/auth/passkey/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Lumo-Client-IP': clientIp }, body: JSON.stringify(input),
     })
   }
 
@@ -81,6 +125,58 @@ export class GovernanceAuthClient {
 
   async logout(token: string): Promise<void> {
     await this.call('/v1/auth/logout', { method: 'POST', headers: { 'X-Lumo-Session': token } })
+  }
+
+  async sessions(token: string): Promise<AuthSession[]> {
+    const body = await this.json<{ sessions?: AuthSession[] }>('/v1/auth/sessions', { headers: { 'X-Lumo-Session': token } })
+    return body.sessions ?? []
+  }
+
+  async securityEvents(token: string): Promise<AuthSecurityEvent[]> {
+    const body = await this.json<{ events?: AuthSecurityEvent[] }>('/v1/auth/security-events', { headers: { 'X-Lumo-Session': token } })
+    return body.events ?? []
+  }
+
+  async mfaStatus(token: string): Promise<MFAStatus> {
+    return this.json<MFAStatus>('/v1/auth/mfa', { headers: { 'X-Lumo-Session': token } })
+  }
+
+  async beginTOTPEnrollment(token: string): Promise<TOTPEnrollment> {
+    return this.json<TOTPEnrollment>('/v1/auth/mfa/enroll', { method: 'POST', headers: { 'X-Lumo-Session': token } })
+  }
+
+  async confirmTOTPEnrollment(token: string, code: string): Promise<MFAStatus> {
+    return this.json<MFAStatus>('/v1/auth/mfa/confirm', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Lumo-Session': token }, body: JSON.stringify({ code }) })
+  }
+
+  async disableTOTP(token: string, code: string): Promise<void> {
+    await this.call('/v1/auth/mfa', { method: 'DELETE', headers: { 'Content-Type': 'application/json', 'X-Lumo-Session': token }, body: JSON.stringify({ code }) })
+  }
+
+  async passkeys(token: string): Promise<PasskeyStatus> {
+    return this.json<PasskeyStatus>('/v1/auth/passkeys', { headers: { 'X-Lumo-Session': token } })
+  }
+
+  async beginPasskeyRegistration(token: string): Promise<WebAuthnPublicKeyOptions> {
+    const body = await this.json<{ public_key: WebAuthnPublicKeyOptions }>('/v1/auth/passkeys/register/options', { method: 'POST', headers: { 'X-Lumo-Session': token } })
+    return body.public_key
+  }
+
+  async completePasskeyRegistration(token: string, input: Record<string, string>): Promise<PasskeyCredential> {
+    return this.json<PasskeyCredential>('/v1/auth/passkeys/register', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Lumo-Session': token }, body: JSON.stringify(input) })
+  }
+
+  async deletePasskey(token: string, credentialID: string): Promise<void> {
+    await this.call(`/v1/auth/passkeys/${encodeURIComponent(credentialID)}`, { method: 'DELETE', headers: { 'X-Lumo-Session': token } })
+  }
+
+  async revokeSession(token: string, sessionID: string): Promise<void> {
+    await this.call(`/v1/auth/sessions/${encodeURIComponent(sessionID)}`, { method: 'DELETE', headers: { 'X-Lumo-Session': token } })
+  }
+
+  async revokeOtherSessions(token: string): Promise<number> {
+    const body = await this.json<{ revoked?: number }>('/v1/auth/sessions/revoke-others', { method: 'POST', headers: { 'X-Lumo-Session': token } })
+    return body.revoked ?? 0
   }
 
   async changePassword(token: string, currentPassword: string, newPassword: string): Promise<void> {

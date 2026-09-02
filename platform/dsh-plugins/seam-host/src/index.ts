@@ -14,10 +14,14 @@
  */
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type { Server } from 'node:http'
 import { isIP } from 'node:net'
 
 import { createSeamHost } from './server.ts'
+import {
+  assertIdentityAssertionConfig,
+  SEAM_IDENTITY_AUDIENCE,
+} from '../../../shared/seam-contracts/identity.ts'
+import { ReloadingMutualTLSCredentials, type MutualTLSFileConfig } from '../../../shared/seam-contracts/mtls.ts'
 
 export interface SeamHostConfig {
   /** 监听地址。默认回环 —— 对外暴露必须是显式动作 */
@@ -27,6 +31,10 @@ export interface SeamHostConfig {
   maxBodyBytes?: number
   /** realm → 共享令牌。缺省即无认证，此时只允许绑回环 */
   tokens?: Record<string, string>
+  /** 与 seam-proxy 配对的短时身份声明密钥；启用后拒绝普通身份头。 */
+  identityAssertionSecret?: string
+  /** CA、节点证书和私钥的绝对 PEM 文件路径；启用后 listener 强制校验客户端证书。 */
+  tls?: MutualTLSFileConfig
   /** 显式承认「本端口无认证」。绑非回环地址时该开关无效（见下） */
   allowAnonymous?: boolean
 }
@@ -37,6 +45,14 @@ export const Config: z<SeamHostConfig> = z.object({
   port: z.number(),
   maxBodyBytes: z.number(),
   tokens: z.dict(z.string()),
+  identityAssertionSecret: z.string(),
+  tls: z.object({
+    caFile: z.string().required(),
+    certFile: z.string().required(),
+    keyFile: z.string().required(),
+    serverName: z.string(),
+    reloadIntervalMs: z.number(),
+  }),
   allowAnonymous: z.boolean(),
 })
 
@@ -46,8 +62,15 @@ export function apply(ctx: Context, config: SeamHostConfig): void {
   const host = config.host ?? '127.0.0.1'
   const port = config.port ?? 8090
   const tokens = new Map(Object.entries(config.tokens ?? {}))
+  const identityAssertionSecret = config.identityAssertionSecret || undefined
+  if (identityAssertionSecret !== undefined) {
+    assertIdentityAssertionConfig({ audience: SEAM_IDENTITY_AUDIENCE, secret: identityAssertionSecret })
+  }
+  // 初始化阶段先打开一次，坏的 Secret volume 不能让 listener 以半配置状态启动。
+  // 后续更新则由 reloader 保留最后一套可用凭据，直到新的完整 bundle 到位。
+  const tlsReloader = config.tls === undefined ? undefined : new ReloadingMutualTLSCredentials(config.tls)
 
-  if (tokens.size === 0) {
+  if (tokens.size === 0 && identityAssertionSecret === undefined) {
     // 无认证 + 非回环 = 把跨租户读取开放给整个网络。这不是「配置不当」，
     // 是一个不该存在的形态，因此在启动期就否掉，而不是留个告警等人忽略。
     if (!isLoopback(host)) {
@@ -65,11 +88,13 @@ export function apply(ctx: Context, config: SeamHostConfig): void {
     ctx.logger.warn('seam-host: 无认证模式，仅限回环 %s:%d —— 任何本机进程可以任意 realm 身份调用', host, port)
   }
 
-  const server: Server = createSeamHost({
+  const server = createSeamHost({
     host,
     port,
     maxBodyBytes: config.maxBodyBytes ?? DEFAULT_MAX_BODY,
     tokens,
+    identityAssertionSecret,
+    tls: config.tls,
     // 惰性解析：Provider 可能比 host 晚挂载；缺失时按 capability_unavailable 拒绝，
     // 而不是让 host 起不来 —— 一个只提供图能力的节点也该能正常服务
     resolveKnowledge: () => ctx.get('knowledge'),
@@ -82,15 +107,34 @@ export function apply(ctx: Context, config: SeamHostConfig): void {
   })
 
   ctx.effect(() => {
+    const rotationTimer = tlsReloader === undefined ? undefined : setInterval(() => {
+      try {
+        const credentials = tlsReloader.get()
+        if (tlsReloader.lastReloadError !== undefined) {
+          ctx.logger.error('seam-host: mTLS Secret 轮换未生效，继续使用上一套证书: %s', tlsReloader.lastReloadError)
+          return
+        }
+        if ('setSecureContext' in server) {
+          const { serverName: _serverName, ...context } = credentials
+          server.setSecureContext({ ...context, minVersion: 'TLSv1.2' })
+        }
+      } catch (e) {
+        ctx.logger.error('seam-host: mTLS 证书上下文轮换失败，继续使用上一套证书: %s', e)
+      }
+    }, config.tls?.reloadIntervalMs ?? 30_000)
     server.on('error', (e: unknown) => {
       // 端口占用等致命错误：必须响亮，否则节点看着活着却没有对外能力
       ctx.logger.error('seam-host: 监听 %s:%d 失败: %s', host, port, e)
     })
     server.listen(port, host, () => {
-      ctx.logger.info('seam-host: 监听 %s:%d（认证=%s）', host, port,
-        tokens.size > 0 ? `tokens[${[...tokens.keys()].join(',')}]` : 'anonymous')
+      const authentication = identityAssertionSecret !== undefined
+        ? `signed-identity${tokens.size > 0 ? ` + tokens[${[...tokens.keys()].join(',')}]` : ''}`
+        : tokens.size > 0 ? `tokens[${[...tokens.keys()].join(',')}]` : 'anonymous'
+      ctx.logger.info('seam-host: 监听 %s:%d（认证=%s，传输=%s）', host, port, authentication,
+        config.tls === undefined ? 'http-compat' : 'mTLS')
     })
     return () => {
+      if (rotationTimer !== undefined) clearInterval(rotationTimer)
       server.closeAllConnections?.()
       server.close()
     }
@@ -109,4 +153,3 @@ function isLoopback(host: string): boolean {
   if (isIP(h) === 4) return h.startsWith('127.')
   return false
 }
-

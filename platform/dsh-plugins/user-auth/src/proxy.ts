@@ -285,6 +285,22 @@ function loginState(url: URL): LoginPageOptions['state'] {
   return state === 'invalid' || state === 'locked' || state === 'expired' || state === 'unavailable' || state === 'password-changed' ? state : undefined
 }
 
+function stringFields(body: Record<string, unknown>, fields: readonly string[]): Record<string, string> | undefined {
+  const result: Record<string, string> = {}
+  for (const field of fields) {
+    if (typeof body[field] !== 'string') return undefined
+    result[field] = body[field] as string
+  }
+  return result
+}
+
+function sessionCookie(result: { token: string; expires_at: string }, options: AuthProxyOptions): string {
+  return authCookie(SESSION_COOKIE, result.token, {
+    secure: options.secureCookie,
+    maxAge: Math.max(1, Math.floor((Date.parse(result.expires_at) - Date.now()) / 1000)),
+  })
+}
+
 export function createAuthProxy(options: AuthProxyOptions): Server {
   const sessions = new SessionCache(options.client)
   const server = createServer((req, res) => {
@@ -331,6 +347,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
             captchaId: requestCookies.get(CAPTCHA_COOKIE) ?? '',
             captchaCode: form.get('captcha') ?? '',
             clientIp: sourceIp(req),
+			mfaCode: form.get('mfa') ?? '',
           })
           sessions.set(result.token, result.principal)
           redirect(res, '/', { 'Set-Cookie': [
@@ -344,6 +361,39 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
             ...(error instanceof GovernanceApiError && error.retryAfter > 0 ? { 'Retry-After': String(error.retryAfter) } : {}),
             'Set-Cookie': authCookie(CAPTCHA_COOKIE, '', { secure: options.secureCookie, maxAge: 0 }),
           })
+        }
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/auth/passkey/login/options') {
+        let body: Record<string, unknown>
+        try { body = await readJson(req) } catch { writeJson(res, 400, { error: 'invalid_passkey_request' }); return }
+        const values = stringFields(body, ['username', 'captcha_code'])
+        if (values === undefined) { writeJson(res, 422, { error: 'invalid_passkey_request' }); return }
+        try {
+          writeJson(res, 200, { public_key: await options.client.beginPasskeyLogin({
+            realm: options.realm, username: values['username']!, captchaId: requestCookies.get(CAPTCHA_COOKIE) ?? '', captchaCode: values['captcha_code']!, clientIp: sourceIp(req),
+          }) }, { 'Set-Cookie': authCookie(CAPTCHA_COOKIE, '', { secure: options.secureCookie, maxAge: 0 }) })
+        } catch (error) {
+          if (!(error instanceof GovernanceApiError)) throw error
+          writeJson(res, error.status, { error: error.code, message: error.message }, {
+            ...(error.retryAfter > 0 ? { 'Retry-After': String(error.retryAfter) } : {}),
+            'Set-Cookie': authCookie(CAPTCHA_COOKIE, '', { secure: options.secureCookie, maxAge: 0 }),
+          })
+        }
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/auth/passkey/login') {
+        let body: Record<string, unknown>
+        try { body = await readJson(req) } catch { writeJson(res, 400, { error: 'invalid_passkey_request' }); return }
+        const values = stringFields(body, ['challenge', 'id', 'raw_id', 'type', 'client_data_json', 'authenticator_data', 'signature'])
+        if (values === undefined) { writeJson(res, 422, { error: 'invalid_passkey_request' }); return }
+        try {
+          const result = await options.client.completePasskeyLogin(values, sourceIp(req))
+          sessions.set(result.token, result.principal)
+          writeJson(res, 200, { authenticated: true }, { 'Set-Cookie': sessionCookie(result, options) })
+        } catch (error) {
+          if (!(error instanceof GovernanceApiError)) throw error
+          writeJson(res, error.status, { error: error.code, message: error.message })
         }
         return
       }
@@ -361,6 +411,128 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
           roles: principal.roles, department: principal.primary_dept_id ?? '', clientIp: sourceIp(req),
           captchaMode: 'always',
         })
+        return
+      }
+      if (req.method === 'GET' && url.pathname === '/auth/account/sessions') {
+        try {
+          writeJson(res, 200, { sessions: await options.client.sessions(sessionToken ?? '') })
+        } catch (error) {
+          if (!(error instanceof GovernanceApiError)) throw error
+          writeJson(res, error.status, { error: error.code, message: error.message })
+        }
+        return
+      }
+      if (req.method === 'GET' && url.pathname === '/auth/account/security-events') {
+        try {
+          writeJson(res, 200, { events: await options.client.securityEvents(sessionToken ?? '') })
+        } catch (error) {
+          if (!(error instanceof GovernanceApiError)) throw error
+          writeJson(res, error.status, { error: error.code, message: error.message })
+        }
+        return
+      }
+      if (req.method === 'GET' && url.pathname === '/auth/account/mfa') {
+        try {
+          writeJson(res, 200, await options.client.mfaStatus(sessionToken ?? ''))
+        } catch (error) {
+          if (!(error instanceof GovernanceApiError)) throw error
+          writeJson(res, error.status, { error: error.code, message: error.message })
+        }
+        return
+      }
+      if (req.method === 'GET' && url.pathname === '/auth/account/passkeys') {
+        try { writeJson(res, 200, await options.client.passkeys(sessionToken ?? '')) } catch (error) {
+          if (!(error instanceof GovernanceApiError)) throw error
+          writeJson(res, error.status, { error: error.code, message: error.message })
+        }
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/auth/account/passkeys/register/options') {
+        if (req.headers['x-lumo-auth-request'] !== '1') { writeJson(res, 403, { error: 'auth_request_header_required' }); return }
+        try { writeJson(res, 200, { public_key: await options.client.beginPasskeyRegistration(sessionToken ?? '') }) } catch (error) {
+          if (!(error instanceof GovernanceApiError)) throw error
+          writeJson(res, error.status, { error: error.code, message: error.message })
+        }
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/auth/account/passkeys/register') {
+        if (req.headers['x-lumo-auth-request'] !== '1') { writeJson(res, 403, { error: 'auth_request_header_required' }); return }
+        let body: Record<string, unknown>
+        try { body = await readJson(req) } catch { writeJson(res, 400, { error: 'invalid_passkey_request' }); return }
+        const values = stringFields(body, ['challenge', 'id', 'raw_id', 'type', 'client_data_json', 'attestation_object', 'label'])
+        if (values === undefined) { writeJson(res, 422, { error: 'invalid_passkey_request' }); return }
+        try { writeJson(res, 201, await options.client.completePasskeyRegistration(sessionToken ?? '', values)) } catch (error) {
+          if (!(error instanceof GovernanceApiError)) throw error
+          writeJson(res, error.status, { error: error.code, message: error.message })
+        }
+        return
+      }
+      const passkeyMatch = url.pathname.match(/^\/auth\/account\/passkeys\/([^/]+)$/u)
+      if (req.method === 'DELETE' && passkeyMatch !== null) {
+        if (req.headers['x-lumo-auth-request'] !== '1') { writeJson(res, 403, { error: 'auth_request_header_required' }); return }
+        let credentialID: string
+        try { credentialID = decodeURIComponent(passkeyMatch[1]!) } catch { writeJson(res, 400, { error: 'invalid_passkey_id' }); return }
+        if (!/^[A-Za-z0-9_-]{16,2048}$/u.test(credentialID)) { writeJson(res, 400, { error: 'invalid_passkey_id' }); return }
+        try { await options.client.deletePasskey(sessionToken ?? '', credentialID); writeJson(res, 204) } catch (error) {
+          if (!(error instanceof GovernanceApiError)) throw error
+          writeJson(res, error.status, { error: error.code, message: error.message })
+        }
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/auth/account/mfa/enroll') {
+        if (req.headers['x-lumo-auth-request'] !== '1') { writeJson(res, 403, { error: 'auth_request_header_required' }); return }
+        try {
+          writeJson(res, 201, await options.client.beginTOTPEnrollment(sessionToken ?? ''))
+        } catch (error) {
+          if (!(error instanceof GovernanceApiError)) throw error
+          writeJson(res, error.status, { error: error.code, message: error.message })
+        }
+        return
+      }
+      if ((req.method === 'POST' && url.pathname === '/auth/account/mfa/confirm') || (req.method === 'DELETE' && url.pathname === '/auth/account/mfa')) {
+        if (req.headers['x-lumo-auth-request'] !== '1') { writeJson(res, 403, { error: 'auth_request_header_required' }); return }
+        let body: Record<string, unknown>
+        try { body = await readJson(req) } catch { writeJson(res, 400, { error: 'invalid_mfa_request' }); return }
+        if (typeof body['code'] !== 'string') { writeJson(res, 422, { error: 'invalid_mfa_request' }); return }
+        try {
+          if (req.method === 'POST') writeJson(res, 200, await options.client.confirmTOTPEnrollment(sessionToken ?? '', body['code']))
+          else { await options.client.disableTOTP(sessionToken ?? '', body['code']); writeJson(res, 204) }
+        } catch (error) {
+          if (!(error instanceof GovernanceApiError)) throw error
+          writeJson(res, error.status, { error: error.code, message: error.message })
+        }
+        return
+      }
+      const sessionMatch = url.pathname.match(/^\/auth\/account\/sessions\/([^/]+)$/u)
+      if (req.method === 'DELETE' && sessionMatch !== null) {
+        if (req.headers['x-lumo-auth-request'] !== '1') { writeJson(res, 403, { error: 'auth_request_header_required' }); return }
+        let sessionID: string
+        try { sessionID = decodeURIComponent(sessionMatch[1]!) } catch { writeJson(res, 400, { error: 'invalid_session_id' }); return }
+        if (!/^[A-Za-z0-9._-]{1,128}$/u.test(sessionID)) { writeJson(res, 400, { error: 'invalid_session_id' }); return }
+        try {
+          const current = (await options.client.sessions(sessionToken ?? '')).find(session => session.id === sessionID)?.current ?? false
+          await options.client.revokeSession(sessionToken ?? '', sessionID)
+          if (current) {
+            sessions.delete(sessionToken)
+            writeJson(res, 204, undefined, { 'Set-Cookie': authCookie(SESSION_COOKIE, '', { secure: options.secureCookie, maxAge: 0 }) })
+            return
+          }
+        } catch (error) {
+          if (!(error instanceof GovernanceApiError)) throw error
+          writeJson(res, error.status, { error: error.code, message: error.message })
+          return
+        }
+        writeJson(res, 204)
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/auth/account/sessions/revoke-others') {
+        if (req.headers['x-lumo-auth-request'] !== '1') { writeJson(res, 403, { error: 'auth_request_header_required' }); return }
+        try {
+          writeJson(res, 200, { revoked: await options.client.revokeOtherSessions(sessionToken ?? '') })
+        } catch (error) {
+          if (!(error instanceof GovernanceApiError)) throw error
+          writeJson(res, error.status, { error: error.code, message: error.message })
+        }
         return
       }
       if (req.method === 'POST' && url.pathname === '/auth/logout') {

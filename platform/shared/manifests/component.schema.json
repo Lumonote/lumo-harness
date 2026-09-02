@@ -35,6 +35,21 @@
         }
       }
     },
-    "payload_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+    "payload_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "runtime": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "entrypoint"],
+      "properties": {
+        "type": { "const": "process" },
+        "entrypoint": {
+          "type": "string", "minLength": 1, "maxLength": 256,
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        },
+        "args": {
+          "type": "array", "maxItems": 32,
+          "items": { "type": "string", "maxLength": 4096 }
+        }
+      }
+    }
   }
 }

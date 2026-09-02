@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { SessionEventLike } from '../../../shared/seam-contracts/provenance.ts'
+import { adjudicateCall, type SessionEventLike } from '../../../shared/seam-contracts/provenance.ts'
 import { ProvenanceClassifier } from '../src/classify.ts'
 import { computeTaint, currentTurn } from '../src/taint.ts'
 
@@ -30,9 +30,10 @@ describe('currentTurn —— 用 dsh 原生 turn 标记', () => {
 })
 
 describe('computeTaint —— 污点是日志的纯函数', () => {
-  it('干净 turn：基线为 user', () => {
+  it('工作区读取置 external 污点，不能把被投毒仓库当平台受控数据', () => {
     const taint = computeTaint([turnStart(1), call(1, 'grep')], classifier)
-    expect(taint).toEqual({ turn: 1, level: 'internal', sources: [] })
+    expect(taint).toEqual({ turn: 1, level: 'external', sources: ['grep'] })
+    expect(adjudicateCall(taint, 'write-external', false).action).toBe('require-confirmation')
   })
 
   it('场景 2：knowledge_query 置污点，并记下来源', () => {
@@ -44,15 +45,15 @@ describe('computeTaint —— 污点是日志的纯函数', () => {
   it('场景 3：封闭是 turn 级——下一 turn 重新干净', () => {
     const events = [
       turnStart(1), call(1, 'knowledge_query'), turnEnd(1),
-      turnStart(2), call(2, 'grep'),
+      turnStart(2),
     ]
     const taint = computeTaint(events, classifier)
     expect(taint.turn).toBe(2)
-    expect(taint.level).toBe('internal')
+    expect(taint.level).toBe('user')
     expect(taint.sources).toEqual([])
   })
 
-  it('场景 8：污点单调——external 之后的 internal 调用不降级', () => {
+  it('场景 8：污点单调——external 之后的工作区调用不降级', () => {
     const events = [turnStart(1), call(1, 'knowledge_query'), call(1, 'grep')]
     expect(computeTaint(events, classifier).level).toBe('external')
   })

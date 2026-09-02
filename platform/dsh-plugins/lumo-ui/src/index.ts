@@ -3,14 +3,47 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type { SessionLogQuerySeam } from '../../../shared/seam-contracts/session-query.ts'
 
 import { assertIdentityConfiguration, IdentityAssertionError, resolveRequestIdentity, type RequestIdentity } from './identity.ts'
 import { lumoBootThemeInjection } from './boot-theme.ts'
+import { registerDesktopHandoff } from './desktop-handoff.ts'
+
+/** Read-only structural projection of the session-query seam. Keeping the
+ * host plugin's build boundary local avoids pulling the platform contract
+ * implementation (and its transitive runtime modules) into this UI package. */
+interface SessionLogQuerySeam {
+  queryWithStaleness(sessionRef: string, options?: { readonly liveHead?: number; readonly maxLag?: number }): Promise<
+    | { readonly kind: 'fresh'; readonly records: readonly unknown[] }
+    | { readonly kind: 'stale'; readonly reason: string; readonly replicaHead: number; readonly liveHead: number; readonly lag: number }
+  >
+}
 
 /** Read-only browser projection of the platform KnowledgeSeam. */
 interface KnowledgeQueryService {
   query(request: { realm: string; roles: string[]; text: string; topK: number; scope: 'published' | 'draft' }): Promise<Array<{ docId: string; sourceVersion: number; score: number; text: string }>>
+}
+
+/** 管理面需要的最小来源能力。它保持为运行时检测的可选扩展：Milvus
+ * 只保存向量投影，不能被 UI 误当成源内容的权威存储。 */
+interface KnowledgeSourceManagerService {
+  listSources(realm: string): Promise<Array<{
+    docId: string; realm: string; space: string; title: string; sourceVersion: number
+    embeddingModel: string; chunkCount: number; updatedAt: string
+  }>>
+  getSource(docId: string, realm: string): Promise<{
+    doc: { docId: string; realm: string; space: string; title: string; sourceVersion: number; embeddingModel: string }
+    chunks: Array<{ text: string; metadata: Record<string, unknown> }>
+  } | undefined>
+  upsertSource(entry: {
+    docId: string; realm: string; space: string; title: string
+    chunks: Array<{ text: string; metadata: Record<string, unknown> }>
+    expectedSourceVersion?: number
+  }): Promise<{
+    docId: string; realm: string; space: string; title: string; sourceVersion: number
+    embeddingModel: string; chunkCount: number; updatedAt: string
+  }>
+  removeSource(docId: string, realm: string, expectedSourceVersion: number): Promise<void>
+  rebuild(realm: string): Promise<void>
 }
 
 /** Human-safe projection of the DSH SkillRegistry; bodies and paths stay host-side. */
@@ -37,6 +70,7 @@ export interface Config {
   flowsUrl: string
   connectorUrl: string
   governanceUrl: string
+  registryUrl: string
   realm: string
   userId: string
   roles: string[]
@@ -50,10 +84,12 @@ export interface Config {
   middleware: string[]
   clusterStatus: string
   plugins: PluginSummary[]
+  /** 桌面壳指定的握手文件：装配完成后写入带 token 的 Web 入口；空串表示不是桌面形态。 */
+  desktopHandoffFile: string
 }
 
 export const Config: z<Config> = z.object({
-  schedulerUrl: z.string(), projectsUrl: z.string(), flowsUrl: z.string(), connectorUrl: z.string(), governanceUrl: z.string(),
+  schedulerUrl: z.string(), projectsUrl: z.string(), flowsUrl: z.string(), connectorUrl: z.string(), governanceUrl: z.string(), registryUrl: z.string().default(''),
   realm: z.string(), userId: z.string(), roles: z.array(z.string()), projectId: z.string(), deptId: z.string(), controlPlaneToken: z.string(), identityAssertionSecret: z.string().default(''),
   timeoutMs: z.number().default(5000),
   deploymentMode: z.union(['local', 'standalone', 'cluster'] as const).default('standalone'),
@@ -65,9 +101,10 @@ export const Config: z<Config> = z.object({
     surface: z.union(['knowledge', 'skills', 'connectors', 'operations', 'account', 'market'] as const),
     kind: z.union(['runtime', 'governance'] as const),
   })).default([]),
+  desktopHandoffFile: z.string().default(''),
 })
 
-type ServiceName = 'scheduler' | 'projects' | 'flows' | 'connector' | 'governance'
+type ServiceName = 'scheduler' | 'projects' | 'flows' | 'connector' | 'governance' | 'registry'
 interface UpstreamResult { ok: boolean; status: number; data: unknown; error?: string }
 
 interface PluginSummary {
@@ -79,7 +116,14 @@ interface PluginSummary {
 }
 
 function base(config: Config, service: ServiceName): string {
-  return { scheduler: config.schedulerUrl, projects: config.projectsUrl, flows: config.flowsUrl, connector: config.connectorUrl, governance: config.governanceUrl }[service].replace(/\/+$/u, '')
+  return {
+    scheduler: config.schedulerUrl,
+    projects: config.projectsUrl,
+    flows: config.flowsUrl,
+    connector: config.connectorUrl,
+    governance: config.governanceUrl,
+    registry: config.registryUrl,
+  }[service].replace(/\/+$/u, '')
 }
 
 function identityHeaders(config: Config, identity: RequestIdentity): Record<string, string> {
@@ -99,11 +143,13 @@ async function upstream(config: Config, identity: RequestIdentity, service: Serv
     ...(body === undefined ? {} : { 'content-type': req.headers['content-type']?.toString() || 'application/json' }),
   }
   try {
+    const serviceBase = base(config, service)
+    if (serviceBase === '') return { ok: false, status: 503, data: { error: `${service} 服务未配置` }, error: 'upstream_not_configured' }
     const init: RequestInit = { method, headers, signal: AbortSignal.timeout(config.timeoutMs) }
     // The browser-facing routes accept JSON only. Converting the bounded Buffer
     // to text avoids coupling Node's Buffer type to the DOM fetch BodyInit.
     if (body !== undefined) init.body = body.toString('utf8')
-    const response = await fetch(`${base(config, service)}${path}`, init)
+    const response = await fetch(`${serviceBase}${path}`, init)
     const text = await response.text()
     let data: unknown = null
     try { data = text === '' ? null : JSON.parse(text) } catch { data = text }
@@ -194,6 +240,89 @@ function safeID(value: string | undefined): string | undefined {
   return value
 }
 
+function isRealmAdmin(identity: RequestIdentity): boolean {
+  return identity.roles.some(role => role === 'platform_admin' || role === 'realm_admin' || role === 'admin')
+}
+
+function sourceManager(knowledge: KnowledgeQueryService | undefined): KnowledgeSourceManagerService | undefined {
+  if (knowledge === undefined || typeof knowledge !== 'object') return undefined
+  const candidate = knowledge as Partial<KnowledgeSourceManagerService>
+  return typeof candidate.listSources === 'function'
+    && typeof candidate.getSource === 'function'
+    && typeof candidate.upsertSource === 'function'
+    && typeof candidate.removeSource === 'function'
+    && typeof candidate.rebuild === 'function'
+    ? candidate as KnowledgeSourceManagerService
+    : undefined
+}
+
+function requireKnowledgeAdmin(res: ServerResponse, identity: RequestIdentity, knowledge: KnowledgeQueryService | undefined): KnowledgeSourceManagerService | undefined {
+  if (!isRealmAdmin(identity)) {
+    writeJson(res, 403, { error: 'knowledge source management requires realm_admin, platform_admin, or admin' })
+    return undefined
+  }
+  const manager = sourceManager(knowledge)
+  if (manager === undefined) {
+    writeJson(res, 501, { error: 'knowledge source management is unavailable for the configured vector provider' })
+    return undefined
+  }
+  return manager
+}
+
+function requiredText(body: Record<string, unknown>, field: string, maxBytes: number): string {
+  const value = body[field]
+  if (typeof value !== 'string' || value.trim() === '' || Buffer.byteLength(value, 'utf8') > maxBytes) {
+    throw new TypeError(`${field} must be a non-empty string up to ${maxBytes} bytes`)
+  }
+  return value.trim()
+}
+
+function sourceChunks(body: Record<string, unknown>): Array<{ text: string; metadata: Record<string, unknown> }> {
+  const value = body['chunks']
+  if (!Array.isArray(value) || value.length === 0 || value.length > 500) throw new TypeError('chunks must contain 1 to 500 entries')
+  return value.map((chunk, index) => {
+    if (typeof chunk !== 'object' || chunk === null || Array.isArray(chunk)) throw new TypeError(`chunks[${index}] must be an object`)
+    const record = chunk as Record<string, unknown>
+    const text = requiredText(record, 'text', 64 * 1024)
+    const metadata = record['metadata']
+    if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) throw new TypeError(`chunks[${index}].metadata must be an object`)
+    return { text, metadata: metadata as Record<string, unknown> }
+  })
+}
+
+function expectedSourceVersion(value: unknown, required: boolean): number | undefined {
+  if (value === undefined && !required) return undefined
+  if (!Number.isSafeInteger(value) || (value as number) < 1) throw new TypeError('expectedSourceVersion must be a positive integer')
+  return value as number
+}
+
+function sourceWrite(body: Record<string, unknown>, realm: string, docId?: string, requireExpectedVersion = false): {
+  docId: string; realm: string; space: string; title: string
+  chunks: Array<{ text: string; metadata: Record<string, unknown> }>
+  expectedSourceVersion?: number
+} {
+  const resolvedDocID = docId ?? safeID(typeof body['docId'] === 'string' ? body['docId'] : undefined)
+  if (resolvedDocID === undefined) throw new TypeError('docId is invalid')
+  const space = safeID(typeof body['space'] === 'string' ? body['space'] : undefined)
+  if (space === undefined) throw new TypeError('space is invalid')
+  const expected = expectedSourceVersion(body['expectedSourceVersion'], requireExpectedVersion)
+  return {
+    docId: resolvedDocID,
+    realm,
+    space,
+    title: requiredText(body, 'title', 512),
+    chunks: sourceChunks(body),
+    ...(expected === undefined ? {} : { expectedSourceVersion: expected }),
+  }
+}
+
+function knowledgeManagementStatus(error: unknown): number {
+  if (error instanceof RangeError) return 413
+  if (error instanceof SyntaxError || error instanceof TypeError) return 400
+  if (error instanceof Error && error.name === 'KnowledgeSourceConflictError') return 409
+  return 502
+}
+
 function writeUpstream(res: ServerResponse, result: UpstreamResult): void {
   if (result.ok) { writeJson(res, result.status, result.data); return }
   const upstreamError = typeof result.data === 'object' && result.data !== null ? result.data : undefined
@@ -232,7 +361,7 @@ async function ensureFreshReportEvidence(query: SessionLogQuerySeam | undefined,
   if (liveHead !== undefined && (!Number.isSafeInteger(liveHead) || liveHead < 0)) return { ok: false, status: 400, body: { error: 'live_head must be a non-negative integer' } }
   for (const sessionRef of refs) {
     try {
-      const envelope = await query.queryWithStaleness(sessionRef, { liveHead, maxLag: 8 })
+      const envelope = await query.queryWithStaleness(sessionRef, { ...(liveHead === undefined ? {} : { liveHead }), maxLag: 8 })
       if (envelope.kind === 'stale') return { ok: false, status: 503, body: { stale: true, reason: envelope.reason, replica_head: envelope.replicaHead, live_head: envelope.liveHead, lag: envelope.lag, message: 'session log replication is stale; report was not persisted' } }
     } catch (error) {
       return { ok: false, status: 503, body: { stale: true, reason: 'replication-lag', message: error instanceof Error ? error.message : 'session log query failed' } }
@@ -241,7 +370,7 @@ async function ensureFreshReportEvidence(query: SessionLogQuerySeam | undefined,
   return { ok: true }
 }
 
-async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, req: IncomingMessage, res: ServerResponse): Promise<void> {
+export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const pathname = new URL(req.url ?? '/', 'http://lumo.local').pathname
   let identity: RequestIdentity
   try {
@@ -252,6 +381,77 @@ async function api(config: Config, knowledge: KnowledgeQueryService | undefined,
     return
   }
   if (req.method === 'GET' && pathname === '/lumo/api/overview') { writeJson(res, 200, await overview(config, identity, req)); return }
+
+  if (req.method === 'GET' && pathname === '/lumo/api/registry/artifacts') {
+    if (config.deploymentMode === 'local') {
+      writeJson(res, 501, { error: '本地单机没有已连接的制品注册表；只能显示运行时配置，不能声明可发现制品。' })
+      return
+    }
+    const query = new URL(req.url ?? '/', 'http://lumo.local').search
+    writeUpstream(res, await upstream(config, identity, 'registry', `/v1/artifacts${query}`, req))
+    return
+  }
+  const registryArtifact = pathname.match(/^\/lumo\/api\/registry\/artifacts\/([^/]+)$/u)
+  if (req.method === 'GET' && registryArtifact !== null) {
+    if (config.deploymentMode === 'local') {
+      writeJson(res, 501, { error: '本地单机没有已连接的制品注册表，无法读取历史已发布版本。' })
+      return
+    }
+    const artifactName = safeID(registryArtifact[1])
+    if (artifactName === undefined) { writeJson(res, 400, { error: 'invalid artifact id' }); return }
+    writeUpstream(res, await upstream(config, identity, 'registry', `/v1/artifacts/${encodeURIComponent(artifactName)}`, req))
+    return
+  }
+  if (req.method === 'GET' && pathname === '/lumo/api/registry/installations') {
+    if (config.deploymentMode === 'local') {
+      writeJson(res, 501, { error: '本地单机没有 Provisioner 节点回报；不能声明制品已经部署。' })
+      return
+    }
+    const query = new URL(req.url ?? '/', 'http://lumo.local').search
+    writeUpstream(res, await upstream(config, identity, 'registry', `/v1/installations${query}`, req))
+    return
+  }
+  const rollout = pathname.match(/^\/lumo\/api\/registry\/rollouts(?:\/([^/]+))?$/u)
+  if (rollout !== null) {
+    if (config.deploymentMode === 'local') {
+      writeJson(res, 501, { error: '本地单机没有已连接的制品注册表，无法读取或更新部署期望状态。' })
+      return
+    }
+    if (req.method === 'GET' && rollout[1] === undefined) {
+      writeUpstream(res, await upstream(config, identity, 'registry', '/v1/rollouts/stable', req))
+      return
+    }
+    const artifactName = rollout[1] === undefined ? undefined : safeID(rollout[1])
+    if (req.method === 'GET' && artifactName !== undefined) {
+      const nodeID = new URL(req.url ?? '/', 'http://lumo.local').searchParams.get('node_id')
+      if (nodeID !== null && safeID(nodeID) === undefined) { writeJson(res, 400, { error: 'invalid node id' }); return }
+      const query = nodeID === null ? '' : `?node_id=${encodeURIComponent(nodeID)}`
+      writeUpstream(res, await upstream(config, identity, 'registry', `/v1/rollouts/stable/${encodeURIComponent(artifactName)}${query}`, req))
+      return
+    }
+    if (req.method === 'PUT' && artifactName !== undefined) {
+      try {
+        writeUpstream(res, await upstream(config, identity, 'registry', `/v1/rollouts/stable/${encodeURIComponent(artifactName)}`, req, 'PUT', await readBody(req)))
+      } catch (error) {
+        writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' })
+      }
+      return
+    }
+    writeJson(res, artifactName === undefined ? 400 : 405, { error: artifactName === undefined ? 'invalid artifact id' : 'method not allowed' })
+    return
+  }
+  if (req.method === 'POST' && pathname === '/lumo/api/registry/plan') {
+    if (config.deploymentMode === 'local') {
+      writeJson(res, 501, { error: '本地单机没有已连接的制品注册表，无法生成签名安装计划。' })
+      return
+    }
+    try {
+      writeUpstream(res, await upstream(config, identity, 'registry', '/v1/plan', req, 'POST', await readBody(req)))
+    } catch (error) {
+      writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' })
+    }
+    return
+  }
 
   const placement = pathname.match(/^\/lumo\/api\/scheduler\/placements(?:\/([^/]+))?$/u)
   if (placement !== null) {
@@ -290,6 +490,81 @@ async function api(config: Config, knowledge: KnowledgeQueryService | undefined,
     return
   }
 
+  // 来源内容是源真相，读取和写入都只给 realm 管理员。不能把 query 的
+  // `allowedRoles` 当成来源编辑授权：检索角色与资料治理角色是不同边界。
+  if (req.method === 'GET' && pathname === '/lumo/api/knowledge/sources') {
+    const manager = requireKnowledgeAdmin(res, identity, knowledge)
+    if (manager === undefined) return
+    try {
+      const sources = await manager.listSources(identity.realm)
+      writeJson(res, 200, { realm: identity.realm, state: 'synchronized', sources })
+    } catch (error) {
+      writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : 'knowledge sources unavailable' })
+    }
+    return
+  }
+
+  if (req.method === 'POST' && pathname === '/lumo/api/knowledge/rebuild') {
+    const manager = requireKnowledgeAdmin(res, identity, knowledge)
+    if (manager === undefined) return
+    try {
+      await manager.rebuild(identity.realm)
+      writeJson(res, 200, { realm: identity.realm, state: 'synchronized' })
+    } catch (error) {
+      writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : 'knowledge rebuild failed' })
+    }
+    return
+  }
+
+  if (req.method === 'POST' && pathname === '/lumo/api/knowledge/sources') {
+    const manager = requireKnowledgeAdmin(res, identity, knowledge)
+    if (manager === undefined) return
+    try {
+      const summary = await manager.upsertSource(sourceWrite(await readJson(req), identity.realm))
+      writeJson(res, 201, { source: summary, state: 'synchronized' })
+    } catch (error) {
+      writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : 'knowledge source was not saved' })
+    }
+    return
+  }
+
+  const knowledgeSource = pathname.match(/^\/lumo\/api\/knowledge\/sources\/([^/]+)$/u)
+  if (knowledgeSource !== null) {
+    const docID = safeID(knowledgeSource[1])
+    if (docID === undefined) { writeJson(res, 400, { error: 'invalid knowledge source id' }); return }
+    const manager = requireKnowledgeAdmin(res, identity, knowledge)
+    if (manager === undefined) return
+    if (req.method === 'GET') {
+      try {
+        const source = await manager.getSource(docID, identity.realm)
+        if (source === undefined) { writeJson(res, 404, { error: 'knowledge source not found' }); return }
+        writeJson(res, 200, { source, state: 'synchronized' })
+      } catch (error) {
+        writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : 'knowledge source unavailable' })
+      }
+      return
+    }
+    if (req.method === 'PUT') {
+      try {
+        const summary = await manager.upsertSource(sourceWrite(await readJson(req), identity.realm, docID, true))
+        writeJson(res, 200, { source: summary, state: 'synchronized' })
+      } catch (error) {
+        writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : 'knowledge source was not saved' })
+      }
+      return
+    }
+    if (req.method === 'DELETE') {
+      try {
+        const body = await readJson(req)
+        await manager.removeSource(docID, identity.realm, expectedSourceVersion(body['expectedSourceVersion'], true)!)
+        writeJson(res, 200, { docId: docID, state: 'removed' })
+      } catch (error) {
+        writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : 'knowledge source was not removed' })
+      }
+      return
+    }
+  }
+
   if (req.method === 'GET' && pathname === '/lumo/api/skills') {
     if (skills === undefined) {
       writeJson(res, 503, { error: '本地技能 registry 尚未装配。' })
@@ -315,19 +590,21 @@ async function api(config: Config, knowledge: KnowledgeQueryService | undefined,
       const unavailable = (capability: string): UpstreamResult => ({ ok: false, status: 501, data: { error: `本地单机不提供${capability}；请连接服务器形态。` }, error: 'local_capability_unavailable' })
       writeJson(res, 200, {
         features: unavailable('治理策略'), departments: unavailable('组织目录'), roles: unavailable('角色目录'),
-        catalog: unavailable('治理技能目录'), effective: unavailable('跨用户技能分发'),
+        catalog: unavailable('治理技能目录'), effective: unavailable('跨用户技能分发'), permissions: unavailable('权限判定'),
       })
       return
     }
     const effectivePath = `/v1/users/${encodeURIComponent(identity.userId)}/effective-skills?project_id=${encodeURIComponent(identity.projectId ?? config.projectId)}`
-    const [features, departments, roles, catalog, effective] = await Promise.all([
+    const projectID = identity.projectId ?? config.projectId
+    const [features, departments, roles, catalog, effective, permissions] = await Promise.all([
       upstream(config, identity, 'governance', '/v1/features', req),
       upstream(config, identity, 'governance', '/v1/departments/tree', req),
       upstream(config, identity, 'governance', '/v1/roles', req),
       upstream(config, identity, 'governance', '/v1/skills', req),
       upstream(config, identity, 'governance', effectivePath, req),
+      upstream(config, identity, 'governance', `/v1/effective-permissions?project_id=${encodeURIComponent(projectID)}`, req),
     ])
-    writeJson(res, 200, { features, departments, roles, catalog, effective })
+    writeJson(res, 200, { features, departments, roles, catalog, effective, permissions })
     return
   }
 
@@ -336,8 +613,78 @@ async function api(config: Config, knowledge: KnowledgeQueryService | undefined,
     return
   }
 
+  const governedSkillPublish = pathname.match(/^\/lumo\/api\/governance\/skills\/([^/]+)\/versions\/([^/]+)\/publish$/u)
+  if (governedSkillPublish !== null) {
+    const skillID = safeID(governedSkillPublish[1]); const version = safeID(governedSkillPublish[2])
+    if (skillID === undefined || version === undefined) { writeJson(res, 400, { error: 'invalid skill id or version' }); return }
+    if (req.method !== 'POST') { writeJson(res, 405, { error: 'method not allowed' }); return }
+    writeUpstream(res, await upstream(config, identity, 'governance', `/v1/skills/${encodeURIComponent(skillID)}/versions/${encodeURIComponent(version)}/publish`, req, 'POST'))
+    return
+  }
+
+  const governedSkillVersions = pathname.match(/^\/lumo\/api\/governance\/skills\/([^/]+)\/versions(?:\/([^/]+))?$/u)
+  if (governedSkillVersions !== null) {
+    const skillID = safeID(governedSkillVersions[1]); const version = safeID(governedSkillVersions[2])
+    if (skillID === undefined || (governedSkillVersions[2] !== undefined && version === undefined)) { writeJson(res, 400, { error: 'invalid skill id or version' }); return }
+    const upstreamPath = `/v1/skills/${encodeURIComponent(skillID)}/versions${version === undefined ? '' : `/${encodeURIComponent(version)}`}`
+    if (req.method === 'GET') { writeUpstream(res, await upstream(config, identity, 'governance', upstreamPath, req)); return }
+    if (req.method === 'POST' && version === undefined) {
+      try { writeUpstream(res, await upstream(config, identity, 'governance', upstreamPath, req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+      return
+    }
+  }
+
+  if (pathname === '/lumo/api/agent-presets' && (req.method === 'GET' || req.method === 'POST')) {
+    if (req.method === 'GET') { writeUpstream(res, await upstream(config, identity, 'governance', '/v1/agent-presets', req)); return }
+    try { writeUpstream(res, await upstream(config, identity, 'governance', '/v1/agent-presets', req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  const agentPreset = pathname.match(/^\/lumo\/api\/agent-presets\/([^/]+)$/u)
+  if (agentPreset !== null && (req.method === 'GET' || req.method === 'PATCH')) {
+    const presetID = safeID(agentPreset[1])
+    if (presetID === undefined) { writeJson(res, 400, { error: 'invalid agent preset id' }); return }
+    if (req.method === 'GET') { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/agent-presets/${encodeURIComponent(presetID)}`, req)); return }
+    try { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/agent-presets/${encodeURIComponent(presetID)}`, req, 'PATCH', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  if (req.method === 'GET' && pathname === '/lumo/api/workers') {
+    const query = new URL(req.url ?? '/', 'http://lumo.local').search
+    writeUpstream(res, await upstream(config, identity, 'governance', `/v1/workers${query}`, req))
+    return
+  }
+
   if (req.method === 'GET' && pathname === '/lumo/api/users') {
     writeUpstream(res, await upstream(config, identity, 'governance', `/v1/users?q=${encodeURIComponent(new URL(req.url ?? '/', 'http://lumo.local').searchParams.get('q') ?? '')}`, req)); return
+  }
+
+  const userResource = pathname.match(/^\/lumo\/api\/users\/([^/]+)$/u)
+  if (req.method === 'PUT' && userResource !== null) {
+    const userID = safeID(userResource[1])
+    if (userID === undefined) { writeJson(res, 400, { error: 'invalid user id' }); return }
+    try { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/users/${encodeURIComponent(userID)}`, req, 'PUT', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  if (pathname === '/lumo/api/roles' && (req.method === 'GET' || req.method === 'POST')) {
+    if (req.method === 'GET') { writeUpstream(res, await upstream(config, identity, 'governance', '/v1/roles', req)); return }
+    try { writeUpstream(res, await upstream(config, identity, 'governance', '/v1/roles', req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  if (pathname === '/lumo/api/departments' && (req.method === 'GET' || req.method === 'POST')) {
+    if (req.method === 'GET') { writeUpstream(res, await upstream(config, identity, 'governance', '/v1/departments/tree', req)); return }
+    try { writeUpstream(res, await upstream(config, identity, 'governance', '/v1/departments', req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  const userRole = pathname.match(/^\/lumo\/api\/users\/([^/]+)\/roles\/([^/]+)$/u)
+  if (req.method === 'PUT' && userRole !== null) {
+    const userID = safeID(userRole[1]); const roleID = safeID(userRole[2])
+    if (userID === undefined || roleID === undefined) { writeJson(res, 400, { error: 'invalid user or role id' }); return }
+    try { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/users/${encodeURIComponent(userID)}/roles/${encodeURIComponent(roleID)}`, req, 'PUT', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
   }
 
   const userTags = pathname.match(/^\/lumo\/api\/users\/([^/]+)\/tags$/u)
@@ -351,6 +698,46 @@ async function api(config: Config, knowledge: KnowledgeQueryService | undefined,
 
   if (req.method === 'POST' && pathname === '/lumo/api/delegations/preview') {
     try { writeUpstream(res, await upstream(config, identity, 'governance', '/v1/delegations/preview', req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  const delegationCancel = pathname.match(/^\/lumo\/api\/delegations\/([^/]+)\/cancel$/u)
+  if (req.method === 'POST' && delegationCancel !== null) {
+    const taskID = safeID(delegationCancel[1])
+    if (taskID === undefined) { writeJson(res, 400, { error: 'invalid task id' }); return }
+    writeUpstream(res, await upstream(config, identity, 'governance', `/v1/delegations/${encodeURIComponent(taskID)}/cancel`, req, 'POST'))
+    return
+  }
+
+  const delegationRetry = pathname.match(/^\/lumo\/api\/delegations\/([^/]+)\/retry$/u)
+  if (req.method === 'POST' && delegationRetry !== null) {
+    const taskID = safeID(delegationRetry[1])
+    if (taskID === undefined) { writeJson(res, 400, { error: 'invalid task id' }); return }
+    try { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/delegations/${encodeURIComponent(taskID)}/retry`, req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  const delegationReassign = pathname.match(/^\/lumo\/api\/delegations\/([^/]+)\/reassign$/u)
+  if (req.method === 'POST' && delegationReassign !== null) {
+    const taskID = safeID(delegationReassign[1])
+    if (taskID === undefined) { writeJson(res, 400, { error: 'invalid task id' }); return }
+    try { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/delegations/${encodeURIComponent(taskID)}/reassign`, req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  const taskRuns = pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/runs$/u)
+  if (req.method === 'GET' && taskRuns !== null) {
+    const taskID = safeID(taskRuns[1])
+    if (taskID === undefined) { writeJson(res, 400, { error: 'invalid task id' }); return }
+    writeUpstream(res, await upstream(config, identity, 'governance', `/v1/tasks/${encodeURIComponent(taskID)}/runs`, req))
+    return
+  }
+
+  const taskAudit = pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/audit$/u)
+  if (req.method === 'GET' && taskAudit !== null) {
+    const taskID = safeID(taskAudit[1])
+    if (taskID === undefined) { writeJson(res, 400, { error: 'invalid task id' }); return }
+    writeUpstream(res, await upstream(config, identity, 'governance', `/v1/tasks/${encodeURIComponent(taskID)}/audit`, req))
     return
   }
 
@@ -453,7 +840,21 @@ async function api(config: Config, knowledge: KnowledgeQueryService | undefined,
     writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/${encodeURIComponent(projectID)}/dashboard`, req)); return
   }
 
-  const flow = pathname.match(/^\/lumo\/api\/flows\/([^/]+)(?:\/(submit|run|review|target|deprecate|rollback|definition))?$/u)
+  const flowVersion = pathname.match(/^\/lumo\/api\/flows\/([^/]+)\/versions\/([1-9]\d*)$/u)
+  if (req.method === 'GET' && flowVersion !== null) {
+    const flowID = safeID(flowVersion[1])
+    if (flowID === undefined) { writeJson(res, 400, { error: 'invalid flow id' }); return }
+    writeUpstream(res, await upstream(config, identity, 'flows', `/v1/flows/${encodeURIComponent(flowID)}/versions/${flowVersion[2]}`, req)); return
+  }
+
+  const flowRunReplay = pathname.match(/^\/lumo\/api\/flows\/([^/]+)\/runs\/([1-9]\d*)\/replay$/u)
+  if (req.method === 'POST' && flowRunReplay !== null) {
+    const flowID = safeID(flowRunReplay[1])
+    if (flowID === undefined) { writeJson(res, 400, { error: 'invalid flow id' }); return }
+    writeUpstream(res, await upstream(config, identity, 'flows', `/v1/flows/${encodeURIComponent(flowID)}/runs/${flowRunReplay[2]}/replay`, req, 'POST')); return
+  }
+
+  const flow = pathname.match(/^\/lumo\/api\/flows\/([^/]+)(?:\/(submit|run|runs|review|target|deprecate|rollback|definition))?$/u)
   if (flow !== null) {
     const flowID = safeID(flow[1])
     if (flowID === undefined) { writeJson(res, 400, { error: 'invalid flow id' }); return }
@@ -462,6 +863,7 @@ async function api(config: Config, knowledge: KnowledgeQueryService | undefined,
       try { writeUpstream(res, await upstream(config, identity, 'flows', `/v1/flows/${encodeURIComponent(flowID)}/definition`, req, 'PUT', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
       return
     }
+    if (req.method === 'GET' && flow[2] === 'runs') { writeUpstream(res, await upstream(config, identity, 'flows', `/v1/flows/${encodeURIComponent(flowID)}/runs`, req)); return }
     if (req.method === 'POST' && flow[2] !== undefined) {
       try { writeUpstream(res, await upstream(config, identity, 'flows', `/v1/flows/${encodeURIComponent(flowID)}/${flow[2]}`, req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
       return
@@ -511,11 +913,32 @@ async function api(config: Config, knowledge: KnowledgeQueryService | undefined,
     return
   }
 
+  if (req.method === 'GET' && pathname === '/lumo/api/connectors') {
+    const query = new URL(req.url ?? '/', 'http://lumo.local').search
+    writeUpstream(res, await upstream(config, identity, 'connector', `/connectors${query}`, req)); return
+  }
+
+  if (req.method === 'GET' && pathname === '/lumo/api/connector-approvals') {
+    writeUpstream(res, await upstream(config, identity, 'connector', '/approvals', req)); return
+  }
+  const connectorApprovalDecision = pathname.match(/^\/lumo\/api\/connector-approvals\/([^/]+)\/(approve|reject)$/u)
+  if (req.method === 'POST' && connectorApprovalDecision !== null) {
+    const approvalID = safeID(connectorApprovalDecision[1])
+    if (approvalID === undefined) { writeJson(res, 400, { error: 'invalid approval id' }); return }
+    writeUpstream(res, await upstream(config, identity, 'connector', `/approvals/${encodeURIComponent(approvalID)}/${connectorApprovalDecision[2]}`, req, 'POST')); return
+  }
+
   const connector = pathname.match(/^\/lumo\/api\/connectors\/([^/]+)$/u)
   if (req.method === 'DELETE' && connector !== null) {
     const connectorID = safeID(connector[1])
     if (connectorID === undefined) { writeJson(res, 400, { error: 'invalid connector id' }); return }
     writeUpstream(res, await upstream(config, identity, 'connector', `/connectors/${encodeURIComponent(connectorID)}`, req, 'DELETE')); return
+  }
+  const connectorEnable = pathname.match(/^\/lumo\/api\/connectors\/([^/]+)\/enable$/u)
+  if (req.method === 'POST' && connectorEnable !== null) {
+    const connectorID = safeID(connectorEnable[1])
+    if (connectorID === undefined) { writeJson(res, 400, { error: 'invalid connector id' }); return }
+    writeUpstream(res, await upstream(config, identity, 'connector', `/connectors/${encodeURIComponent(connectorID)}/enable`, req, 'POST')); return
   }
 
   if (req.method === 'POST' && pathname === '/lumo/api/projects') {
@@ -540,6 +963,7 @@ export function apply(ctx: Context, config: Config): void {
   // 预插件区间的深色引导。放在 registerRoutes 之外、inject 门之前：主题与
   // knowledge/skills 是否装配无关，任何形态下白底闪一帧都不可接受。
   ctx.on('webserver/index-inject', (table) => { table.push(lumoBootThemeInjection()) })
+  if (config.desktopHandoffFile !== '') registerDesktopHandoff(ctx, config.desktopHandoffFile)
   const registerRoutes = (runtimeCtx: Context): void => {
     const knowledge = runtimeCtx.get('knowledge') as KnowledgeQueryService | undefined
     const skills = runtimeCtx.get('skills') as SkillRegistryService | undefined
