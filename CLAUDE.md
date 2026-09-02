@@ -23,13 +23,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > the conflict, then solve it through a legal extension point instead. See
 > [the extension points](#the-first-iron-rule-never-modify-dsh-source) below.
 >
-> **Verify compliance** — that tree is its own git repo pinned to a tag, so one command proves it is
-> untouched:
+> **Verify compliance** — that tree is its own git repo tracking upstream `master`, so two commands
+> prove it is untouched:
 >
 > ```sh
-> git -C deepseek-harness describe --tags --dirty   # must print dsh-v0.1.1-rc.2 with NO -dirty
 > git -C deepseek-harness status --porcelain -uno   # must print nothing
+> git -C deepseek-harness describe --tags --dirty   # must NOT end in -dirty
 > ```
+>
+> The invariant is the absence of local modification, **not** a particular version — the checkout
+> follows `master` and is expected to move. `describe` therefore prints whatever
+> `<tag>-<n>-g<sha>` the current `master` resolves to; only the `-dirty` suffix is a violation.
 >
 > Run this before reporting any task complete that involved reading or running dsh. A `-dirty`
 > suffix or any porcelain output means the rule was broken: say so plainly and restore the tree with
@@ -61,7 +65,7 @@ Two trees, very different rules:
 | Path | In this repo? | Role |
 |---|---|---|
 | `docs/` | yes (the actual work) | Chinese-language architecture spec for the distributed platform |
-| `deepseek-harness/` | **no — gitignored, separate git repo** | Upstream `dsh` checkout at tag `dsh-v0.1.1-rc.2`, branch `master`. Read-only reference. |
+| `deepseek-harness/` | **no — gitignored, separate git repo** | Upstream `dsh` checkout tracking branch `master` (not pinned to a tag). Read-only reference. |
 
 `deepseek-harness/` is ignored by the first line of `.gitignore` and carries its own `.git`. Never
 commit into it, never treat edits there as part of this project's work, and don't expect changes
