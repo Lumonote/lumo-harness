@@ -128,7 +128,7 @@ V2 有 OPA / Vault / 签名 / 脱敏等控制，但**没有威胁模型章节**�
 > - **每 turn 能力封闭闭环**：副作用三级与来源档位正交；受污染 turn 内只读放行、平台内写放行留审计、出平台写转 HITL。
 > - **敏感外部写 HITL 闭环**：复用 §10.3 与 `control` 插件既有审批通道，未新造机制。**取舍写在 §18.2：转人工而非禁止，代价是依赖人真的会看**，故审批疲劳被列为 SLO 观测项（HITL 通过率趋近 100% 即视为该闸失效）。
 > - **两条不变式**：turn 号取 dsh 原生 `turn/start`（不数 `user/message`——它含 `agent.inject()` 合成消息）；污点从 SessionEvent 日志重算不存进程内存（否则跨节点 resume 洗白污点，而攻击者可主动逼迁移）。后者附带修正了 `recovery` 插件（R2 交付）的同源缺陷：其 `countTurns` 数 `user/message`，turn 中途一次 inject 就让幂等键失配，**保护恰在其存在意义上静默失效**。
-> - **未闭环（§18.4 逐条列明）**：工作区文件按 `internal` 处理，被投毒的仓库文件可绕过；SQL/Cypher 注入归 §5.3.4；A2A 对端消息随 §8.3；注册表投毒归 §6.5；混淆代理随 R1 seam 分级表；**跨节点 resume 的真机 e2e 待补**——现有验证止于日志层等价性，未在 `compose.cluster.yml` 跑真实 resume。
+> - **混淆代理收束（2026-09-02）**：Seam Proxy 可为受限运行身份签发 60 秒、受众固定为 `lumo-seam-host` 的 HMAC 声明；Host 在启用密钥时不再读取普通 realm/user 头，并将查询 payload 角色限制为签名角色子集。它防远程载荷伪造身份或抬升角色；节点遭攻陷、密钥隔离仍归部署层 mTLS。SQL/Cypher、A2A、注册表投毒及跨节点 resume 真机 e2e 仍按 §18.4 的原归属推进。工作区内容已改按 `external` 处理，避免被投毒仓库文件绕过该闸。
 >
 > 核验：`pnpm typecheck` 无错，`pnpm vitest run` 36 项全绿（判决矩阵、分类器 fail-closed、污点单调与 turn 级重置、resume 等价性、recovery turn 口径回归）。设计说明见 `docs/superpowers/specs/2026-08-24-provenance-design.md`，实现计划见 `docs/superpowers/plans/2026-08-24-provenance.md`。
 
@@ -213,8 +213,8 @@ Nebula 按分区 Raft，**跨分区无原子性、无多语句事务**。标注�
 >
 > - **一处实质分歧已记录**：本条原文「**签名与信任链在 PG 校验**」被修正为「校验对象是从对象存储按 digest 取回的原始字节，PG 全程不参与执法」。理由：在 PG 校验会让 registry 数据库本身成为信任根——攻击者写穿库即可把 `scopes: [kb:query]` 改成 `[data:write:*]`，而签名覆盖的字节没动过，验签照样通过。这是典型的 parser differential：签名覆盖的对象与执法依赖的对象不是同一个。验收测试 `TestTamperedMetadataDoesNotAffectEnforcement` 就是这条修正的判据——直接 `UPDATE registry_artifacts SET scopes=...` 后，生成的安装计划仍只带原始 scope。信任根（发布者公钥 + scope 上限）同理不入库，从 `REGISTRY_TRUST_FILE` 加载。
 > - **两处超出本条的补充**：① **身份断言**——重解析出的 `name`/`version` 必须等于请求的那个，否则 `ErrIdentityMismatch`；没有它，攻击者只需把制品 A 的 `digest`+`sig` 换成制品 B 的（两者都是合法签名，都验得过）就能绕过上面全部论证。② **scope 上限在 plan 阶段重查**——发布时查过一次不够，信任表可能事后收紧（发布者被降权），只在发布时查等于既得权限永久有效。
-> - **偏离记账**：`registry_rollouts` 灰度规则当前仍存 PG；Nacos 已进入 Scheduler/DSH 节点发现部署拓扑，但 registry 的灰度规则尚未切换到 Nacos Config，按 `ReleaseChannel` 接口保留替换点。
-> - **状态**：Provisioner 已完成计划下载、digest 复核、原子安装与 install-state；Connector Gateway 已接入 OPA/Vault Provider。私钥轮换与吊销仍需生产信任根策略。
+> - **偏离记账**：`registry_rollouts` 灰度规则当前仍存 PG；Nacos 已进入 Scheduler/DSH 节点发现部署拓扑，但 registry 的灰度规则尚未切换到 Nacos Config，按 `ReleaseChannel` 接口保留替换点。当前通道保存目标与 holdback 版本，Provisioner 以稳定 node ID 分桶选择版本；上调 `percent` 单调扩大目标 cohort，`percent=0` 回到 holdback。节点仍会按原始签名字节重建计划，灰度记录不能下发可执行内容。
+> - **状态**：Provisioner 已完成计划下载、digest 复核、原子安装与 install-state，并可按通道期望版本持续对账；Connector Gateway 已接入 OPA/Vault Provider。私钥轮换与吊销仍需生产信任根策略。
 >
 > 核验：单测 + 对活 PG / 活 MinIO 的集成测试全绿；判据「篡改 PG 不改变执法」与「篡改对象存储字节 → 验签失败」均在活库上实跑。设计说明见 `docs/superpowers/specs/2026-08-24-registry-design.md`。
 
@@ -439,7 +439,7 @@ realm + RBAC + ABAC + OPA 骨架合理。面向真实企业销售还缺：审批
 | P1 | N7 | 部署形态三前提：seam 契约测试、`if(standalone)` CI 门禁、缩微集群故障注入进 CI | §13.2 | |
 | P2 | N5 | CRDT 与复制日志两套「日志+快照」并存，须声明分工边界 | §5.4.7.4/§4.2 | |
 | P2 | N6 | 多集群数据驻留仅一句话，须提升为项目强约束并在三处强制 | §11.1/§7.4 | |
-| **P0** | R5 | 提示注入威胁完全缺失，需安全模型章节 | 全篇 | 安全模型补为 §18；来源标记+每turn能力封闭+出平台写 HITL 三件套已落地（provenance 插件）；工作区文件与真机 resume e2e 未覆盖（§18.4） |
+| **P0** | R5 | 提示注入威胁完全缺失，需安全模型章节 | 全篇 | 安全模型补为 §18；来源标记+每turn能力封闭+出平台写 HITL 三件套已落地（provenance 插件）；工作区内容现按 external 处理，真机 resume e2e 仍未覆盖（§18.4） |
 | P1 | A1 | 复制日志一致性自相矛盾，写路径需强一致 + fencing | §4.2/§13.1 | |
 | P1 | A3 | Redis 承载信箱与「持久」承诺冲突，需 TTL + 死信 + 对账 | §5.2/§8.1 | |
 | P1 | A5 | 零侵入可行性需逐项核验（跨节点 fork、计量旁路） | §4.2/§6.4 | |

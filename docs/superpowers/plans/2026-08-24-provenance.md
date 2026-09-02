@@ -333,8 +333,8 @@ describe('ProvenanceClassifier —— 来源档位', () => {
     expect(new ProvenanceClassifier().provenanceOf('knowledge_query')).toBe('external')
   })
 
-  it('工作区文件读取是 internal（有意的取舍，见 classify.ts 注释）', () => {
-    expect(new ProvenanceClassifier().provenanceOf('read')).toBe('internal')
+  it('工作区文件读取是 external：被投毒仓库不得绕过能力封闭', () => {
+    expect(new ProvenanceClassifier().provenanceOf('read')).toBe('external')
   })
 
   it('未声明的工具按 external 处理（fail closed）', () => {
@@ -438,20 +438,16 @@ import type { Provenance, ToolEffect } from '../../../shared/seam-contracts/prov
 /**
  * dsh 内置工具的默认来源档位。
  *
- * **一处有意的取舍**：`read` / `grep` / `glob` / `ls` 读工作区文件，判为 `internal`
- * 而非 `external`。工作区里的文件确实可能含注入（一个被投毒的仓库文件），但若判
- * `external`，几乎每个 turn 一开工就被污染，机制立刻退化成「永远受污染」，
- * 于事无补还会被整体绕开。判据仍是「谁能写这段字节」：工作区是用户自己选择打开的
- * 项目，知识库是跨用户共享的内容——后者的撰写者与当前用户无关。
- * **残余风险明写**：被投毒的工作区文件可绕过本机制。缓解手段（按路径细分来源）
- * 留待需要时再做，不在本次交付。
+ * `read` / `grep` / `glob` / `ls` 暴露的是工作区字节或路径名。提交者、依赖下载、
+ * 解压归档、协作者或攻击者仍可能写入其中；把它们标成 `internal` 会让恶意仓库文件
+ * 绕过能力封闭。故它们一律是 `external`，读取后同一 turn 的出平台写必须人工确认。
  */
 export const BUILTIN_PROVENANCE: Readonly<Record<string, Provenance>> = Object.freeze({
-  // 工作区读取：见上文取舍
-  read: 'internal',
-  glob: 'internal',
-  grep: 'internal',
-  ls: 'internal',
+  // 工作区内容与路径名可由非受信方写入，见上文
+  read: 'external',
+  glob: 'external',
+  grep: 'external',
+  ls: 'external',
 
   // 平台内受控数据：只有平台自己写得进去
   todo_write: 'internal',
@@ -1157,7 +1153,7 @@ grep -n "^## §\|^## " docs/architecture.md | tail -20
 2. **提示注入的结构性防护三件套**：来源标记（四档，判据与档位表）、每 turn 能力封闭（副作用三级 + 判决矩阵）、出平台写 HITL。明写 **turn 号取 dsh 原生 `turn/start`**、**污点从日志重算（resume 不洗白）**两条不变式。
 3. **明确不做的事**：不做内容层注入检测（理由：改写/翻译/编码/跨片段拆分皆可绕过，且上线后会挤掉结构性防护的资源）。承诺边界一句话写死：**不声称能识别注入，只声称外部内容不能在无人确认的情况下把副作用送出平台**。
 4. **未覆盖清单**（逐条写明归属交付，不得省略）：
-   - 工作区文件按 `internal` 处理——被投毒的仓库文件可绕过本机制；缓解（按路径细分来源）未做
+   - 工作区文件按 `external` 处理；`read` / `grep` / `glob` / `ls` 后的同 turn 出平台写必须人工确认
    - LLM 生成 SQL / Cypher 注入 → §5.3.4 参数化
    - A2A 对端 agent 消息 → 随 §8.3 交付纳入来源分级（档位已预留）
    - 注册表投毒 → §6.5 制品签名与信任链

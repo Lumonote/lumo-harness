@@ -108,6 +108,7 @@ R1 的原话是「碎片化接口必须在 Provider 侧聚合成批量调用后�
 5. 每 turn 超预算：`warn` 模式下产出结构化告警且调用照常成功；`enforce` 模式下第 N+1 次调用被拒且错误信息含 seam/count/budget。
 6. `isIdempotent()` 的返回与分级表逐方法一致；`remotable` 集合与 `METHOD_TABLE` 键集合相等。
 7. 分级表里每个 `never`/`needs-design` 条目都有非空 `why`。
+8. 启用签名 runtime identity 后，Host 不接受普通身份头作为回退；请求体查询角色不得超出签名角色，且 `lumo-ui` 受众断言不得重放到 Host。
 
 ## 10. 已知不覆盖
 
@@ -115,3 +116,4 @@ R1 的原话是「碎片化接口必须在 Provider 侧聚合成批量调用后�
 - turn 边界的判定依赖调用方传入 turn 标识；`ctx.llm`/`ctx.sessions` 归 R2 与 §4.2，本项不碰。
 - 延迟预算只做声明与超预算计数，不做实时 p95 采样与自动熔断降级——那需要 SLO 与容量模型（待补章节第 4 项）先定稿。
 - 句柄虚拟化、流控背压两套机制均不在本项，`needs-design` 条目保持拒绝状态。
+- HMAC runtime identity 不替代节点间 mTLS，也不防御已遭攻陷的签发节点；密钥轮换、证书身份与网络隔离归部署层。

@@ -201,6 +201,22 @@ dsh 能远程化 filesystem/subprocess，是因为它专门造了 `ctx.e2b` 这�
 
 闸 B 的错误码是 `forbidden` 而非 `invalid`：seam 名是合法标识符，被拒原因是**准入策略**；且 `forbidden` 不计入熔断——客户端配置错了不该把健康 host 判死刑。
 
+**调用方身份不能由 RPC 载荷自报。**部署为 `seam-proxy.identityAssertionSecret` 和
+`seam-host.identityAssertionSecret` 配置同一独立密钥时，Proxy 为每次调用签发仅面向
+`lumo-seam-host` 的 60 秒 HMAC 声明（`realm`、`userId`、非空 `roles`）。Host 只读取该声明，
+不回退 `X-Lumo-Realm`/`X-Lumo-User`；`knowledge.query` 与 `knowledgeGraph.neighborhood`
+请求体里的角色必须是已签角色的子集。旧 header/token 模式仅为兼容，不能称为已解决的
+混淆代理防护；该应用层声明也不替代节点间 mTLS（签名密钥泄露或节点遭攻陷时仍须由部署边界兜底）。
+
+Seam 的现有 JSON/HTTP 实现已可选开启 mTLS：Host 加载 CA、节点证书、私钥后强制校验客户端证书，
+Proxy 同时仅连 HTTPS endpoint（包括动态发现更新）。证书为部署层只读文件挂载，默认每 30 秒（可配置）
+检查并验证完整 bundle；Host 对新连接刷新 TLS context，Proxy 对新请求刷新客户端凭据。轮换失败保留最后
+一套有效 bundle，因而撤销与紧急回退仍要由原子 Secret 更新和滚动重启收敛。Cluster Helm 可选 Istio
+workload mTLS：所有控制面、网关和 DSH 子代理通道由 sidecar 的 SDS 身份覆盖，`PeerAuthentication: STRICT`
+拒绝未认证明文，`DestinationRule: ISTIO_MUTUAL` 防止客户端降级；浏览器流量仍须经 Edge/Ingress TLS 终止后
+以 workload 身份入网格。CA 根轮换、证书 TTL、trust-domain federation 与紧急 principal deny-list 是部署
+运营职责，不能由 HMAC runtime identity 替代。
+
 **B. 粗粒度是硬规矩，量化成每 turn 调用预算。**「seam 粒度要粗」不可执法，量化后可执法：单 turn 网络开销上限 `TURN_NETWORK_BUDGET_MS = 6400`，每个 `remotable` seam 的 `perTurnCallBudget × latencyBudgetMs` 不得超过它（有测试守着）。
 
 闸 C 在 `seam-proxy` 客户端，**默认 `warn` 而非 `enforce`**：超预算是性能回归，不是安全事故；默认拒绝会把「某个组件写得太碎」升级成「用户这一轮直接失败」。但告警是结构化的 `{seam, turn, count, budget}`，可进 CI 断言——否则它退化成纸面要求。
@@ -543,7 +559,7 @@ query ──▶ ctx.knowledge.vector: top-k 语义召回(带 realm 过滤)
 |---|---|---|
 | 制品原始字节（JSON，被签名覆盖） | 内容寻址对象存储（sha256，MinIO） | 执法唯一依据；内容寻址使重传天然幂等 |
 | 元数据 / 签名 / 依赖图 | PostgreSQL | 供查询与依赖遍历，**是索引不是真相源** |
-| 灰度规则 | Nacos Config（本期以 PG `registry_rollouts` 顶，见 `design-review.md` T1 偏离记账） | 需热推与订阅语义 |
+| 灰度规则 | Nacos Config（本期以 PG `registry_rollouts` 顶，见 `design-review.md` T1 偏离记账） | 当前已提供通道期望版本与 Provisioner 轮询；Nacos 接入后替换为热推与订阅语义 |
 
 **硬约束**：安装端执法只信按 digest 从对象存储取回的原始字节——重新解析它，重新验签，重新核对身份与 scope 上限。PG 里的 `scopes`/`requires`/依赖行不得作为任何执法判断的输入，它们只服务于查询与展示。否则写穿 registry 数据库就等于换掉信任根：把 `kb:query` 改成 `data:write:*` 而签名照样验得过（parser differential）。
 
@@ -1259,8 +1275,8 @@ docker compose -f compose.cluster.yml up          # 起两个缩微集群
 |---|---|---|
 | `system` | 装配层注入，模型与用户均不可改 | 系统提示、preset、工具定义 |
 | `user` | 当前会话中经认证用户的直接输入 | 终端消息、审批决定 |
-| `internal` | 平台内受控数据，无外部撰写者 | 计量读数、任务状态、工作区文件 |
-| `external` | **存在非受信撰写者** | 知识库正文、连接器响应、网页抓取、任意命令输出 |
+| `internal` | 平台内受控数据，无外部撰写者 | 计量读数、任务状态 |
+| `external` | **存在非受信撰写者** | 知识库正文、连接器响应、网页抓取、任意命令输出、工作区/仓库文件与路径名 |
 
 档位由**装配层声明，不由工具自报**——自报等于让被注入方自证清白。未声明的工具按 `external` 处理并告警一次（fail closed）。
 
@@ -1293,11 +1309,11 @@ docker compose -f compose.cluster.yml up          # 起两个缩微集群
 
 | 未覆盖项 | 现状与归属 |
 |---|---|
-| **工作区文件按 `internal` 处理** | 被投毒的仓库文件可绕过本机制。若判 `external` 则几乎每个 turn 一开工即污染，机制退化为「永远受污染」而被整体绕开。缓解（按路径细分来源）**未做** |
+| 工作区 / 仓库内容 | 已按 `external` 处理；`read` / `grep` / `glob` / `ls` 后的同 turn 出平台写必须人工确认。路径级信任白名单未提供，避免把可写内容误标为平台受控数据。 |
 | LLM 生成 SQL / Cypher 注入 | §5.3.4 参数化，部分覆盖 |
 | A2A 对端 agent 消息 | 随 §8.3 交付纳入来源分级，档位已预留 |
 | 注册表投毒 | §6.5 制品签名与信任链 |
-| 经 Seam Proxy 的混淆代理（confused deputy） | 需 seam 调用链的调用方身份透传，随评审 R1 的 seam 分级表 |
+| 经 Seam Proxy 的混淆代理（confused deputy） | `seam-host` 可校验仅面向自身的短时签名 runtime identity，并把查询角色收束到签名角色；旧 header/token 兼容模式及节点受攻陷的防护仍依赖部署层 mTLS/密钥隔离。 |
 | 跨节点 resume 的真机 e2e | 现有验证止于日志层等价性（同一份日志喂给全新进程得同一判决）。真实 resume 还牵涉 `seed` 重放是否完整保留 `tool/call` 事件，需 `compose.cluster.yml` 双实例编排，**待补** |
 | 审批疲劳 | HITL 通过率长期趋近 100% 即视为该闸已失效，须进 SLO 观测项（§21.1 已立指标） |
 
@@ -1353,7 +1369,7 @@ SessionEvent 日志 append-only、每会话单调序号（§8.2）——这让�
 
 1. 设计说明 → TDD 计划 → 红/绿 → **mutation 验证**（突变必须真的落在被测实现上——此前 sed 图案未命中导致突变静默未发生的先例，用 Edit 复核）→ 文档同步 → 按切片提交。
 2. 真库断言坑：pg 把 BIGINT 读成字符串、JSONB 读成对象、timestamptz 读成 Date——断言前先定类型（`sel t n::text`、`ts::text` 或等值比较），不要拿字符串比较碰运气。
-3. 第一铁律合规每切片收尾必查：`git -C deepseek-harness describe --tags --dirty` 无 `-dirty` + `status --porcelain -uno` 无输出。
+3. 第一铁律合规每切片收尾必查：`git -C deepseek-harness status --porcelain -uno` 无输出 + `describe --tags --dirty` 不以 `-dirty` 结尾。判据是「无本地改动」，不是某个版本号——该 checkout 跟随 `master`，版本本来就会动。
 
 ---
 
@@ -1448,9 +1464,10 @@ SessionEvent 日志 append-only、每会话单调序号（§8.2）——这让�
 
 ### 22.1 dsh 升级流程（第一铁律的验证途径）
 
-- dsh 以 **pin 住的 tag 依赖**进入（当前 `dsh-v0.1.1-rc.2`），**绝不 vendor / fork / 打补丁**。升级 = 换 tag → 跑平台全量契约与实现测试（§19）→ 灰度。
+- dsh 以**跟随上游 `master` 的只读 checkout** 进入（不 pin tag），**绝不 vendor / fork / 打补丁**。升级 = `git pull` → 跑平台全量契约与实现测试（§19）→ 灰度。
 - **验证判据**（也是第一铁律的双可证）：① dsh 升版本无需 rebase 任何补丁；② 删除平台全部代码后 dsh 原样独立运行。
-- **回滚**：回退 dsh 依赖 tag。平台代码保持与**相邻两个 dsh 版本**兼容（不依赖某版本的新 API 又不等它的替代 API）——这是「随时可滚」的硬条件，进代码评审清单。
+- **判据 ① 的一次实测**：从 `dsh-v0.1.1-rc.2` 拉到 `0.1.2-alpha.1`（1079 个提交、上游包数 236 → 256）——覆盖层零补丁 rebase，只有 1 个字符串锚点因 `InputZone.session` 类型改名而需重新校准（改锚在稳定的声明行上，见 `platform/dsh-overrides/apply.mjs`）。真正的成本落在**上游删包**上：`@deepseek-ai/dsh-client-runtime` 被整包移除，`ctx.slots` 迁到 `ui-renderer`，platform 侧跟着改了 5 个声明面。这类改动由 `pnpm test` 当场兜住，不必等打包。
+- **回滚**：把 checkout 退回上一个已知良好的 commit/tag。平台代码保持与**相邻两个 dsh 版本**兼容（不依赖某版本的新 API 又不等它的替代 API）——这是「随时可滚」的硬条件，进代码评审清单。
 
 ### 22.2 部署形态迁移
 
