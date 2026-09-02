@@ -85,3 +85,42 @@ Web 工作台默认使用 `Obsidian Signal`，设置页提供四套产品主题�
 
 调试版和正式 `.app` 都优先使用包内 `runtime/lumo-runtime.sh`；只有开发预览才回退到
 checkout 中的 `local-runtime.sh`。如果包内资源损坏或缺失，诊断页会明确显示启动错误。
+正式安装包会把本地 runtime 的 stdout/stderr 追加写入系统应用数据目录的 `runtime.log`；
+如果双击后出现白屏，可先查看该文件（通常位于 `~/Library/Application Support/io.lumo.desktop/`），
+再根据其中的架构、端口或前端加载错误处理，而不必从 Finder 猜测原因。
+
+## 启动过程与菜单栏
+
+窗口在壳启动的瞬间就会出现，先显示内置的启动页（`desktop-assets/boot.html`），
+runtime 在后台线程里拉起；本地 Web 端口一应答，窗口就切到真实工作台。启动页会实时
+显示已等待秒数和 `runtime.log` 的路径。runtime 在 120 秒内没有就绪或提前退出时，启动页
+会原地切换成失败态，把具体原因（例如 `本地 DSH runtime 提前退出：exit status: 1`）显示出来，
+不再是一个黑窗口。
+
+`lumo-runtime.sh` 启用了 Node 的磁盘编译缓存（`NODE_COMPILE_CACHE`，落在应用数据目录的
+`runtime/compile-cache`），第二次以后的启动直接复用字节码。
+
+应用在菜单栏有一个模板图标（亮/暗菜单栏自动着色），菜单项为「显示 Lumo」「查看运行时日志」
+「退出 Lumo」。关闭窗口只是把它收进菜单栏，runtime 继续运行；点 Dock 图标或菜单栏的
+「显示 Lumo」即可重新打开。真正退出用菜单栏的「退出 Lumo」或 ⌘Q，此时本地 runtime 会
+一并结束。
+
+## 图标
+
+`icons/logo.png` 是唯一的源图。`make-icons.sh`（`beforeBuildCommand` 里会先跑它）用宿主
+自带的 `swiftc` 与 `iconutil` 生成：
+
+- `icons/icon.png`：1024×1024，内容占 824×824 的圆角矩形（圆角约 22.5%），四周透明，
+  与 macOS 系统图标同一规范——直接拿方图当图标就是 Dock 里那个“太正方体”的效果；
+- `icons/Lumo.icns`：完整尺寸集，bundler 原样使用；
+- `icons/tray.png`：44×44 单色模板图标，供菜单栏使用。
+
+## 构建期护栏
+
+`build-runtime.mjs` 在拷贝依赖闭包前会检查两类只在运行时才暴露的回归：
+
+- `@deepseek-ai/*` 只能来自本地 dsh 快照。上游 npm 插件（如 `dsh-cost-meter`）会把
+  `@deepseek-ai/dsh-credentials` 声明成普通依赖，pnpm 便从 registry 拉一份只导出两个符号的
+  老版本；一旦它混进闭包，dsh-credentials-local、dsh-llm-pi-ai 等包会在 import 时直接失败。
+- 体积裁剪只在包根一层删 `doc/docs/test/tests/example(s)`；`dist`、`lib` 里的同名目录往往是
+  真代码（`yaml/dist/doc` 是 Document 的实现）。

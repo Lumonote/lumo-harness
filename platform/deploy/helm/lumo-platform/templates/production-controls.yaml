@@ -1,0 +1,26 @@
+{{- if .Values.productionControls.enforced }}
+{{- $observability := .Values.productionControls.observability }}
+{{- $compliance := .Values.productionControls.compliance }}
+{{- $_ := required "productionControls.observability.sloDocumentRef is required when productionControls.enforced=true" $observability.sloDocumentRef }}
+{{- $_ := required "productionControls.observability.collectorUrl is required when productionControls.enforced=true" $observability.collectorUrl }}
+{{- $_ := required "productionControls.compliance.breakGlassPolicyRef is required when productionControls.enforced=true" $compliance.breakGlassPolicyRef }}
+{{- $_ := required "productionControls.compliance.tenantKeyDestructionPolicyRef is required when productionControls.enforced=true" $compliance.tenantKeyDestructionPolicyRef }}
+{{- $_ := required "productionControls.compliance.marketplaceGovernancePolicyRef is required when productionControls.enforced=true" $compliance.marketplaceGovernancePolicyRef }}
+{{- if le (int $observability.logsRetentionDays) 0 }}{{ fail "productionControls.observability.logsRetentionDays must be greater than zero when productionControls.enforced=true" }}{{- end }}
+{{- if le (int $observability.tracesRetentionDays) 0 }}{{ fail "productionControls.observability.tracesRetentionDays must be greater than zero when productionControls.enforced=true" }}{{- end }}
+{{- if le (float64 $observability.monthlyCostCapUSD) 0.0 }}{{ fail "productionControls.observability.monthlyCostCapUSD must be greater than zero when productionControls.enforced=true" }}{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lumo-platform.name" . }}-production-controls
+  labels: { lumo.dev/governance: production-controls }
+data:
+  slo-document-ref: {{ $observability.sloDocumentRef | quote }}
+  otel-collector-url: {{ $observability.collectorUrl | quote }}
+  logs-retention-days: {{ $observability.logsRetentionDays | quote }}
+  traces-retention-days: {{ $observability.tracesRetentionDays | quote }}
+  monthly-cost-cap-usd: {{ $observability.monthlyCostCapUSD | quote }}
+  break-glass-policy-ref: {{ $compliance.breakGlassPolicyRef | quote }}
+  tenant-key-destruction-policy-ref: {{ $compliance.tenantKeyDestructionPolicyRef | quote }}
+  marketplace-governance-policy-ref: {{ $compliance.marketplaceGovernancePolicyRef | quote }}
+{{- end }}

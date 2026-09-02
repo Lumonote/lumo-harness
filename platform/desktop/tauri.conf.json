@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "io.lumo.desktop",
   "build": {
-    "beforeBuildCommand": "node desktop/build-runtime.mjs",
+    "beforeBuildCommand": "sh desktop/make-icons.sh && node desktop/build-runtime.mjs",
     "devUrl": "http://127.0.0.1:3080",
     "frontendDist": "../desktop-assets"
   },
@@ -16,11 +16,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"],
+    "icon": ["icons/Lumo.icns", "icons/icon.png"],
     "resources": {
-      "target/lumo-runtime": "runtime",
-      "../desktop-assets/startup-error.html": "startup-error.html",
-      "../desktop-assets/lumo-logo.png": "lumo-logo.png"
+      "target/lumo-runtime": "runtime"
     }
   }
 }

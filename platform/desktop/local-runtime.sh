@@ -50,7 +50,10 @@ export LUMO_WEB_PORT="${LUMO_WEB_PORT:-3080}"
 # profile symlink never changes how their resource roots are resolved.
 export LUMO_BUNDLED_SKILLS_ROOT="${LUMO_BUNDLED_SKILLS_ROOT:-${platform_root}/upstream/skills}"
 export LUMO_RUFLO_BIN="${LUMO_RUFLO_BIN:-${platform_root}/dsh-plugins/ruflo-orchestration/node_modules/ruflo/bin/ruflo.js}"
-ppt_python="${platform_root}/upstream/skills/ppt-master/.venv/bin/python"
+# install-components.sh 按 target 建 venv；仓库预览取宿主架构那份。
+host_arch="$(uname -m)"
+[[ "${host_arch}" = "arm64" ]] && host_arch="arm64" || host_arch="x64"
+ppt_python="${platform_root}/upstream/skills/ppt-master/.venv-darwin-${host_arch}/bin/python"
 if [[ -x "${ppt_python}" ]]; then
   export LUMO_PPT_PYTHON="${LUMO_PPT_PYTHON:-${ppt_python}}"
 fi

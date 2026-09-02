@@ -1,0 +1,81 @@
+{{- if .Values.serviceMesh.istio.enabled }}
+{{- $trustDomain := required "serviceMesh.istio.trustDomain is required when serviceMesh.istio.enabled=true" .Values.serviceMesh.istio.trustDomain }}
+{{- $namespace := .Release.Namespace }}
+{{- if ne .Values.service.type "ClusterIP" }}
+{{- fail "service.type must remain ClusterIP when serviceMesh.istio.enabled=true; expose browser traffic through a separately managed Edge/Ingress Gateway" }}
+{{- end }}
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: {{ include "lumo-platform.name" . }}-workload-mtls
+  labels:
+    lumo.dev/mesh: istio
+    lumo.dev/trust-domain: {{ $trustDomain | quote }}
+spec:
+  selector:
+    matchLabels:
+      lumo.dev/mesh-mtls: "enabled"
+  mtls:
+    mode: STRICT
+---
+{{- range $name, $cfg := .Values.services }}
+{{- if $cfg.enabled }}
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ include "lumo-platform.name" $ }}-{{ $name }}-mtls
+  labels: { lumo.dev/mesh: istio }
+spec:
+  host: {{ printf "%s-%s.%s.svc.cluster.local" (include "lumo-platform.name" $) $name $namespace | quote }}
+  exportTo: ["."]
+  trafficPolicy:
+    tls: { mode: ISTIO_MUTUAL }
+---
+{{- end }}
+{{- end }}
+{{- if .Values.dshNode.enabled }}
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ include "lumo-platform.name" . }}-dsh-node-mtls
+  labels: { lumo.dev/mesh: istio }
+spec:
+  host: {{ printf "%s-dsh-node.%s.svc.cluster.local" (include "lumo-platform.name" .) $namespace | quote }}
+  exportTo: ["."]
+  trafficPolicy:
+    tls: { mode: ISTIO_MUTUAL }
+---
+{{- end }}
+{{- if .Values.dshWeb.enabled }}
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ include "lumo-platform.name" . }}-dsh-web-mtls
+  labels: { lumo.dev/mesh: istio }
+spec:
+  host: {{ printf "%s-dsh-web.%s.svc.cluster.local" (include "lumo-platform.name" .) $namespace | quote }}
+  exportTo: ["."]
+  trafficPolicy:
+    tls: { mode: ISTIO_MUTUAL }
+---
+{{- end }}
+{{- if .Values.serviceMesh.istio.denyPrincipals }}
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ include "lumo-platform.name" . }}-deny-revoked-workloads
+  labels: { lumo.dev/mesh: istio }
+spec:
+  selector:
+    matchLabels:
+      lumo.dev/mesh-mtls: "enabled"
+  action: DENY
+  rules:
+    - from:
+        - source:
+            principals:
+              {{- range .Values.serviceMesh.istio.denyPrincipals }}
+              - {{ . | quote }}
+              {{- end }}
+{{- end }}
+{{- end }}

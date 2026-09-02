@@ -1,0 +1,50 @@
+{{- if .Values.productionControls.observability.enabled }}
+{{- $o := .Values.productionControls.observability }}
+{{- if or (not $o.collectorUrl) (not $o.lokiUrl) (not $o.objectStoreEndpoint) (not $o.objectStoreBucket) }}
+{{- fail "productionControls.observability.enabled requires collectorUrl, lokiUrl, objectStoreEndpoint and objectStoreBucket" }}
+{{- end }}
+{{- if or (le (int $o.logsRetentionDays) 0) (le (int $o.tracesRetentionDays) 0) }}
+{{- fail "productionControls observability retention must be positive" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lumo-platform.name" . }}-observability
+data:
+  otel-collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc: {}
+          http: {}
+    processors:
+      batch: {}
+    exporters:
+      otlphttp:
+        endpoint: {{ $o.collectorUrl | quote }}
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [otlphttp]
+  loki-retention.yaml: |
+    limits_config:
+      retention_period: {{ printf "%dd" (int $o.logsRetentionDays) | quote }}
+    compactor:
+      retention_enabled: true
+      delete_request_store: filesystem
+    # Endpoint is supplied for the deployment's Loki client/configuration.
+    lumo_loki_endpoint: {{ $o.lokiUrl | quote }}
+  object-store-lifecycle.json: |
+    {"bucket":{{ $o.objectStoreBucket | quote }},"endpoint":{{ $o.objectStoreEndpoint | quote }},"traceRetentionDays":{{ int $o.tracesRetentionDays }}}
+  prometheus-recording-rules.yaml: |
+    groups:
+      - name: lumo-production
+        interval: 30s
+        rules:
+          - record: lumo:http_error_ratio5m
+            expr: sum(rate(lumo_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(lumo_http_requests_total[5m])), 1)
+          - record: lumo:http_request_latency_p95_5m
+            expr: histogram_quantile(0.95, sum by (le) (rate(lumo_http_request_duration_seconds_bucket[5m])))
+{{- end }}

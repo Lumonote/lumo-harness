@@ -9,37 +9,14 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/../.." && pwd)"
 dsh_root="$repo_root/deepseek-harness"
-dsh_repo="${DSH_REPOSITORY:-https://github.com/deepseek-ai/deepseek-harness.git}"
+# shellcheck source=lib/dsh-source.sh
+source "$script_dir/lib/dsh-source.sh"
 
 usage() {
   echo "usage: $0 {cluster|standalone} [docker compose up options]" >&2
   echo "local is the Rust desktop shape; run: pnpm --dir platform desktop:dev" >&2
   echo "example: $0 cluster -d --build" >&2
   exit 64
-}
-
-ensure_dsh_source() {
-  if [[ -e "$dsh_root" ]]; then
-    if [[ -f "$dsh_root/package.json" && -d "$dsh_root/packages" ]]; then
-      echo "deepseek-harness exists; using it unchanged: $dsh_root"
-      return
-    fi
-    echo "deepseek-harness exists but is not a usable source checkout: $dsh_root" >&2
-    echo "Refusing to overwrite it. Repair or remove that directory, then retry." >&2
-    exit 1
-  fi
-
-  if ! command -v git >/dev/null 2>&1; then
-    echo "git is required to retrieve deepseek-harness but was not found in PATH" >&2
-    exit 127
-  fi
-
-  echo "deepseek-harness is absent; cloning latest default branch from $dsh_repo ..."
-  git clone --depth 1 "$dsh_repo" "$dsh_root"
-  if [[ ! -f "$dsh_root/package.json" || ! -d "$dsh_root/packages" ]]; then
-    echo "cloned deepseek-harness is missing expected source files: $dsh_root" >&2
-    exit 1
-  fi
 }
 
 warn_legacy_cluster_storage() {
@@ -74,6 +51,6 @@ case "$shape" in
   *) usage ;;
 esac
 
-ensure_dsh_source
+ensure_dsh_source "$dsh_root"
 warn_legacy_cluster_storage
 exec docker compose -f "$script_dir/compose.$shape.yml" up "$@"

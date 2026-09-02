@@ -9,6 +9,12 @@ Helm 默认从 `lumo-control-plane-token/token` 读取。
 `@lumo/user-auth` 会在治理用户完成登录后按 `docs/configuration.md` 的契约签发逐请求身份；
 未设置时仅适合本地开发。
 
+Cluster 使用 Istio 时，可启用 `serviceMesh.istio.enabled=true`，使 Chart 为控制面、网关和 DSH 节点
+注入 sidecar 并创建 STRICT workload mTLS 策略。该开关要求显式填写目标集群的 `trustDomain`；证书由
+Istio SDS 管理，不应创建或挂载通用私钥 Secret。上线前还应启用 `productionControls.enforced=true`，以
+已批准的 SLO、留存/费用和合规策略引用通过 Helm 渲染门槛。具体值与紧急吊销步骤见
+[`docs/configuration.md`](../../docs/configuration.md)。
+
 > 三档产品形态：本地单机、服务器单例、服务器集群。**本地单机不是服务器单例的缩小版**，不启动任何网络中间件，使用 SQLite；`compose.local.yml` 只是遗留的开发集成测试台。
 
 | 文件/目录 | 形态 | 载体 | 用途 |
@@ -21,6 +27,20 @@ Helm 默认从 `lumo-control-plane-token/token` 读取。
 | `migrations/` + `migrate.sh` | — | — | 版本化平台迁移记录与执行入口 |
 
 ## 原生 DSH Web + Lumo 运营面
+
+### 部署前置检查
+
+在启动或做 Cluster 验收前先运行只读预检；它不会启动容器或读取 Secret 正文，只会检查
+Docker daemon 可达性、Compose 渲染、必需拓扑、控制面令牌和 Registry 信任根。`--strict`
+额外拒绝仓库内的开发默认凭据、开发 trust root 和过短的身份断言密钥：
+
+```sh
+./platform/deploy/preflight-deployment.sh standalone
+./platform/deploy/preflight-deployment.sh cluster --strict
+```
+
+`smoke-cluster.sh` 会自动运行基础预检。因此没有 Docker socket 权限或缺失部署变量时，会在
+读取容器状态之前以具体的前置条件失败，而不是将其误报为应用故障。
 
 ### 启动前自动确保 DSH 源码
 
@@ -194,13 +214,47 @@ Bearer 令牌或发布内容被转发到其他地址。使用外部签名服务�
 PROVISIONER_ARTIFACT_NAME=my-skill \
 PROVISIONER_ARTIFACT_VERSION=1.2.3 \
 LUMO_CONTROL_PLANE_TOKEN='replace-me' \
-docker compose -f compose.standalone.yml --profile provisioner up -d --build provisioner dsh-node
+docker compose -f compose.standalone.yml --profile provisioner up -d --build provisioner artifact-runtime dsh-node
 ```
+
+也可以把版本选择交给 Registry 的 `stable` 通道：管理员先在 Lumo 插件市场将某个
+已发布制品设为 Stable 期望版本，再配置 `PROVISIONER_ARTIFACT_NAME` 与
+`PROVISIONER_ROLLOUT_CHANNEL=stable`（不设置 `PROVISIONER_ARTIFACT_VERSION`）。每个
+周期会读取目标版本并重新从签名字节生成计划；当前只支持 `percent=100` 的全量收敛。
 
 Cluster 使用相同的 `provisioner` profile；启动整个缩微集群时加入
 `--profile provisioner` 即可让所有 DSH 容器只读挂载同一份快照。持续检查周期由
 `PROVISIONER_INTERVAL` 配置，默认 `30s`；DSH 默认等待 `120s`，可通过
 `LUMO_SKILL_SNAPSHOT_WAIT_MS` 覆盖。
+
+### 受控 Component 本地运行时
+
+`Component` manifest 可选地声明一个已签名的 `runtime`。当前只支持本地 `process`：
+入口必须是同一份已验签 payload 内的安全相对路径，参数为固定字符串数组；不允许 shell、
+环境变量、挂载、Docker 或 Kubernetes 规格。只有 Provisioner 重新校验 manifest digest、
+payload digest 和所有 payload 文件后，`artifact-runtime` 才会授予入口可执行权限并启动它。
+
+启用 `provisioner` profile 会一并启动不发布网络端口的 `artifact-runtime` 控制器。控制器
+只绑定共享卷中的 mode `0600` Unix socket，且不会自动运行任何制品。使用容器内客户端显式
+操作（以下以服务器单例为例）：
+
+```sh
+docker compose -f compose.standalone.yml exec artifact-runtime \
+  artifact-runtime start --socket /var/lib/lumo/artifacts/artifact-runtime.sock \
+  --name my-component --version 1.2.3
+docker compose -f compose.standalone.yml exec artifact-runtime \
+  artifact-runtime health --socket /var/lib/lumo/artifacts/artifact-runtime.sock \
+  --name my-component --version 1.2.3
+docker compose -f compose.standalone.yml exec artifact-runtime \
+  artifact-runtime logs --socket /var/lib/lumo/artifacts/artifact-runtime.sock \
+  --name my-component --version 1.2.3
+```
+
+`stop` 会优雅终止后在超时后强制结束；`uninstall` 只允许卸载当前安装闭包的根制品。持续
+Provisioner 仍以 Registry 的期望状态为真相源，因此若未清除或替换该目标，下一次 reconcile
+会重新安装；控制器会明确返回这一提示。Helm 需要同时设置
+`provisioner.enabled=true` 与 `provisioner.runtime.enabled=true`；操作时通过同 Pod 的
+`artifact-runtime` 容器执行上述客户端命令，不开放 Service。
 
 `helm/lumo-platform` 提供八个控制面服务的 Deployment、Service、健康探针以及
 PG/Nacos/OPA/Vault 配置绑定；设置 `dshNode.enabled=true` 后会部署可水平扩展的
@@ -212,8 +266,8 @@ DSH 承载节点池和 HPA，设置 `dshWeb.enabled=true` 后会部署原生 DSH
 helm upgrade --install lumo ./helm/lumo-platform -n lumo --create-namespace
 ```
 
-同时设置 `provisioner.enabled=true`、`provisioner.artifactName` 和
-`provisioner.artifactVersion` 时，每个 DSH Pod 会先通过 init container 完成首次安装，
+同时设置 `provisioner.enabled=true`、`provisioner.artifactName` 以及
+`provisioner.artifactVersion` 或 `provisioner.rolloutChannel` 时，每个 DSH Pod 会先通过 init container 完成首次安装，
 再由 sidecar 持续校验；主容器只读挂载 Pod 内共享卷，不会读取未验证的远端内容。
 
 `platform/console` 的旧静态直连页面已退役，只显示迁移入口；不要再把控制面 CORS、

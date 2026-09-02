@@ -224,8 +224,8 @@ services:
       governance:
         condition: service_started
 
-  # 可选持续制品收敛器：默认不启动；设置 PROVISIONER_ARTIFACT_NAME/VERSION 后
-  # 以 `--profile provisioner` 启动，interval 由 PROVISIONER_INTERVAL 注入。
+  # 可选持续制品收敛器：默认不启动；设置制品名和显式 VERSION，或设置
+  # ROLLOUT_CHANNEL 由 Registry 的期望状态决定版本后，以 profile 启动。
   provisioner:
     profiles: [provisioner]
     build:
@@ -237,6 +237,7 @@ services:
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       PROVISIONER_ARTIFACT_NAME: "${PROVISIONER_ARTIFACT_NAME:-}"
       PROVISIONER_ARTIFACT_VERSION: "${PROVISIONER_ARTIFACT_VERSION:-}"
+      PROVISIONER_ROLLOUT_CHANNEL: "${PROVISIONER_ROLLOUT_CHANNEL:-}"
       PROVISIONER_INSTALL_DIR: /var/lib/lumo/artifacts
       PROVISIONER_INTERVAL: "${PROVISIONER_INTERVAL:-30s}"
       PROVISIONER_SHAPE: "${PROVISIONER_SHAPE:-{\"object\":true}}"
@@ -250,6 +251,24 @@ services:
     depends_on:
       registry:
         condition: service_started
+
+  # 受控 Component 进程运行时。管理 API 只在共享卷上的 Unix socket 暴露，
+  # 不发布宿主机端口；制品须由 Provisioner 先完成签名与 digest 校验。
+  artifact-runtime:
+    profiles: [provisioner]
+    build:
+      context: ../control-plane
+      dockerfile: registry/Dockerfile.provisioner
+    image: lumo/provisioner:dev
+    entrypoint: ["artifact-runtime"]
+    command: ["serve", "-dir", "/var/lib/lumo/artifacts", "-socket", "/var/lib/lumo/artifacts/artifact-runtime.sock"]
+    volumes:
+      - provisionerdata:/var/lib/lumo/artifacts
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /var/lib/lumo/artifacts/artifact-runtime.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   registry:
     build:
@@ -392,6 +411,8 @@ services:
       LUMO_AUTH_LOCK_SECONDS: "${LUMO_AUTH_LOCK_SECONDS:-300}"
       LUMO_AUTH_SESSION_TTL_SECONDS: "${LUMO_AUTH_SESSION_TTL_SECONDS:-86400}"
       LUMO_AUTH_CAPTCHA_TTL_SECONDS: "${LUMO_AUTH_CAPTCHA_TTL_SECONDS:-120}"
+      # Optional: base64-encoded 32-byte AES-GCM key. Do not commit a value.
+      LUMO_AUTH_MFA_KEY: "${LUMO_AUTH_MFA_KEY:-}"
     ports:
       - "18089:8089"
     depends_on:

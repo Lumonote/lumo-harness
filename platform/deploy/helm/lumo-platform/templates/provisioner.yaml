@@ -11,7 +11,18 @@ spec:
     matchLabels: { lumo.dev/service: provisioner }
   template:
     metadata:
-      labels: { lumo.dev/service: provisioner }
+      labels:
+        lumo.dev/service: provisioner
+        {{- if .Values.serviceMesh.istio.enabled }}
+        lumo.dev/mesh-mtls: "enabled"
+        {{- if .Values.serviceMesh.istio.revision }}
+        istio.io/rev: {{ .Values.serviceMesh.istio.revision | quote }}
+        {{- end }}
+        {{- end }}
+      {{- if .Values.serviceMesh.istio.enabled }}
+      annotations:
+        sidecar.istio.io/inject: "true"
+      {{- end }}
     spec:
       containers:
         - name: provisioner
@@ -22,14 +33,21 @@ spec:
               value: {{ printf "http://%s-registry:%v" (include "lumo-platform.name" .) .Values.services.registry.port | quote }}
             - name: PROVISIONER_ARTIFACT_NAME
               value: {{ required "provisioner.artifactName is required when provisioner is enabled" .Values.provisioner.artifactName | quote }}
+            {{- if .Values.provisioner.rolloutChannel }}
+            - name: PROVISIONER_ROLLOUT_CHANNEL
+              value: {{ .Values.provisioner.rolloutChannel | quote }}
+            {{- else }}
             - name: PROVISIONER_ARTIFACT_VERSION
               value: {{ required "provisioner.artifactVersion is required when provisioner is enabled" .Values.provisioner.artifactVersion | quote }}
+            {{- end }}
             - name: PROVISIONER_INTERVAL
               value: {{ .Values.provisioner.interval | quote }}
             - name: PROVISIONER_SHAPE
               value: {{ .Values.provisioner.shape | quote }}
             - name: PROVISIONER_INSTALL_DIR
               value: {{ .Values.provisioner.installDir | quote }}
+            - name: PROVISIONER_NODE_ID
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - name: LUMO_CONTROL_PLANE_TOKEN
               valueFrom: { secretKeyRef: { name: {{ .Values.controlPlaneAuth.tokenSecret }}, key: {{ .Values.controlPlaneAuth.tokenKey }}, optional: false } }
           volumeMounts:
@@ -47,6 +65,19 @@ spec:
           resources:
             requests: { cpu: 25m, memory: 64Mi }
             limits: { cpu: 250m, memory: 256Mi }
+        {{- if .Values.provisioner.runtime.enabled }}
+        - name: artifact-runtime
+          image: {{ .Values.provisioner.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["artifact-runtime"]
+          args: ["serve", "-dir", {{ .Values.provisioner.installDir | quote }}, "-socket", {{ .Values.provisioner.runtime.socketPath | quote }}]
+          volumeMounts:
+            - name: artifacts
+              mountPath: {{ .Values.provisioner.installDir | quote }}
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+        {{- end }}
       volumes:
         - name: artifacts
           {{- if .Values.provisioner.persistence.enabled }}

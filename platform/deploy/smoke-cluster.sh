@@ -8,6 +8,10 @@ timeout_seconds="${LUMO_SMOKE_TIMEOUT_SECONDS:-240}"
 command -v docker >/dev/null 2>&1 || { echo "smoke: docker is required" >&2; exit 127; }
 command -v curl >/dev/null 2>&1 || { echo "smoke: curl is required" >&2; exit 127; }
 
+# Fail before inspecting a partially started topology when the daemon, compose
+# render, trust root, or mandatory control-plane credential is unavailable.
+LUMO_ENV_FILE="$env_file" "$script_dir/preflight-deployment.sh" cluster
+
 compose=(docker compose -f "$script_dir/compose.cluster.yml")
 if [[ -f "$env_file" ]]; then
   compose=(docker compose --env-file "$env_file" -f "$script_dir/compose.cluster.yml")

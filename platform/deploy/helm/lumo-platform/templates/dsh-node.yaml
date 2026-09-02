@@ -11,7 +11,18 @@ spec:
     matchLabels: { lumo.dev/service: dsh-node }
   template:
     metadata:
-      labels: { lumo.dev/service: dsh-node }
+      labels:
+        lumo.dev/service: dsh-node
+        {{- if .Values.serviceMesh.istio.enabled }}
+        lumo.dev/mesh-mtls: "enabled"
+        {{- if .Values.serviceMesh.istio.revision }}
+        istio.io/rev: {{ .Values.serviceMesh.istio.revision | quote }}
+        {{- end }}
+        {{- end }}
+      {{- if .Values.serviceMesh.istio.enabled }}
+      annotations:
+        sidecar.istio.io/inject: "true"
+      {{- end }}
     spec:
       terminationGracePeriodSeconds: 30
       {{- if .Values.provisioner.enabled }}
@@ -24,14 +35,21 @@ spec:
               value: {{ printf "http://%s-registry:%v" (include "lumo-platform.name" .) .Values.services.registry.port | quote }}
             - name: PROVISIONER_ARTIFACT_NAME
               value: {{ required "provisioner.artifactName is required when provisioner is enabled" .Values.provisioner.artifactName | quote }}
+            {{- if .Values.provisioner.rolloutChannel }}
+            - name: PROVISIONER_ROLLOUT_CHANNEL
+              value: {{ .Values.provisioner.rolloutChannel | quote }}
+            {{- else }}
             - name: PROVISIONER_ARTIFACT_VERSION
               value: {{ required "provisioner.artifactVersion is required when provisioner is enabled" .Values.provisioner.artifactVersion | quote }}
+            {{- end }}
             - name: PROVISIONER_INTERVAL
               value: 0s
             - name: PROVISIONER_SHAPE
               value: {{ .Values.provisioner.shape | quote }}
             - name: PROVISIONER_INSTALL_DIR
               value: {{ .Values.provisioner.installDir | quote }}
+            - name: PROVISIONER_NODE_ID
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - name: LUMO_CONTROL_PLANE_TOKEN
               valueFrom: { secretKeyRef: { name: {{ .Values.controlPlaneAuth.tokenSecret }}, key: {{ .Values.controlPlaneAuth.tokenKey }}, optional: false } }
           volumeMounts:
@@ -108,14 +126,21 @@ spec:
               value: {{ printf "http://%s-registry:%v" (include "lumo-platform.name" .) .Values.services.registry.port | quote }}
             - name: PROVISIONER_ARTIFACT_NAME
               value: {{ required "provisioner.artifactName is required when provisioner is enabled" .Values.provisioner.artifactName | quote }}
+            {{- if .Values.provisioner.rolloutChannel }}
+            - name: PROVISIONER_ROLLOUT_CHANNEL
+              value: {{ .Values.provisioner.rolloutChannel | quote }}
+            {{- else }}
             - name: PROVISIONER_ARTIFACT_VERSION
               value: {{ required "provisioner.artifactVersion is required when provisioner is enabled" .Values.provisioner.artifactVersion | quote }}
+            {{- end }}
             - name: PROVISIONER_INTERVAL
               value: {{ .Values.provisioner.interval | quote }}
             - name: PROVISIONER_SHAPE
               value: {{ .Values.provisioner.shape | quote }}
             - name: PROVISIONER_INSTALL_DIR
               value: {{ .Values.provisioner.installDir | quote }}
+            - name: PROVISIONER_NODE_ID
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - name: LUMO_CONTROL_PLANE_TOKEN
               valueFrom: { secretKeyRef: { name: {{ .Values.controlPlaneAuth.tokenSecret }}, key: {{ .Values.controlPlaneAuth.tokenKey }}, optional: false } }
           volumeMounts:
@@ -124,6 +149,19 @@ spec:
           resources:
             requests: { cpu: 25m, memory: 64Mi }
             limits: { cpu: 250m, memory: 256Mi }
+      {{- if .Values.provisioner.runtime.enabled }}
+        - name: artifact-runtime
+          image: {{ .Values.provisioner.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["artifact-runtime"]
+          args: ["serve", "-dir", {{ .Values.provisioner.installDir | quote }}, "-socket", {{ .Values.provisioner.runtime.socketPath | quote }}]
+          volumeMounts:
+            - name: artifacts
+              mountPath: {{ .Values.provisioner.installDir | quote }}
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+      {{- end }}
       {{- end }}
       {{- if .Values.provisioner.enabled }}
       volumes:
@@ -181,7 +219,18 @@ spec:
     matchLabels: { lumo.dev/service: dsh-web }
   template:
     metadata:
-      labels: { lumo.dev/service: dsh-web }
+      labels:
+        lumo.dev/service: dsh-web
+        {{- if .Values.serviceMesh.istio.enabled }}
+        lumo.dev/mesh-mtls: "enabled"
+        {{- if .Values.serviceMesh.istio.revision }}
+        istio.io/rev: {{ .Values.serviceMesh.istio.revision | quote }}
+        {{- end }}
+        {{- end }}
+      {{- if .Values.serviceMesh.istio.enabled }}
+      annotations:
+        sidecar.istio.io/inject: "true"
+      {{- end }}
     spec:
       terminationGracePeriodSeconds: 30
       containers:
@@ -232,6 +281,8 @@ spec:
               value: {{ .Values.dshWeb.flowsUrl | quote }}
             - name: LUMO_CONNECTOR_GATEWAY_URL
               value: {{ .Values.dshWeb.connectorUrl | quote }}
+            - name: LUMO_REGISTRY_URL
+              value: {{ .Values.dshWeb.registryUrl | quote }}
             - name: LUMO_NACOS_ADDR
               value: {{ .Values.dshWeb.nacosAddress | quote }}
             - name: LUMO_NACOS_SERVICE

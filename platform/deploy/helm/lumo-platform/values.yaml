@@ -28,6 +28,39 @@ console:
 controlPlaneAuth:
   tokenSecret: lumo-control-plane-token
   tokenKey: token
+serviceMesh:
+  # Optional, production-only workload mTLS for an Istio-managed namespace.
+  # When enabled every Lumo workload in this chart receives a sidecar; service
+  # identities and leaf certificate rotation are obtained through Istio SDS,
+  # rather than copied into application containers or environment variables.
+  istio:
+    enabled: false
+    revision: ""
+    # Must match the installed mesh. It is intentionally not guessed when mTLS
+    # is enabled because a wrong SPIFFE trust domain is an authentication bug.
+    trustDomain: ""
+    # Emergency deny-list for compromised workload SPIFFE principals, e.g.
+    # cluster.local/ns/lumo/sa/retired-worker. Empty means no extra deny rule.
+    denyPrincipals: []
+productionControls:
+  # Helm cannot make business/compliance choices. Enabling this switch turns
+  # their approved references and numeric retention/cost boundaries into a
+  # render-time deployment gate and publishes the non-secret declaration.
+  enforced: false
+  observability:
+    enabled: false
+    sloDocumentRef: ""
+    collectorUrl: ""
+    lokiUrl: ""
+    objectStoreBucket: ""
+    objectStoreEndpoint: ""
+    logsRetentionDays: 0
+    tracesRetentionDays: 0
+    monthlyCostCapUSD: 0
+  compliance:
+    breakGlassPolicyRef: ""
+    tenantKeyDestructionPolicyRef: ""
+    marketplaceGovernancePolicyRef: ""
 dshNode:
   # 承载 subagent 的可水平扩展节点池；生产必须替换为已发布的 DSH 镜像。
   enabled: false
@@ -69,18 +102,26 @@ dshWeb:
   projectsUrl: http://lumo-platform-projects:8086
   flowsUrl: http://lumo-platform-flows:8087
   connectorUrl: http://lumo-platform-connector-gateway:8082
+  registryUrl: http://lumo-platform-registry:8084
   nacosAddress: http://nacos:8848
   nacosService: lumo-dsh-node
   nacosGroup: DEFAULT_GROUP
 provisioner:
   # 持续将节点制品目录收敛到 Registry 的已签名计划；按需启用。
+  # rolloutChannel 非空时，每轮从该通道读取 artifactName 的期望版本；否则使用 artifactVersion。
   enabled: false
   image: ghcr.io/lumo-harness/provisioner:0.1.0
   artifactName: ""
   artifactVersion: ""
+  rolloutChannel: ""
   interval: 30s
   shape: '{"object":true}'
   installDir: /var/lib/lumo/artifacts
+  runtime:
+    # Only starts a Unix-socket local Component runtime adapter; artifacts are
+    # still started explicitly by an on-node administrator.
+    enabled: false
+    socketPath: /var/lib/lumo/artifacts/artifact-runtime.sock
   persistence:
     enabled: true
     size: 10Gi

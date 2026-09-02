@@ -12,7 +12,18 @@ spec:
     matchLabels: { lumo.dev/service: {{ $name }} }
   template:
     metadata:
-      labels: { lumo.dev/service: {{ $name }} }
+      labels:
+        lumo.dev/service: {{ $name }}
+        {{- if $.Values.serviceMesh.istio.enabled }}
+        lumo.dev/mesh-mtls: "enabled"
+        {{- if $.Values.serviceMesh.istio.revision }}
+        istio.io/rev: {{ $.Values.serviceMesh.istio.revision | quote }}
+        {{- end }}
+        {{- end }}
+      {{- if $.Values.serviceMesh.istio.enabled }}
+      annotations:
+        sidecar.istio.io/inject: "true"
+      {{- end }}
     spec:
       containers:
         - name: {{ $name }}

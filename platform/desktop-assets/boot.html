@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lumo</title>
+    <style>
+      :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; color: #eef3f6; background: #0b0e11; -webkit-user-select: none; user-select: none; }
+      main { width: min(640px, calc(100vw - 56px)); padding: 48px; border: 1px solid #2f4656; border-radius: 28px; background: linear-gradient(145deg, #18212a, #0e1217); box-shadow: 0 28px 90px #0008; }
+      .mark { width: 54px; height: 54px; overflow: hidden; display: grid; place-items: center; border: 1px solid #2f4656; border-radius: 50%; color: transparent; font-size: 0; background: #0b0e11 url('lumo-logo.png') center / cover no-repeat; box-shadow: 0 8px 24px #0006; }
+      .eyebrow { margin: 32px 0 10px; color: #7fd1ff; font-size: 12px; letter-spacing: .16em; }
+      body.failed .eyebrow { color: #ffad70; }
+      h1 { margin: 0; font-size: clamp(30px, 5vw, 48px); letter-spacing: -.04em; }
+      p { color: #a4b1bb; line-height: 1.7; }
+      .bar { position: relative; height: 4px; margin: 28px 0 10px; overflow: hidden; border-radius: 2px; background: #1c262f; }
+      .bar::after { content: ""; position: absolute; inset: 0; width: 35%; border-radius: 2px; background: linear-gradient(90deg, #3aa0ff, #7fd1ff); animation: slide 1.4s ease-in-out infinite; }
+      @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
+      body.failed .bar { display: none; }
+      .status { display: flex; justify-content: space-between; color: #74818b; font-size: 13px; font-variant-numeric: tabular-nums; }
+      code { display: none; margin: 24px 0; padding: 16px 18px; overflow: auto; white-space: pre-wrap; word-break: break-all; border: 1px solid #2f4656; border-radius: 12px; color: #ffcfad; background: #11161c; -webkit-user-select: text; user-select: text; }
+      body.failed code { display: block; }
+      small { color: #74818b; }
+      .hint { display: none; }
+      body.failed .hint { display: block; }
+      body.failed .booting { display: none; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark">L</div>
+      <div class="eyebrow" id="eyebrow">本地优先运行时</div>
+      <h1 id="title">正在启动 Lumo</h1>
+      <p class="booting" id="detail">正在加载内置的 DSH runtime。首次启动需要编译模块缓存，可能要等十几秒；之后会快很多。</p>
+      <p class="hint">桌面壳已启动，但内置的 DSH runtime 没有成功就绪。下面是本次失败的原因；完整输出在 runtime 日志里。</p>
+      <div class="bar"></div>
+      <div class="status"><span id="phase">等待 127.0.0.1 端口就绪…</span><span id="elapsed">0 s</span></div>
+      <code id="message"></code>
+      <small id="log"></small>
+    </main>
+    <script>
+      const started = Date.now();
+      const $ = (id) => document.getElementById(id);
+      const tick = setInterval(() => { $('elapsed').textContent = `${Math.round((Date.now() - started) / 1000)} s`; }, 1000);
+      // Rust 壳通过 webview.eval 调用这些钩子；这里没有 IPC，也不需要任何 capability。
+      window.__lumoBoot = {
+        status(text) { $('phase').textContent = text; },
+        logPath(path) { $('log').textContent = path ? `runtime 日志：${path}` : ''; },
+        fail(message, logPath) {
+          clearInterval(tick);
+          document.body.classList.add('failed');
+          document.title = 'Lumo — 本地运行时未启动';
+          $('eyebrow').textContent = '本地运行时未启动';
+          $('title').textContent = '本地运行时没有启动';
+          $('phase').textContent = '启动失败';
+          $('message').textContent = message || '未知错误';
+          if (logPath) this.logPath(logPath);
+        },
+      };
+    </script>
+  </body>
+</html>

@@ -13,4 +13,5 @@ data:
   LUMO_OPA_ADDR: {{ .Values.opa.address | quote }}
   LUMO_VAULT_ADDR: {{ .Values.vault.address | quote }}
   LUMO_CORS_ORIGIN: {{ .Values.console.corsOrigin | quote }}
+  LUMO_OTEL_COLLECTOR_URL: {{ .Values.productionControls.observability.collectorUrl | quote }}
   REGISTRY_TRUST_FILE: /etc/lumo/trust/registry-trust.json

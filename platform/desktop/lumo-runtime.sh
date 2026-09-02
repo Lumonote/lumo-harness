@@ -24,5 +24,9 @@ export DSH_HOME="${DSH_HOME:-${HOME}/Library/Application Support/Lumo/dsh}"
 export LUMO_DEPLOYMENT_MODE="${LUMO_DEPLOYMENT_MODE:-local}"
 export LUMO_DSH_PROFILE="${LUMO_DSH_PROFILE:-web}"
 export LUMO_WEB_PORT="${LUMO_WEB_PORT:-3080}"
+# 启动要加载 800+ 个包的模块图，V8 编译占了冷启动的大头。Node 22.1+ 的磁盘编译缓存
+# 让第二次起动直接复用字节码；缓存放在 runtime 状态目录，随 DSH_HOME 走，卸载即清。
+export NODE_COMPILE_CACHE="${NODE_COMPILE_CACHE:-$state_dir/compile-cache}"
+mkdir -p "$NODE_COMPILE_CACHE"
 
 exec "$runtime_root/node" --experimental-strip-types "$runtime_root/dsh-node/src/index.ts"

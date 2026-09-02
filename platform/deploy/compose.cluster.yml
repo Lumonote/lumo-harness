@@ -217,7 +217,9 @@ services:
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       PROVISIONER_ARTIFACT_NAME: "${PROVISIONER_ARTIFACT_NAME:-}"
       PROVISIONER_ARTIFACT_VERSION: "${PROVISIONER_ARTIFACT_VERSION:-}"
+      PROVISIONER_ROLLOUT_CHANNEL: "${PROVISIONER_ROLLOUT_CHANNEL:-}"
       PROVISIONER_INSTALL_DIR: /var/lib/lumo/artifacts
+      PROVISIONER_NODE_ID: provisioner
       PROVISIONER_INTERVAL: "${PROVISIONER_INTERVAL:-30s}"
       PROVISIONER_SHAPE: "${PROVISIONER_SHAPE:-{\"object\":true}}"
     volumes:
@@ -229,6 +231,24 @@ services:
       retries: 24
     depends_on:
       registry: { condition: service_started }
+
+  # 节点本地 Component 进程运行时。它只监听共享卷上的 Unix socket，默认不
+  # 自动启动制品；管理员必须明确调用 artifact-runtime start。
+  artifact-runtime:
+    profiles: [provisioner]
+    build:
+      context: ../control-plane
+      dockerfile: registry/Dockerfile.provisioner
+    image: lumo/provisioner:dev
+    entrypoint: ["artifact-runtime"]
+    command: ["serve", "-dir", "/var/lib/lumo/artifacts", "-socket", "/var/lib/lumo/artifacts/artifact-runtime.sock"]
+    volumes:
+      - provisionerdata:/var/lib/lumo/artifacts
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /var/lib/lumo/artifacts/artifact-runtime.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   # 原生 DeepSeek Harness Web 首页。Lumo UI 以 dsh.client 插件挂入同一个
   # AppFrame，并通过 dsh-node 的同源 /lumo/api 访问控制面。
@@ -252,7 +272,6 @@ services:
       - "LUMO_IDENTITY_ASSERTION_SECRET=${LUMO_IDENTITY_ASSERTION_SECRET:-}"
       - LUMO_WEB_PORT=3080
       - LUMO_NODE_ID=lumo-web
-      - LUMO_CLUSTER_ID=cluster-a
       - LUMO_ROLE=agent
       - LUMO_REALM=dev
       - "LUMO_USER_ID=${LUMO_USER_ID:-dev-user}"
@@ -267,7 +286,6 @@ services:
       - "LUMO_MINIO_SECRET_KEY=${LUMO_MINIO_ROOT_PASSWORD:-lumo-minio-123}"
       - LUMO_MINIO_BUCKET=lumo-objects
       - LUMO_CONNECTOR_GATEWAY_URL=http://connector-gateway:8082
-      - LUMO_SCHEDULER_URL=http://scheduler-0:8083
       - LUMO_SCHEDULER_API_URL=http://scheduler-0:8083
       - LUMO_PROJECTS_URL=http://projects:8086
       - LUMO_FLOWS_URL=http://flows:8087
@@ -516,6 +534,9 @@ services:
       - "LUMO_AUTH_LOCK_SECONDS=${LUMO_AUTH_LOCK_SECONDS:-300}"
       - "LUMO_AUTH_SESSION_TTL_SECONDS=${LUMO_AUTH_SESSION_TTL_SECONDS:-86400}"
       - "LUMO_AUTH_CAPTCHA_TTL_SECONDS=${LUMO_AUTH_CAPTCHA_TTL_SECONDS:-120}"
+      # Optional: base64-encoded 32-byte AES-GCM key. MFA stays unavailable
+      # until an operator supplies this through the deployment secret store.
+      - "LUMO_AUTH_MFA_KEY=${LUMO_AUTH_MFA_KEY:-}"
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["18089:8089"]
