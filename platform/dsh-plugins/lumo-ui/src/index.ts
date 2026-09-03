@@ -1,4 +1,5 @@
 /** Host half: keep DSH's native Web shell and add a same-origin Lumo control API. */
+import { readFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -7,6 +8,8 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import { assertIdentityConfiguration, IdentityAssertionError, resolveRequestIdentity, type RequestIdentity } from './identity.ts'
 import { lumoBootThemeInjection } from './boot-theme.ts'
 import { registerDesktopHandoff } from './desktop-handoff.ts'
+import { discoverSkillDemos, resolveSkillDemoAsset, type SkillDemo } from './skill-demos.ts'
+import { allowedAssetUrl, createUpstreamDemoService, type GallerySkill, type UpstreamDemoService } from './upstream-demos.ts'
 
 /** Read-only structural projection of the session-query seam. Keeping the
  * host plugin's build boundary local avoids pulling the platform contract
@@ -54,6 +57,8 @@ interface SkillRegistryService {
       name: string; description: string; whenToUse?: string
       invocation: { modelInvocable: boolean; userInvocable: boolean }
       source: string; provider: string
+      /** 目录型 resourceBase 才有原生示例可扫；路径只在宿主侧使用，永不下发。 */
+      resourceBase?: { kind: 'directory'; path: string } | { kind: 'url'; url: string } | { kind: 'opaque'; description: string }
     }>
   }>
 }
@@ -370,6 +375,11 @@ async function ensureFreshReportEvidence(query: SessionLogQuerySeam | undefined,
   return { ok: true }
 }
 
+let upstreamDemoService: UpstreamDemoService | undefined
+function upstreamDemos(): UpstreamDemoService {
+  return upstreamDemoService ??= createUpstreamDemoService()
+}
+
 export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const pathname = new URL(req.url ?? '/', 'http://lumo.local').pathname
   let identity: RequestIdentity
@@ -563,6 +573,83 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       }
       return
     }
+  }
+
+  if (req.method === 'GET' && pathname === '/lumo/api/skills/demos/upstream') {
+    const skill = new URL(req.url ?? '/', 'http://lumo.local').searchParams.get('skill')
+    if (skill !== 'ppt-master' && skill !== 'open-design') {
+      writeJson(res, 400, { error: 'skill must be ppt-master or open-design' })
+      return
+    }
+    writeJson(res, 200, await upstreamDemos().gallery(skill satisfies GallerySkill))
+    return
+  }
+
+  if (req.method === 'GET' && pathname === '/lumo/api/skills/demos/upstream/asset') {
+    const upstream = allowedAssetUrl(new URL(req.url ?? '/', 'http://lumo.local').searchParams.get('url') ?? '')
+    const asset = upstream === undefined ? undefined : await upstreamDemos().asset(upstream)
+    if (asset === undefined) {
+      writeJson(res, upstream === undefined ? 403 : 404, { error: upstream === undefined ? 'upstream host is not allowed' : 'upstream demo asset unavailable' })
+      return
+    }
+    // 第三方仓库的 SVG 也可能带脚本：与本地示例一样沙箱化输出。
+    res.writeHead(200, {
+      'content-type': asset.contentType,
+      'content-length': asset.body.byteLength,
+      'cache-control': 'private, max-age=3600',
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:",
+    })
+    res.end(asset.body)
+    return
+  }
+
+  if (req.method === 'GET' && (pathname === '/lumo/api/skills/demos' || pathname === '/lumo/api/skills/demos/asset')) {
+    if (skills === undefined) {
+      writeJson(res, 503, { error: '本地技能 registry 尚未装配。' })
+      return
+    }
+    let snapshot: Awaited<ReturnType<SkillRegistryService['snapshot']>>
+    try { snapshot = await skills.snapshot() } catch (error) {
+      writeJson(res, 502, { error: error instanceof Error ? error.message : 'skill registry unavailable' })
+      return
+    }
+    const directories = new Map<string, string>()
+    for (const skill of snapshot.skills) {
+      if (skill.invocation.userInvocable && skill.resourceBase?.kind === 'directory') directories.set(skill.name, skill.resourceBase.path)
+    }
+    if (pathname === '/lumo/api/skills/demos') {
+      const demos: Array<SkillDemo & { url: string }> = []
+      for (const [skill, directory] of directories) {
+        for (const demo of discoverSkillDemos(skill, directory)) {
+          demos.push({ ...demo, url: `/lumo/api/skills/demos/asset?skill=${encodeURIComponent(skill)}&path=${encodeURIComponent(demo.path)}` })
+        }
+      }
+      writeJson(res, 200, { complete: snapshot.complete, demos })
+      return
+    }
+    const params = new URL(req.url ?? '/', 'http://lumo.local').searchParams
+    const directory = directories.get(params.get('skill') ?? '')
+    const asset = directory === undefined ? undefined : resolveSkillDemoAsset(directory, params.get('path') ?? '')
+    if (asset === undefined) {
+      writeJson(res, 404, { error: 'skill demo asset not found' })
+      return
+    }
+    let body: Buffer
+    try { body = readFileSync(asset.file) } catch {
+      writeJson(res, 404, { error: 'skill demo asset not found' })
+      return
+    }
+    // 示例来自第三方仓库：SVG/HTML 一律沙箱化，不允许它们在 Lumo 同源下执行脚本或发请求。
+    res.writeHead(200, {
+      'content-type': asset.contentType,
+      'content-length': body.length,
+      'cache-control': 'private, max-age=300',
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "sandbox; default-src 'none'; img-src data: 'self'; style-src 'unsafe-inline'; font-src data:",
+    })
+    res.end(body)
+    return
   }
 
   if (req.method === 'GET' && pathname === '/lumo/api/skills') {

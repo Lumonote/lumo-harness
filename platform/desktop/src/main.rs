@@ -497,8 +497,14 @@ fn main() {
 
             // The window comes up on the bundled boot page first; the worker
             // thread swaps it for the real workbench once the port answers.
+            // 标题栏跟随产品主题：Lumo 的四套主题（见 dsh-plugins/lumo-ui/src/theme-catalog.ts）
+            // 目前全是深色，所以窗口外观固定为 Dark，底色取默认主题 obsidian-signal 的
+            // 基色 #0b0e11——启动页、切换到工作台之间以及窗口尺寸变化露出的边缘都不会
+            // 再闪出系统浅灰标题栏。
             WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("boot.html".into()))
                 .title("Lumo")
+                .theme(Some(tauri::Theme::Dark))
+                .background_color(tauri::window::Color(0x0b, 0x0e, 0x11, 0xff))
                 .inner_size(1440.0, 920.0)
                 .min_inner_size(980.0, 680.0)
                 .resizable(true)

@@ -675,8 +675,105 @@ function useRuntimeSkills(): SkillSnapshot | null {
   return snapshot
 }
 
+interface SkillDemo { id: string; skill: string; title: string; summary: string; kind: 'image' | 'html'; url: string }
+interface SkillDemoSnapshot { complete: boolean; demos: SkillDemo[]; error?: string }
+
+function useSkillDemos(): SkillDemoSnapshot | null {
+  const [snapshot, setSnapshot] = useState<SkillDemoSnapshot | null>(null)
+  useEffect(() => {
+    let mounted = true
+    void optionalApi<SkillDemoSnapshot>('/lumo/api/skills/demos', { complete: false, demos: [] }).then(next => {
+      if (mounted) setSnapshot({ ...next.data, ...(next.error === undefined ? {} : { error: next.error }) })
+    })
+    return () => { mounted = false }
+  }, [])
+  return snapshot
+}
+
+/** 原生示例卡片：图片直接 <img>，HTML 示例放进无权限的 iframe，绝不再画 CSS 假预览。 */
+function SkillDemoCard({ demo, label, onPick }: { demo: SkillDemo; label: string; onPick: (demo: SkillDemo) => void }) {
+  return <button type="button" className="lumo-demo-card" aria-label={`使用原生示例：${demo.title}`} onClick={() => onPick(demo)}>
+    <span className="lumo-demo-frame">{demo.kind === 'html'
+      ? <iframe src={demo.url} title={demo.title} sandbox="" loading="lazy" tabIndex={-1} />
+      : <img src={demo.url} alt="" loading="lazy" />}</span>
+    <span><small>{label}</small><b>{demo.title}</b>{demo.summary ? <em>{demo.summary}</em> : null}</span>
+  </button>
+}
+
+interface GalleryPage { title: string; description: string; url: string }
+interface GalleryCollection { id: string; title: string; description: string; category: string; tags: string[]; cover: string; pages: GalleryPage[]; downloads: Array<{ label: string; url: string }> }
+interface Gallery { skill: 'ppt-master' | 'open-design'; title: string; source: string; fetchedAt: string; collections: GalleryCollection[] }
+type GalleryState = { available: true; gallery: Gallery } | { available: false; skill: string; error: string }
+
+/** 上游技能项目自己公开的完整样例（经宿主同源代理）；不可达时 available=false，页面回退到本地模板。 */
+function useUpstreamGallery(skill: Gallery['skill']): GalleryState | null {
+  const [state, setState] = useState<GalleryState | null>(null)
+  useEffect(() => {
+    let mounted = true
+    void optionalApi<GalleryState>(`/lumo/api/skills/demos/upstream?skill=${skill}`, { available: false, skill, error: '' }).then(next => {
+      if (!mounted) return
+      setState(next.data.available ? next.data : { available: false, skill, error: next.error ?? next.data.error })
+    })
+    return () => { mounted = false }
+  }, [skill])
+  return state
+}
+
+function galleryCategories(collections: GalleryCollection[]): string[] {
+  return ['全部', ...new Set(collections.map(item => item.category))]
+}
+
+type GalleryFocus = { collection: GalleryCollection; index: number }
+
+/**
+ * 完整样例查看器：逐页翻看上游样例（PPT 的每一页幻灯片 / OpenDesign 的每张截图），
+ * 底部可直接把当前样例送进创作意图。嵌在工作台对话框内部，Esc 只关闭自己。
+ */
+function GalleryViewer({ focus, useLabel, onIndex, onClose, onUse }: { focus: GalleryFocus; useLabel: string; onIndex: (index: number) => void; onClose: () => void; onUse: (collection: GalleryCollection, page: GalleryPage) => void }) {
+  const ref = useRef<HTMLElement>(null)
+  const { collection, index } = focus
+  const pages = collection.pages
+  const page = pages[Math.min(index, pages.length - 1)] ?? pages[0]!
+  useFocusTrap(ref, true)
+  const step = (delta: number) => { if (pages.length) onIndex((index + delta + pages.length) % pages.length) }
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key === 'ArrowRight') { event.preventDefault(); event.stopPropagation(); step(1) }
+    else if (event.key === 'ArrowLeft') { event.preventDefault(); event.stopPropagation(); step(-1) }
+    else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose() }
+  }
+  return <div className="lumo-gallery-layer" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
+    <section ref={ref} tabIndex={-1} className="lumo-gallery-viewer" role="dialog" aria-modal="true" aria-label={`样例：${collection.title}`} onKeyDown={onKeyDown}>
+      <header><div><span className="lumo-eyebrow">{collection.category}</span><b>{collection.title}</b>{collection.description ? <small>{collection.description}</small> : null}</div><div><span className="lumo-gallery-counter" aria-live="polite">{index + 1} / {pages.length}</span><button type="button" className="lumo-quiet" aria-label="关闭样例查看器" onClick={onClose}>×</button></div></header>
+      <div className="lumo-gallery-stage"><button type="button" className="lumo-gallery-nav prev" aria-label="上一页" disabled={pages.length < 2} onClick={() => step(-1)}>‹</button><figure><img src={page.url} alt={page.title} /><figcaption><b>{page.title}</b>{page.description ? <span>{page.description}</span> : null}</figcaption></figure><button type="button" className="lumo-gallery-nav next" aria-label="下一页" disabled={pages.length < 2} onClick={() => step(1)}>›</button></div>
+      {pages.length > 1 ? <div className="lumo-gallery-strip" role="tablist" aria-label="样例页面">{pages.map((item, position) => <button type="button" role="tab" key={`${collection.id}:${String(position)}`} aria-selected={position === index} aria-label={`第 ${String(position + 1)} 页：${item.title}`} className={position === index ? 'active' : ''} onClick={() => onIndex(position)}><img src={item.url} alt="" loading="lazy" /></button>)}</div> : null}
+      <footer><div>{collection.downloads.map(item => <a key={item.url} href={item.url} target="_blank" rel="noreferrer noopener">{item.label}</a>)}</div><button type="button" className="lumo-primary" onClick={() => onUse(collection, page)}>{useLabel}</button></footer>
+    </section>
+  </div>
+}
+
+function GalleryCollectionCard({ collection, onOpen }: { collection: GalleryCollection; onOpen: (collection: GalleryCollection, index: number) => void }) {
+  return <button type="button" className="lumo-gallery-card" aria-label={`查看样例：${collection.title}`} onClick={() => onOpen(collection, 0)}>
+    <span className="lumo-demo-frame"><img src={collection.cover} alt="" loading="lazy" /></span>
+    <span><small>{collection.category} · {collection.pages.length} 页</small><b>{collection.title}</b>{collection.description ? <em>{collection.description}</em> : null}{collection.tags.length ? <span className="lumo-gallery-tags">{collection.tags.slice(0, 4).map(tag => <i key={tag}>{tag}</i>)}</span> : null}</span>
+  </button>
+}
+
+function GalleryPageCard({ collection, index, onOpen }: { collection: GalleryCollection; index: number; onOpen: (collection: GalleryCollection, index: number) => void }) {
+  const page = collection.pages[index]!
+  return <button type="button" className="lumo-gallery-card" aria-label={`查看样例：${page.title}`} onClick={() => onOpen(collection, index)}>
+    <span className="lumo-demo-frame"><img src={page.url} alt="" loading="lazy" /></span>
+    <span><small>{collection.category}</small><b>{page.title}</b>{page.description ? <em>{page.description}</em> : null}</span>
+  </button>
+}
+
+/** Lumo 创作命令：在原生 `/` 菜单里登记，回车后打开对应工作台，命令后的文字作为创作意图。 */
+const lumoCreativeCommands = [
+  { name: 'design', label: '开放设计', description: '打开开放设计工作台，用原生 open-design 技能生成设计产物', kind: 'design' as const },
+  { name: 'ppt', label: 'PPT 生成', description: '打开 PPT 生成工作台，用原生 ppt-master 模板生成演示文稿', kind: 'presentation' as const },
+] as const
+
 type DesignFormatId = (typeof designFormats)[number]['id']
-type CreativeSeed = { kind: 'design'; skillName?: string; formatId?: DesignFormatId } | { kind: 'presentation'; skillName?: string; openHash?: boolean }
+type CreativeSeed = { kind: 'design'; skillName?: string; formatId?: DesignFormatId; brief?: string } | { kind: 'presentation'; skillName?: string; openHash?: boolean; brief?: string }
 let creativeSeed: CreativeSeed | null = null
 
 function openCreativeSurface(seed: CreativeSeed): void {
@@ -725,20 +822,10 @@ function OpenDesignDock(props: ComposerDockProps) {
   return <NativeConversationBridgeMount inputActions={props.inputActions} />
 }
 
+// 首页只保留原生对话桥；开放设计 / PPT 生成改由 /design、/ppt 命令或 ⌘K 打开，
+// 不再在输入框下方常驻一块创作工作台。
 function HeroOpenDesignDock(props: HeroComposerDockProps) {
-  const [mode, setMode] = useState<'design' | 'presentation'>('design')
-  const [hash, setHash] = useState('')
-  const runtime = useRuntimeSkills()
-  const designExamples = runtime === null ? [] : creativeExamples(runtime, 'design')
-  const presentationExamples = runtime === null ? [] : creativeExamples(runtime, 'presentation')
-  const onHashChange = (value: string) => {
-    setHash(value)
-    if (value.includes('#')) { setHash(''); openCreativeSurface({ kind: 'presentation', openHash: true }) }
-  }
-  return <><NativeConversationBridgeMount inputActions={props.inputActions} /><section className="lumo-home-creative" aria-label="开放设计与 PPT 样例">
-    <header><div><b>创作工作台</b><span>基于现有插件能力，在 AI 对话中继续完成真实产物</span></div><nav aria-label="创作能力"><button type="button" className={mode === 'design' ? 'active' : ''} onClick={() => setMode('design')}><Glyph surface="design" />开放设计</button><button type="button" className={mode === 'presentation' ? 'active' : ''} onClick={() => setMode('presentation')}><Glyph surface="presentation" />PPT 生成</button></nav></header>
-    {mode === 'design' ? <div className="lumo-home-design"><div className="lumo-home-mode-row">{designFormats.map(item => <button type="button" key={item.id} onClick={() => openCreativeSurface({ kind: 'design', formatId: item.id })}><i>{item.icon}</i>{item.label}</button>)}</div><div className="lumo-home-example-grid">{runtime === null ? <p role="status">正在同步创作技能…</p> : designExamples.length ? designExamples.map(example => <button type="button" key={example.id} onClick={() => openCreativeSurface({ kind: 'design', skillName: example.skillName })}><span className={`lumo-design-preview ${example.className}`}><i /><i /><i /><b /></span><span><small>{example.kind}</small><b>{example.title}</b></span></button>) : <p role="status">{runtime.error || '当前运行时没有可用的设计技能。'}</p>}</div></div> : <div className="lumo-home-presentation"><label><Glyph surface="presentation" /><input aria-label="用 # 选择 PPT 样例" value={hash} onChange={event => onHashChange(event.target.value)} placeholder="输入 # 选择演示样例，然后进入 AI 对话" /><kbd>#</kbd></label><div>{runtime === null ? <p role="status">正在同步演示技能…</p> : presentationExamples.length ? presentationExamples.map(example => <button type="button" key={example.id} onClick={() => openCreativeSurface({ kind: 'presentation', skillName: example.skillName })}><i className={example.className} /><span><b>{example.title}</b><small>{example.description}</small></span></button>) : <p role="status">{runtime.error || '当前运行时没有可用的 PPT 技能。'}</p>}</div></div>}
-  </section></>
+  return <NativeConversationBridgeMount inputActions={props.inputActions} />
 }
 
 function CommandPalette({ open, surface, select, close }: { open: boolean; surface: Surface; select: (surface: Surface) => void; close: () => void }) {
@@ -1794,7 +1881,6 @@ function AutomationSurface() {
   </div>
 }
 
-const designCategories = ['全部', '应用', '数据看板', '品牌设计'] as const
 
 function OpenDesignSurface({ onConversationStart }: { onConversationStart: () => void }) {
   const { project, space } = useStudioScope()
@@ -1805,9 +1891,16 @@ function OpenDesignSurface({ onConversationStart }: { onConversationStart: () =>
   const seededExample = designExamples.find(example => example.skillName === seed?.skillName) ?? null
   const [selectedExample, setSelectedExample] = useState<CreativeExample | null>(null)
   const [format, setFormat] = useState<DesignFormatId>(() => seed?.formatId ?? 'ui')
-  const [category, setCategory] = useState<(typeof designCategories)[number]>('全部')
-  const [brief, setBrief] = useState('')
+  const [category, setCategory] = useState('全部')
+  const [brief, setBrief] = useState(seed?.brief ?? '')
   const [notice, setNotice] = useState('')
+  const [focus, setFocus] = useState<GalleryFocus | null>(null)
+  const gallery = useUpstreamGallery('open-design')
+  const collections = gallery?.available ? gallery.gallery.collections : []
+  const categories = galleryCategories(collections)
+  const demos = useSkillDemos()
+  const designDemos = demos === null ? [] : demos.demos.filter(demo => designExamples.some(example => example.skillName === demo.skill))
+  const openDesignExample = designExamples.find(item => skillCommandName(item.skillName) === 'open-design') ?? null
   useEffect(() => {
     if (selectedExample !== null || seededExample === null) return
     setSelectedExample(seededExample)
@@ -1815,12 +1908,6 @@ function OpenDesignSurface({ onConversationStart }: { onConversationStart: () =>
     setNotice(`已从首页载入「${seededExample.title}」，可继续补充后发送。`)
   }, [seededExample?.skillName, selectedExample])
   const active = designFormats.find(item => item.id === format) ?? designFormats[0]
-  const visibleExamples = category === '全部' ? designExamples : designExamples.filter(example => {
-    const searchable = `${example.title} ${example.description} ${example.prompt}`.toLowerCase()
-    if (category === '应用') return /app|mobile|prototype|应用|原型/u.test(searchable)
-    if (category === '数据看板') return /dashboard|chart|data|看板|数据/u.test(searchable)
-    return /brand|visual|image|品牌|视觉/u.test(searchable)
-  })
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const skill = selectedExample ?? designExamples[0]
@@ -1838,18 +1925,32 @@ function OpenDesignSurface({ onConversationStart }: { onConversationStart: () =>
     }
     onConversationStart()
   }
-  const useExample = (example: CreativeExample) => {
+  const useDemo = (demo: SkillDemo) => {
+    const example = designExamples.find(item => item.skillName === demo.skill) ?? null
     setSelectedExample(example)
-    setBrief(`${example.prompt} 参考「${example.title}」的信息层级，但保持当前项目的品牌与内容。`)
-    setNotice(`已载入「${example.title}」，可继续补充后发送。`)
+    setBrief(`参考「${demo.title}」这个原生示例的结构与视觉层级，${active.prompt} 保持当前项目的品牌与内容。`)
+    setNotice(`已载入原生示例「${demo.title}」，可继续补充后发送。`)
   }
+  const useGalleryPage = (collection: GalleryCollection, page: GalleryPage) => {
+    setSelectedExample(openDesignExample)
+    setBrief(`参考 OpenDesign 官方示例「${page.title}」（${collection.title}）：${page.description || collection.description} ${active.prompt} 保持当前项目的品牌与内容。`)
+    setFocus(null)
+    setNotice(`已载入 OpenDesign 示例「${page.title}」，可继续补充后发送。`)
+  }
+  const visibleCollections = category === '全部' ? collections : collections.filter(item => item.category === category)
   return <div className="lumo-studio-page lumo-design-studio">
     <header className="lumo-studio-heading"><div><span className="lumo-eyebrow">OPEN DESIGN · 原有插件能力</span><h1>开放设计</h1><p>从一句想法开始，生成可继续编辑的设计方案。</p></div><span className={`lumo-plugin-readiness ${bridge === null || runtime === null ? 'waiting' : ''}`}><i />{bridge === null ? '等待会话' : runtime === null ? '同步技能目录' : designExamples.length ? `/${skillCommandName(designExamples[0]!.skillName)} 已就绪` : '暂无设计技能'}</span></header>
     <div className="lumo-studio-tabs" role="tablist" aria-label="开放设计产物类型">{designFormats.map(item => <button type="button" role="tab" aria-selected={item.id === format} aria-label={`选择开放设计类型：${item.label}`} key={item.id} className={item.id === format ? 'active' : ''} onClick={() => { setFormat(item.id); setNotice('') }}><i>{item.icon}</i>{item.label}</button>)}</div>
     <form className="lumo-studio-composer" onSubmit={submit}>{selectedExample ? <span className="lumo-selected-example">{selectedExample.title}<button type="button" aria-label="移除设计样例" onClick={() => { setSelectedExample(null); setBrief('') }}>×</button></span> : null}<textarea aria-label="开放设计创作意图" rows={5} value={brief} onChange={event => setBrief(event.target.value)} placeholder="描述你想设计的产品、页面或流程" /><div className="lumo-studio-tools"><button type="button" aria-label="添加设计上下文">＋</button><span><i>{active.icon}</i>{active.label}</span><span>◉ 设计系统</span><span>⌁ 工作目录</span><em>{selectedExample ? `/${skillCommandName(selectedExample.skillName)}` : '/open-design'}</em><button type="submit" className="lumo-studio-send" aria-label="发送到 OpenDesign">↑</button></div></form>
     {notice ? <div className="lumo-studio-notice" role="status">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div> : null}
-    <div className="lumo-studio-categories" aria-label="设计样例分类">{designCategories.map(item => <button type="button" key={item} className={category === item ? 'active' : ''} onClick={() => setCategory(item)}>{item}</button>)}</div>
-    <section className="lumo-inspiration"><header><b>灵感样例</b><span>样例来自当前运行时技能目录，点击后只组织上下文，最终仍由原生技能生成真实产物</span></header><div>{runtime === null ? <p role="status">正在同步创作技能…</p> : visibleExamples.length ? visibleExamples.map(example => <button type="button" key={example.id} className="lumo-inspiration-card" onClick={() => useExample(example)}><span className={`lumo-design-preview ${example.className}`}><i /><i /><i /><b /></span><span><small>{example.kind}</small><b>{example.title}</b></span></button>) : <Empty>{runtime.error || '当前分类没有匹配的运行时技能。'}</Empty>}</div></section>
+    <section className="lumo-inspiration" aria-label="OpenDesign 官方示例"><header><div><b>OpenDesign 完整示例</b><span>来自 open-design 仓库 README「演示」章节的真实产物截图，按原型 / 仪表盘 / 演示文稿 / 图片 / 视频分类；点开逐张查看，再送进创作意图</span></div>{gallery?.available ? <a href={gallery.gallery.source} target="_blank" rel="noreferrer noopener">上游原文 ↗</a> : null}</header>
+      {gallery === null ? <p role="status">正在拉取 OpenDesign 示例…</p> : gallery.available ? <>
+        <div className="lumo-studio-categories" aria-label="设计样例分类">{categories.map(item => <button type="button" key={item} className={category === item ? 'active' : ''} onClick={() => setCategory(item)}>{item}</button>)}</div>
+        <div className="lumo-gallery-grid">{visibleCollections.flatMap(collection => collection.pages.map((_page, index) => <GalleryPageCard key={`${collection.id}:${String(index)}`} collection={collection} index={index} onOpen={(item, position) => setFocus({ collection: item, index: position })} />))}</div>
+      </> : <Empty>OpenDesign 示例暂时不可用{gallery.error ? `：${gallery.error}` : ''}。可以直接描述意图发送，或使用下方本地示例。</Empty>}
+    </section>
+    {demos !== null && designDemos.length ? <section className="lumo-inspiration" aria-label="本地技能示例"><header><div><b>本地技能示例</b><span>已装配技能目录里自带的真实文件</span></div></header><div className="lumo-demo-grid">{designDemos.map(demo => <SkillDemoCard key={demo.id} demo={demo} label={localizedSkillName(demo.skill)} onPick={useDemo} />)}</div></section> : null}
+    {focus === null ? null : <GalleryViewer focus={focus} useLabel="以此样例创建" onIndex={index => setFocus({ collection: focus.collection, index })} onClose={() => setFocus(null)} onUse={useGalleryPage} />}
   </div>
 }
 
@@ -1865,11 +1966,35 @@ function PresentationSurface({ onConversationStart }: { onConversationStart: () 
   const presentationExamples = runtime === null ? [] : creativeExamples(runtime, 'presentation')
   const [seed] = useState(() => takeCreativeSeed('presentation'))
   const seededExample = presentationExamples.find(example => example.skillName === seed?.skillName) ?? null
-  const [draft, setDraft] = useState(seed?.openHash ? '#' : '')
+  const [draft, setDraft] = useState(seed?.openHash ? '#' : seed?.brief ?? '')
+  const [focus, setFocus] = useState<GalleryFocus | null>(null)
+  const [style, setStyle] = useState('全部')
+  const gallery = useUpstreamGallery('ppt-master')
+  const collections = gallery?.available ? gallery.gallery.collections : []
+  const styles = galleryCategories(collections)
+  const visibleCollections = style === '全部' ? collections : collections.filter(item => item.category === style)
+  const demos = useSkillDemos()
+  const deckDemos = demos === null ? [] : demos.demos.filter(demo => presentationExamples.some(example => example.skillName === demo.skill))
+  const useDeck = (demo: SkillDemo) => {
+    const example = presentationExamples.find(item => item.skillName === demo.skill) ?? null
+    setSelected(example)
+    setDraft(`${example === null ? '' : `#${example.title} `}使用「${demo.title}」品牌模板。${draft.replace(/^#[^\s]+\s*/u, '').trim()}`.trimEnd())
+    setPopup(false)
+    setNotice(`已选择原生模板「${demo.title}」，继续描述听众、时长和重点后发送。`)
+  }
   const [selected, setSelected] = useState<CreativeExample | null>(null)
   const [popup, setPopup] = useState(seed?.openHash === true)
   const [activeIndex, setActiveIndex] = useState(0)
   const [notice, setNotice] = useState('')
+  const useGalleryDeck = (collection: GalleryCollection, page: GalleryPage) => {
+    const example = presentationExamples[0] ?? null
+    setSelected(example)
+    const detail = draft.replace(/^#[^\s]+\s*/u, '').replace(/参考 PPT Master 官方示例「[^」]*」[^。]*。\s*/u, '').trim()
+    setDraft(`${example === null ? '' : `#${example.title} `}参考 PPT Master 官方示例「${collection.title}」（${collection.category}，共 ${String(collection.pages.length)} 页，当前看的是「${page.title}」）：${collection.description}。${detail}`.trimEnd())
+    setPopup(false)
+    setFocus(null)
+    setNotice(`已选择 PPT Master 示例「${collection.title}」，继续描述听众、时长和重点后发送。`)
+  }
   useEffect(() => {
     if (selected !== null || seededExample === null) return
     setSelected(seededExample)
@@ -1919,7 +2044,14 @@ function PresentationSurface({ onConversationStart }: { onConversationStart: () 
     <div className="lumo-presentation-layout"><main><div className="lumo-assistant-prompt"><Glyph surface="skills" /><p>告诉我这次演示的主题、听众和预计时长。你也可以输入 <b>#</b> 从样例开始。</p></div><div className={`lumo-presentation-composer-wrap ${popup ? 'popup-open' : ''}`}>
       {popup ? <section className="lumo-example-popup" role="dialog" aria-label="选择演示样例"><header><b># 选择演示样例</b><span>{query ? `筛选：${query}` : '输入样例名可筛选'}</span></header><div>{matches.map((example, index) => <button type="button" key={example.id} className={activeIndex === index ? 'active' : ''} onMouseEnter={() => setActiveIndex(index)} onClick={() => choose(example)}><i className={example.className} /><span><b>{example.title}</b><small>{example.description}</small></span></button>)}</div><footer>↑↓ 选择 · Enter 插入 · Esc 关闭</footer></section> : null}
       <form className="lumo-presentation-composer" onSubmit={submit}>{selected ? <span className="lumo-selected-example">#{selected.title}<button type="button" aria-label="移除演示样例" onClick={() => { setSelected(null); setDraft('') }}>×</button></span> : null}<textarea autoFocus aria-label="PPT 对话输入" rows={5} value={draft} onChange={event => changeDraft(event.target.value)} onKeyDown={onKeyDown} placeholder="输入 # 选择样例，然后继续描述听众、时长和重点" /><div className="lumo-studio-tools"><button type="button" aria-label="添加演示材料">＋</button><span>▤ 演示文稿</span><span>◉ 黑曜石信号</span><span><i className="lumo-live-dot" /> {space.label}</span><em>/ppt-master</em><button type="submit" className="lumo-studio-send" aria-label="发送到 PPT Master">↑</button></div></form>
-    </div>{notice ? <div className="lumo-studio-notice" role="status">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div> : null}</main><aside className="lumo-deck-outline"><header><b>演示大纲</b><span>{project.label}</span></header>{['封面页', '问题与机遇', '方案介绍', '价值与数据', '总结与展望'].map((title, index) => <div key={title}><i>{index + 1}</i><span><b>{title}</b><small>等待 AI 对话生成</small></span></div>)}<footer>AI 将根据对话内容生成完整大纲与页面</footer></aside></div>
+    </div>{notice ? <div className="lumo-studio-notice" role="status">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div> : null}
+    <section className="lumo-inspiration" aria-label="PPT Master 官方示例"><header><div><b>PPT Master 完整示例</b><span>来自 ppt-master 示例站的真实生成结果，每个示例都能逐页翻看全部幻灯片并下载 PPTX</span></div>{gallery?.available ? <a href={gallery.gallery.source} target="_blank" rel="noreferrer noopener">示例站 ↗</a> : null}</header>
+      {gallery === null ? <p role="status">正在拉取 PPT Master 示例…</p> : gallery.available ? <>
+        <div className="lumo-studio-categories" aria-label="演示风格筛选">{styles.map(item => <button type="button" key={item} className={style === item ? 'active' : ''} onClick={() => setStyle(item)}>{item}</button>)}</div>
+        <div className="lumo-gallery-grid">{visibleCollections.map(collection => <GalleryCollectionCard key={collection.id} collection={collection} onOpen={(item, index) => setFocus({ collection: item, index })} />)}</div>
+      </> : <Empty>PPT Master 示例暂时不可用{gallery.error ? `：${gallery.error}` : ''}。右侧本地品牌模板仍可使用。</Empty>}
+    </section></main><aside className="lumo-deck-outline" aria-label="原生演示模板"><header><b>本地品牌模板</b><span>{project.label}</span></header><div className="lumo-demo-grid compact">{demos === null ? <p role="status">正在同步演示模板…</p> : deckDemos.length ? deckDemos.map(demo => <SkillDemoCard key={demo.id} demo={demo} label={localizedSkillName(demo.skill)} onPick={useDeck} />) : <Empty>{demos.error || '当前 PPT 技能没有自带模板，直接描述主题即可发送。'}</Empty>}</div><footer>模板封面来自 ppt-master 技能目录，AI 会沿用其版式与品牌色生成完整文稿</footer></aside></div>
+    {focus === null ? null : <GalleryViewer focus={focus} useLabel="用这个样例生成" onIndex={index => setFocus({ collection: focus.collection, index })} onClose={() => setFocus(null)} onUse={useGalleryDeck} />}
   </div>
 }
 
@@ -1941,7 +2073,7 @@ function Workbench({ surface, close, select, commandOpen, toggleCommand }: { sur
   const meta = surfaceMeta[surface]
   useFocusTrap(ref, !commandOpen)
   return <div className="lumo-backdrop"><section ref={ref} tabIndex={-1} className="lumo-workbench" role="dialog" aria-modal="true" aria-label={`${meta.label}工作台`}>
-    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>Lumo 工作台</span><i>›</i><b>{meta.label}</b><small>{meta.eyebrow}</small></div><div className="lumo-header-actions"><LumoThemePicker /><button type="button" className="lumo-command-trigger" onClick={toggleCommand}><span>跳转</span><kbd>⌘ K</kbd></button><span className="lumo-identity-chip"><i className="lumo-live-dot" /> 原生会话</span><MagneticButton className="lumo-quiet" aria-label="关闭工作台" onClick={close}>×</MagneticButton></div></header><main>{surface === 'knowledge' ? <KnowledgeSurface /> : surface === 'skills' ? <SkillsSurface /> : surface === 'connectors' ? <ConnectorsSurface /> : surface === 'operations' ? <OperationsSurface /> : surface === 'automation' ? <AutomationSurface /> : surface === 'design' ? <OpenDesignSurface onConversationStart={close} /> : surface === 'presentation' ? <PresentationSurface onConversationStart={close} /> : surface === 'market' ? <MarketSurface /> : <AccountSurface />}</main><footer className="lumo-workbench-footer"><span>开放设计与 PPT 分别调用 /open-design 和 /ppt-master 原有插件能力</span><span>按 Esc 返回原生 DSH</span></footer></div>
+    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>Lumo 工作台</span><i>›</i><b>{meta.label}</b><small>{meta.eyebrow}</small></div><div className="lumo-header-actions"><LumoThemePicker /><button type="button" className="lumo-command-trigger" onClick={toggleCommand}><span>跳转</span><kbd>⌘ K</kbd></button><span className="lumo-identity-chip"><i className="lumo-live-dot" /> 原生会话</span><MagneticButton className="lumo-quiet" aria-label="关闭工作台" onClick={close}>×</MagneticButton></div></header><main>{surface === 'knowledge' ? <KnowledgeSurface /> : surface === 'skills' ? <SkillsSurface /> : surface === 'connectors' ? <ConnectorsSurface /> : surface === 'operations' ? <OperationsSurface /> : surface === 'automation' ? <AutomationSurface /> : surface === 'design' ? <OpenDesignSurface onConversationStart={close} /> : surface === 'presentation' ? <PresentationSurface onConversationStart={close} /> : surface === 'market' ? <MarketSurface /> : <AccountSurface />}</main><footer className="lumo-workbench-footer"><span>在对话框输入 /design 或 /ppt 可随时打开；产物仍由 /open-design 与 /ppt-master 原生技能生成</span><span>按 Esc 返回原生 DSH</span></footer></div>
     <CommandPalette open={commandOpen} surface={surface} select={select} close={toggleCommand} />
   </section></div>
 }
@@ -1986,6 +2118,50 @@ export function LumoOverlay(_props: OverlayProps) {
   return <ClickSpark>{surface === null ? null : <Workbench surface={surface} close={close} select={select} commandOpen={commandOpen} toggleCommand={toggleCommand} />}</ClickSpark>
 }
 
+/** 原生 `/` 触发源的最小结构投影；同样不把 ui-input-trigger 的源码项目拉进本包。 */
+interface LumoCommandClaim { token: string; hint?: string; submit(args: string): Promise<{ kind: 'success' | 'error'; text?: string }> }
+type LumoPickOutcome = { claim: LumoCommandClaim } | undefined
+interface LumoInputTriggerSource {
+  trigger: '/'
+  name: string
+  order?: number
+  candidates(session: unknown, req: { query: string }): Promise<ReadonlyArray<{ name: string; description?: string }>>
+  onPick(pick: { candidate: { name: string } }): LumoPickOutcome
+  matchEnter(session: unknown, line: string): Promise<LumoPickOutcome>
+}
+interface LumoInputTriggerService { registerSource(source: LumoInputTriggerSource): () => void }
+
+function creativeCommandClaim(name: string): LumoCommandClaim | undefined {
+  const command = lumoCreativeCommands.find(item => item.name === name)
+  if (command === undefined) return undefined
+  return {
+    token: `/${command.name}`,
+    hint: `${command.label} · 可附上创作意图后回车`,
+    submit: async (args: string) => {
+      openCreativeSurface({ kind: command.kind, brief: args.trim() })
+      return { kind: 'success' }
+    },
+  }
+}
+
+export const lumoCreativeCommandSource: LumoInputTriggerSource = {
+  trigger: '/',
+  name: 'lumo',
+  order: 1,
+  async candidates(_session, { query }) {
+    return lumoCreativeCommands.filter(item => item.name.startsWith(query)).map(item => ({ name: item.name, description: `${item.label} · ${item.description}` }))
+  },
+  onPick({ candidate }) {
+    const claim = creativeCommandClaim(candidate.name)
+    return claim === undefined ? undefined : { claim }
+  },
+  async matchEnter(_session, line) {
+    const match = line.trim().match(/^\/([a-z-]+)(?:\s|$)/u)
+    const claim = match === null ? undefined : creativeCommandClaim(match[1]!)
+    return claim === undefined ? undefined : { claim }
+  },
+}
+
 export const inject = ['slots', 'theme']
 export function apply(ctx: ClientContext): void {
   const root = ((ctx as ClientContext & { root?: object }).root ?? ctx) as object
@@ -2015,4 +2191,11 @@ export function apply(ctx: ClientContext): void {
     { name: 'conversation.hero.composer.dock', id: 'lumo-capability-launchers', order: 20, label: 'Lumo 功能入口' },
     HeroOpenDesignDock,
   ))
+  // 创作入口收进原生 `/` 命令菜单：inputTriggers 由上游 ui-input-trigger 提供，
+  // 用 ctx.inject 等它就绪，避免和它的装配顺序耦合。
+  ctx.inject(['inputTriggers'], (triggerCtx) => {
+    const inputTriggers = triggerCtx.get('inputTriggers') as LumoInputTriggerService | undefined
+    if (inputTriggers === undefined) return
+    triggerCtx.effect(() => inputTriggers.registerSource(lumoCreativeCommandSource), 'lumo-ui: creative slash commands')
+  })
 }

@@ -944,6 +944,57 @@
 .lumo-inspiration-card > span:last-child { display: grid; gap: 4px; padding: 10px 11px 12px; }
 .lumo-inspiration-card small { color: var(--lumo-faint); font-size: 8px; }
 .lumo-inspiration-card b { font-size: 11px; }
+.lumo-demo-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
+.lumo-demo-grid.compact { grid-template-columns: 1fr; gap: 9px; margin-top: 12px; }
+.lumo-demo-grid > p, .lumo-demo-grid > .lumo-empty { grid-column: 1 / -1; }
+.lumo-demo-card { display: grid; grid-template-rows: auto auto; overflow: hidden; min-width: 0; padding: 0; border: 1px solid var(--lumo-line); border-radius: 10px; color: var(--lumo-ink); background: var(--lumo-accent-2); cursor: pointer; text-align: left; transition: border-color .18s, transform .18s; }
+.lumo-demo-card:hover, .lumo-demo-card:focus-visible { border-color: var(--lumo-accent-36); transform: translateY(-2px); }
+.lumo-demo-frame { position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden; background: var(--lumo-accent-4); }
+.lumo-demo-frame > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.lumo-demo-frame > iframe { display: block; width: 200%; height: 200%; border: 0; transform: scale(.5); transform-origin: 0 0; pointer-events: none; background: #fff; }
+.lumo-demo-card > span:last-child { display: grid; gap: 3px; padding: 9px 11px 11px; }
+.lumo-demo-card small { color: var(--lumo-faint); font-size: 8px; }
+.lumo-demo-card b { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.lumo-demo-card em { display: -webkit-box; overflow: hidden; color: var(--lumo-faint); font-size: 8px; font-style: normal; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.lumo-inspiration { margin-top: 18px; }
+.lumo-inspiration > header > div { display: grid; gap: 4px; }
+.lumo-inspiration > header a { flex: none; align-self: flex-start; color: var(--lumo-faint); font-size: 9px; text-decoration: none; }
+.lumo-inspiration > header a:hover { color: var(--lumo-ink); }
+.lumo-inspiration .lumo-studio-categories { margin: 10px 0 12px; }
+.lumo-gallery-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
+.lumo-gallery-grid > .lumo-empty { grid-column: 1 / -1; }
+.lumo-gallery-card { display: grid; grid-template-rows: auto auto; overflow: hidden; min-width: 0; padding: 0; border: 1px solid var(--lumo-line); border-radius: 10px; color: var(--lumo-ink); background: var(--lumo-accent-2); cursor: pointer; text-align: left; transition: border-color .18s, transform .18s; }
+.lumo-gallery-card:hover, .lumo-gallery-card:focus-visible { border-color: var(--lumo-accent-36); transform: translateY(-2px); }
+.lumo-gallery-card > span:last-child { display: grid; gap: 3px; padding: 9px 11px 11px; }
+.lumo-gallery-card small { color: var(--lumo-faint); font-size: 8px; }
+.lumo-gallery-card b { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.lumo-gallery-card em { display: -webkit-box; overflow: hidden; color: var(--lumo-faint); font-size: 8px; font-style: normal; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.lumo-gallery-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.lumo-gallery-tags i { padding: 1px 6px; border: 1px solid var(--lumo-line); border-radius: 999px; color: var(--lumo-faint); font-size: 7px; font-style: normal; }
+.lumo-gallery-layer { position: absolute; inset: 0; z-index: 30; display: grid; place-items: center; padding: 24px; background: rgba(0, 0, 0, .58); backdrop-filter: blur(6px); }
+.lumo-gallery-viewer { display: grid; grid-template-rows: auto 1fr auto auto; width: min(1180px, 100%); max-height: 100%; overflow: hidden; border: 1px solid var(--lumo-line-strong); border-radius: 16px; background: var(--lumo-panel, var(--lumo-accent-2)); box-shadow: 0 30px 90px rgba(0, 0, 0, .5); outline: none; }
+.lumo-gallery-viewer > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 14px 18px; border-bottom: 1px solid var(--lumo-line); }
+.lumo-gallery-viewer > header > div:first-child { display: grid; gap: 3px; min-width: 0; }
+.lumo-gallery-viewer > header b { font-size: 13px; }
+.lumo-gallery-viewer > header small { display: -webkit-box; overflow: hidden; color: var(--lumo-faint); font-size: 9px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.lumo-gallery-viewer > header > div:last-child { display: flex; flex: none; align-items: center; gap: 10px; }
+.lumo-gallery-counter { color: var(--lumo-faint); font: 10px/1 var(--lumo-mono); }
+.lumo-gallery-stage { display: grid; grid-template-columns: 40px minmax(0, 1fr) 40px; align-items: center; gap: 8px; min-height: 0; padding: 14px; }
+.lumo-gallery-stage figure { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 8px; min-height: 0; margin: 0; }
+.lumo-gallery-stage img { display: block; width: 100%; max-height: min(62vh, 640px); border: 1px solid var(--lumo-line); border-radius: 8px; object-fit: contain; background: #fff; }
+.lumo-gallery-stage figcaption { display: grid; gap: 2px; text-align: center; }
+.lumo-gallery-stage figcaption b { font-size: 11px; }
+.lumo-gallery-stage figcaption span { color: var(--lumo-faint); font-size: 9px; }
+.lumo-gallery-nav { display: grid; place-items: center; width: 36px; height: 56px; border: 1px solid var(--lumo-line); border-radius: 8px; color: var(--lumo-ink); background: var(--lumo-accent-4); cursor: pointer; font-size: 22px; line-height: 1; }
+.lumo-gallery-nav:disabled { opacity: .3; cursor: default; }
+.lumo-gallery-strip { display: flex; gap: 6px; overflow-x: auto; padding: 0 14px 12px; }
+.lumo-gallery-strip button { flex: none; width: 88px; padding: 0; border: 2px solid transparent; border-radius: 6px; overflow: hidden; background: #fff; cursor: pointer; opacity: .6; transition: opacity .15s, border-color .15s; }
+.lumo-gallery-strip button.active, .lumo-gallery-strip button:hover { border-color: var(--lumo-mint); opacity: 1; }
+.lumo-gallery-strip img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.lumo-gallery-viewer > footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 18px; border-top: 1px solid var(--lumo-line); }
+.lumo-gallery-viewer > footer > div { display: flex; flex-wrap: wrap; gap: 10px; }
+.lumo-gallery-viewer > footer a { color: var(--lumo-faint); font-size: 9px; text-decoration: none; }
+.lumo-gallery-viewer > footer a:hover { color: var(--lumo-ink); }
 .lumo-design-preview.mobile { background: linear-gradient(140deg, #111927, #27222f); }
 .lumo-design-preview.mobile i:first-child { width: 24%; height: 82%; border-radius: 9px; background: linear-gradient(#edf1f5, #a6b2bf); }
 .lumo-design-preview.mobile i:nth-child(2) { left: 38%; width: 24%; height: 82%; border-radius: 9px; background: linear-gradient(#252b33, #080a0d); }
@@ -1009,7 +1060,8 @@
 .lumo-automation-principles span { color: var(--lumo-faint); font-size: 8px; line-height: 1.5; }
 
 @media (max-width: 980px) {
-  .lumo-home-example-grid, .lumo-inspiration > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lumo-home-example-grid, .lumo-inspiration > div, .lumo-demo-grid, .lumo-gallery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lumo-gallery-stage { grid-template-columns: 32px minmax(0, 1fr) 32px; }
   .lumo-home-presentation > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lumo-presentation-layout { grid-template-columns: 1fr; }
   .lumo-deck-outline { min-height: 0; }
@@ -1019,7 +1071,7 @@
 @media (max-width: 700px) {
   .lumo-home-creative { width: calc(100vw - 24px); }
   .lumo-home-creative > header { align-items: flex-start; flex-direction: column; }
-  .lumo-home-example-grid, .lumo-home-presentation > div, .lumo-inspiration > div, .lumo-example-popup > div, .lumo-automation-summary, .lumo-automation-principles { grid-template-columns: 1fr; }
+  .lumo-home-example-grid, .lumo-home-presentation > div, .lumo-inspiration > div, .lumo-demo-grid, .lumo-gallery-grid, .lumo-example-popup > div, .lumo-automation-summary, .lumo-automation-principles { grid-template-columns: 1fr; }
   .lumo-studio-page { width: calc(100% - 28px); padding-top: 24px; }
   .lumo-studio-heading { align-items: flex-start; flex-direction: column; }
   .lumo-studio-tools > span:nth-of-type(n+2), .lumo-studio-tools > em { display: none; }
