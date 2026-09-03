@@ -1,5 +1,6 @@
 /** Host half: keep DSH's native Web shell and add a same-origin Lumo control API. */
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -10,6 +11,7 @@ import { lumoBootThemeInjection } from './boot-theme.ts'
 import { registerDesktopHandoff } from './desktop-handoff.ts'
 import { discoverSkillDemos, resolveSkillDemoAsset, type SkillDemo } from './skill-demos.ts'
 import { allowedAssetUrl, createUpstreamDemoService, type GallerySkill, type UpstreamDemoService } from './upstream-demos.ts'
+import { buildCatalog, installItem, refreshCatalog, searchCatalog, type SkillHubConfig, type SkillHubKind } from './skillhub.ts'
 
 /** Read-only structural projection of the session-query seam. Keeping the
  * host plugin's build boundary local avoids pulling the platform contract
@@ -91,6 +93,18 @@ export interface Config {
   plugins: PluginSummary[]
   /** 桌面壳指定的握手文件：装配完成后写入带 token 的 Web 入口；空串表示不是桌面形态。 */
   desktopHandoffFile: string
+  /** SkillHub 目录索引文件（可空，缺失时回退到内置 seed）。 */
+  skillhubCatalogFile: string
+  /** SkillHub 已安装记录文件（工作区拥有的本地状态）。 */
+  skillhubInstallFile: string
+  /** SkillHub 技能安装根目录（仅在有 CLI 时使用）。 */
+  skillhubRoot: string
+  /** `skillhub` CLI 可执行名/路径；空串禁用 CLI 委派。 */
+  skillhubCommand: string
+  /** SkillHub API base URL. */
+  skillhubApiBase: string
+  /** skill-local snapshot file path. */
+  skillhubSnapshotFile: string
 }
 
 export const Config: z<Config> = z.object({
@@ -107,6 +121,12 @@ export const Config: z<Config> = z.object({
     kind: z.union(['runtime', 'governance'] as const),
   })).default([]),
   desktopHandoffFile: z.string().default(''),
+  skillhubCatalogFile: z.string().default('.lumo/skillhub-catalog.json'),
+  skillhubInstallFile: z.string().default('.lumo/skillhub-installs.json'),
+  skillhubRoot: z.string().default('.lumo/skills'),
+  skillhubCommand: z.string().default('skillhub'),
+  skillhubApiBase: z.string().default('https://api.skillhub.cn'),
+  skillhubSnapshotFile: z.string().default('.lumo/skill-snapshot.json'),
 })
 
 type ServiceName = 'scheduler' | 'projects' | 'flows' | 'connector' | 'governance' | 'registry'
@@ -1035,6 +1055,47 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
 
   if (req.method === 'POST' && pathname === '/lumo/api/web/fetch') {
     try { writeUpstream(res, await upstream(config, identity, 'connector', '/web/fetch', req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+  // SkillHub market: catalog + install. The adapter never executes `skillhub
+  // install` from an untrusted body; it only records installs (and delegates to
+  // the configured CLI when present, or performs native download). Materialization
+  // for the runtime goes through the snapshot bridge, not a Web request.
+  const skillhubUrl = new URL(req.url ?? '/', 'http://lumo.local')
+  const skillhubConfig = (): SkillHubConfig => ({
+    catalogFile: resolve(config.skillhubCatalogFile ?? '.lumo/skillhub-catalog.json'),
+    installFile: resolve(config.skillhubInstallFile ?? '.lumo/skillhub-installs.json'),
+    root: resolve(config.skillhubRoot ?? '.lumo/skills'),
+    snapshotFile: resolve(config.skillhubSnapshotFile ?? '.lumo/skill-snapshot.json'),
+    apiBase: config.skillhubApiBase ?? 'https://api.skillhub.cn',
+    command: config.skillhubCommand ?? 'skillhub',
+  })
+  // `catalog` queries SkillHub live (falling back to the on-disk cache, then the
+  // seed); `catalog?cached=1` reads only local state; `refresh` is an alias that
+  // always goes to the network.
+  if (req.method === 'GET' && (pathname === '/lumo/api/skillhub/catalog' || pathname === '/lumo/api/skillhub/refresh')) {
+    const cachedOnly = pathname === '/lumo/api/skillhub/catalog' && skillhubUrl.searchParams.get('cached') === '1'
+    try { writeJson(res, 200, cachedOnly ? buildCatalog(skillhubConfig()) : await refreshCatalog(skillhubConfig())) } catch (error) { writeJson(res, 502, { error: error instanceof Error ? error.message : 'skillhub catalog unavailable' }) }
+    return
+  }
+  // Live search against SkillHub: `?kind=skill|pack|plugin&q=...&category=...&page=n` (only plugins page server-side).
+  if (req.method === 'GET' && pathname === '/lumo/api/skillhub/search') {
+    const kind = skillhubUrl.searchParams.get('kind') ?? 'skill'
+    if (kind !== 'skill' && kind !== 'pack' && kind !== 'plugin') { writeJson(res, 400, { error: 'invalid kind' }); return }
+    const q = (skillhubUrl.searchParams.get('q') ?? '').slice(0, 120)
+    const category = (skillhubUrl.searchParams.get('category') ?? '').slice(0, 40)
+    const limit = Number.parseInt(skillhubUrl.searchParams.get('limit') ?? '60', 10)
+    const page = Number.parseInt(skillhubUrl.searchParams.get('page') ?? '1', 10)
+    try { writeJson(res, 200, await searchCatalog(skillhubConfig(), { kind: kind as SkillHubKind, q, category, limit: Number.isFinite(limit) ? limit : 60, page: Number.isFinite(page) && page > 0 ? page : 1 })) } catch (error) { writeJson(res, 502, { error: error instanceof Error ? error.message : 'skillhub search failed' }) }
+    return
+  }
+  if (req.method === 'POST' && pathname === '/lumo/api/skillhub/install') {
+    let body: Record<string, unknown>
+    try { body = await readJson(req) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }); return }
+    const kind = body['kind']; const id = body['id']
+    if (kind !== 'skill' && kind !== 'pack' && kind !== 'plugin') { writeJson(res, 400, { error: 'invalid kind' }); return }
+    if (typeof id !== 'string' || id.length === 0 || id.length > 128) { writeJson(res, 400, { error: 'invalid id' }); return }
+    try { writeJson(res, 200, await installItem(skillhubConfig(), kind, id)) } catch (error) { writeJson(res, error instanceof TypeError ? 400 : 502, { error: error instanceof Error ? error.message : 'install failed' }) }
     return
   }
 

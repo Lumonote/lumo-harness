@@ -36,6 +36,15 @@ const governance = {
   catalog: { ok: true, status: 200, data: { skills: [] } },
   effective: { ok: true, status: 200, data: { skills: [] } },
 }
+const skillhubCatalog = {
+  source: 'seed',
+  generatedAt: new Date().toISOString(),
+  counts: { skills: 1, packs: 1, plugins: 1 },
+  skills: [{ id: 'tencent-docs', name: '腾讯文档 TENCENT DOCS', tag: '办公效率', description: '在线云文档平台。', rating: 274, downloads: 719000, source: 'SkillHub', verified: true, command: 'tencent-docs', apiKey: true }],
+  packs: [{ id: 'automation-testing', name: '自动化测试', role: '高级开发工程师', category: '科技', description: '从 TDD 到 E2E 测试。', skills: 6, source: 'SkillHub', command: 'automation-testing' }],
+  plugins: [{ id: 'modlens', name: 'liustack/modlens', category: '模型推理', description: 'DSH 视觉插件。', stars: 3800, forks: 112, source: 'GitHub', installable: true, repo: 'liustack/modlens' }],
+  installed: { skills: [], packs: [], plugins: [] },
+}
 
 /**
  * 最小 ClientContext 替身。三个面缺一不可:
@@ -128,6 +137,8 @@ describe('Lumo native Harness integration', () => {
           { id: 'ppt-master:deck:中国电信', skill: 'ppt-master', title: '中国电信', summary: '克制的红灰品牌视觉', kind: 'image', url: '/lumo/api/skills/demos/asset?skill=ppt-master&path=templates%2Fdecks%2F%E4%B8%AD%E5%9B%BD%E7%94%B5%E4%BF%A1%2Ftemplates%2F01_cover.svg' },
           { id: 'archify:example:dataflow-product-analytics.html', skill: 'archify', title: 'dataflow product analytics', summary: '技能自带的 HTML 示例', kind: 'html', url: '/lumo/api/skills/demos/asset?skill=archify&path=examples%2Fdataflow-product-analytics.html' },
         ] } :
+        path === '/lumo/api/skillhub/catalog' ? skillhubCatalog :
+        init?.method === 'POST' && path === '/lumo/api/skillhub/install' ? { ...skillhubCatalog, installed: { skills: ['tencent-docs'], packs: ['automation-testing'], plugins: ['modlens'] } } :
         path === '/lumo/api/skills' ? { complete: true, skills: [
           { name: 'open-design', description: '以产物优先的方式创建、完善、预览并导出真实设计产物。', whenToUse: '适用于原型、落地页、看板和视觉升级。', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 'lumo-open-design' },
           { name: 'ppt-master', description: '从主题、文档或现有模板生成、编辑和增强原生可编辑 PPTX。', whenToUse: '适用于演示文稿生成、模板填充和原生 PPTX 编辑。', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 'lumo-creative-skills' },
@@ -174,7 +185,7 @@ describe('Lumo native Harness integration', () => {
     render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
     const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
     expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual([
-      '项目', '专家 · 技能 · 连接器', '自动化', '资料库', '更多应用 · 灵感',
+      '项目', '技能市场', '自动化', '资料库', '更多应用 · 灵感',
     ])
     expect(within(navigation).queryByRole('button', { name: '开放设计' })).toBeNull()
     expect(within(navigation).queryByRole('button', { name: 'PPT 生成' })).toBeNull()
@@ -206,13 +217,14 @@ describe('Lumo native Harness integration', () => {
 		await screen.findByText(/已保存 doc-ops 的 v5/)
 		expect(calls.some(call => call === 'PUT /lumo/api/knowledge/sources/doc-ops')).toBe(true)
 
-    fireEvent.click(within(navigation).getByRole('button', { name: '专家 · 技能 · 连接器' }))
+    fireEvent.click(within(navigation).getByRole('button', { name: '技能市场' }))
+    // Navigate to 能力目录 from SkillHub
+    fireEvent.click(await screen.findByRole('button', { name: '能力目录' }))
     // 技能名经 localizedSkillName 落地;断言渲染出的中文名,证明 /lumo/api/skills 的响应真驱动了这块
     expect(await screen.findByText('架构与调度图')).toBeTruthy()
     const spotlight = document.querySelector<HTMLElement>('.lumo-skill-card')!
     fireEvent.pointerMove(spotlight, { clientX: 40, clientY: 30 })
     expect(spotlight.style.getPropertyValue('--spot-x')).not.toBe('')
-
     fireEvent.change(screen.getByRole('textbox', { name: '技能名称' }), { target: { value: 'campaign-review' } })
     fireEvent.change(screen.getByRole('textbox', { name: '技能版本内容' }), { target: { value: '# Campaign review\nReview the launch plan.' } })
     fireEvent.click(screen.getByRole('button', { name: '保存治理版本' }))
@@ -271,6 +283,33 @@ describe('Lumo native Harness integration', () => {
 
     fireEvent.keyDown(window, { key: 'Escape' })
     await waitFor(() => expect(document.querySelector('.lumo-workbench')).toBeNull())
+  }, 15000)
+
+  it('lists SkillHub skills and packs with quick-install', async () => {
+    const registered = mountLumo()
+    const entry = registered.find(item => item.name === 'sidebar.navigation')
+    const overlay = registered.find(item => item.name === 'shell.overlay')
+    const Entry = entry!.Component
+    const Overlay = overlay!.Component
+    render(<><Entry wide /><Overlay /></>)
+
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '技能市场' }))
+    // 默认技能 tab：SkillHub 卡片渲染名称、评分、下载量与来源。
+    expect(await screen.findByText('腾讯文档 TENCENT DOCS')).toBeTruthy()
+    expect(screen.getByText('下载 71.9万')).toBeTruthy()
+    expect(calls.some(call => call === 'GET /lumo/api/skillhub/catalog')).toBe(true)
+
+    // 快速安装：POST 后卡片切换为「已安装」并出现 @ 对话入口。
+    fireEvent.click(screen.getByRole('button', { name: '安装' }))
+    expect(await screen.findByText('已安装')).toBeTruthy()
+    expect(calls.some(call => call === 'POST /lumo/api/skillhub/install')).toBe(true)
+    const mention = screen.getByRole('button', { name: /在对话中 @ 引用/ })
+    expect(mention).toBeTruthy()
+
+    // 第二个 tab：专家包。
+    fireEvent.click(screen.getByRole('tab', { name: /专家包/ }))
+    expect(await screen.findByText('自动化测试')).toBeTruthy()
+    expect(screen.getByText('6 个技能')).toBeTruthy()
   }, 15000)
 
   it('keeps the home composer clean and opens creative workbenches only through /design and /ppt', async () => {

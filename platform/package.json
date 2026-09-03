@@ -15,6 +15,7 @@
     "test": "vitest run",
     "typecheck": "tsc -b --noEmit",
     "kb:eval": "tsx dsh-plugins/knowledge/eval/run-eval.ts",
+    "skillhub": "node tools/skillhub-sync.mjs",
     "desktop:dev": "cd desktop && cargo tauri dev",
     "desktop:build": "cd desktop && cargo tauri build --bundles app",
     "desktop:dmg": "cd desktop && cargo tauri build --bundles app && bash make-dmg.sh"

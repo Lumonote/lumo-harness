@@ -69,7 +69,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-type Surface = 'knowledge' | 'skills' | 'connectors' | 'operations' | 'automation' | 'design' | 'presentation' | 'account' | 'market'
+type Surface = 'knowledge' | 'skills' | 'connectors' | 'operations' | 'automation' | 'design' | 'presentation' | 'account' | 'market' | 'skillhub'
 type OverlayProps = PropsRuntime<'shell.overlay'>
 type SidebarNavigationProps = PropsRuntime<'sidebar.navigation'>
 type ComposerScopeProps = PropsRuntime<'conversation.input.left'>
@@ -162,6 +162,14 @@ interface KnowledgeSource {
 interface KnowledgeSources { realm: string; state: 'synchronized'; sources: KnowledgeSourceSummary[] }
 interface RuntimeSkill { name: string; description: string; whenToUse?: string; invocation: { modelInvocable: boolean; userInvocable: boolean }; source: string; provider: string }
 interface SkillSnapshot { complete: boolean; skills: RuntimeSkill[]; error?: string }
+interface SkillHubSkill { id: string; name: string; tag: string; description: string; rating: number; downloads: number; source: string; verified: boolean; command: string; apiKey: boolean; icon?: string; publisher?: string; tags?: string[]; homepage?: string }
+interface SkillHubPack { id: string; name: string; role: string; category: string; description: string; skills: number; source: string; command?: string; icon?: string }
+interface SkillHubPlugin { id: string; name: string; category: string; description: string; stars: number; forks: number; source: string; installable: boolean; repo: string; icon?: string; homepage?: string }
+interface SkillHubInstalls { skills: string[]; packs: string[]; plugins: string[] }
+interface SkillHubCatalog { source: 'skillhub' | 'cache' | 'seed'; generatedAt: string; counts: { skills: number; packs: number; plugins: number }; categories?: { skills: string[]; packs: string[]; plugins: string[] }; skills: SkillHubSkill[]; packs: SkillHubPack[]; plugins: SkillHubPlugin[]; installed: SkillHubInstalls }
+interface SkillHubSearchResult { kind: SkillHubKind; q: string; category: string; source: 'skillhub' | 'cache' | 'seed'; total: number; skills: SkillHubSkill[]; packs: SkillHubPack[]; plugins: SkillHubPlugin[] }
+type SkillHubTab = '技能' | '专家包'
+type SkillHubKind = 'skill' | 'pack' | 'plugin'
 interface GovernedSkill { id: string; realm: string; name: string; description?: string; kind: 'prompt' | 'workflow' | 'tool' | 'connector'; visibility: string; current_version: string; published_version?: string; published_digest?: string; published_by?: string; published_at?: string; created_by: string }
 interface GovernedSkillVersion { realm: string; skill_id: string; version: string; content: string; digest: string; created_by: string; created_at: string }
 interface UpstreamResult { ok: boolean; status: number; data?: unknown; error?: string }
@@ -188,12 +196,13 @@ const surfaceMeta: Record<Surface, { label: string; eyebrow: string; description
   knowledge: { label: '资料库', eyebrow: '知识连接', description: '检索已发布知识，保留来源、版本与相关度。', short: '资料' },
   design: { label: '开放设计', eyebrow: 'OpenDesign', description: '组织设计上下文，并把任务交给原有 open-design 插件执行。', short: '设计' },
   presentation: { label: 'PPT 生成', eyebrow: 'PPT Master', description: '通过 # 选择样例，再交给原有 ppt-master 插件继续对话生成。', short: '演示' },
+  skillhub: { label: '技能市场', eyebrow: 'SkillHub', description: '直接集成 SkillHub 的技能、专家包与插件，点击即装，安装后在对话中 @ 引用。', short: '市场' },
   connectors: { label: '连接器', eyebrow: '连接器网关', description: '检查能力清单、调用协议与受控 Web 出站。', short: '连接' },
   account: { label: '用户中心', eyebrow: '身份与安全', description: '查看治理用户身份、安全策略与当前会话。', short: '账户' },
   market: { label: '更多', eyebrow: '应用与灵感', description: '查看已随桌面本地运行时装配的能力，并打开对应功能。', short: '更多' },
 }
 const surfaces = Object.keys(surfaceMeta) as Surface[]
-const sidebarSurfaces: Surface[] = ['operations', 'skills', 'automation', 'knowledge', 'market']
+const sidebarSurfaces: Surface[] = ['operations', 'skillhub', 'automation', 'knowledge', 'market']
 const OPEN_EVENT = 'lumo:open-workbench'
 const CLOSE_EVENT = 'lumo:close-workbench'
 const skillNameLabels: Record<string, string> = {
@@ -512,6 +521,7 @@ function Glyph({ surface }: { surface: Surface }) {
     presentation: <><rect x="4" y="4" width="16" height="12" rx="2" /><path d="M8 20h8M12 16v4M8 8h8M8 11h5" /></>,
     account: <><circle cx="12" cy="8" r="4" /><path d="M4.5 21a7.5 7.5 0 0 1 15 0" /></>,
     market: <><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z" /><path d="m8 9 4 2.25L16 9M12 11.25V17" /></>,
+    skillhub: <><rect x="4" y="4" width="16" height="16" rx="3" /><path d="M4 9h16M9 4v16M4 14h16" /></>,
   }
   return <svg className="lumo-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>{paths[surface]}</svg>
 }
@@ -1139,6 +1149,171 @@ function SkillsSurface() {
       {governed.length ? <div className="lumo-table-list">{governed.map(skill => <div key={skill.id} className={selectedGoverned?.id === skill.id ? 'selected' : ''}><span><b>{localizedSkillName(skill.name)}</b><small>{skill.description || '未填写用途说明'} · 创建者 {skill.created_by}</small></span><i>{localizedSkillKind(skill.kind)}</i><em>{localizedVisibility(skill.visibility)} · 草稿 {skill.current_version}{skill.published_version ? ` · 已发布 ${skill.published_version}` : ' · 未发布'}</em><button type="button" className="lumo-button lumo-secondary lumo-version-open" onClick={() => void viewGoverned(skill)}>查看内容</button></div>)}</div> : <Empty>{governance?.catalog.error || '当前部署模式没有治理技能目录，运行时技能目录仍可独立使用。'}</Empty>}
     </Section>
     {selectedGoverned ? <Section title={`治理版本 · ${localizedSkillName(selectedGoverned.name)}`} meta={versionLoading ? '正在读取不可变来源内容' : `当前草稿 ${selectedGoverned.current_version}${selectedGoverned.published_version ? ` · 已发布治理源 ${selectedGoverned.published_version}` : ' · 尚未发布治理源'}`}><div className="lumo-governed-version-layout"><div className="lumo-governed-source"><p>{selectedVersion ? `来源摘要 ${selectedVersion.digest} · 创建者 ${selectedVersion.created_by}` : '版本内容会显示在这里。'}</p><pre>{selectedVersion?.content ?? (versionLoading ? '正在读取…' : '未能读取该版本内容。')}</pre><small>{selectedGoverned.published_version === selectedVersion?.version ? `此版本已选为治理运行时源${selectedGoverned.published_digest ? ` · ${selectedGoverned.published_digest}` : ''}；还需由受信任发布器签名为 Registry Bundle，节点安装事实以 Provisioner 回报为准。` : '这是治理草稿内容，尚未成为可构建的运行时源。'}</small></div><form className="lumo-stacked-form lumo-version-form" onSubmit={createVersion}><b>保存新草稿版本</b><label><span>新版本号</span><input name="version" maxLength={64} placeholder="例如：1.1.0" /></label><label><span>新版本内容</span><textarea name="content" aria-label="新技能版本内容" maxLength={131072} rows={7} placeholder={'---\nname: campaign-review\ndescription: 审核营销活动内容\n---\n\n版本一经保存不能覆盖。'} /></label><div className="lumo-form-actions"><BusyButton type="submit" busy={publishingVersion} className="lumo-primary">保存新版本</BusyButton><BusyButton type="button" busy={promotingVersion} disabled={selectedVersion === null || selectedVersion.version === selectedGoverned.published_version} className="lumo-secondary" onClick={() => void publishVersion()}>发布为运行时源</BusyButton></div><small>仅创建者或 realm_admin 可以读取和写入来源；发布运行时源仅限 realm_admin。签名制品构建与节点实际安装分别由受保护发布器和 Provisioner 完成。</small></form></div></Section> : null}
+  </div>
+}
+
+const SKILLHUB_TABS: SkillHubTab[] = ['技能', '专家包']
+const SKILLHUB_KIND: Record<SkillHubTab, SkillHubKind> = { '技能': 'skill', '专家包': 'pack' }
+
+const skillhubTabMeta: Record<SkillHubTab, { label: string; meta: string; empty: string; placeholder: string }> = {
+  '技能': { label: '技能', meta: '单一能力，点击即装', empty: 'SkillHub 没有匹配的技能。', placeholder: '搜索 SkillHub 技能，例如「文档」「爬虫」「PPT」…' },
+  '专家包': { label: '专家包', meta: '一组专家技能，整体安装', empty: '没有匹配的专家包。', placeholder: '搜索专家包名称或场景…' },
+}
+
+const skillhubTagAccent: Record<string, string> = {
+  '办公效率': 'blue', '内容创作': 'orange', '开发编程': 'violet', '数据分析': 'cyan', '设计多媒体': 'orange', 'AI Agent': 'mint', '知识管理': 'green', '生活服务': 'orange', 'Pay Skill': 'cyan',
+  '科技': 'violet', '医疗': 'green', '人力资源': 'blue', '金融': 'cyan', '法律': 'blue', '媒体': 'orange', '玄学': 'violet', '内容': 'orange',
+  '模型推理': 'violet', '客户端': 'blue', '工作流': 'mint', '记忆': 'green', '联网工具': 'cyan', '安全管理': 'orange', '趣味换装': 'orange',
+}
+
+function metricValue(value: number): string {
+  if (value >= 10000) return (value / 10000).toFixed(1) + '万'
+  return String(value)
+}
+
+function mentionInComposer(bridge: NativeConversationBridge | null, token: string): boolean {
+  if (bridge === null) return false
+  bridge.setDraft('@' + token + ' ')
+  return true
+}
+
+const SEED_SKILLHUB_FILTERS: Record<SkillHubTab, string[]> = {
+  '技能': ['全部', '办公效率', '开发编程', '知识管理', '生活服务', '数据分析'],
+  '专家包': ['全部', '金融', '科技', '设计', '营销', '法律', '学术', '教育', '人力资源', '电商', '媒体', '医疗', '玄学'],
+  '插件': ['全部分类', '趣味换装', '联网工具', '记忆', '工作流', '模型推理', '客户端', '安全管理'],
+}
+
+function useDebounced<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => { const timer = window.setTimeout(() => setDebounced(value), delay); return () => window.clearTimeout(timer) }, [value, delay])
+  return debounced
+}
+
+function SkillHubMark({ icon, name, tone }: { icon?: string | undefined; name: string; tone: string }) {
+  const [broken, setBroken] = useState(false)
+  if (icon && !broken) return <span className="lumo-skillhub-mark has-icon" data-tone={tone}><img src={icon} alt="" loading="lazy" onError={() => setBroken(true)} /></span>
+  return <span className="lumo-skillhub-mark" data-tone={tone}>{name.replace(/^[\w.-]+\//, '').slice(0, 1).toUpperCase()}</span>
+}
+
+function SkillHubCard({ children, tone, index }: { children: ReactNode; tone: string; index: number }) {
+  return <article className="lumo-skillhub-card" data-tone={tone} style={{ '--lumo-order': String(index) } as CSSProperties}>{children}</article>
+}
+
+function SkillHubSurface() {
+  const [tab, setTab] = useState<SkillHubTab>('技能')
+  const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState('全部')
+  const [catalog, setCatalog] = useState<SkillHubCatalog | null>(null)
+  const [result, setResult] = useState<SkillHubSearchResult | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [searching, setSearching] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [installing, setInstalling] = useState('')
+  const [page, setPage] = useState(1)
+  const bridge = useNativeConversationBridge()
+  const debouncedQuery = useDebounced(query.trim(), 320)
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('')
+    try { setCatalog(await api<SkillHubCatalog>('/lumo/api/skillhub/catalog')) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setLoading(false) }
+  }, [])
+  useEffect(() => { void load() }, [load])
+
+  const allLabel = '全部'
+  const live = debouncedQuery !== '' || filter !== allLabel
+
+  // Search goes straight to SkillHub through the plugin proxy; the local catalog
+  // is only used for browsing the default view and as the offline fallback.
+  useEffect(() => {
+    if (!live) { setResult(null); setSearching(false); return }
+    let cancelled = false
+    setSearching(true)
+    const params = new URLSearchParams({ kind: SKILLHUB_KIND[tab], q: debouncedQuery, category: filter === allLabel ? '' : filter, page: String(page) })
+    api<SkillHubSearchResult>('/lumo/api/skillhub/search?' + params.toString())
+      .then(next => { if (!cancelled) setResult(next) })
+      .catch(reason => { if (!cancelled) { setResult(null); setNotice(reason instanceof Error ? reason.message : String(reason)) } })
+      .finally(() => { if (!cancelled) setSearching(false) })
+    return () => { cancelled = true }
+  }, [live, tab, debouncedQuery, filter, allLabel, page])
+
+  // Reset page when tab/query/filter changes
+  useEffect(() => { setPage(1) }, [tab, debouncedQuery, filter])
+
+  const install = async (kind: SkillHubKind, id: string, name: string, command?: string) => {
+    setInstalling(kind + ':' + id); setNotice('')
+    try {
+      const next = await api<SkillHubCatalog>('/lumo/api/skillhub/install', { method: 'POST', body: JSON.stringify({ kind, id }) })
+      setCatalog(next)
+      setNotice('「' + name + '」已安装；在对话框输入 @' + (command ?? id) + ' 即可引用。')
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setInstalling('') }
+  }
+
+  const installedSkills = new Set(catalog?.installed.skills ?? [])
+  const installedPacks = new Set(catalog?.installed.packs ?? [])
+  const installedPlugins = new Set(catalog?.installed.plugins ?? [])
+
+  const categoryKey = tab === '技能' ? 'skills' : tab === '专家包' ? 'packs' : 'plugins'
+  const filters = catalog?.categories?.[categoryKey]?.length ? catalog.categories[categoryKey] : SEED_SKILLHUB_FILTERS[tab]
+
+  const skills = tab !== '技能' ? [] : result ? result.skills : (catalog?.skills ?? [])
+  const packs = tab !== '专家包' ? [] : result ? result.packs : (catalog?.packs ?? [])
+  const count = tab === '技能' ? skills.length : packs.length
+  const total = result ? result.total : (catalog?.counts[categoryKey] ?? count)
+
+  const mention = (command: string | undefined, name: string) => {
+    if (!mentionInComposer(bridge, command ?? name)) setNotice('请先选择工作区并创建会话，再把任务交给它。')
+  }
+
+  const toneFor = (value: string) => skillhubTagAccent[value] ?? 'mint'
+  const installedCount = installedSkills.size + installedPacks.size + installedPlugins.size
+  const source = result?.source ?? catalog?.source
+  const sourceLabel = source === 'skillhub' ? 'SkillHub 实时' : source === 'cache' ? '本地缓存' : source === 'seed' ? '内置示例' : '同步中'
+  const syncedAt = catalog ? new Date(catalog.generatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''
+  const switchTab = (next: SkillHubTab) => { setTab(next); setQuery(''); setFilter(next === '插件' ? '全部分类' : '全部'); setPage(1); setResult(null) }
+
+  const actions = (kind: SkillHubKind, id: string, name: string, installed: boolean, command?: string, label = '安装') => installed
+    ? <><span className="lumo-skillhub-installed">已安装</span><button type="button" className="lumo-button lumo-secondary" onClick={() => mention(command, name)} aria-label={'在对话中 @ 引用 ' + name}>@ 对话</button></>
+    : <BusyButton className="lumo-primary" busy={installing === (kind + ':' + id)} onClick={() => void install(kind, id, name, command)}>{label}</BusyButton>
+
+  return <div className="lumo-surface lumo-skillhub-surface">
+    <SurfaceIntro surface="skillhub" trailing={<span className="lumo-surface-actions"><button type="button" className="lumo-button lumo-secondary" onClick={() => openSurface('skills')}>能力目录</button><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>刷新目录</BusyButton></span>} />
+    {error ? <Notice error>{error}</Notice> : null}
+    {notice ? <Notice close={() => setNotice('')}>{notice}</Notice> : null}
+
+    <div className="lumo-skillhub-head">
+      <div className="lumo-skillhub-tabs" role="tablist" aria-label="SkillHub 能力市场">{SKILLHUB_TABS.map(item => <button type="button" role="tab" aria-selected={item === tab} key={item} className={item === tab ? 'active' : ''} onClick={() => switchTab(item)}><b>{item}</b><span>{catalog ? metricValue(catalog.counts[item === '技能' ? 'skills' : 'packs']) : '–'}</span></button>)}</div>
+      <div className="lumo-skillhub-status"><i className={'lumo-live-dot' + (source === 'skillhub' ? '' : ' muted')} /><span>{sourceLabel}</span>{syncedAt ? <small>{syncedAt} 同步</small> : null}<small>已安装 {installedCount}</small></div>
+    </div>
+
+    <div className="lumo-skillhub-toolbar">
+      <label className="lumo-skillhub-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m20 20-4.2-4.2" /></svg><input value={query} onChange={event => setQuery(event.target.value)} placeholder={skillhubTabMeta[tab].placeholder} aria-label={'搜索 SkillHub ' + skillhubTabMeta[tab].label} />{query ? <button type="button" aria-label="清空搜索" onClick={() => setQuery('')}>×</button> : null}{searching ? <i className="lumo-skillhub-spinner" aria-hidden="true" /> : null}</label>
+      <span className="lumo-skillhub-count">{searching ? '正在查询 SkillHub…' : live ? `${count} 个结果` : `热门 ${count}${total > count ? ` / 共 ${metricValue(total)}` : ''}`}</span>
+    </div>
+    <div className="lumo-skillhub-filters" role="group" aria-label={skillhubTabMeta[tab].label + '分类'}>{filters.map(tag => <button type="button" key={tag} data-tone={toneFor(tag)} className={filter === tag ? 'active' : ''} onClick={() => setFilter(tag)}>{tag}</button>)}</div>
+
+    {loading ? <div className="lumo-skillhub-grid">{[0, 1, 2, 3, 4, 5].map(index => <div className="lumo-skeleton-skill" key={index}><span /><div><b /><i /><i /></div></div>)}</div>
+      : tab === '技能' ? (skills.length ? <div className="lumo-skillhub-grid">{skills.map((skill, index) => <SkillHubCard key={skill.id} index={index} tone={toneFor(skill.tag)}>
+        <header><SkillHubMark icon={skill.icon} name={skill.name} tone={toneFor(skill.tag)} /><div className="lumo-skillhub-title"><b title={skill.name}>{skill.name}</b><small>{skill.publisher ? skill.publisher + ' · ' : ''}{skill.source}{skill.verified ? <em className="lumo-skillhub-verified">✓ 认证</em> : null}</small></div></header>
+        <p>{skill.description || '暂无描述。'}</p>
+        <div className="lumo-skillhub-chips"><span className="lumo-skillhub-tag" data-tone={toneFor(skill.tag)}>{skill.tag}</span>{skill.apiKey ? <span className="lumo-skillhub-key">需 API Key</span> : null}{(skill.tags ?? []).slice(0, 2).map(tag => <span key={tag} className="lumo-skillhub-tag">{tag}</span>)}</div>
+        <footer><span className="lumo-skillhub-stats"><span>★ {skill.rating}</span><span>下载 {metricValue(skill.downloads)}</span><code>/{skill.command}</code></span><span className="lumo-skillhub-actions">{actions('skill', skill.id, skill.name, installedSkills.has(skill.id), skill.command)}</span></footer>
+      </SkillHubCard>)}</div> : <Empty>{skillhubTabMeta[tab].empty}</Empty>)
+      : tab === '专家包' ? (packs.length ? <div className="lumo-skillhub-grid">{packs.map((pack, index) => <SkillHubCard key={pack.id} index={index} tone={toneFor(pack.category)}>
+        <header><SkillHubMark icon={pack.icon} name={pack.name} tone={toneFor(pack.category)} /><div className="lumo-skillhub-title"><b title={pack.name}>{pack.name}</b><small>{pack.role ? pack.role + ' · ' : ''}{pack.source}</small></div></header>
+        <p>{pack.description || '暂无描述。'}</p>
+        <div className="lumo-skillhub-chips"><span className="lumo-skillhub-tag" data-tone={toneFor(pack.category)}>{pack.category}</span><span className="lumo-skillhub-tag">{pack.skills} 个技能</span></div>
+        <footer><span className="lumo-skillhub-stats">{pack.command ? <code>/{pack.command}</code> : null}</span><span className="lumo-skillhub-actions">{actions('pack', pack.id, pack.name, installedPacks.has(pack.id), pack.command, '安装专家包')}</span></footer>
+      </SkillHubCard>)}</div> : <Empty>{skillhubTabMeta[tab].empty}</Empty>)
+      : (plugins.length ? <div className="lumo-skillhub-grid">{plugins.map((plugin, index) => <SkillHubCard key={plugin.id} index={index} tone={toneFor(plugin.category)}>
+        <header><SkillHubMark icon={plugin.icon} name={plugin.name} tone={toneFor(plugin.category)} /><div className="lumo-skillhub-title"><b title={plugin.name}>{plugin.name}</b><small>{plugin.source}{plugin.installable ? <em className="lumo-skillhub-verified">✓ 可安装</em> : null}</small></div></header>
+        <p>{plugin.description || '暂无描述。'}</p>
+        <div className="lumo-skillhub-chips"><span className="lumo-skillhub-tag" data-tone={toneFor(plugin.category)}>{plugin.category}</span></div>
+        <footer><span className="lumo-skillhub-stats"><span>★ {metricValue(plugin.stars)}</span><span>分支 {plugin.forks}</span></span><span className="lumo-skillhub-actions">{actions('plugin', plugin.id, plugin.name, installedPlugins.has(plugin.id), undefined, '安装插件')}</span></footer>
+      </SkillHubCard>)}</div> : <Empty>{skillhubTabMeta[tab].empty}</Empty>)}
   </div>
 }
 
@@ -2073,7 +2248,7 @@ function Workbench({ surface, close, select, commandOpen, toggleCommand }: { sur
   const meta = surfaceMeta[surface]
   useFocusTrap(ref, !commandOpen)
   return <div className="lumo-backdrop"><section ref={ref} tabIndex={-1} className="lumo-workbench" role="dialog" aria-modal="true" aria-label={`${meta.label}工作台`}>
-    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>Lumo 工作台</span><i>›</i><b>{meta.label}</b><small>{meta.eyebrow}</small></div><div className="lumo-header-actions"><LumoThemePicker /><button type="button" className="lumo-command-trigger" onClick={toggleCommand}><span>跳转</span><kbd>⌘ K</kbd></button><span className="lumo-identity-chip"><i className="lumo-live-dot" /> 原生会话</span><MagneticButton className="lumo-quiet" aria-label="关闭工作台" onClick={close}>×</MagneticButton></div></header><main>{surface === 'knowledge' ? <KnowledgeSurface /> : surface === 'skills' ? <SkillsSurface /> : surface === 'connectors' ? <ConnectorsSurface /> : surface === 'operations' ? <OperationsSurface /> : surface === 'automation' ? <AutomationSurface /> : surface === 'design' ? <OpenDesignSurface onConversationStart={close} /> : surface === 'presentation' ? <PresentationSurface onConversationStart={close} /> : surface === 'market' ? <MarketSurface /> : <AccountSurface />}</main><footer className="lumo-workbench-footer"><span>在对话框输入 /design 或 /ppt 可随时打开；产物仍由 /open-design 与 /ppt-master 原生技能生成</span><span>按 Esc 返回原生 DSH</span></footer></div>
+    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>Lumo 工作台</span><i>›</i><b>{meta.label}</b><small>{meta.eyebrow}</small></div><div className="lumo-header-actions"><LumoThemePicker /><button type="button" className="lumo-command-trigger" onClick={toggleCommand}><span>跳转</span><kbd>⌘ K</kbd></button><span className="lumo-identity-chip"><i className="lumo-live-dot" /> 原生会话</span><MagneticButton className="lumo-quiet" aria-label="关闭工作台" onClick={close}>×</MagneticButton></div></header><main>{surface === 'knowledge' ? <KnowledgeSurface /> : surface === 'skills' ? <SkillsSurface /> : surface === 'connectors' ? <ConnectorsSurface /> : surface === 'operations' ? <OperationsSurface /> : surface === 'automation' ? <AutomationSurface /> : surface === 'design' ? <OpenDesignSurface onConversationStart={close} /> : surface === 'presentation' ? <PresentationSurface onConversationStart={close} /> : surface === 'market' ? <MarketSurface /> : surface === 'skillhub' ? <SkillHubSurface /> : <AccountSurface />}</main><footer className="lumo-workbench-footer"><span>在对话框输入 /design 或 /ppt 可随时打开；产物仍由 /open-design 与 /ppt-master 原生技能生成</span><span>按 Esc 返回原生 DSH</span></footer></div>
     <CommandPalette open={commandOpen} surface={surface} select={select} close={toggleCommand} />
   </section></div>
 }

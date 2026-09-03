@@ -44,6 +44,7 @@ Compose 和 Helm 是部署层配置，不应把生产密钥提交到仓库。
 | dsh 节点 | `LUMO_CONNECTOR_GATEWAY_URL` | 出站连接器网关 |
 | dsh 节点 | `LUMO_REALM`、`LUMO_USER_ID`、`LUMO_PROJECT_ID`、`LUMO_USER_ROLE` | 运行身份 |
 | dsh 节点 | `LUMO_SKILL_SNAPSHOT_ROOT`、`LUMO_SKILL_SNAPSHOT_FILE`、`LUMO_SKILL_SNAPSHOT_WAIT_MS` | Provisioner 已验证技能目录、快照清单和启动等待上限 |
+| SkillHub 技能源 | `skillhub search/install`、`LUMO_SKILL_SNAPSHOT_ROOT`、`LUMO_SKILL_SNAPSHOT_FILE` | 通过 SkillHub 搜索、安装并验签技能，再生成 `skill-local` 启动快照；不会在运行时直接拉取远端内容 |
 | DSH 基础技能 | `LUMO_ARCHIFY_ROOT` | 可选的已 provision Archify checkout；缺失时只提供 JSON-IR 工作流契约，不自动下载或执行未知 CLI；OpenDesign 的 `od` CLI 同样要求由目标工作区显式提供 |
 | Provisioner | `PROVISIONER_ARTIFACT_NAME`、`PROVISIONER_ARTIFACT_VERSION` 或 `PROVISIONER_ROLLOUT_CHANNEL`、`PROVISIONER_INTERVAL`、`PROVISIONER_SHAPE`、`PROVISIONER_NODE_ID` | 要收敛的签名制品闭包及目标形态。设置通道时每轮按稳定 `node_id` 读取该制品的 0–100% 灰度目标，但仍会重新验签计划；`PROVISIONER_NODE_ID` 是向 Registry 回报实际对账状态的稳定节点标识，设置制品名后 DSH 自动读取共享快照 |
 | 治理技能发布器（受保护 CI） | `GOVERNANCE_URL`、`REGISTRY_URL`、`LUMO_REALM`、`LUMO_GOVERNANCE_PUBLISHER_USER`、`LUMO_GOVERNANCE_PUBLISHER_ROLES`、`GOVERNED_SKILL_ARTIFACT_NAME`、`GOVERNED_SKILL_ARTIFACT_VERSION`、`GOVERNED_SKILL_PUBLISHER`、`GOVERNED_SKILL_PRIVATE_KEY_FILE` | `governed-skill-publisher` 仅读取 realm-admin 已发布的治理版本并构建聚合 Skill Bundle；私钥仅在此受保护发布环境出现。对应公钥和 `skills:use` scope 上限必须预先置入 `REGISTRY_TRUST_FILE`。 |
@@ -59,185 +60,60 @@ fanout 仍由请求/运行时策略决定，节点池由 Nacos + HPA 按容量�
 
 ## 治理技能运行时发布
 
-Governance 的“发布为运行时源”只固定审核过的不可变版本；它不把未签名的数据库内容直接送到节点。受保护的 CI/发布主机使用 `governed-skill-publisher` 导出该 realm 的全部已发布版本、复核每个源摘要与 `SKILL.md` frontmatter，并生成一个普通 Registry `Skill` Bundle：
+### 从 SkillHub 搜索并安装技能
+
+技能市场直接集成 [SkillHub](https://skillhub.cn) 的技能、专家包与插件目录。UI 中的安装操作通过以下流程实现：
+
+1. **目录加载**：启动时从 `https://api.skillhub.cn` 拉取实时目录（技能、专家包、插件），离线或失败时回退到内置的种子目录
+2. **安装流程**：
+   - 优先尝试调用本地的 `skillhub` CLI（当 `skillhubCommand` 配置非空且 CLI 可执行时）
+   - CLI 不可用时，执行原生安装：通过 `/api/v1/download?slug=<slug>` 下载 zip，安全解压到 `<skillhubRoot>/<slug>/`（拒绝绝对路径和 `..` 遍历），验证 `SKILL.md` 的 frontmatter `name` 与目录名一致，计算 `sha256` 摘要
+   - 专家包安装：下载 `/api/v1/skillsets/<slug>/download`，解析 `manifest.json` 获取子技能列表，递归安装每个子技能
+   - 插件（GitHub 仓库）仅记录已安装状态，不实际克隆到技能根目录
+3. **快照更新**：每次安装后，将 `<skillhubRoot>/` 下所有技能的 `{name, sha256, description}` 写入 `skillhubSnapshotFile`（默认 `.lumo/skill-snapshot.json`），供 `skill-local` 插件启动时验证；未列入快照的目录会导致 `skill-local` 启动失败（`unpinned entry in snapshot root`）
+4. **配置项**：
+   - `skillhubCatalogFile`（默认 `.lumo/skillhub-catalog.json`）：缓存的目录文件
+   - `skillhubInstallFile`（默认 `.lumo/skillhub-installs.json`）：已安装项目的记录
+   - `skillhubRoot`（默认 `.lumo/skills`）：技能安装根目录
+   - `skillhubCommand`（默认 `'skillhub'`）：SkillHub CLI 命令名或路径，留空则仅使用原生安装
+   - `skillhubApiBase`（默认 `https://api.skillhub.cn`）：SkillHub API 基础 URL
+   - `skillhubSnapshotFile`（默认 `.lumo/skill-snapshot.json`）：skill-local 快照文件路径
+
+**安全约束**：UI 安装操作不允许模型或 Web 请求直接调用 `skillhub install` 命令。生产环境应由 Provisioner 将 SkillHub 内容重新包装成受信任的 Registry Bundle，通过治理流程发布后再下发到数据节点；`skill-local` 的不可变快照机制确保运行时不会加载未经验证的技能。
+
+CLI 安装方式（仅供本地开发参考）：
 
 ```sh
-cd platform/control-plane/registry
-go run ./cmd/governed-skill-publisher \
-  --governance "$GOVERNANCE_URL" --registry "$REGISTRY_URL" \
-  --realm "$LUMO_REALM" --user "$LUMO_GOVERNANCE_PUBLISHER_USER" --roles realm_admin \
-  --artifact "$GOVERNED_SKILL_ARTIFACT_NAME" --version 0.0.1 \
-  --publisher "$GOVERNED_SKILL_PUBLISHER" --private-key "$GOVERNED_SKILL_PRIVATE_KEY_FILE" \
-  --scope skills:use
+# 安装 SkillHub CLI（可选；UI 不依赖它）
+curl -fsSL https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/install.sh | bash -s -- --cli-only
+
+# 搜索技能
+skillhub search "网页搜索"
+
+# 安装技能到指定目录
+skillhub install websearch --dir .lumo/skills
+
+# 生成快照（skill-local 需要）
+node -e "
+const { readdirSync, readFileSync, writeFileSync, statSync } = require('fs');
+const { join } = require('path');
+const { createHash } = require('crypto');
+const root = '.lumo/skills';
+const entries = readdirSync(root, { withFileTypes: true })
+  .filter(d => d.isDirectory() && !d.name.startsWith('.'))
+  .map(d => {
+    const skillMdPath = join(root, d.name, 'SKILL.md');
+    const content = readFileSync(skillMdPath, 'utf8');
+    const nameMatch = content.match(/^name:\s*(.+)$/m);
+    const descMatch = content.match(/^description:\s*(.+)$/m);
+    const sha256 = 'sha256:' + createHash('sha256').update(content, 'utf8').digest('hex');
+    return { name: nameMatch[1].trim(), sha256, description: descMatch ? descMatch[1].trim() : '' };
+  });
+writeFileSync('.lumo/skill-snapshot.json', JSON.stringify(entries, null, 2) + '\n');
+"
+
+# 启动节点，指向快照
+LUMO_SKILL_SNAPSHOT_ROOT="$PWD/.lumo/skills" \
+LUMO_SKILL_SNAPSHOT_FILE="$PWD/.lumo/skill-snapshot.json" \
+pnpm --filter @lumo/dsh-node start -- --profile headless
 ```
-
-该命令的私钥必须属于 `REGISTRY_TRUST_FILE` 中已配置、且最大 scope 包含 `skills:use` 的发布者。然后像任意制品一样将该精确版本设为 Stable（或灰度）目标，并使节点以该 artifact name 和 rollout channel 持续运行 Provisioner；只有 Provisioner 验签并原子写入 `/var/lib/lumo/artifacts/skills` 与 `skill-snapshot.json` 后，DSH 才会加载它。空的已发布目录同样会生成含元数据的 Bundle，从而可在下一轮对账中撤回原有本地技能。
-
-## 外部身份与 OAuth 注册
-
-Passkey 的 RPID/origin 是浏览器安全边界，不从 `Host`、反向代理头或用户输入推导。部署必须先
-确定公开身份域，再把相同的精确 origin 配入 `LUMO_AUTH_WEBAUTHN_ORIGINS`。用户只能在已认证的
-账户页新增/删除自己的凭据；挑战仅保存摘要、5 分钟过期且单次消费，服务端检查 RP hash、UP/UV、
-P-256 签名与单调计数器。
-
-连接器的 OAuth 注册写入 Connector manifest 的 `auth.oauth`。通用网关只接受以下边界：Bearer
-access-token 的受管引用、具体供应商名称、精确 HTTPS 授权/令牌/回调 URL、客户端 ID/Secret
-引用、非空且去重的 scope 以及 `pkce: true`。例如：
-
-```json
-{
-  "auth": {
-    "kind": "bearer",
-    "credentialRef": "secret/data/acme/access-token",
-    "oauth": {
-      "provider": "Acme SaaS",
-      "authorizationUrl": "https://login.acme.example/authorize",
-      "tokenUrl": "https://login.acme.example/token",
-      "callbackUrl": "https://lumo.example/oauth/callback/acme",
-      "clientIdRef": "secret/data/acme/client-id",
-      "clientSecretRef": "secret/data/acme/client-secret",
-      "scopes": ["items.read"],
-      "pkce": true
-    }
-  }
-}
-```
-
-这些字段是注册期校验契约，不会把 client secret、refresh token 或第三方令牌写入 manifest、审计或
-日志。授权码回调、token 交换/轮换以及企业 IdP 登录必须绑定实际 IdP/SaaS 的 issuer、已注册回调
-和受管凭据存储后才能启用；仓库不会猜测供应商或凭据生命周期。
-
-## PostgreSQL 抢占端到端测试
-
-Scheduler 的 `internal/integration/preemption_test.go` 已覆盖“高优先级任务只能在低优先级任务报告
-终态释放名额后放置”的真实 PostgreSQL 路径。它不会自行启动数据库；提供隔离的测试库后运行：
-
-```sh
-cd platform/control-plane/scheduler
-LUMO_TEST_PG_DSN='postgres://…' go test ./internal/integration -run TestPreemption -count=1
-```
-
-测试账户必须只指向可销毁的测试数据库。没有 `LUMO_TEST_PG_DSN` 时用例按设计跳过，不能把跳过视为
-端到端验收通过。
-
-## 三种形态的硬边界
-
-| 形态 | 存储 | 允许的运行能力 | 禁止依赖 |
-|---|---|---|---|
-| `local` | SQLite | 本机 DSH、OpenDesign、Archify、本地技能、本机 Agent | RocketMQ、Nacos、MinIO、Redis、PostgreSQL、跨用户委派 |
-| `standalone` | PostgreSQL | 单服务器控制面、单节点调度和服务器连接器 | 跨节点/桌面节点/组织委派治理，即使机器上另有 Nacos 也不自动开启 |
-| `cluster` | PostgreSQL | Nacos 节点目录、跨用户委派、桌面节点、灰度与弹性调度 | — |
-
-模式由 `LUMO_DEPLOYMENT_MODE` 决定，不能由中间件是否可连接、节点数量或 URL 是否存在推断。
-
-## 仍存在的默认值
-
-代码中的 `localhost`、`127.0.0.1`、`dev-*`、Legacy Local-lite PG/Redis 端口以及 Compose
-中的 `${...:-dev-default}` 均是开发兜底，不是生产连接信息。生产必须在部署层覆盖，尤其是：
-
-- `LUMO_CONTROL_PLANE_TOKEN`、`LUMO_SUBAGENT_HOST_TOKEN`、`LUMO_VAULT_TOKEN` 和 OPA/Vault 地址；
-- 所有 PG/Redis/Embedding/网关地址；
-- `LUMO_DSH_IMAGE` 及节点广告地址；
-- Helm Secret、TLS、Nacos namespace/group 和数据驻留域。
-
-Helm 的 `dshNode.enabled` 默认关闭，避免在未提供正式 DSH 镜像和承载令牌时误启动；
-启用后每个节点以 Pod 名称注册为独立 Nacos 临时实例，副本数可以扩展到大于两个。
-Scheduler 的多智能体 fanout 数量不写死为两个，HPA 只是执行节点的容量调节层。
-
-浏览器不能覆盖 `X-Lumo-User`、`X-Lumo-Realm`、`X-Lumo-Roles` 等运行身份。公开端口由
-`@lumo/user-auth` 持有；原生 DSH WebServer 只绑定容器内环回地址和随机端口。代理使用
-HttpOnly + SameSite=Strict 的不透明会话 Cookie 向 Governance 校验用户，再删除浏览器
-提交的身份头并为每个转发请求注入：
-
-- `X-Lumo-Identity`：base64url 编码的 JSON，字段为 `aud: "lumo-ui"`、`exp`（Unix 秒，
-  最多晚于当前时间 300 秒）、`userId`、`realm`、非空 `roles`，以及可选 `projectId`、
-  `deptId`；
-- `X-Lumo-Identity-Signature`：对上述编码字符串执行 HMAC-SHA256 后的 base64url 值。
-
-断言的有效期为 60 秒；缺失、过期、超长有效期或签名错误统一返回 `401`，部署中的
-`dev-user` 等静态字段不作为浏览器认证回退。Compose 未单独设置 Secret 时使用同环境的
-控制面令牌作为本地开发兜底；生产必须提供独立 Secret、TLS，并启用
-`LUMO_AUTH_SECURE_COOKIE=true`。Helm 启用 `dshWeb.enabled=true` 时默认要求
-`dshWeb.identityAssertion.secretName`；只有明确设置
-`dshWeb.identityAssertion.allowStaticIdentity=true` 才允许开发环境继续使用静态身份。
-
-跨节点 Seam 调用应使用另一把独立密钥（不能复用上面的 `lumo-ui` 受众），在 Proxy 配置
-`identityAssertionSecret` 与非空 `roles`，并在 Host 配置相同的
-`identityAssertionSecret`。Proxy 会在每次请求上写入受众为 `lumo-seam-host`、有效期 60 秒的
-`X-Lumo-Identity` / `X-Lumo-Identity-Signature`；Host 启用该项后拒绝普通
-`X-Lumo-Realm` / `X-Lumo-User` 身份头，并拒绝查询载荷请求断言外的角色。密钥至少 32 字节，
-通过 Secret 注入；生产还必须使用节点间 mTLS，HMAC 断言不防御遭攻陷节点。
-
-Seam Host 与 Proxy 的 mTLS 配置使用相同的 `tls` 对象：`caFile`、`certFile`、`keyFile` 都必须是
-Secret volume 中的**绝对** PEM 路径；Proxy 可选 `serverName` 用于 SNI/证书 DNS 校验，
-`reloadIntervalMs` 可设为 1000–3600000 毫秒（默认 30000）。Host 启用后以
-`requestCert + rejectUnauthorized` 强制客户端证书，Proxy 启用后只接受 `https://` 端点，连 Nacos
-热更新的 endpoint 也不能降级为 HTTP。每次检查会先验证完整的新 PEM bundle；Host 为新连接更新 TLS
-context，Proxy 为新请求使用新凭据。无效或不完整的轮换文件保留上一套有效凭据，Host 记错误；证书撤销、
-紧急回退或部署策略要求时仍应通过原子 Secret 更新配合滚动重启完成收敛。私钥字节不进入 patch、Registry、
-日志或环境变量。
-
-## Helm workload mTLS 与生产治理门槛
-
-### Standalone/Compose 控制面原生 TLS
-
-除 Istio 外，所有 TCP HTTP 控制面入口都可通过同一组环境变量启用原生 TLS/mTLS：
-`LUMO_TLS_CERT_FILE`、`LUMO_TLS_KEY_FILE`、`LUMO_TLS_CLIENT_CA_FILE`。三者必须同时提供，
-服务端仅接受 TLS 1.3 且强制校验客户端 CA；证书/私钥文件在每次新握手前按 mtime/size 热加载，
-无效轮换会失败关闭而不会回退到明文。控制面出站客户端使用 `LUMO_TLS_CA_FILE`、同名 cert/key
-和可选 `LUMO_TLS_SERVER_NAME`。未配置任何 TLS 变量时才保持本地开发 HTTP 行为。
-
-Cluster 形态的控制面、DSH Web/承载节点、子代理 start/result 回调与 Connector/LLM 网关间流量可通过
-`serviceMesh.istio.enabled=true` 接入 Istio workload mTLS。Chart 会给所有这些 Pod 注入 sidecar、创建以
-`lumo.dev/mesh-mtls=enabled` 为 selector 的 `PeerAuthentication: STRICT`，并为各 Lumo Service 创建
-`DestinationRule: ISTIO_MUTUAL`。应用仍使用内部 `http://` Service URL；sidecar 透明地以 mTLS 连接，
-因此不会出现只改一半客户端而退回明文的拓扑。
-
-```yaml
-serviceMesh:
-  istio:
-    enabled: true
-    revision: stable             # 与集群已安装的 Istio revision 一致；不使用则留空
-    trustDomain: cluster.local   # 必填，不猜测实际 SPIFFE trust domain
-    denyPrincipals: []           # 紧急隔离时填被吊销的 workload SPIFFE principal
-```
-
-证书由 Istio SDS 按 Pod ServiceAccount 签发、以内存挂载并自动轮换，私钥不进入应用容器、Helm values 或
-环境变量。生产 operator 必须在启用前确认 CA 根轮换窗口、工作负载证书 TTL、跨命名空间/入口网关的
-trust-domain federation；紧急处置先把受影响 principal 写入 `denyPrincipals` 并滚动替换其 ServiceAccount/
-证书，根 CA 泄露则按 mesh 的双根过渡和最终移除旧根执行。该 Chart 不会伪造 CRL 或把浏览器直接接到
-STRICT workload；南北向流量必须先在受管 Ingress/Edge Gateway 终止浏览器 TLS，再以网格身份访问服务。
-
-`productionControls.enforced=true` 是上线渲染门槛，而不是替业务代做决策。开启时 Helm 必须获得 SLO 文档、
-正式 OTLP Collector URL、日志/trace 留存天数、月度费用上限以及 break-glass、租户密钥销毁、市场治理三份已批准策略引用，并
-以 ConfigMap 发布这些非敏感声明；值缺失或非正数会使 `helm template/upgrade` 失败。策略正文、审批证据、
-Go 控制面会从该 ConfigMap 的 `LUMO_OTEL_COLLECTOR_URL` 接收 Collector 地址；Loki/对象存储生命周期和
-break-glass 执行流程仍须由运营与合规系统承载，当前不会把未经批准的 endpoint 猜测成真实系统。
-
-## Cluster 联合验收
-
-真实集群验收入口为 `platform/deploy/acceptance-cluster.sh`。它拒绝空值和开发默认，要求调用方提供
-`LUMO_TEST_PG_DSN`、`LUMO_TEST_RMQ_ENDPOINT` 以及 Nacos、Milvus、Nebula adapter、OPA、Vault 的健康 URL：
-
-```sh
-LUMO_TEST_PG_DSN='postgres://...' \
-LUMO_TEST_RMQ_ENDPOINT='rmq-proxy:8081' \
-LUMO_TEST_NACOS_HEALTH_URL='https://nacos.example/nacos/v1/console/health/readiness' \
-LUMO_TEST_MILVUS_HEALTH_URL='https://milvus.example/healthz' \
-LUMO_TEST_NEBULA_HEALTH_URL='https://graph-adapter.example/healthz' \
-LUMO_TEST_OPA_HEALTH_URL='https://opa.example/health' \
-LUMO_TEST_VAULT_HEALTH_URL='https://vault.example/v1/sys/health' \
-./platform/deploy/acceptance-cluster.sh
-```
-
-脚本先执行 Cluster smoke，再运行 Scheduler 租约接管、流程/项目/Registry、Connector/LLM、RocketMQ
-真实传输和 Session-log 双写者 resume/fencing 测试。`LUMO_ACCEPTANCE_SKIP_SMOKE=1` 只适用于已由外部
-编排器确认所有容器健康的场景；它不会跳过依赖健康检查或 `LUMO_TEST_PG_DSN` 闸门。健康 URL、PG schema、
-RocketMQ topic、Vault token 和测试数据隔离均由验收环境负责，脚本不创建或删除生产数据。
-
-父节点在收到 Scheduler 的 `node_id` 后，先读取显式 `LUMO_SUBAGENT_NODE_URLS`，未命中
-时查询 Nacos 的健康实例并按 `node_id` 匹配；承载令牌优先取节点专属
-`LUMO_SUBAGENT_HOST_TOKENS`，否则使用同环境的 `LUMO_SUBAGENT_HOST_TOKEN`。因此
-扩容出来的新 Pod 会自动进入可路由集合，不需要修改父节点配置或把智能体数量写死。
-
-测试脚本里的 `127.0.0.1` 和 `dev-*` 只用于本机测试，不参与生产启动。

@@ -702,7 +702,7 @@
 .lumo-market-category-row button { min-height: 28px; padding: 0 10px; border: 1px solid var(--lumo-line); border-radius: 999px; color: var(--lumo-muted); background: transparent; cursor: pointer; font-size: 9px; transition: color .16s ease, border-color .16s ease, background .16s ease, transform .16s ease; }
 .lumo-market-category-row button:hover, .lumo-market-category-row button.active { border-color: color-mix(in srgb, var(--lumo-mint) 52%, var(--lumo-line)); color: var(--lumo-ink); background: var(--lumo-accent-12); transform: translateY(-1px); }
 .lumo-market-layout { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(260px, .8fr); gap: 14px; align-items: start; }
-.lumo-market-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.lumo-market-grid { display: grid; grid-template-columns: 1fr; gap: 9px; }
 .lumo-market-card { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 10px; min-width: 0; min-height: 138px; padding: 12px; border: 1px solid var(--lumo-line); border-radius: 11px; color: var(--lumo-muted); background: linear-gradient(145deg, color-mix(in srgb, var(--market-accent, var(--lumo-mint)) 7%, var(--lumo-panel)), var(--lumo-panel)); cursor: pointer; text-align: left; transition: transform .18s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease; animation: lumo-card-in .38s cubic-bezier(.16, .8, .2, 1) both; animation-delay: calc(var(--lumo-order, 0) * 35ms); }
 .lumo-market-card:hover, .lumo-market-card.selected { border-color: color-mix(in srgb, var(--market-accent, var(--lumo-mint)) 58%, var(--lumo-line)); background: linear-gradient(145deg, color-mix(in srgb, var(--market-accent, var(--lumo-mint)) 13%, var(--lumo-panel)), var(--lumo-panel-raised)); box-shadow: 0 13px 28px rgba(0, 0, 0, .18); transform: translateY(-2px); }
 .lumo-market-card.selected { box-shadow: inset 3px 0 var(--market-accent, var(--lumo-mint)), 0 13px 28px rgba(0, 0, 0, .18); }
@@ -1077,4 +1077,73 @@
   .lumo-studio-tools > span:nth-of-type(n+2), .lumo-studio-tools > em { display: none; }
   .lumo-presentation-steps li { min-width: 0; flex: 1; }
   .lumo-presentation-steps li::after { display: none; }
+}
+
+/* SkillHub market: live catalog with a compact segmented header, a prominent
+   search field and a responsive card grid. Tones come from the category. */
+.lumo-skillhub-surface { --sh-blue: #7da9ed; --sh-violet: #b796e8; --sh-green: #63c9b9; --sh-orange: #f29a62; --sh-cyan: #6fd3e8; --sh-mint: var(--lumo-mint); }
+.lumo-skillhub-surface [data-tone='blue'] { --sh-tone: var(--sh-blue); }
+.lumo-skillhub-surface [data-tone='violet'] { --sh-tone: var(--sh-violet); }
+.lumo-skillhub-surface [data-tone='green'] { --sh-tone: var(--sh-green); }
+.lumo-skillhub-surface [data-tone='orange'] { --sh-tone: var(--sh-orange); }
+.lumo-skillhub-surface [data-tone='cyan'] { --sh-tone: var(--sh-cyan); }
+.lumo-skillhub-surface [data-tone='mint'], .lumo-skillhub-surface [data-tone=''] { --sh-tone: var(--sh-mint); }
+
+.lumo-skillhub-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 14px; }
+.lumo-skillhub-tabs { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--lumo-line); border-radius: 11px; background: var(--lumo-accent-2); }
+.lumo-skillhub-tabs button { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border: 0; border-radius: 8px; background: transparent; color: var(--lumo-muted); cursor: pointer; transition: background .18s, color .18s; }
+.lumo-skillhub-tabs button b { font-size: 12px; font-weight: 600; }
+.lumo-skillhub-tabs button span { min-width: 20px; padding: 2px 6px; border-radius: 999px; background: var(--lumo-accent-8); color: var(--lumo-faint); font: 600 9px/1.3 var(--lumo-mono); text-align: center; }
+.lumo-skillhub-tabs button:hover { color: var(--lumo-ink); background: var(--lumo-accent-6); }
+.lumo-skillhub-tabs button.active { color: var(--lumo-ink); background: var(--lumo-panel-raised); box-shadow: 0 1px 0 rgba(255,255,255,.04) inset, 0 6px 18px rgba(0,0,0,.18); }
+.lumo-skillhub-tabs button.active span { background: var(--lumo-mint-soft); color: var(--lumo-mint); }
+.lumo-skillhub-status { display: inline-flex; align-items: center; gap: 8px; color: var(--lumo-muted); font-size: 10px; }
+.lumo-skillhub-status small { color: var(--lumo-faint); font: 9px/1 var(--lumo-mono); }
+.lumo-skillhub-status small + small::before { content: '·'; margin-right: 8px; color: var(--lumo-line-strong); }
+.lumo-skillhub-status .lumo-live-dot.muted { background: var(--lumo-faint); box-shadow: none; animation: none; }
+
+.lumo-skillhub-toolbar { display: flex; align-items: center; gap: 14px; margin: 0 0 10px; }
+.lumo-skillhub-search { position: relative; display: flex; flex: 1; align-items: center; gap: 10px; min-height: 42px; padding: 0 12px 0 14px; border: 1px solid var(--lumo-line); border-radius: 12px; background: var(--lumo-panel); transition: border-color .18s, box-shadow .18s; }
+.lumo-skillhub-search:focus-within { border-color: var(--lumo-accent-45); box-shadow: 0 0 0 3px var(--lumo-accent-12); }
+.lumo-skillhub-search svg { width: 15px; height: 15px; flex: none; fill: none; stroke: var(--lumo-faint); stroke-width: 1.8; stroke-linecap: round; }
+.lumo-skillhub-search input { flex: 1; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--lumo-ink); font-size: 12px; outline: 0; }
+.lumo-skillhub-search input::placeholder { color: var(--lumo-faint); }
+.lumo-skillhub-search button { display: grid; place-items: center; width: 20px; height: 20px; border: 0; border-radius: 50%; background: var(--lumo-accent-8); color: var(--lumo-muted); font-size: 12px; line-height: 1; cursor: pointer; }
+.lumo-skillhub-search button:hover { background: var(--lumo-accent-18); color: var(--lumo-ink); }
+.lumo-skillhub-spinner { width: 13px; height: 13px; border: 2px solid var(--lumo-accent-18); border-top-color: var(--lumo-mint); border-radius: 50%; animation: lumo-spin .7s linear infinite; }
+@keyframes lumo-spin { to { transform: rotate(360deg); } }
+.lumo-skillhub-count { flex: none; color: var(--lumo-faint); font: 9px/1 var(--lumo-mono); letter-spacing: .04em; white-space: nowrap; }
+
+.lumo-skillhub-filters { display: flex; gap: 6px; margin: 0 0 16px; padding-bottom: 4px; overflow-x: auto; scrollbar-width: none; }
+.lumo-skillhub-filters::-webkit-scrollbar { display: none; }
+.lumo-skillhub-filters button { flex: none; padding: 5px 11px; border: 1px solid var(--lumo-line); border-radius: 999px; background: transparent; color: var(--lumo-muted); font-size: 10px; cursor: pointer; transition: all .16s; }
+.lumo-skillhub-filters button:hover { border-color: var(--lumo-line-strong); color: var(--lumo-ink); }
+.lumo-skillhub-filters button.active { border-color: color-mix(in srgb, var(--sh-tone) 60%, transparent); color: var(--sh-tone); background: color-mix(in srgb, var(--sh-tone) 14%, transparent); }
+
+.lumo-skillhub-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.lumo-skillhub-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 14px 14px 12px; border: 1px solid var(--lumo-line); border-radius: 13px; background: linear-gradient(160deg, color-mix(in srgb, var(--sh-tone) 6%, var(--lumo-panel)), var(--lumo-panel) 60%); transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease; animation: lumo-card-in .38s cubic-bezier(.16, .8, .2, 1) both; animation-delay: calc(min(var(--lumo-order, 0), 12) * 30ms); }
+.lumo-skillhub-card:hover { border-color: color-mix(in srgb, var(--sh-tone) 45%, var(--lumo-line)); box-shadow: 0 12px 28px rgba(0, 0, 0, .18); transform: translateY(-2px); }
+.lumo-skillhub-card header { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.lumo-skillhub-mark { display: grid; flex: none; place-items: center; width: 38px; height: 38px; border-radius: 10px; border: 1px solid color-mix(in srgb, var(--sh-tone) 35%, var(--lumo-line)); background: color-mix(in srgb, var(--sh-tone) 14%, transparent); color: var(--sh-tone); font: 700 14px/1 var(--lumo-mono); overflow: hidden; }
+.lumo-skillhub-mark.has-icon { background: #fff; border-color: var(--lumo-line); }
+.lumo-skillhub-mark img { width: 100%; height: 100%; object-fit: cover; }
+.lumo-skillhub-title { display: grid; gap: 3px; min-width: 0; }
+.lumo-skillhub-title b { overflow: hidden; color: var(--lumo-ink); font-size: 13px; font-weight: 600; letter-spacing: -.01em; text-overflow: ellipsis; white-space: nowrap; }
+.lumo-skillhub-title small { display: flex; align-items: center; gap: 6px; color: var(--lumo-faint); font-size: 9px; }
+.lumo-skillhub-verified { color: var(--lumo-mint); font-style: normal; }
+.lumo-skillhub-card p { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; min-height: calc(2 * 1.55 * 10.5px); margin: 0; overflow: hidden; color: var(--lumo-muted); font-size: 10.5px; line-height: 1.55; }
+.lumo-skillhub-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.lumo-skillhub-tag { padding: 2px 8px; border-radius: 999px; background: var(--lumo-accent-6); color: var(--lumo-muted); font-size: 9px; }
+.lumo-skillhub-tag[data-tone] { background: color-mix(in srgb, var(--sh-tone) 14%, transparent); color: var(--sh-tone); }
+.lumo-skillhub-key { padding: 2px 8px; border-radius: 999px; background: rgba(244,166,88,.14); color: #f4a658; font-size: 9px; }
+.lumo-skillhub-card footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--lumo-line); }
+.lumo-skillhub-stats { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-width: 0; color: var(--lumo-faint); font-size: 9px; }
+.lumo-skillhub-stats code { padding: 2px 6px; border-radius: 5px; background: var(--lumo-accent-6); color: var(--lumo-muted); font: 9px/1.3 var(--lumo-mono); }
+.lumo-skillhub-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+.lumo-skillhub-actions .lumo-button { min-height: 30px; padding: 6px 12px; font-size: 10.5px; }
+.lumo-skillhub-installed { color: var(--lumo-mint); font-size: 10px; font-weight: 600; }
+@media (max-width: 900px) {
+  .lumo-skillhub-head { flex-direction: column; align-items: flex-start; }
+  .lumo-skillhub-grid { grid-template-columns: 1fr; }
+}
 }
