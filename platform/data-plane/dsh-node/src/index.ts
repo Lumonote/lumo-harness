@@ -18,7 +18,7 @@ import { dirname, resolve } from 'node:path'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { spawn } from 'node:child_process'
-import { localStorageRows, profileLifetimeOverlay, profileStorageRows, workflowEngineOverlay } from './workflow.ts'
+import { localStorageRows, localVaultRows, profileLifetimeOverlay, profileStorageRows, workflowEngineOverlay } from './workflow.ts'
 import { localSkillSnapshotAssembly, skillSnapshotSource, waitForSkillSnapshotFile } from './skills.ts'
 import { startNacosRegistration } from './nacos.ts'
 import { ensureProfilePlugins, PLATFORM_PLUGIN_MODULES } from './plugins.ts'
@@ -135,18 +135,12 @@ ensureProfilePlugins({ profile: dshProfile, platformRoot, dshRoot, deploymentMod
 // package files are linked by ensureProfilePlugins (or staged into the app
 // bundle for a packaged desktop build), so the profile mounts real plugin
 // entrypoints without asking the app to download anything at launch.
+// @anweat/dsh-browser 自 0.1.10（最新版）仍 import 已被 dsh master 移除的
+// settingsNamespace，会整树炸掉；从桌面包基线移除（见 plugins.ts 的版本漂移纪律）。
 const basePluginPatchRows = `${isWebProfile ? `    - id: dsh-market
       name: dshmarket
     - id: modlens
       name: '@liustack/modlens'
-    - id: browser
-      name: '@anweat/dsh-browser'
-      config:
-        channel: chromium
-        headless: true
-        opencliEnabled: true
-        autoInstall: false
-        verbose: false
     - id: dsh-context
       name: dsh-context
     - id: cost-meter
@@ -203,9 +197,9 @@ type PluginSummary = {
 const basePluginRows: PluginSummary[] = [
   { id: 'dshmarket', label: '插件市场', description: '浏览、搜索并管理 DSH 基础插件', surface: 'market', kind: 'runtime' },
   { id: 'modlens', label: '视觉理解', description: '图片读取、OCR 与视觉证据', surface: 'market', kind: 'runtime' },
-  { id: 'dsh-browser', label: '浏览器自动化', description: '基于 Playwright 的浏览、点击与页面操作', surface: 'market', kind: 'runtime' },
   { id: 'dsh-context', label: '上下文洞察', description: '查看上下文组成、趋势与注入事件', surface: 'market', kind: 'runtime' },
   { id: 'dsh-cost-meter', label: '费用统计', description: '会话、预算、模型价格与历史费用', surface: 'market', kind: 'runtime' },
+  { id: 'dsh-dream-skin', label: '梦幻皮肤', description: '8 套高质感主题、弥散光壁纸与每用户强调色', surface: 'market', kind: 'runtime' },
   { id: 'gpt-image-2-style-library', label: '图像风格库', description: 'GPT Image 2 模板、风格标签与工业级提示词', surface: 'skills', kind: 'runtime' },
   { id: 'ppt-master', label: '演示文稿生成', description: '生成、编辑和增强原生可编辑 PPTX', surface: 'skills', kind: 'runtime' },
   { id: 'ruflo-orchestration', label: '多智能体编排', description: '在任务运行内组织 Ruflo 智能体拓扑与分工', surface: 'operations', kind: 'runtime' },
@@ -311,7 +305,7 @@ ${isWebProfile ? `${localMode ? `# Local desktop serves the native DSH Web shell
 `}
 - insert:
 ${basePluginPatchRows}
-${localMode ? localStorageRows(dshProfile, sqlitePath) : `    - id: lumo-object-store
+${localMode ? localStorageRows(dshProfile, sqlitePath) + localVaultRows(sqlitePath, platformRealm) : `    - id: lumo-object-store
       name: ${JSON.stringify(objectStoreEntry)}
       inject: []
       config:

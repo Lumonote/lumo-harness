@@ -36,6 +36,7 @@ const dshNodeRoot = resolve(repoRoot, 'platform', 'data-plane', 'dsh-node')
 // 拿到的是没有 Lumo 插槽的那份产物。显式播种能抢在遍历之前把名字占住。
 const overriddenPackageRoots = overriddenPackageDirectories.map((directory) => resolve(dshRoot, directory))
 const lumoUiRoot = resolve(repoRoot, 'platform', 'dsh-plugins', 'lumo-ui')
+const knowledgeVaultRoot = resolve(repoRoot, 'platform', 'dsh-plugins', 'knowledge-vault')
 const bundledSkillsRoot = resolve(repoRoot, 'platform', 'upstream', 'skills')
 const bundledSkillSources = resolve(repoRoot, 'platform', 'upstream', 'skill-sources.json')
 // ---- 构建目标 ----
@@ -65,11 +66,16 @@ const PRUNE_DIRECTORY_NAMES = new Set(['test', 'tests', '__tests__', 'docs', 'do
 // 这两个名字不会出现在可 require 的路径里，任意深度都可裁；其余只裁包根一层（见 pruneDeadWeight）。
 const PRUNE_ANYWHERE_DIRECTORY_NAMES = new Set(['__tests__', '.github'])
 const upstreamPluginSpecs = [
-  'dshmarket@1.36.0',
+  'dshmarket@1.41.0',
   '@liustack/modlens@3.25.2',
-  '@anweat/dsh-browser@0.1.10',
-  'dsh-context@0.38.1',
+  'dsh-context@0.41.3',
   'dsh-cost-meter@1.6.7',
+  // Dream Skin：桌面换肤/主题插件（8 套 iOS / Linear 式清透冷调主题 + 弥散光壁纸 +
+  // 每用户强调色）。纯原生 --dsw-* token 实现，经其 cordis.patch.yml 在 Web 壳激活。
+  'dsh-dream-skin@8.30.1',
+  // 版本漂移纪律：与 dsh-node/src/plugins.ts 的 BASE_PROFILE_PLUGINS 保持一致。
+  // 两个提升是 dsh-settings 0.1.2 移除旧 API 的直接后果（installSettingsSection /
+  // settingsNamespace），@anweat/dsh-browser 因无适配新版而退出基线，见其注释。
 ]
 
 if (!existsSync(resolve(dshRoot, 'package.json'))) {
@@ -85,12 +91,20 @@ prepareUpstreamPlugins()
 // what Vite resolves from the workspace package exports, and they contain the
 // homepage composer seats and sidebar navigation slot added for Lumo. The
 // isolated snapshot contains source only, so emit lib/types before tsdown.
+rebuildDshHostArtifacts()
+// 快照对被覆盖包（ui-conversation/ui-sidebar）不投影 lib/（其产物必须从打补丁后的
+// 快照源码重建），而它们的 tsdown 配置又消费 lib/types —— 全量 client pass 之前
+// 必须先 tsc 出这两包的类型，否则 UNRESOLVED_ENTRY lib/types/index.js。
 buildDshClientPackages()
+rebuildDshClientArtifacts()
 
 // lumo-ui is bundled JavaScript (unlike the two small local server plugins
 // compiled below). Build it before copying the package closure so a desktop
 // bundle always receives the source UI that the user just edited.
 buildLumoUiPlugin()
+// knowledge-vault 在 src 里跨包 import 了 ../knowledge/src/consumer.ts，transpileModule
+// 单文件语义搬不动它——用 tsdown 打成单入口 bundle（两个 src 目录都进图）。
+buildKnowledgeVaultPlugin()
 
 // Always rebuild the Web shell. The desktop artifact embeds the Vite bundle,
 // so a cached dist/index.html would otherwise hide changes to the resident
@@ -99,7 +113,18 @@ console.log('构建 DSH Web 前端资源（含创作与多智能体编排能力�
 runWorkspaceBinary(join('apps', 'web'), 'vite', ['build'], 'DSH Web 前端构建失败')
 runPlatformScript('brand-web.mjs', [dshRoot], 'DSH Web 品牌资源覆盖失败')
 
-rmSync(stagingRoot, { recursive: true, force: true })
+// 与 prepare-runtime.mjs 的 retryRemove 同因：并发构建/残留句柄会让 rmdir ENOTEMPTY。
+for (let attempt = 1; ; attempt++) {
+  try {
+    rmSync(stagingRoot, { recursive: true, force: true })
+    break
+  } catch (error) {
+    if (attempt >= 4) throw error
+    console.warn(`清理 ${stagingRoot} 失败（${String(error)}），重试 ${attempt}...`)
+    const until = Date.now() + attempt * 500
+    while (Date.now() < until) { /* busy-wait */ }
+  }
+}
 mkdirSync(modulesRoot, { recursive: true })
 
 const moduleSearchRoots = [
@@ -211,6 +236,7 @@ for (const root of [
   resolve(repoRoot, 'platform', 'dsh-plugins', 'archify'),
   resolve(repoRoot, 'platform', 'dsh-plugins', 'creative-skills'),
   resolve(repoRoot, 'platform', 'dsh-plugins', 'ruflo-orchestration'),
+  knowledgeVaultRoot,
   ...upstreamPluginSpecs.map((spec) => packagePath(spec.slice(0, spec.lastIndexOf('@')), upstreamPluginRoot)),
 ]) {
   if (root === undefined || !existsSync(resolve(root, 'package.json'))) {
@@ -568,7 +594,20 @@ function compilePackagedTypeScriptPlugins() {
 
 function prepareUpstreamPlugins() {
   const packageNames = upstreamPluginSpecs.map((spec) => spec.slice(0, spec.lastIndexOf('@')))
-  const ready = packageNames.every((name) => existsSync(resolve(upstreamPluginModulesRoot, ...name.split('/'), 'package.json')))
+  // 只查“目录存在”不够：版本漂移（比如 dshmarket 1.36.0 → 1.41.0）时旧包还躺在
+  // 安装目录里，闭包会继续点名旧版。逐包核对已装版本，不匹配就整体重装。
+  const ready = upstreamPluginSpecs.every((spec) => {
+    const at = spec.lastIndexOf('@')
+    const name = spec.slice(0, at)
+    const expected = spec.slice(at + 1)
+    const manifest = resolve(upstreamPluginModulesRoot, ...name.split('/'), 'package.json')
+    if (!existsSync(manifest)) return false
+    try {
+      return JSON.parse(readFileSync(manifest, 'utf8')).version === expected
+    } catch {
+      return false
+    }
+  })
   if (ready) return
 
   rmSync(upstreamPluginRoot, { recursive: true, force: true })
@@ -599,6 +638,16 @@ function prepareUpstreamPlugins() {
   if (result.status !== 0) throw new Error(`桌面基础插件安装失败：${String(result.status ?? result.signal)}`)
 }
 
+function buildKnowledgeVaultPlugin() {
+  const tsdown = resolve(dshRoot, 'node_modules', '.bin', 'tsdown')
+  const result = spawnSync(tsdown, ['--config', 'tsdown.config.ts'], { cwd: knowledgeVaultRoot, stdio: 'inherit' })
+  if (result.error !== undefined) throw result.error
+  if (result.status !== 0) throw new Error(`Knowledge Vault 构建失败：${String(result.status ?? result.signal)}`)
+  if (!existsSync(resolve(knowledgeVaultRoot, 'lib', 'index.js'))) {
+    throw new Error(`Knowledge Vault 构建失败：lib/index.js 未产出`)
+  }
+}
+
 function buildLumoUiPlugin() {
   const tsc = resolve(dshRoot, 'node_modules', '.bin', 'tsc')
   const tsdown = resolve(dshRoot, 'node_modules', '.bin', 'tsdown')
@@ -610,6 +659,65 @@ function buildLumoUiPlugin() {
     if (result.error !== undefined) throw result.error
     if (result.status !== 0) throw new Error(`Lumo UI 构建失败：${String(result.status ?? result.signal)}`)
   }
+}
+
+// Host 面产物必须在快照上重产：`tsc -b` 只产出 lib/types，typert 的
+// lib/typert.remote-client.*（`@deepseek-ai/dsh-api-*/remote` 子路径）与
+// tsdown 的 host 包 bundle 只有 host 面的 tsdown 序能造；上游 master 重构期
+// 根 tsdown.config.ts 的 dsh-root 花括号 entry 会卡死该序，apply.mjs 的
+// LUMO_DSH_TYSDOWN_ENTRY 补丁已在快照上修好入口（synthesize-dsh-libs 补
+// 附加入口形状）。依赖开发树旧 lib 是这个构建链最大的坑——旧产物会同包。
+// 快照的 node_modules 软链指向开发树 packages/*（linkWorkspaceModules），
+// 因此再生产物必须回拷开发树，否则闭包遍历/TS 解析落回旧 lib。
+// 注意：绝不在快照内跑 tsc——快照的 tsconfig paths 指向自身包，而 node_modules
+// 软链回开发树，同一类型会在两边各自声明（TS2717/私有属性分裂）。lib/types 的
+// 唯一事实源是开发树（prepare 投影 + 回拷闭环），快照只跑 tsdown 打包与 typert。
+function rebuildDshHostArtifacts() {
+  console.log('重建 DSH host 面产物（tsdown 包与 typert remote 投影）...')
+  const tsdown = resolve(dshRoot, 'node_modules', '.bin', 'tsdown')
+  const result = spawnSync(tsdown, ['--env.DSH_BUILD_FACE', 'host'], { cwd: dshRoot, stdio: 'inherit' })
+  if (result.error !== undefined) throw result.error
+  if (result.status !== 0) throw new Error(`DSH host 面产物重建失败：${String(result.status ?? result.signal)}`)
+  mirrorSnapshotLibsBackToSource()
+}
+
+// Client 面整 workspace 重建：host 面里 clientBundle 包被 SKIP_WORKSPACE_BUILD
+// 跳过（其 node 半要靠 client 面补齐——tsdown.client.ts 的契约），只打被点名的
+// 包会漏掉所有 loader 入口包的 node 半（typert-registry / api-gateway /
+// client-modules 的 lib/index.js 曾因此停留在合成再导出形态，default 丢失导致
+// cordis "invalid plugin, received object"——2026-09 的实测根因）。client 面在
+// 修复后的 tsdown.config.ts 下可完整跑通（UNRESOLVED_ENTRY 幻影发生在补丁落地前）。
+function rebuildDshClientArtifacts() {
+  console.log('重建 DSH client 面产物（整 workspace：clientBundle 包 node 半 + 浏览器 bundle）...')
+  const tsdown = resolve(dshRoot, 'node_modules', '.bin', 'tsdown')
+  const result = spawnSync(tsdown, ['--env.DSH_BUILD_FACE', 'client'], { cwd: dshRoot, stdio: 'inherit' })
+  if (result.error !== undefined) throw result.error
+  if (result.status !== 0) throw new Error(`DSH client 面产物重建失败：${String(result.status ?? result.signal)}`)
+  mirrorSnapshotLibsBackToSource()
+}
+
+// 把快照里重产出的 lib/ 回拷到开发库（只覆盖 gitignored 产物；快照为源头）。
+// 快照的 node_modules 软链指向 sourceDshRoot 的 packages/*（linkWorkspaceModules），
+// 两边必须同态，否则 TS 解析与闭包遍历落回旧产物。
+function mirrorSnapshotLibsBackToSource() {
+  if (sourceDshRoot !== resolve(repoRoot, 'deepseek-harness')) {
+    // LUMO_DSH_SOURCE_ROOT 指向外部 checkout 时回拷由用户自行决定
+    console.log('跳过快照产物回拷（LUMO_DSH_SOURCE_ROOT 为外部库）')
+    return
+  }
+  let copied = 0
+  const manifests = spawnSync('git', ['-C', sourceDshRoot, 'ls-files', '-z', '**/package.json', 'package.json'], { encoding: 'utf8' })
+  if (manifests.error !== undefined || manifests.status !== 0) return
+  for (const manifest of manifests.stdout.split('\0').filter(Boolean)) {
+    const packageDir = dirname(resolve(sourceDshRoot, manifest))
+    const snapshotLib = resolve(dshRoot, dirname(manifest), 'lib')
+    if (!existsSync(snapshotLib)) continue
+    const targetLib = join(packageDir, 'lib')
+    rmSync(targetLib, { recursive: true, force: true })
+    cpSync(snapshotLib, targetLib, { recursive: true, dereference: true })
+    copied++
+  }
+  console.log(`DSH 产物已回拷开发库（${copied} 个包）`)
 }
 
 function buildDshClientPackages() {

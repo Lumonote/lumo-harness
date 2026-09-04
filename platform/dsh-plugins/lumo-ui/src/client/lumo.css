@@ -38,9 +38,14 @@
   --lumo-accent-80: color-mix(in srgb, var(--lumo-mint) 80%, transparent);
   --lumo-cyan-soft: color-mix(in srgb, var(--lumo-cyan) 7%, transparent);
   --lumo-cyan-line: color-mix(in srgb, var(--lumo-cyan) 24%, transparent);
+  /* 圆角、字族、表面、强调、特效强度均由主题身份 token 驱动；此处只作宿主外的回退值。 */
   --lumo-radius: 14px;
+  --lumo-radius-sm: 8px;
+  --lumo-heading: var(--lumo-heading);
+  --lumo-body: "Avenir Next", Avenir, "Noto Sans SC", "PingFang SC", ui-sans-serif, sans-serif;
+  --lumo-surface-tint: 0.06;
   --lumo-mono: var(--ds-font-family-code, "SFMono-Regular", "Cascadia Mono", "Roboto Mono", ui-monospace, monospace);
-  font-family: "Avenir Next", Avenir, "Noto Sans SC", "PingFang SC", ui-sans-serif, sans-serif;
+  font-family: var(--lumo-body);
 }
 
 .lumo-sidebar-entry {
@@ -197,7 +202,7 @@
 .lumo-surface { position: relative; max-width: 1480px; margin: 0 auto; padding: 32px 42px 48px; }
 .lumo-surface-intro { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; padding-bottom: 28px; }
 .lumo-eyebrow, .lumo-inspector-label { display: block; color: var(--lumo-cyan); font: 700 9px/1.3 var(--lumo-mono); letter-spacing: .18em; }
-.lumo-surface-intro h1 { margin: 8px 0 7px; color: var(--lumo-ink); font: 600 clamp(28px, 3.3vw, 42px)/1.02 Georgia, "Songti SC", serif; letter-spacing: -.055em; }
+.lumo-surface-intro h1 { margin: 8px 0 7px; color: var(--lumo-ink); font: 600 clamp(28px, 3.3vw, 42px)/1.02 var(--lumo-heading); letter-spacing: -.055em; }
 .lumo-surface-intro p { max-width: 500px; margin: 0; color: var(--lumo-muted); font-size: 12px; line-height: 1.7; }
 .lumo-scope-card { min-width: 175px; padding: 13px 15px; border: 1px solid var(--lumo-line); border-radius: 10px; background: var(--lumo-accent-4); }
 .lumo-scope-card span, .lumo-scope-card b, .lumo-scope-card small { display: block; }
@@ -274,7 +279,7 @@
 @keyframes lumo-shimmer { to { background-position: -200% 0; } }
 
 .lumo-inspector { align-self: start; min-height: 190px; padding: 17px; border: 1px solid var(--lumo-cyan-line); border-radius: 11px; background: linear-gradient(145deg, var(--lumo-cyan-soft), var(--lumo-accent-2)); }
-.lumo-inspector h3 { margin: 10px 0 8px; color: var(--lumo-ink); font: 600 22px/1.05 Georgia, "Songti SC", serif; letter-spacing: -.04em; }
+.lumo-inspector h3 { margin: 10px 0 8px; color: var(--lumo-ink); font: 600 22px/1.05 var(--lumo-heading); letter-spacing: -.04em; }
 .lumo-inspector > p { margin: 0; color: var(--lumo-muted); font-size: 10px; line-height: 1.65; }
 .lumo-inspector-empty { display: grid; place-content: center; min-height: 155px; text-align: center; }
 .lumo-inspector-empty span { color: var(--lumo-cyan); font-size: 11px; }
@@ -287,7 +292,7 @@
 .lumo-metric { min-height: 112px; padding: 16px; border: 1px solid var(--lumo-line); border-radius: 13px; background: linear-gradient(145deg, var(--lumo-accent-6), var(--lumo-accent-2)); }
 .lumo-metric:hover { border-color: var(--lumo-accent-32); transform: translateY(-2px); }
 .lumo-metric small, .lumo-metric span { display: block; color: var(--lumo-muted); font-size: 9px; }
-.lumo-metric strong { display: block; margin: 11px 0 6px; color: var(--lumo-ink); font: 500 31px/1 Georgia, "Songti SC", serif; letter-spacing: -.05em; }
+.lumo-metric strong { display: block; margin: 11px 0 6px; color: var(--lumo-ink); font: 500 31px/1 var(--lumo-heading); letter-spacing: -.05em; }
 .lumo-metric.mint strong { color: var(--lumo-mint); }
 
 .lumo-filter { display: flex; align-items: center; gap: 7px; }
@@ -340,7 +345,7 @@
 .lumo-connector-card b, .lumo-connector-card small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lumo-connector-card b { color: var(--lumo-ink); font-size: 12px; }
 .lumo-connector-card small { margin-top: 3px; color: var(--lumo-faint); font-size: 9px; }
-.lumo-connector-mark { display: grid; place-items: center; width: 34px; height: 34px; flex: none; border-radius: 9px; color: var(--lumo-bg); background: linear-gradient(145deg, var(--lumo-cyan), var(--lumo-mint)); font-family: Georgia, "Songti SC", serif; font-size: 15px; font-weight: 700; }
+.lumo-connector-mark { display: grid; place-items: center; width: 34px; height: 34px; flex: none; border-radius: 9px; color: var(--lumo-bg); background: linear-gradient(145deg, var(--lumo-cyan), var(--lumo-mint)); font-family: var(--lumo-heading); font-size: 15px; font-weight: 700; }
 .lumo-operation-list { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 5px; min-height: 56px; margin: 15px 0; }
 .lumo-operation-list span { padding: 4px 6px; border: 1px solid var(--lumo-cyan-line); border-radius: 5px; color: var(--lumo-cyan); background: var(--lumo-cyan-soft); font: 8px/1 var(--lumo-mono); }
 .lumo-connector-card footer { display: flex; justify-content: space-between; gap: 10px; margin-top: auto; margin-bottom: 10px; color: var(--lumo-faint); font: 8px/1 var(--lumo-mono); }
@@ -406,13 +411,13 @@
 .lumo-local-mode { display: grid; gap: 16px; }
 .lumo-local-intro { position: relative; overflow: hidden; padding: 21px; border: 1px solid var(--lumo-accent-24); border-radius: 13px; background: radial-gradient(circle at 88% 12%, var(--lumo-accent-14), transparent 34%), linear-gradient(135deg, var(--lumo-accent-8), var(--lumo-bg)); }
 .lumo-local-intro::after { position: absolute; right: 9%; bottom: -42px; width: 160px; height: 160px; border: 1px solid var(--lumo-accent-18); border-radius: 50%; content: ''; box-shadow: 0 0 0 18px var(--lumo-accent-4), 0 0 0 36px var(--lumo-accent-2); }
-.lumo-local-intro h2 { position: relative; z-index: 1; margin: 9px 0 7px; color: var(--lumo-ink); font: 600 25px/1.05 Georgia, "Songti SC", serif; letter-spacing: -.045em; }
+.lumo-local-intro h2 { position: relative; z-index: 1; margin: 9px 0 7px; color: var(--lumo-ink); font: 600 25px/1.05 var(--lumo-heading); letter-spacing: -.045em; }
 .lumo-local-intro p { position: relative; z-index: 1; max-width: 640px; margin: 0; color: var(--lumo-muted); font-size: 11px; line-height: 1.7; }
 .lumo-local-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: 14px; }
 .lumo-local-capabilities { display: grid; gap: 7px; }
 .lumo-local-capabilities button { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 11px; border: 1px solid var(--lumo-line); border-radius: 8px; color: inherit; background: var(--lumo-accent-2); text-align: left; cursor: pointer; transition: border-color .2s, transform .2s, background .2s; }
 .lumo-local-capabilities button:hover { border-color: var(--lumo-accent-36); background: var(--lumo-accent-6); transform: translateX(2px); }
-.lumo-local-capabilities button > span { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--lumo-bg); background: linear-gradient(145deg, var(--lumo-cyan), var(--lumo-mint)); font: 700 13px Georgia, "Songti SC", serif; }
+.lumo-local-capabilities button > span { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--lumo-bg); background: linear-gradient(145deg, var(--lumo-cyan), var(--lumo-mint)); font: 700 13px var(--lumo-heading); }
 .lumo-local-capabilities b, .lumo-local-capabilities small { display: block; }
 .lumo-local-capabilities b { color: var(--lumo-ink); font-size: 11px; }
 .lumo-local-capabilities small { margin-top: 3px; color: var(--lumo-muted); font-size: 9px; line-height: 1.35; }
@@ -549,7 +554,7 @@
 .lumo-sheet { position: absolute; inset: auto 42px 32px; z-index: 3; padding: 18px; border: 1px solid var(--lumo-line-strong); border-radius: 14px; background: linear-gradient(145deg, var(--lumo-panel-raised), var(--lumo-bg)); box-shadow: 0 22px 60px rgba(0, 0, 0, .52); animation: lumo-sheet-in .24s ease both; }
 .lumo-sheet > header { display: flex; justify-content: space-between; gap: 15px; }
 .lumo-sheet header p { margin: 2px 0 0; color: var(--lumo-muted); font-size: 10px; }
-.lumo-sheet h3 { margin: 9px 0 5px; color: var(--lumo-ink); font: 600 22px/1 Georgia, "Songti SC", serif; letter-spacing: -.04em; }
+.lumo-sheet h3 { margin: 9px 0 5px; color: var(--lumo-ink); font: 600 22px/1 var(--lumo-heading); letter-spacing: -.04em; }
 .lumo-fact-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 7px; margin-top: 15px; }
 .lumo-fact-grid div { padding: 9px; border: 1px solid var(--lumo-line); border-radius: 8px; background: var(--lumo-accent-2); }
 .lumo-fact-grid small, .lumo-fact-grid b { display: block; }
@@ -706,7 +711,7 @@
 .lumo-market-card { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 10px; min-width: 0; min-height: 138px; padding: 12px; border: 1px solid var(--lumo-line); border-radius: 11px; color: var(--lumo-muted); background: linear-gradient(145deg, color-mix(in srgb, var(--market-accent, var(--lumo-mint)) 7%, var(--lumo-panel)), var(--lumo-panel)); cursor: pointer; text-align: left; transition: transform .18s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease; animation: lumo-card-in .38s cubic-bezier(.16, .8, .2, 1) both; animation-delay: calc(var(--lumo-order, 0) * 35ms); }
 .lumo-market-card:hover, .lumo-market-card.selected { border-color: color-mix(in srgb, var(--market-accent, var(--lumo-mint)) 58%, var(--lumo-line)); background: linear-gradient(145deg, color-mix(in srgb, var(--market-accent, var(--lumo-mint)) 13%, var(--lumo-panel)), var(--lumo-panel-raised)); box-shadow: 0 13px 28px rgba(0, 0, 0, .18); transform: translateY(-2px); }
 .lumo-market-card.selected { box-shadow: inset 3px 0 var(--market-accent, var(--lumo-mint)), 0 13px 28px rgba(0, 0, 0, .18); }
-.lumo-market-mark { display: grid; place-items: center; width: 31px; height: 31px; flex: none; border-radius: 10px; color: #111518; background: var(--market-accent, var(--lumo-mint)); box-shadow: 0 6px 17px color-mix(in srgb, var(--market-accent, var(--lumo-mint)) 24%, transparent); font: 700 14px/1 Georgia, "Songti SC", serif; }
+.lumo-market-mark { display: grid; place-items: center; width: 31px; height: 31px; flex: none; border-radius: 10px; color: #111518; background: var(--market-accent, var(--lumo-mint)); box-shadow: 0 6px 17px color-mix(in srgb, var(--market-accent, var(--lumo-mint)) 24%, transparent); font: 700 14px/1 var(--lumo-heading); }
 .lumo-market-card-main { display: grid; gap: 6px; min-width: 0; }
 .lumo-market-card-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .lumo-market-card-head b { overflow: hidden; color: var(--lumo-ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
@@ -718,7 +723,7 @@
 .lumo-market-arrow { color: var(--market-accent, var(--lumo-mint)); font: 14px/1 var(--lumo-mono); opacity: .75; }
 .lumo-market-inspector { position: sticky; top: 14px; min-width: 0; padding: 16px; border: 1px solid var(--lumo-line-strong); border-radius: 12px; background: linear-gradient(145deg, var(--lumo-panel-raised), var(--lumo-panel)); box-shadow: 0 18px 40px rgba(0, 0, 0, .16); }
 .lumo-market-detail-title { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
-.lumo-market-detail-title h3 { margin: 0 0 5px; color: var(--lumo-ink); font: 600 18px/1.1 Georgia, "Songti SC", serif; letter-spacing: -.03em; }
+.lumo-market-detail-title h3 { margin: 0 0 5px; color: var(--lumo-ink); font: 600 18px/1.1 var(--lumo-heading); letter-spacing: -.03em; }
 .lumo-market-inspector > p { margin: 13px 0; color: var(--lumo-muted); font-size: 11px; line-height: 1.6; }
 .lumo-ready-text { color: var(--lumo-mint) !important; }
 .lumo-market-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px; }
@@ -775,7 +780,7 @@
 .lumo-scope-popover b { color: var(--lumo-ink); font-size: 10px; }
 .lumo-scope-popover small { color: var(--lumo-faint); font-size: 8px; }
 .lumo-scope-popover i { color: var(--lumo-mint); font: 8px/1 var(--lumo-mono); font-style: normal; }
-.lumo-project-glyph { display: grid; place-items: center; width: 23px; height: 23px; border: 1px solid var(--lumo-line-strong); border-radius: 7px; color: var(--lumo-mint); background: var(--lumo-accent-8); font: 700 10px/1 Georgia, "Songti SC", serif; }
+.lumo-project-glyph { display: grid; place-items: center; width: 23px; height: 23px; border: 1px solid var(--lumo-line-strong); border-radius: 7px; color: var(--lumo-mint); background: var(--lumo-accent-8); font: 700 10px/1 var(--lumo-heading); }
 .lumo-space-glyph { display: block; width: 11px; height: 11px; }
 
 .lumo-opendesign-dock { position: relative; overflow: hidden; margin-top: 12px; border: 1px solid color-mix(in srgb, var(--lumo-mint) 23%, var(--lumo-line)); border-radius: 15px; background: linear-gradient(135deg, color-mix(in srgb, var(--lumo-panel-raised) 95%, #0a0d10), var(--lumo-panel)); box-shadow: 0 16px 45px rgba(0, 0, 0, .18), inset 0 1px color-mix(in srgb, #fff 8%, transparent); }
@@ -792,7 +797,7 @@
 .lumo-opendesign-body { display: grid; gap: 16px; padding: 19px; animation: lumo-opendesign-in .28s cubic-bezier(.16, .8, .2, 1) both; }
 @keyframes lumo-opendesign-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 .lumo-opendesign-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; }
-.lumo-opendesign-heading h2 { margin: 7px 0 0; color: var(--lumo-ink); font: 600 clamp(18px, 2vw, 25px)/1.1 Georgia, "Songti SC", serif; letter-spacing: -.035em; }
+.lumo-opendesign-heading h2 { margin: 7px 0 0; color: var(--lumo-ink); font: 600 clamp(18px, 2vw, 25px)/1.1 var(--lumo-heading); letter-spacing: -.035em; }
 .lumo-scope-readout { display: inline-flex; align-items: center; gap: 7px; max-width: 42%; overflow: hidden; color: var(--lumo-muted); font: 9px/1 var(--lumo-mono); text-overflow: ellipsis; white-space: nowrap; }
 .lumo-scope-readout i { width: 7px; height: 7px; flex: none; border-radius: 50%; }
 .lumo-scope-readout b { color: var(--lumo-faint); font-weight: 400; }
@@ -849,6 +854,24 @@
 
 /* Product navigation lives above the untouched native workspace/history list. */
 .lumo-sidebar-navigation { display: grid; gap: 2px; padding: 10px 12px 9px; border-bottom: 1px solid var(--lumo-line); }
+.lumo-project-switcher { position: relative; padding: 10px; border-bottom: 1px solid var(--lumo-line); }
+.lumo-project-current { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 10px; border: 1px solid var(--lumo-line); border-radius: 10px; background: linear-gradient(135deg, var(--lumo-panel), color-mix(in srgb, var(--lumo-mint) 5%, var(--lumo-panel))); color: var(--lumo-ink); cursor: pointer; text-align: left; transition: border-color .18s ease, background .18s ease, transform .18s ease; }
+.lumo-project-current:hover { border-color: color-mix(in srgb, var(--lumo-mint) 38%, var(--lumo-line)); background: linear-gradient(135deg, var(--lumo-panel-raised), color-mix(in srgb, var(--lumo-mint) 8%, var(--lumo-panel))); transform: translateY(-1px); }
+.lumo-project-badge { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; background: var(--lumo-mint); color: #0a0d12; font: 700 14px/1 var(--lumo-sans); box-shadow: 0 4px 12px color-mix(in srgb, var(--lumo-mint) 20%, transparent); }
+.lumo-project-info { display: grid; gap: 2px; min-width: 0; }
+.lumo-project-info b { overflow: hidden; color: var(--lumo-ink); font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.lumo-project-info small { color: var(--lumo-faint); font: 8px/1.2 var(--lumo-mono); }
+.lumo-project-current > i { color: var(--lumo-muted); font-size: 14px; font-style: normal; }
+.lumo-project-menu { position: absolute; top: 68px; left: 10px; right: 10px; z-index: 999; max-height: 420px; padding: 6px; border: 1px solid var(--lumo-line); border-radius: 11px; background: var(--lumo-panel-raised); box-shadow: 0 16px 38px rgba(0, 0, 0, .28); overflow-y: auto; animation: lumo-card-in .28s cubic-bezier(.16, .8, .2, 1) both; }
+.lumo-project-menu header { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; color: var(--lumo-muted); font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+.lumo-project-menu button { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 8px 10px; border: 1px solid transparent; border-radius: 8px; color: var(--lumo-muted); background: transparent; cursor: pointer; text-align: left; transition: border-color .16s ease, background .16s ease; }
+.lumo-project-menu button:hover { border-color: var(--lumo-line); background: color-mix(in srgb, var(--lumo-mint) 8%, var(--lumo-panel)); }
+.lumo-project-menu button.selected { border-color: color-mix(in srgb, var(--lumo-mint) 42%, var(--lumo-line)); background: color-mix(in srgb, var(--lumo-mint) 12%, var(--lumo-panel)); }
+.lumo-project-menu button > span:nth-child(2) { display: grid; gap: 2px; min-width: 0; }
+.lumo-project-menu button > span:nth-child(2) b { overflow: hidden; color: var(--lumo-ink); font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.lumo-project-menu button > span:nth-child(2) small { color: var(--lumo-faint); font: 8px/1.2 var(--lumo-mono); }
+.lumo-project-menu button > i { color: var(--lumo-mint); font-size: 12px; font-style: normal; }
+
 .lumo-sidebar-navigation button { position: relative; display: flex; align-items: center; gap: 10px; width: 100%; min-height: 31px; padding: 0 9px; border: 0; border-radius: 7px; color: var(--lumo-muted); background: transparent; cursor: pointer; text-align: left; transition: color .16s ease, background .16s ease, transform .16s ease; }
 .lumo-sidebar-navigation button:hover { color: var(--lumo-ink); background: var(--lumo-accent-6); transform: translateX(1px); }
 .lumo-sidebar-navigation button.active { color: var(--lumo-ink); background: linear-gradient(90deg, var(--lumo-accent-12), var(--lumo-accent-4)); }
@@ -1142,8 +1165,198 @@
 .lumo-skillhub-actions { display: flex; flex: none; align-items: center; gap: 8px; }
 .lumo-skillhub-actions .lumo-button { min-height: 30px; padding: 6px 12px; font-size: 10.5px; }
 .lumo-skillhub-installed { color: var(--lumo-mint); font-size: 10px; font-weight: 600; }
+.lumo-skillhub-installing { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+.lumo-skillhub-installing em { font-size: 9px; font-style: normal; color: var(--lumo-faint); }
+.lumo-skillhub-progress { display: block; width: 104px; height: 4px; border-radius: 999px; overflow: hidden; background: var(--lumo-accent-18); position: relative; }
+.lumo-skillhub-progress i { position: absolute; inset: 0; width: 38%; border-radius: 999px; background: linear-gradient(90deg, transparent, var(--lumo-mint), transparent); animation: lumo-skillhub-progress 1.1s ease-in-out infinite; }
+@keyframes lumo-skillhub-progress { from { transform: translateX(-105%); } to { transform: translateX(280%); } }
 @media (max-width: 900px) {
   .lumo-skillhub-head { flex-direction: column; align-items: flex-start; }
   .lumo-skillhub-grid { grid-template-columns: 1fr; }
 }
 }
+
+/* ---------------------------------------------------------------------------
+   主题驱动的表面 / 强调 / 特效 —— 主题身份 token 由 `themes.ts` 注入 `body`，
+   Workbench 根元素据此携带 `data-lumo-surface` / `data-lumo-emphasis` /
+   `data-lumo-effects`，让四套主题不只换强调色，而是整套外观语言一起变化。
+   --------------------------------------------------------------------------- */
+
+/* flat：面板回归中性，描边承载层级，去掉彩色渐变底与径向光源。 */
+.lumo-workbench[data-lumo-surface='flat'] .lumo-section,
+.lumo-workbench[data-lumo-surface='flat'] .lumo-inspector,
+.lumo-workbench[data-lumo-surface='flat'] .lumo-orchestration,
+.lumo-workbench[data-lumo-surface='flat'] .lumo-metric,
+.lumo-workbench[data-lumo-surface='flat'] .lumo-skill-card,
+.lumo-workbench[data-lumo-surface='flat'] .lumo-connector-card,
+.lumo-workbench[data-lumo-surface='flat'] .lumo-hit,
+.lumo-workbench[data-lumo-surface='flat'] .lumo-governed-source,
+.lumo-workbench[data-lumo-surface='flat'] .lumo-version-form,
+.lumo-workbench[data-lumo-surface='flat'] .lumo-platform-group,
+.lumo-workbench[data-lumo-surface='flat'] .lumo-market-card,
+.lumo-workbench[data-lumo-surface='flat'] .lumo-market-inspector,
+.lumo-workbench[data-lumo-surface='flat'] .lumo-market-note-grid > div,
+.lumo-workbench[data-lumo-surface='flat'] .lumo-local-intro {
+  background: var(--lumo-bg);
+}
+
+/* flat：主按钮改为中性描边，弱化彩色渐变的华丽感。 */
+.lumo-workbench[data-lumo-surface='flat'] .lumo-primary {
+  color: var(--lumo-mint);
+  background: color-mix(in srgb, var(--lumo-mint) 13%, var(--lumo-bg));
+  border-color: var(--lumo-accent-52);
+}
+.lumo-workbench[data-lumo-surface='flat'] .lumo-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--lumo-mint) 22%, var(--lumo-bg));
+  border-color: var(--lumo-mint);
+  box-shadow: none;
+}
+
+/* grid：在面板底上叠加参考线网格，视觉靠网格与描边承载。 */
+.lumo-workbench[data-lumo-surface='grid'] .lumo-section,
+.lumo-workbench[data-lumo-surface='grid'] .lumo-metric,
+.lumo-workbench[data-lumo-surface='grid'] .lumo-skill-card,
+.lumo-workbench[data-lumo-surface='grid'] .lumo-market-card,
+.lumo-workbench[data-lumo-surface='grid'] .lumo-market-inspector {
+  background-image: linear-gradient(var(--lumo-cyan-soft) 1px, transparent 1px), linear-gradient(90deg, var(--lumo-cyan-soft) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+/* glass：半透明磨砂表面，配合大圆角呈现玻璃质感。 */
+.lumo-workbench[data-lumo-surface='glass'] .lumo-section,
+.lumo-workbench[data-lumo-surface='glass'] .lumo-inspector,
+.lumo-workbench[data-lumo-surface='glass'] .lumo-metric,
+.lumo-workbench[data-lumo-surface='glass'] .lumo-skill-card,
+.lumo-workbench[data-lumo-surface='glass'] .lumo-connector-card,
+.lumo-workbench[data-lumo-surface='glass'] .lumo-market-card,
+.lumo-workbench[data-lumo-surface='glass'] .lumo-market-inspector {
+  background: color-mix(in srgb, var(--lumo-panel-raised) 64%, transparent);
+  backdrop-filter: blur(16px) saturate(1.18);
+}
+.lumo-workbench[data-lumo-surface='glass'] .lumo-primary {
+  color: var(--lumo-bg);
+  background: var(--lumo-accent-hover);
+  border-color: var(--lumo-accent-hover);
+}
+
+/* 强调方式：solid 实体填充；outline 描边。gradient 沿用基面默认。 */
+.lumo-workbench[data-lumo-emphasis='solid'] .lumo-primary {
+  color: var(--lumo-bg);
+  background: var(--lumo-mint);
+  border-color: var(--lumo-mint);
+}
+.lumo-workbench[data-lumo-emphasis='solid'] .lumo-primary:hover:not(:disabled) {
+  background: var(--lumo-accent-hover);
+  border-color: var(--lumo-accent-hover);
+  box-shadow: none;
+}
+.lumo-workbench[data-lumo-emphasis='outline'] .lumo-primary {
+  color: var(--lumo-mint);
+  background: color-mix(in srgb, var(--lumo-mint) 12%, transparent);
+  border-color: var(--lumo-mint);
+}
+.lumo-workbench[data-lumo-emphasis='outline'] .lumo-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--lumo-mint) 24%, transparent);
+  border-color: var(--lumo-accent-hover);
+  box-shadow: none;
+}
+
+/* 动效强度：none 关闭悬浮位移、径向光斑与入场动画的「妆点」层。 */
+.lumo-workbench[data-lumo-effects='none'] .lumo-spotlight::before,
+.lumo-workbench[data-lumo-effects='none'] .lumo-local-intro::after,
+.lumo-workbench[data-lumo-effects='none'] .lumo-market-card::before { content: none; }
+.lumo-workbench[data-lumo-effects='none'] .lumo-spotlight:hover,
+.lumo-workbench[data-lumo-effects='none'] .lumo-market-card:hover,
+.lumo-workbench[data-lumo-effects='none'] .lumo-nav-group button:hover,
+.lumo-workbench[data-lumo-effects='none'] .lumo-nav-group button.active,
+.lumo-workbench[data-lumo-effects='none'] .lumo-skill-card:hover,
+.lumo-workbench[data-lumo-effects='none'] .lumo-connector-card:hover,
+.lumo-workbench[data-lumo-effects='none'] .lumo-hit:hover,
+.lumo-workbench[data-lumo-effects='none'] .lumo-platform-group button:hover { transform: none; }
+.lumo-workbench[data-lumo-effects='none'] .lumo-spotlight,
+.lumo-workbench[data-lumo-effects='none'] .lumo-market-card,
+.lumo-workbench[data-lumo-effects='none'] .lumo-section,
+.lumo-workbench[data-lumo-effects='none'] .lumo-demo-card { animation: none; box-shadow: none; }
+
+/* ---------------------------------------------------------------------------
+   右上角「界面主题」选择器——从原生 <select> 升级为带色板预览的下拉控件。
+   --------------------------------------------------------------------------- */
+.lumo-theme-control { position: relative; }
+.lumo-theme-trigger { display: inline-flex; align-items: center; gap: 8px; min-height: 34px; padding: 5px 10px; border: 1px solid var(--lumo-line); border-radius: var(--lumo-radius-sm); color: var(--lumo-muted); background: var(--lumo-accent-4); cursor: pointer; font: 500 11px/1 var(--lumo-body); transition: border-color .16s ease, background .16s ease, color .16s ease; }
+.lumo-theme-trigger:hover { border-color: var(--lumo-line-strong); color: var(--lumo-ink); background: var(--lumo-accent-6); }
+.lumo-theme-trigger > i { color: var(--lumo-faint); font: 10px/1 var(--lumo-mono); font-style: normal; }
+.lumo-theme-swatch { display: inline-block; width: 14px; height: 14px; flex: none; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .22); box-shadow: inset 0 0 0 2px rgba(0, 0, 0, .18), 0 0 0 1px rgba(0, 0, 0, .12); }
+.lumo-theme-label { color: inherit; white-space: nowrap; }
+.lumo-theme-menu { position: absolute; top: calc(100% + 8px); right: 0; z-index: 9; width: 208px; padding: 6px; border: 1px solid var(--lumo-line-strong); border-radius: var(--lumo-radius); background: var(--lumo-panel-raised); box-shadow: 0 22px 52px rgba(0, 0, 0, .42); animation: lumo-command-in .2s cubic-bezier(.16, .8, .2, 1) both; }
+.lumo-theme-menu button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 9px; border: 1px solid transparent; border-radius: var(--lumo-radius-sm); color: var(--lumo-muted); background: transparent; cursor: pointer; text-align: left; transition: background .14s ease, border-color .14s ease; }
+.lumo-theme-menu button:hover { background: var(--lumo-accent-6); }
+.lumo-theme-menu button.selected { border-color: var(--lumo-accent-24); background: var(--lumo-accent-8); }
+.lumo-theme-menu button > span:nth-child(2) { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.lumo-theme-menu b { color: var(--lumo-ink); font-size: 11px; }
+.lumo-theme-menu small { overflow: hidden; color: var(--lumo-faint); font: 8px/1 var(--lumo-mono); text-overflow: ellipsis; white-space: nowrap; }
+.lumo-theme-menu button > i { color: var(--lumo-mint); font: 11px/1 var(--lumo-mono); font-style: normal; }
+
+/* 跳转触发按钮：略微收紧，弱化「终端 kbd」感。 */
+.lumo-command-trigger { min-height: 34px; border-radius: var(--lumo-radius-sm); }
+.lumo-command-trigger > span { font: 500 11px/1 var(--lumo-body); }
+.lumo-identity-chip { border-radius: var(--lumo-radius-sm); font: 500 11px/1 var(--lumo-body); }
+
+/* ---------------------------------------------------------------------------
+   自动化工作流：规则编辑、运行详情与更清晰的状态着色。
+   --------------------------------------------------------------------------- */
+.lumo-automation-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.lumo-automation-summary b { font-family: var(--lumo-heading); letter-spacing: -.03em; }
+
+.lumo-automation-editor { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) auto; gap: 10px; align-items: end; }
+.lumo-automation-editor label { display: grid; gap: 7px; }
+.lumo-automation-editor label > span { color: var(--lumo-muted); font-size: 10px; }
+.lumo-automation-editor-actions { display: inline-flex; align-items: center; gap: 7px; }
+
+.lumo-run-state { display: inline-flex; align-items: center; gap: 6px; padding: 4px 7px; border: 1px solid var(--lumo-line); border-radius: 999px; font: 8px/1 var(--lumo-mono); font-style: normal; white-space: nowrap; }
+.lumo-run-state.succeeded { color: var(--lumo-cyan); border-color: var(--lumo-cyan-line); }
+.lumo-run-state.failed { color: var(--lumo-danger); border-color: rgba(243, 161, 155, .30); }
+.lumo-run-state.running { color: var(--lumo-mint); border-color: var(--lumo-accent-32); }
+
+.lumo-run-detail { margin: 6px 0 8px; padding: 13px; border: 1px solid var(--lumo-cyan-line); border-radius: var(--lumo-radius-sm); background: var(--lumo-accent-2); animation: lumo-rise .2s ease both; }
+.lumo-run-detail .lumo-detail-stack { margin-top: 0; }
+.lumo-run-error { max-height: 180px; margin: 11px 0 0; padding: 10px; overflow: auto; border-left: 2px solid var(--lumo-danger); color: var(--lumo-danger); background: rgba(150, 47, 41, .12); font: 9px/1.5 var(--lumo-mono); white-space: pre-wrap; word-break: break-word; }
+
+.lumo-automation-list > div:hover { background: var(--lumo-accent-2); }
+
+/* ---------------------------------------------------------------------------
+   原生 DSH 会话的通用观感增强 —— 只触及稳定、全局安全的选择器（body / 滚动条 /
+   选区 / 配色），全部由主题 token 驱动；不改上游源码，也不依赖哈希化的 CSS
+   Modules class。工作台打开时原生会话仍在前台，同样受益。
+   --------------------------------------------------------------------------- */
+body {
+  background: var(--dsw-alias-bg-base, #0b0e11);
+  color: var(--dsw-alias-label-primary, #eef3f6);
+}
+body ::selection {
+  color: var(--dsw-label-primary, #0b0e11);
+  background: var(--dsw-alias-brand-primary, #ff914d);
+}
+body, body * {
+  scrollbar-color: var(--dsw-alias-interactive-bg-hover-accent, rgba(255, 145, 77, .28)) transparent;
+}
+body *::-webkit-scrollbar { width: 10px; height: 10px; }
+body *::-webkit-scrollbar-thumb {
+  background: var(--dsw-alias-interactive-bg-hover-accent, rgba(255, 145, 77, .28));
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+}
+body *::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-brand-primary, #ff914d); background-clip: content-box; }
+
+/* 资料库面板：索引健康摘要、知识空间筛选条、来源详情抽屉（vault / 集群共用骨架） */
+.lumo-knowledge-health { display: flex; gap: 18px; align-items: center; padding: 10px 0 2px; font: 11px/1.3 var(--lumo-sans); color: var(--lumo-faint); flex-wrap: wrap; }
+.lumo-knowledge-health span.lumo-context-end { margin-left: auto; }
+.lumo-space-filter { display: flex; gap: 8px; align-items: center; padding: 8px 0 2px; flex-wrap: wrap; }
+.lumo-space-filter button { border: 1px solid var(--lumo-line); background: transparent; color: var(--lumo-faint); font: 11px var(--lumo-sans); padding: 4px 12px; border-radius: 999px; cursor: pointer; }
+.lumo-space-filter button.active { border-color: var(--dsw-alias-brand-primary, #ff914d); color: var(--dsw-alias-brand-primary, #ff914d); background: var(--lumo-accent-4); }
+.lumo-chunk-preview { margin-top: 10px; max-height: 320px; overflow: auto; display: grid; gap: 8px; }
+.lumo-chunk-preview div { border: 1px solid var(--lumo-line); border-radius: 8px; padding: 8px 10px; }
+.lumo-chunk-preview b { display: block; font: 10px var(--lumo-sans); color: var(--lumo-faint); margin-bottom: 4px; }
+.lumo-chunk-preview p { margin: 0; font: 12px/1.5 var(--lumo-sans); white-space: pre-wrap; }
+.lumo-open-original { display: inline-block; color: var(--dsw-alias-brand-primary, #ff914d); font: 11px var(--lumo-sans); text-decoration: none; }
+.lumo-open-detail { color: var(--dsw-alias-brand-primary, #ff914d) !important; }

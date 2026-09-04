@@ -33,7 +33,7 @@ describe('governed skill runtime-snapshot publication proxy', () => {
     vi.stubGlobal('fetch', fetchMock)
     const { res, result } = response()
 
-    await api(config, undefined, undefined, undefined, request() as never, res)
+    await api(config, undefined, undefined, undefined, undefined, request() as never, res)
 
     expect(result.status).toBe(200)
     expect(result.body).toEqual(published)

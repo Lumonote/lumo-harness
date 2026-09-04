@@ -17,6 +17,7 @@ export const PLATFORM_PLUGIN_MODULES = {
   archify: '@lumo/archify',
   creativeSkills: '@lumo/creative-skills',
   rufloOrchestration: '@lumo/ruflo-orchestration',
+  knowledgeVault: '@lumo/knowledge-vault',
   project: '@lumo/project',
   provenance: '@lumo/provenance',
   recovery: '@lumo/recovery',
@@ -46,6 +47,7 @@ const PLATFORM_PLUGIN_DIRECTORIES: Record<keyof typeof PLATFORM_PLUGIN_MODULES, 
   archify: 'archify',
   creativeSkills: 'creative-skills',
   rufloOrchestration: 'ruflo-orchestration',
+  knowledgeVault: 'knowledge-vault',
   project: 'project',
   provenance: 'provenance',
   recovery: 'recovery',
@@ -71,13 +73,21 @@ const WEB_COMMUNITY_PLUGINS = [
  * the self-contained desktop runtime during packaging.  Pinning versions is
  * important here: a desktop build must not change behavior because a registry
  * tag moved after the installer was produced.
+ *
+ * 版本漂移纪律（2026-09 · dsh master 重构期）：每个 pin 必须与当前 master 的
+ * 公共 API 兼容。dsh-settings 在 0.1.2 把 installSettingsSection/settingsNamespace
+ * 移除（SettingsProvider 取代），1.36.0 的 dshmarket 与 0.38.1 的 dsh-context
+ * 在运行时直接 import 失败，因此随 master 升到 1.41.0 / 0.41.3。
+ * `@anweat/dsh-browser` 自 0.1.10 （2026-08-29，最新版）仍 import 这两个旧符号，
+ * master 下无法通过 import 校验，且上游无更新版——从桌面包基线移除；市场里装到
+ * 其它 profile 的行为不受影响（那里用户的 dsh-settings 可能仍是旧 API）。
  */
 export const BASE_PROFILE_PLUGINS = [
-  { name: 'dshmarket', spec: 'dshmarket@1.36.0' },
+  { name: 'dshmarket', spec: 'dshmarket@1.41.0' },
   { name: '@liustack/modlens', spec: '@liustack/modlens@3.25.2' },
-  { name: '@anweat/dsh-browser', spec: '@anweat/dsh-browser@0.1.10' },
-  { name: 'dsh-context', spec: 'dsh-context@0.38.1' },
+  { name: 'dsh-context', spec: 'dsh-context@0.41.3' },
   { name: 'dsh-cost-meter', spec: 'dsh-cost-meter@1.6.7' },
+  { name: 'dsh-dream-skin', spec: 'dsh-dream-skin@8.30.1' },
 ] as const
 
 export const OBSOLETE_PROFILE_PLUGINS = ['deepseek-harness-auth'] as const
@@ -85,15 +95,16 @@ export const OBSOLETE_PROFILE_PLUGINS = ['deepseek-harness-auth'] as const
 const PACKAGED_PROFILE_MODULES = [
   '@deepseek-ai/dsh-storage-sqlite',
   '@lumo/dsh-platform-ui',
+  '@lumo/knowledge-vault',
   '@lumo/open-design',
   '@lumo/archify',
   '@lumo/creative-skills',
   '@lumo/ruflo-orchestration',
   'dshmarket',
   '@liustack/modlens',
-  '@anweat/dsh-browser',
   'dsh-context',
   'dsh-cost-meter',
+  'dsh-dream-skin',
 ] as const
 
 export interface ProfilePluginSpec {
@@ -108,7 +119,8 @@ export function profilePluginSpecs(profile: string, platformRoot: string, deploy
     spec: `link:${resolve(platformRoot, 'dsh-plugins', PLATFORM_PLUGIN_DIRECTORIES[key as keyof typeof PLATFORM_PLUGIN_MODULES])}`,
   }))
   if (deploymentMode === 'local') {
-    const localOnly = new Set(['@lumo/dsh-platform-ui', '@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/skill-local'])
+    // local 模式的知识源是 Vault（sqlite+FTS5），不是需要 PG 的 @lumo/knowledge 接缝。
+    const localOnly = new Set(['@lumo/dsh-platform-ui', '@lumo/knowledge-vault', '@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/skill-local'])
     return [
       ...local.filter(({ name }) => localOnly.has(name)),
       ...BASE_PROFILE_PLUGINS,

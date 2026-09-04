@@ -1,0 +1,9 @@
+{
+  "id": "lumo-vault-source",
+  "name": "Lumo Vault Source",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "把本 Obsidian vault 同步到 Lumo 桌面知识库（来源扫描与索引由 Lumo 侧完成）。",
+  "author": "Lumo",
+  "isDesktopOnly": true
+}

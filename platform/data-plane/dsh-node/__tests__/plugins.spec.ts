@@ -33,12 +33,12 @@ describe('profile plugin installation', () => {
     expect(headless.some(({ name }) => name === 'deepseek-harness-auth')).toBe(false)
     expect(headless.some(({ name }) => name === '@yejiming/dsh-data-agent')).toBe(false)
     expect(local.map(({ name }) => name)).toEqual([
-      '@lumo/dsh-platform-ui', '@lumo/open-design', '@lumo/archify', '@lumo/creative-skills',
-      '@lumo/ruflo-orchestration', '@lumo/skill-local',
-      'dshmarket', '@liustack/modlens', '@anweat/dsh-browser', 'dsh-context', 'dsh-cost-meter',
+      '@lumo/dsh-platform-ui', '@lumo/open-design', '@lumo/archify',
+      '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/knowledge-vault', '@lumo/skill-local',
+      'dshmarket', '@liustack/modlens', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
     ])
-    expect(local).toContainEqual({ name: 'dshmarket', spec: 'dshmarket@1.36.0' })
-    expect(local).toContainEqual({ name: '@anweat/dsh-browser', spec: '@anweat/dsh-browser@0.1.10' })
+    expect(local).toContainEqual({ name: 'dshmarket', spec: 'dshmarket@1.41.0' })
+    expect(local).toContainEqual({ name: 'dsh-context', spec: 'dsh-context@0.41.3' })
   })
 
   it('installs only dependencies missing from the profile manifest', () => {

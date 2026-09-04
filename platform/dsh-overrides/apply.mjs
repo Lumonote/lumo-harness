@@ -36,6 +36,17 @@ export const overriddenPackageDirectories = [
  * only be called for an isolated checkout/copy, never the upstream worktree.
  */
 export function applyLumoDshOverrides(root) {
+  // 上游 master 重构期（2026-09 · 76fda72979）根配置的花括号 entry 对 dsh-root 解析
+  // 断裂（Cannot find entry: ["lib/types/{index,invariant,startup}.js"]），整个 host
+  // tsdown 序失败——typert 的 lib/typert.remote-client.* 投影与 host 包 bundle 全部
+  // 缺失。改为 index 单入口：invariant/startup 的附加入口由 synthesize-dsh-libs.mjs
+  // 以再导出形状补齐，dsh-root 本就不进运行时。typert 投影由 build-runtime.mjs 的
+  // rebuildDshHostArtifacts() 在快照上重产出。
+  patchFile(root, 'tsdown.config.ts', [[
+    "    entry: client ? '' : ['lib/types/{index,invariant,startup}.js'],\n",
+    "    entry: client ? '' : ['lib/types/index.js'], // LUMO_DSH_TYSDOWN_ENTRY: 花括号 entry 在重构期对 dsh-root 解析断裂,见 apply.mjs 注释\n",
+  ]], 'LUMO_DSH_TYSDOWN_ENTRY')
+
   patchFile(root, 'packages/client/ui-conversation/src/client/apply.ts', [[
     "      'conversation.hero.agentPreset': { kind: 'single', scope: 'root' },\n",
     "      'conversation.hero.agentPreset': { kind: 'single', scope: 'root' },\n"
@@ -73,17 +84,18 @@ export function applyLumoDshOverrides(root) {
   ])
 
   patchFile(root, 'packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx', [
+    // 上游把 composer 重构：`leftItems` 属性已移除，首页输入改为 `composer.bar` + `input.dock`。
+    // 锚点移到 `heroWorkspaceRow`——它在 composerBar 里唯一且稳定；`hero` 守卫保证只在
+    // 首页（无会话）渲染左侧项目/空间控制座位。
     [
-      "    leftItems: zone === undefined ? null : renderSlot('conversation.input.left', zone),\n",
-      "    // LUMO_DSH_OVERLAY: expose the same scope control on the homepage composer.\n"
-        + "    leftItems: zone === undefined\n"
-        + "      ? renderSlot('conversation.hero.input.left', {})\n"
-        + "      : renderSlot('conversation.input.left', zone),\n",
+      "      {hero && heroWorkspaceRow}\n",
+      "      {hero && heroWorkspaceRow}\n"
+        + "      {hero && renderSlot('conversation.hero.input.left', { input: inputState, inputActions })} {/* LUMO_DSH_OVERLAY: pre-session project scope control */}\n",
     ],
     [
       "      {inputBar}\n    </div>\n",
       "      {inputBar}\n"
-        + "      {hero && renderSlot('conversation.hero.composer.dock', {})} {/* LUMO_DSH_OVERLAY */}\n"
+        + "      {hero && renderSlot('conversation.hero.composer.dock', { input: inputState, inputActions })} {/* LUMO_DSH_OVERLAY */}\n"
         + "    </div>\n",
     ],
   ])
@@ -145,20 +157,12 @@ export function applyLumoDshOverrides(root) {
       + "}\n",
   ]], 'LUMO_HERO_INPUT_BRIDGE')
 
-  patchFile(root, 'packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx', [
-    [
-      "  renderSlot, renderSlotChain, selectWorkspace, t,\n",
-      "  renderSlot, renderSlotChain, selectWorkspace, inputActions, t, // LUMO_HERO_INPUT_BRIDGE\n",
-    ],
-    [
-      "      ? renderSlot('conversation.hero.input.left', {})\n",
-      "      ? renderSlot('conversation.hero.input.left', { input: inputState, inputActions })\n",
-    ],
-    [
-      "      {hero && renderSlot('conversation.hero.composer.dock', {})}",
-      "      {hero && renderSlot('conversation.hero.composer.dock', { input: inputState, inputActions })}",
-    ],
-  ], 'LUMO_HERO_INPUT_BRIDGE')
+  // `inputState`/`inputActions` 已在组件的标准属性里；只把 `inputActions` 补进解构，
+  // 让上面的 hero 座位能拿到原生输入面。载荷升级已并入第一段补丁，这里不再重复。
+  patchFile(root, 'packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx', [[
+    "  renderSlot, renderSlotChain, selectWorkspace, t,\n",
+    "  renderSlot, renderSlotChain, selectWorkspace, inputActions, t, // LUMO_HERO_INPUT_BRIDGE\n",
+  ]], 'LUMO_HERO_INPUT_BRIDGE')
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

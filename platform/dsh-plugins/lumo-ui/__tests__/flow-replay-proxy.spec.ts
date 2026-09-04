@@ -32,7 +32,7 @@ describe('failed flow run replay proxy', () => {
     vi.stubGlobal('fetch', fetchMock)
     const { res, result } = response()
 
-    await api(config, undefined, undefined, undefined, request() as never, res)
+    await api(config, undefined, undefined, undefined, undefined, request() as never, res)
 
     expect(result.status).toBe(202)
     expect(result.body).toEqual({ status: 'queued', replay_trigger_id: 43, already_queued: false })

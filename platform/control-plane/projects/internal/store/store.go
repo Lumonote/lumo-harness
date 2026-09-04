@@ -429,6 +429,16 @@ func (s *Store) ListAutomations(ctx context.Context, projectID string) ([]domain
 	return out, rows.Err()
 }
 
+// DeleteAutomation 删除一条自动化规则。删除不存在规则的返回与成功一致（幂等），
+// 便于前端在不关心先验存在性的情况下安全清理。
+func (s *Store) DeleteAutomation(ctx context.Context, projectID, automationID string) error {
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM project_automations
+		WHERE project_id = $1 AND automation_id = $2`,
+		projectID, automationID)
+	return err
+}
+
 // Transition 生命周期转移（幂等：重复 archive 是重放）。归档时刻只在
 // active→archived 那次写入。
 func (s *Store) Transition(ctx context.Context, projectID, event string) (domain.Project, error) {

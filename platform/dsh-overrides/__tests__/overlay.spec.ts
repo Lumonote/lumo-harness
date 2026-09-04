@@ -31,6 +31,8 @@ const PATCHED = [
   'packages/client/ui-sidebar/src/client/index.ts',
   'packages/client/ui-sidebar/src/client/contract/slots.ts',
   'packages/client/ui-sidebar/src/client/SidebarRoot.tsx',
+  // 根 tsdown.config.ts 在列表尾部：前面 0-5 的下标是既有测试的读取约定。
+  'tsdown.config.ts',
 ]
 
 const temporaries: string[] = []
@@ -95,13 +97,15 @@ describe('applyLumoDshOverrides', () => {
     expect(sidebarRoot).toContain("renderSlot('sidebar.navigation', { wide })")
   })
 
-  it('首页无会话时左槽改渲染 hero 变体,有会话仍走上游的 session 作用域槽', () => {
+  it('首页无会话时 hero 座位只在 hero 模式渲染,会话仍走上游的 input.dock 槽', () => {
     const root = stagePristineUpstream('scope')
     applyLumoDshOverrides(root)
     const source = read(root, PATCHED[2]!)
-    // 关键是这个三元没被改成无条件替换 —— 会话内的左槽必须仍然是上游那个。
-    expect(source).toContain("renderSlot('conversation.input.left', zone)")
-    expect(source).toMatch(/zone === undefined\s*\n?\s*\?\s*renderSlot\('conversation\.hero\.input\.left'/u)
+    // 上游已把 composer 重构为 input.dock + composer.bar,不再有 leftItems/三元。
+    // 关键:会话输入走上游的 input.dock;hero 座位用 hero 守卫,绝不无条件替换会话槽。
+    expect(source).toContain("renderSlot('conversation.input.dock', zone)")
+    expect(source).toContain("{hero && renderSlot('conversation.hero.input.left', { input: inputState, inputActions })}")
+    expect(source).not.toMatch(/zone === undefined\s*\?\s*renderSlot\('conversation\.hero\.input\.left'/u)
   })
 
   it('重复执行是幂等的,不会打第二遍', () => {

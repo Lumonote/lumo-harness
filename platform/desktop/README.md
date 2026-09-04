@@ -48,11 +48,14 @@ cargo tauri build --debug --bundles app
 
 | 中文入口 | 上游包 | 版本 | 用途 |
 | --- | --- | --- | --- |
-| 插件市场 | `dshmarket` | `1.36.0` | 浏览和管理 DSH 插件 |
+| 插件市场 | `dshmarket` | `1.41.0` | 浏览和管理 DSH 插件 |
 | 视觉理解 | `@liustack/modlens` | `3.25.2` | 图片读取、OCR 与视觉证据 |
-| 浏览器自动化 | `@anweat/dsh-browser` | `0.1.10` | Playwright 浏览、点击、输入和截图 |
-| 上下文洞察 | `dsh-context` | `0.38.1` | 上下文组成、趋势与事件 |
+| 上下文洞察 | `dsh-context` | `0.41.3` | 上下文组成、趋势与事件 |
 | 费用统计 | `dsh-cost-meter` | `1.6.7` | 会话、预算、价格和历史费用 |
+| 梦幻皮肤 | `dsh-dream-skin` | `8.30.1` | 8 套高质感主题、弥散光壁纸与每用户强调色（原生 `--dsw-*` 实现） |
+
+> 浏览器自动化（`@anweat/dsh-browser` 0.1.10）因依赖已被 dsh 现行版本移除的
+> dsh-settings 旧导出，且上游无适配版本，暂不固定进桌面基线——市场页面也不展示。
 
 ## 创作与多智能体组件
 
@@ -78,10 +81,15 @@ OpenDesign 仍作为输入框下方的嵌入式创作面板提供；项目和空
 
 ## 主题
 
-Web 工作台默认使用 `Obsidian Signal`，设置页提供四套产品主题：`Obsidian Signal`、
-`Ember Foundry`、`Orbital Glass` 和 `Infrared Grid`。它们都以深色中性底为基础，分别使用
-信号橙、炉芯橙、冰蓝和红珊瑚作为单一强调色，不依赖服务器中间件，也不会把本地模式
-变成集群模式。
+界面皮肤优先由标准换肤插件 `dsh-dream-skin`（`8.30.1`）提供：8 套 iOS / Linear 式
+清透冷调高质感主题、弥散光壁纸与每用户强调色，走 DSH 原生 `--dsw-*` token 系统。
+工作台右上角的界面主题选择器读取**主题服务当前注册的全部主题**（含该插件），因此
+切到它的任何一个主题都会驱动整套 Lumo 工作台外观。
+
+工作台自身另内置四套 Lumo 产品主题（`Obsidian Signal`、`Ember Foundry`、
+`Orbital Glass`、`Infrared Grid`）作为兜底，它们都以深色中性底为基础，分别使用
+信号橙、炉芯橙、冰蓝和红珊瑚作为单一强调色。这些主题与 `dsh-dream-skin` 共用同一
+token 契约，可并存而不冲突；不依赖服务器中间件，也不会把本地模式变成集群模式。
 
 调试版和正式 `.app` 都优先使用包内 `runtime/lumo-runtime.sh`；只有开发预览才回退到
 checkout 中的 `local-runtime.sh`。如果包内资源损坏或缺失，诊断页会明确显示启动错误。

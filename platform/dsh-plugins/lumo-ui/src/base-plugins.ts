@@ -28,19 +28,21 @@ export const BASE_PLUGIN_CATALOG: readonly BasePluginDescriptor[] = [
     capability: '插件发现与生命周期管理', accent: '#f29a62',
   },
   {
+    id: 'dsh-dream-skin', packageName: 'dsh-dream-skin', version: '8.30.1',
+    label: '梦幻皮肤', summary: '8 套 iOS / Linear 式清透冷调高质感主题 + 弥散光壁纸，每用户可调强调色。', category: '主题换肤',
+    tags: ['高质感主题', '弥散光壁纸', '每用户强调色'], repository: 'https://github.com/RevolutionLA/dsh-dream-skin', license: 'MIT',
+    capability: 'DSH Web 换肤与主题包管理', accent: '#8fa8ff',
+  },
+  {
     id: 'modlens', packageName: '@liustack/modlens', version: '3.25.2',
     label: '视觉理解', summary: '把图片、截图和附件转换成可追溯的视觉证据。', category: '视觉能力',
     tags: ['图片读取', 'OCR', '视觉证据'], repository: 'https://github.com/liustack/modlens', license: 'MIT',
     capability: 'modlens_read_image 视觉桥接', accent: '#7da9ed',
   },
+  // @anweat/dsh-browser 0.1.10（最新版）仍依赖于已被 dsh master 移除的
+  // dsh-settings 旧导出，桌面基线不再固定它（见 dsh-node/src/plugins.ts）。
   {
-    id: 'dsh-browser', packageName: '@anweat/dsh-browser', version: '0.1.10',
-    label: '浏览器自动化', summary: '通过 Playwright 和 OpenCLI 完成浏览、点击、输入与截图。', category: '自动化',
-    tags: ['打开页面', '点击输入', '页面截图'], repository: 'https://github.com/anweat/dsh-browser', license: 'MIT',
-    capability: 'browser 服务与 9 个交互工具', accent: '#63c9b9',
-  },
-  {
-    id: 'dsh-context', packageName: 'dsh-context', version: '0.38.1',
+    id: 'dsh-context', packageName: 'dsh-context', version: '0.41.3',
     label: '上下文洞察', summary: '查看上下文组成、趋势、注入、压缩和每一步消息。', category: '上下文',
     tags: ['上下文面板', '趋势分析', '事件追踪'], repository: 'https://github.com/bowenliang123/dsh-context', license: 'Apache-2.0',
     capability: 'Context 面板与 /context 命令', accent: '#b796e8',

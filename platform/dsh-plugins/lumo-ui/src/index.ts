@@ -28,6 +28,12 @@ interface KnowledgeQueryService {
   query(request: { realm: string; roles: string[]; text: string; topK: number; scope: 'published' | 'draft' }): Promise<Array<{ docId: string; sourceVersion: number; score: number; text: string }>>
 }
 
+/** 单机版 vault 知识源的运行态面（Local Desktop；未装配时面板走「未配置」引导）。 */
+interface VaultService {
+  status(): { vaultPath: string; mode: string; docCount: number; chunkCount: number; lastSyncAt: number | null; error: string | null }
+  sync(): Promise<{ docs: number }>
+}
+
 /** 管理面需要的最小来源能力。它保持为运行时检测的可选扩展：Milvus
  * 只保存向量投影，不能被 UI 误当成源内容的权威存储。 */
 interface KnowledgeSourceManagerService {
@@ -349,7 +355,11 @@ function knowledgeManagementStatus(error: unknown): number {
 }
 
 function writeUpstream(res: ServerResponse, result: UpstreamResult): void {
-  if (result.ok) { writeJson(res, result.status, result.data); return }
+  if (result.ok) {
+    // 204 No Content 必须无 body；其余用 JSON 承载，避免 DELETE 写回 "null"。
+    if (result.status === 204) { res.writeHead(204, { 'cache-control': 'no-store' }); res.end(); return }
+    writeJson(res, result.status, result.data); return
+  }
   const upstreamError = typeof result.data === 'object' && result.data !== null ? result.data : undefined
   writeJson(res, result.status || 502, upstreamError ?? { error: result.error || 'upstream unavailable' })
 }
@@ -400,7 +410,7 @@ function upstreamDemos(): UpstreamDemoService {
   return upstreamDemoService ??= createUpstreamDemoService()
 }
 
-export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, req: IncomingMessage, res: ServerResponse): Promise<void> {
+export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, vault: VaultService | undefined, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const pathname = new URL(req.url ?? '/', 'http://lumo.local').pathname
   let identity: RequestIdentity
   try {
@@ -1005,11 +1015,17 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   }
 
   const automation = pathname.match(/^\/lumo\/api\/projects\/([^/]+)\/automations\/([^/]+)$/u)
-  if (req.method === 'PUT' && automation !== null) {
+  if (automation !== null) {
     const projectID = safeID(automation[1]); const automationID = safeID(automation[2])
     if (projectID === undefined || automationID === undefined) { writeJson(res, 400, { error: 'invalid project or automation id' }); return }
-    try { writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/${encodeURIComponent(projectID)}/automations/${encodeURIComponent(automationID)}`, req, 'PUT', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
-    return
+    if (req.method === 'PUT') {
+      try { writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/${encodeURIComponent(projectID)}/automations/${encodeURIComponent(automationID)}`, req, 'PUT', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+      return
+    }
+    if (req.method === 'DELETE') {
+      writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/${encodeURIComponent(projectID)}/automations/${encodeURIComponent(automationID)}`, req, 'DELETE'))
+      return
+    }
   }
 
   const connectorInvoke = pathname.match(/^\/lumo\/api\/connectors\/([^/]+)\/invoke$/u)
@@ -1017,6 +1033,17 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     const connectorID = safeID(connectorInvoke[1])
     if (connectorID === undefined) { writeJson(res, 400, { error: 'invalid connector id' }); return }
     try { writeUpstream(res, await upstream(config, identity, 'connector', `/connectors/${encodeURIComponent(connectorID)}/invoke`, req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  // 单机版 vault 知识源：构建状态与手动同步（仅 Local Desktop 装配该服务）。
+  if (req.method === 'GET' && pathname === '/lumo/api/knowledge/vault/status') {
+    if (vault === undefined) { writeJson(res, 501, { error: 'vault 知识源未装配（集群版不适用）' }); return }
+    writeJson(res, 200, vault.status()); return
+  }
+  if (req.method === 'POST' && pathname === '/lumo/api/knowledge/vault/sync') {
+    if (vault === undefined) { writeJson(res, 501, { error: 'vault 知识源未装配（集群版不适用）' }); return }
+    try { writeJson(res, 200, await vault.sync()) } catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : 'vault sync failed' }) }
     return
   }
 
@@ -1116,9 +1143,10 @@ export function apply(ctx: Context, config: Config): void {
     const knowledge = runtimeCtx.get('knowledge') as KnowledgeQueryService | undefined
     const skills = runtimeCtx.get('skills') as SkillRegistryService | undefined
     const sessionLogQuery = runtimeCtx.get('sessionLogQuery') as SessionLogQuerySeam | undefined
+    const vault = runtimeCtx.get('knowledgeVault') as VaultService | undefined
     if (config.deploymentMode !== 'local' && knowledge === undefined) throw new Error('lumo-platform-ui: ctx.knowledge is unavailable')
     runtimeCtx.effect(() => {
-      const disposeApi = runtimeCtx.webServer.register({ kind: 'prefix', path: '/lumo/api', handler: (req, res) => api(config, knowledge, skills, sessionLogQuery, req, res) })
+      const disposeApi = runtimeCtx.webServer.register({ kind: 'prefix', path: '/lumo/api', handler: (req, res) => api(config, knowledge, skills, sessionLogQuery, vault, req, res) })
       const disposeOps = runtimeCtx.webServer.register({ kind: 'exact', path: '/lumo/ops', handler: ops })
       return () => { disposeApi(); disposeOps() }
     }, 'lumo-platform-ui: same-origin API')

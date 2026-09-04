@@ -4,6 +4,7 @@
  * existing row instead of inserting a second engine: `workflowEngine` is a
  * unary service and duplicate engines would make route selection timing-based.
  */
+import { dirname, join } from 'node:path'
 export function workflowEngineOverlay(role: 'node' | 'agent'): string {
   if (role !== 'agent') return ''
   return `- id: workflow-worker-thread
@@ -40,6 +41,18 @@ export function profileStorageRows(profile: string): string {
 }
 
 /** Assemble the local desktop storage hub with the official SQLite backend. */
+/** 单机版知识库（vault 为源；sqlite+FTS5 关键词档）。realm 与身份一致（§5.4.1 装配层固定）。 */
+export function localVaultRows(sqlitePath: string, realm: string): string {
+  return `    - id: lumo-knowledge-vault
+      name: '@lumo/knowledge-vault'
+      inject: [tools]
+      config:
+        vaultRoot: ${JSON.stringify(process.env['LUMO_KNOWLEDGE_VAULT_ROOT'] ?? '')}
+        dbPath: ${JSON.stringify(join(dirname(sqlitePath), 'knowledge-vault.sqlite'))}
+        realm: ${JSON.stringify(realm)}
+`
+}
+
 export function localStorageRows(profile: string, sqlitePath: string): string {
   if (profile === 'web') {
     return `    - id: lumo-storage-sqlite

@@ -105,6 +105,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/projects/{id}/spaces", s.createSpace)
 	mux.HandleFunc("GET /v1/projects/{id}/automations", s.listAutomations)
 	mux.HandleFunc("PUT /v1/projects/{id}/automations/{automationId}", s.putAutomation)
+	mux.HandleFunc("DELETE /v1/projects/{id}/automations/{automationId}", s.deleteAutomation)
 	mux.HandleFunc("GET /v1/projects/{id}/dashboard", s.dashboard)
 	mux.HandleFunc("POST /v1/projects/{id}/archive", s.archive)
 	mux.HandleFunc("POST /v1/projects/{id}/unarchive", s.unarchive)
@@ -470,6 +471,20 @@ func (s *Server) putAutomation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, a)
+}
+
+func (s *Server) deleteAutomation(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, _, ok := s.require(w, r, id, domain.ActionEdit); !ok {
+		return
+	}
+	automationID := r.PathValue("automationId")
+	if err := s.store.DeleteAutomation(r.Context(), id, automationID); err != nil {
+		s.log.Error("删除自动化失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, 500)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {

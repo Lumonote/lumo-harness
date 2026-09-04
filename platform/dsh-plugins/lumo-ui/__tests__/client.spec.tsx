@@ -65,7 +65,7 @@ function createLumoContext(preloadedThemes: string[] = []): { context: unknown; 
   }
   const themeIDs = new Set(preloadedThemes)
   const theme = {
-    getTheme: () => ({ themes: [...themeIDs].map(id => ({ id })) }),
+    getTheme: () => ({ active: { id: [...themeIDs][0] ?? 'default' }, themes: [...themeIDs].map(id => ({ id, tokens: {} })) }),
     register: (definition: { id: string }) => {
       if (themeIDs.has(definition.id)) throw new Error(`theme "${definition.id}" is already registered`)
       themeIDs.add(definition.id)
@@ -75,7 +75,7 @@ function createLumoContext(preloadedThemes: string[] = []): { context: unknown; 
   }
   // inputTriggers 是上游 ui-input-trigger 的公开服务；替身只记录登记的 `/` 源。
   const inputTriggers = { registerSource: (source: SlashSource) => { sources.push(source); return () => { sources.splice(sources.indexOf(source), 1) } } }
-  const context: Record<string, unknown> = { root: {}, slots, theme, effect: (body: () => unknown) => { body() } }
+  const context: Record<string, unknown> = { root: {}, slots, theme, effect: (body: () => unknown) => { body() }, on: () => () => {} }
   context['get'] = (name: string) => name === 'inputTriggers' ? inputTriggers : undefined
   context['inject'] = (_deps: string[], body: (ctx: unknown) => void) => { body(context) }
   return { context, registered, sources }
@@ -185,7 +185,7 @@ describe('Lumo native Harness integration', () => {
     render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
     const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
     expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual([
-      '项目', '技能市场', '自动化', '资料库', '更多应用 · 灵感',
+      '资料库', '自动化', '技能市场', '项目', '更多应用 · 灵感',
     ])
     expect(within(navigation).queryByRole('button', { name: '开放设计' })).toBeNull()
     expect(within(navigation).queryByRole('button', { name: 'PPT 生成' })).toBeNull()
@@ -315,13 +315,10 @@ describe('Lumo native Harness integration', () => {
   it('keeps the home composer clean and opens creative workbenches only through /design and /ppt', async () => {
     const { registered, sources } = mountLumoWithSources()
 
-    const scope = registered.find(item => item.name === 'conversation.hero.input.left')
     const dock = registered.find(item => item.name === 'conversation.hero.composer.dock')
     const overlay = registered.find(item => item.name === 'shell.overlay')
-    expect(scope).toBeDefined()
     expect(dock).toBeDefined()
     expect(overlay).toBeDefined()
-    const Scope = scope!.Component
     const Dock = dock!.Component
     const Overlay = overlay!.Component
     let draft = ''
@@ -331,8 +328,7 @@ describe('Lumo native Harness integration', () => {
       submit: () => { submitted.push(draft) },
     }
 
-    const { container } = render(<><Scope /><Dock inputActions={inputActions} /><Overlay /></>)
-    expect(screen.getByRole('button', { name: '选择项目：Lumo Desktop' })).toBeTruthy()
+    const { container } = render(<><Dock inputActions={inputActions} /><Overlay /></>)
     // 首页不再常驻创作工作台：没有「创作能力」导航，也没有任何样例卡片。
     expect(screen.queryByRole('navigation', { name: '创作能力' })).toBeNull()
     expect(screen.queryByText('创作工作台')).toBeNull()
@@ -345,11 +341,6 @@ describe('Lumo native Harness integration', () => {
     expect((await lumo!.candidates({}, { query: 'p' })).map(item => item.name)).toEqual(['ppt'])
     expect(await lumo!.matchEnter({}, '/goal 别的命令')).toBeUndefined()
     expect(lumo!.onPick({ candidate: { name: 'unknown' } })).toBeUndefined()
-
-    fireEvent.click(screen.getByRole('button', { name: '选择项目：Lumo Desktop' }))
-    fireEvent.click(screen.getByText('增长实验室').closest('button')!)
-    fireEvent.click(screen.getByRole('button', { name: '选择空间：发布策略' }))
-    fireEvent.click(screen.getByText('创意活动').closest('button')!)
 
     const design = await lumo!.matchEnter({}, '/design 为新品准备一个审批流')
     expect(design?.claim.token).toBe('/design')
@@ -386,7 +377,7 @@ describe('Lumo native Harness integration', () => {
     fireEvent.change(prompt, { target: { value: '为新品准备一个审批流' } })
     fireEvent.click(screen.getByRole('button', { name: '发送到 OpenDesign' }))
     expect(submitted).toHaveLength(1)
-    expect(submitted[0]).toContain('/archify 在项目「增长实验室」的空间「创意活动」中使用「架构与调度图」能力创建线框图。为新品准备一个审批流')
+    expect(submitted[0]).toContain('/archify 在项目「Lumo Desktop」中使用「架构与调度图」能力创建线框图。为新品准备一个审批流')
     await waitFor(() => expect(screen.queryByRole('heading', { name: '开放设计' })).toBeNull())
 
     const ppt = lumo!.onPick({ candidate: { name: 'ppt' } })
@@ -418,7 +409,7 @@ describe('Lumo native Harness integration', () => {
     expect(pptPrompt.value).toBe('#演示文稿生成 使用「中国电信」品牌模板。参考 PPT Master 官方示例「Pritzker 2026 (Quick)」（Architecture Editorial，共 3 页，当前看的是「cover」）：2026 普利兹克大师季 — 8 座新作深读。面向研发团队，控制在 15 分钟。')
     fireEvent.click(screen.getByRole('button', { name: '发送到 PPT Master' }))
     expect(submitted).toHaveLength(2)
-    expect(submitted[1]).toContain('/ppt-master 在项目「增长实验室」的空间「创意活动」中，使用「演示文稿生成」样例生成原生可编辑 PPTX。')
+    expect(submitted[1]).toContain('/ppt-master 在项目「Lumo Desktop」中，使用「演示文稿生成」样例生成原生可编辑 PPTX。')
     expect(submitted[1]).toContain('使用「中国电信」品牌模板。参考 PPT Master 官方示例「Pritzker 2026 (Quick)」')
     expect(submitted[1]).toContain('面向研发团队，控制在 15 分钟。')
   }, 15000)

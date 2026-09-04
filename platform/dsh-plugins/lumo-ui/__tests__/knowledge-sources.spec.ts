@@ -45,7 +45,7 @@ describe('knowledge source management API', () => {
   it('lists source summaries only for a realm administrator', async () => {
     const knowledge = manager()
     const { res, result } = response()
-    await api(config, knowledge, undefined, undefined, request('GET', '/lumo/api/knowledge/sources') as never, res)
+    await api(config, knowledge, undefined, undefined, undefined, request('GET', '/lumo/api/knowledge/sources') as never, res)
 
     expect(result.status).toBe(200)
     expect(result.body).toEqual({ realm: 'realm-a', state: 'synchronized', sources: [source] })
@@ -55,7 +55,7 @@ describe('knowledge source management API', () => {
   it('does not treat query authorization as source-management authorization', async () => {
     const knowledge = manager()
     const { res, result } = response()
-    await api({ ...config, roles: ['viewer'] }, knowledge, undefined, undefined, request('GET', '/lumo/api/knowledge/sources') as never, res)
+    await api({ ...config, roles: ['viewer'] }, knowledge, undefined, undefined, undefined, request('GET', '/lumo/api/knowledge/sources') as never, res)
 
     expect(result.status).toBe(403)
     expect(knowledge.listSources).not.toHaveBeenCalled()
@@ -64,7 +64,7 @@ describe('knowledge source management API', () => {
   it('takes the realm from the signed/fallback identity rather than the request body', async () => {
     const knowledge = manager()
     const { res, result } = response()
-    await api(config, knowledge, undefined, undefined, request('POST', '/lumo/api/knowledge/sources', {
+    await api(config, knowledge, undefined, undefined, undefined, request('POST', '/lumo/api/knowledge/sources', {
       docId: 'doc-new', realm: 'other-realm', space: 'operations', title: '新来源',
       chunks: [{ text: '受管理的来源内容', metadata: { classification: 'internal' } }],
     }) as never, res)
@@ -79,14 +79,14 @@ describe('knowledge source management API', () => {
   it('requires an optimistic version for updates and reports a provider without source truth', async () => {
     const knowledge = manager()
     const missingVersion = response()
-    await api(config, knowledge, undefined, undefined, request('PUT', '/lumo/api/knowledge/sources/doc-ops', {
+    await api(config, knowledge, undefined, undefined, undefined, request('PUT', '/lumo/api/knowledge/sources/doc-ops', {
       space: 'operations', title: '审批边界', chunks: [{ text: '内容', metadata: {} }],
     }) as never, missingVersion.res)
     expect(missingVersion.result.status).toBe(400)
     expect(knowledge.upsertSource).not.toHaveBeenCalled()
 
     const unsupported = response()
-    await api(config, { query: vi.fn() }, undefined, undefined, request('GET', '/lumo/api/knowledge/sources') as never, unsupported.res)
+    await api(config, { query: vi.fn() }, undefined, undefined, undefined, request('GET', '/lumo/api/knowledge/sources') as never, unsupported.res)
     expect(unsupported.result.status).toBe(501)
   })
 })

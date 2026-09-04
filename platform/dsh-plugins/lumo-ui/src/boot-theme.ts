@@ -31,7 +31,8 @@ function bootThemeScript(): string {
   let stored = null
   try { stored = localStorage.getItem(${JSON.stringify(LUMO_THEME_STORAGE_KEY)}) } catch { stored = null }
   const id = Object.prototype.hasOwnProperty.call(catalog, stored) ? stored : ${JSON.stringify(LUMO_DEFAULT_THEME)}
-  const dark = catalog[id] === 'dark'
+  // 未知主题（如第三方皮肤插件注册的 id）默认按深色处理，避免持久化皮肤后启动刷一帧白底。
+  const dark = catalog[id] !== 'light'
   document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
   document.body.toggleAttribute('data-ds-dark-theme', dark)
 })()`
