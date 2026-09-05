@@ -110,6 +110,12 @@ export interface SkillHubConfig {
   command: string
   /** Injectable fetch for testing. */
   fetch?: typeof fetch
+  /**
+   * GitHub repositories (`owner/repo`) already installed as Lumo base/profile
+   * plugins. Any catalog plugin whose `repo` matches is reported as installed,
+   * so the market does not show a misleading 「安装」button for a bundled plugin.
+   */
+  preinstalledRepositories?: string[]
 }
 
 const EMPTY_INSTALLS: SkillHubInstalls = { skills: [], packs: [], plugins: [] }
@@ -235,7 +241,8 @@ const PACK_SCENE_LABELS: Record<string, string> = {
 }
 
 const API_TIMEOUT_MS = 6000
-/** SkillHub `/api/v1/plugins` pages with `page` + `pageSize`; the server caps `pageSize` at 100 (`limit` is ignored). */
+/** SkillHub list endpoints (`/api/skills`, `/api/v1/plugins`, `/api/v1/skillsets`) page with
+ * `page` + `pageSize`; the server caps `pageSize` at 100 (`limit` is ignored). */
 const PLUGIN_PAGE_MAX = 100
 const PLUGIN_PAGE_DEFAULT = 60
 
@@ -246,6 +253,27 @@ async function getJson<T>(fetchFn: typeof fetch, url: string): Promise<T> {
 }
 
 type CategoryMap = Map<string, string>
+
+/** `/api/skills` envelope: `{ code: 0, data: { skills, total } }` — the real market listing. */
+interface SkillHubSkillsPageEnvelope {
+  code?: number
+  message?: string
+  data?: { skills?: SkillHubAPISkill[]; total?: number }
+}
+
+/**
+ * SkillHub's market listing (`/api/skills`): the full skill catalog with
+ * server-side `page`/`pageSize` paging and a real `total` — unlike
+ * `/api/v1/search`, which caps at 100 hits and never reports a total.
+ */
+async function fetchSkillsPage(fetchFn: typeof fetch, base: string, page: number, pageSize: number, options: { keyword?: string; categoryKey?: string; sortBy?: string; order?: string } = {}): Promise<{ skills: SkillHubAPISkill[]; total: number }> {
+  const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize), sortBy: options.sortBy ?? 'score', order: options.order ?? 'desc' })
+  if (options.keyword !== undefined && options.keyword !== '') params.set('keyword', options.keyword)
+  if (options.categoryKey !== undefined && options.categoryKey !== '') params.set('category', options.categoryKey)
+  const envelope = await getJson<SkillHubSkillsPageEnvelope>(fetchFn, `${base}/api/skills?${params.toString()}`)
+  if (envelope.code !== undefined && envelope.code !== 0) throw new Error(envelope.message || `skillhub /api/skills: code ${envelope.code}`)
+  return { skills: envelope.data?.skills ?? [], total: envelope.data?.total ?? 0 }
+}
 
 async function fetchCategoryMaps(fetchFn: typeof fetch, apiBase: string): Promise<{ skills: CategoryMap; plugins: CategoryMap }> {
   const [skillCats, pluginCats] = await Promise.all([
@@ -308,8 +336,26 @@ function mapPlugin(p: SkillHubAPIPlugin, categories: CategoryMap): SkillHubPlugi
   }
 }
 
-function seedCatalog(installed: SkillHubInstalls): SkillHubCatalog {
+/**
+ * Mark catalog plugins that are already installed as Lumo base/profile plugins
+ * (matched by GitHub repo) as installed, so the market does not offer a
+ * misleading「安装」button for a bundled plugin.
+ */
+function applyPreinstalledCatalog(catalog: SkillHubCatalog, config: SkillHubConfig): SkillHubCatalog {
+  const repos = new Set(config.preinstalledRepositories ?? [])
+  if (repos.size === 0) return catalog
+  const extra = catalog.plugins
+    .filter(plugin => repos.has(plugin.repo))
+    .map(plugin => plugin.id)
+  if (extra.length === 0) return catalog
   return {
+    ...catalog,
+    installed: { ...catalog.installed, plugins: Array.from(new Set([...catalog.installed.plugins, ...extra])) },
+  }
+}
+
+function seedCatalog(installed: SkillHubInstalls, config: SkillHubConfig): SkillHubCatalog {
+  return applyPreinstalledCatalog({
     source: 'seed',
     generatedAt: new Date().toISOString(),
     counts: { skills: SEED_SKILLS.length, packs: SEED_PACKS.length, plugins: SEED_PLUGINS.length },
@@ -318,7 +364,7 @@ function seedCatalog(installed: SkillHubInstalls): SkillHubCatalog {
     packs: SEED_PACKS,
     plugins: SEED_PLUGINS,
     installed,
-  }
+  }, config)
 }
 
 function categoriesFor(prefix: string, values: Iterable<string>): string[] {
@@ -335,11 +381,14 @@ export async function refreshCatalog(config: SkillHubConfig): Promise<SkillHubCa
   const installed = normalizeInstalls(readJson(config.installFile, EMPTY_INSTALLS))
   const base = config.apiBase.replace(/\/+$/, '')
   try {
-    const [categories, hot, sets, pluginPage] = await Promise.all([
+    const [categories, hot, sets, pluginPage, skillTotals] = await Promise.all([
       fetchCategoryMaps(fetchFn, base),
       getJson<{ skills?: SkillHubAPISkill[] }>(fetchFn, `${base}/api/v1/showcase/hot`),
-      getJson<{ skillSets?: SkillHubAPISkillSet[] }>(fetchFn, `${base}/api/v1/skillsets`),
+      // 全量专家包：官方页面用 page/pageSize 翻页（pageSize=200 一次拿完）；total 才是真实计数。
+      getJson<{ skillSets?: SkillHubAPISkillSet[]; total?: number }>(fetchFn, `${base}/api/v1/skillsets?page=1&pageSize=200`),
       getJson<{ items?: SkillHubAPIPlugin[]; total?: number }>(fetchFn, `${base}/api/v1/plugins?page=1&pageSize=${PLUGIN_PAGE_MAX}`),
+      // 技能真实总数：拿一条就够，失败不拖垮整个目录（回退到热门列表长度）。
+      fetchSkillsPage(fetchFn, base, 1, 1).catch(() => null),
     ])
     const skills = (hot.skills ?? []).map(s => mapSkill(s, categories.skills))
     const packs = (sets.skillSets ?? []).map(mapPack)
@@ -348,7 +397,7 @@ export async function refreshCatalog(config: SkillHubConfig): Promise<SkillHubCa
     const catalog: SkillHubCatalog = {
       source: 'skillhub',
       generatedAt: new Date().toISOString(),
-      counts: { skills: skills.length, packs: packs.length, plugins: pluginPage.total ?? plugins.length },
+      counts: { skills: skillTotals?.total ?? skills.length, packs: sets.total ?? packs.length, plugins: pluginPage.total ?? plugins.length },
       categories: {
         skills: categoriesFor('全部', categories.skills.size ? categories.skills.values() : skills.map(s => s.tag)),
         packs: categoriesFor('全部', packs.map(p => p.category)),
@@ -360,7 +409,7 @@ export async function refreshCatalog(config: SkillHubConfig): Promise<SkillHubCa
       installed,
     }
     try { writeJson(config.catalogFile, catalog) } catch { /* cache is best effort */ }
-    return catalog
+    return applyPreinstalledCatalog(catalog, config)
   } catch {
     return buildCatalog(config)
   }
@@ -374,12 +423,12 @@ export async function refreshCatalog(config: SkillHubConfig): Promise<SkillHubCa
 export function buildCatalog(config: SkillHubConfig): SkillHubCatalog {
   const installed = normalizeInstalls(readJson(config.installFile, EMPTY_INSTALLS))
   const external = readJson<Partial<SkillHubCatalog> | null>(config.catalogFile, null)
-  if (external === null || external.source !== 'skillhub') return seedCatalog(installed)
+  if (external === null || external.source !== 'skillhub') return seedCatalog(installed, config)
   const skills = Array.isArray(external.skills) && external.skills.length ? external.skills : SEED_SKILLS
   const packs = Array.isArray(external.packs) && external.packs.length ? external.packs : SEED_PACKS
   const plugins = Array.isArray(external.plugins) && external.plugins.length ? external.plugins : SEED_PLUGINS
-  const seedCats = seedCatalog(installed).categories
-  return {
+  const seedCats = seedCatalog(installed, config).categories
+  return applyPreinstalledCatalog({
     source: 'cache',
     generatedAt: typeof external.generatedAt === 'string' ? external.generatedAt : new Date().toISOString(),
     counts: { skills: external.counts?.skills ?? skills.length, packs: external.counts?.packs ?? packs.length, plugins: external.counts?.plugins ?? plugins.length },
@@ -392,7 +441,7 @@ export function buildCatalog(config: SkillHubConfig): SkillHubCatalog {
     packs,
     plugins,
     installed,
-  }
+  }, config)
 }
 
 export interface SkillHubSearchQuery {
@@ -440,11 +489,11 @@ function pageSlice<T>(items: T[], page: number, pageSize: number): T[] {
 }
 
 /**
- * Query SkillHub directly. Skills use `/api/v1/search?q=` (the API ignores category
- * so it is applied here), skillsets are a small fixed list filtered locally, and
- * plugins use the server-side `q` search, `category=<key>` filter and
- * `page`/`pageSize` paging. Any network failure degrades to filtering (and paging)
- * the local catalog so the UI always gets an answer with the same shape.
+ * Query SkillHub directly. Skills use the real market listing `/api/skills` with
+ * `page`/`pageSize`, `keyword`, `category=<key>` and `sortBy` paging; skillsets
+ * page with `category`-equivalent `scene=<key>` and `keyword`; plugins use the
+ * server-side `q` search and paging. Any network failure degrades to filtering
+ * (and paging) the local catalog so the UI always gets an answer with the same shape.
  */
 export async function searchCatalog(config: SkillHubConfig, query: SkillHubSearchQuery): Promise<SkillHubSearchResult> {
   const fetchFn = config.fetch ?? fetch
@@ -458,15 +507,21 @@ export async function searchCatalog(config: SkillHubConfig, query: SkillHubSearc
   try {
     if (query.kind === 'skill') {
       const categories = await fetchCategoryMaps(fetchFn, base)
-      const url = q === '' ? `${base}/api/v1/showcase/hot` : `${base}/api/v1/search?q=${encodeURIComponent(q)}&limit=${limit}`
-      const data = await getJson<{ results?: SkillHubAPISkill[]; skills?: SkillHubAPISkill[] }>(fetchFn, url)
-      const skills = (data.results ?? data.skills ?? []).map(s => mapSkill(s, categories.skills)).filter(s => category === '' || s.tag === category).slice(0, limit)
-      return { ...empty, total: skills.length, pageSize: skills.length, skills }
+      const key = category === '' ? undefined : keyForLabel(categories.skills, category)
+      const listing = await fetchSkillsPage(fetchFn, base, page, pageSize, { keyword: q, ...(key === undefined ? {} : { categoryKey: key }) })
+      const skills = (listing.skills ?? []).map(s => mapSkill(s, categories.skills))
+        // Unknown label (not in the live dictionary): the server saw no filter, so narrow the page locally.
+        .filter(s => category === '' || s.tag === category)
+      return { ...empty, total: listing.total, page, pageSize, skills }
     }
     if (query.kind === 'pack') {
-      const data = await getJson<{ skillSets?: SkillHubAPISkillSet[] }>(fetchFn, `${base}/api/v1/skillsets`)
-      const packs = (data.skillSets ?? []).map(mapPack).filter(p => (category === '' || p.category === category) && matchesText(q, p.name, p.description, p.category)).slice(0, limit)
-      return { ...empty, total: packs.length, pageSize: packs.length, packs }
+      const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) })
+      if (q !== '') params.set('keyword', q)
+      const scene = category === '' ? undefined : keyForLabel(new Map(Object.entries(PACK_SCENE_LABELS)), category)
+      if (scene !== undefined) params.set('scene', scene)
+      const data = await getJson<{ skillSets?: SkillHubAPISkillSet[]; total?: number }>(fetchFn, `${base}/api/v1/skillsets?${params.toString()}`)
+      const packs = (data.skillSets ?? []).map(mapPack)
+      return { ...empty, total: data.total ?? packs.length, page, pageSize, packs }
     }
     const categories = await fetchCategoryMaps(fetchFn, base)
     const key = category === '' ? undefined : keyForLabel(categories.plugins, category)
@@ -484,7 +539,8 @@ export async function searchCatalog(config: SkillHubConfig, query: SkillHubSearc
     const packs = query.kind === 'pack' ? local.packs.filter(p => (category === '' || p.category === category) && matchesText(q, p.name, p.description, p.role)) : []
     const plugins = query.kind === 'plugin' ? local.plugins.filter(p => (category === '' || p.category === category) && matchesText(q, p.name, p.description, p.category)) : []
     if (query.kind === 'plugin') return { ...empty, source: local.source, total: plugins.length, page, pageSize, plugins: pageSlice(plugins, page, pageSize) }
-    return { ...empty, source: local.source, total: skills.length + packs.length, pageSize: skills.length + packs.length, skills, packs }
+    const localItems = query.kind === 'skill' ? skills : packs
+    return { ...empty, source: local.source, total: localItems.length, page, pageSize, skills, packs }
   }
 }
 

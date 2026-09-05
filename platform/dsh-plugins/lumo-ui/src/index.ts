@@ -287,8 +287,10 @@ function sourceManager(knowledge: KnowledgeQueryService | undefined): KnowledgeS
     : undefined
 }
 
-function requireKnowledgeAdmin(res: ServerResponse, identity: RequestIdentity, knowledge: KnowledgeQueryService | undefined): KnowledgeSourceManagerService | undefined {
-  if (!isRealmAdmin(identity)) {
+function requireKnowledgeAdmin(res: ServerResponse, identity: RequestIdentity, knowledge: KnowledgeQueryService | undefined, singleMachine = false): KnowledgeSourceManagerService | undefined {
+  // 单机版（Local Desktop）是单用户、无租户的 fallback 身份（realm 固定、无断言签名），
+  // 角色门不适用：vault provider 本身只读（upsertSource 显式拒绝，编辑归 Obsidian 插件）。
+  if (!singleMachine && !isRealmAdmin(identity)) {
     writeJson(res, 403, { error: 'knowledge source management requires realm_admin, platform_admin, or admin' })
     return undefined
   }
@@ -412,6 +414,8 @@ function upstreamDemos(): UpstreamDemoService {
 
 export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, vault: VaultService | undefined, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const pathname = new URL(req.url ?? '/', 'http://lumo.local').pathname
+  // 单机版（Local Desktop）：vault 知识源 + fallback 身份,知识管理路由不套 realm 管理员角色门。
+  const singleMachine = config.deploymentMode === 'local'
   let identity: RequestIdentity
   try {
     identity = resolveRequestIdentity(req, config)
@@ -533,7 +537,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   // 来源内容是源真相，读取和写入都只给 realm 管理员。不能把 query 的
   // `allowedRoles` 当成来源编辑授权：检索角色与资料治理角色是不同边界。
   if (req.method === 'GET' && pathname === '/lumo/api/knowledge/sources') {
-    const manager = requireKnowledgeAdmin(res, identity, knowledge)
+    const manager = requireKnowledgeAdmin(res, identity, knowledge, singleMachine)
     if (manager === undefined) return
     try {
       const sources = await manager.listSources(identity.realm)
@@ -545,7 +549,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   }
 
   if (req.method === 'POST' && pathname === '/lumo/api/knowledge/rebuild') {
-    const manager = requireKnowledgeAdmin(res, identity, knowledge)
+    const manager = requireKnowledgeAdmin(res, identity, knowledge, singleMachine)
     if (manager === undefined) return
     try {
       await manager.rebuild(identity.realm)
@@ -557,7 +561,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   }
 
   if (req.method === 'POST' && pathname === '/lumo/api/knowledge/sources') {
-    const manager = requireKnowledgeAdmin(res, identity, knowledge)
+    const manager = requireKnowledgeAdmin(res, identity, knowledge, singleMachine)
     if (manager === undefined) return
     try {
       const summary = await manager.upsertSource(sourceWrite(await readJson(req), identity.realm))
@@ -572,7 +576,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   if (knowledgeSource !== null) {
     const docID = safeID(knowledgeSource[1])
     if (docID === undefined) { writeJson(res, 400, { error: 'invalid knowledge source id' }); return }
-    const manager = requireKnowledgeAdmin(res, identity, knowledge)
+    const manager = requireKnowledgeAdmin(res, identity, knowledge, singleMachine)
     if (manager === undefined) return
     if (req.method === 'GET') {
       try {
@@ -1096,6 +1100,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     snapshotFile: resolve(config.skillhubSnapshotFile ?? '.lumo/skill-snapshot.json'),
     apiBase: config.skillhubApiBase ?? 'https://api.skillhub.cn',
     command: config.skillhubCommand ?? 'skillhub',
+    preinstalledRepositories: ['liustack/modlens', 'omdsh-dev/dsh-better-sidebar', 'NanmiCoder/dsh-agent-teams'],
   })
   // `catalog` queries SkillHub live (falling back to the on-disk cache, then the
   // seed); `catalog?cached=1` reads only local state; `refresh` is an alias that

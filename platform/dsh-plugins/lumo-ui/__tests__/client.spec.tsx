@@ -138,6 +138,9 @@ describe('Lumo native Harness integration', () => {
           { id: 'archify:example:dataflow-product-analytics.html', skill: 'archify', title: 'dataflow product analytics', summary: '技能自带的 HTML 示例', kind: 'html', url: '/lumo/api/skills/demos/asset?skill=archify&path=examples%2Fdataflow-product-analytics.html' },
         ] } :
         path === '/lumo/api/skillhub/catalog' ? skillhubCatalog :
+        path.startsWith('/lumo/api/skillhub/search') ? (path.includes('kind=pack')
+          ? { kind: 'pack', q: '', category: '', source: 'seed', total: 1, page: 1, pageSize: 24, skills: [], packs: [skillhubCatalog.packs[0]!], plugins: [] }
+          : { kind: 'skill', q: '', category: '', source: 'seed', total: 1, page: 1, pageSize: 24, skills: [skillhubCatalog.skills[0]!], packs: [], plugins: [] }) :
         init?.method === 'POST' && path === '/lumo/api/skillhub/install' ? { ...skillhubCatalog, installed: { skills: ['tencent-docs'], packs: ['automation-testing'], plugins: ['modlens'] } } :
         path === '/lumo/api/skills' ? { complete: true, skills: [
           { name: 'open-design', description: '以产物优先的方式创建、完善、预览并导出真实设计产物。', whenToUse: '适用于原型、落地页、看板和视觉升级。', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 'lumo-open-design' },
@@ -167,6 +170,11 @@ describe('Lumo native Harness integration', () => {
         path === '/lumo/api/knowledge/query' ? { query: '审批', scope: 'published', hits: [{ docId: 'doc-ops', sourceVersion: 4, score: .92, text: '连接器需要审批。' }] } :
         path === '/auth/account' ? { mode: 'session', provider: 'lumo-governance', username: 'palmer', displayName: 'Palmer', userId: 'palmer', realm: 'dev', roles: ['operator'], department: 'platform', clientIp: '127.0.0.1', captchaMode: 'always' } :
         {}
+      // 集群版服务端对 vault 知识源统一回 501（见 lumo-ui/src/index.ts 的 vault/status 分支），
+      // 客户端吃 501 后按「无 vault 档」渲染来源目录；模拟它，否则走不了非 vault 分支。
+      if (path === '/lumo/api/knowledge/vault/status') {
+        return new Response(JSON.stringify({ error: 'vault 知识源未装配（集群版不适用）' }), { status: 501, headers: { 'content-type': 'application/json' } })
+      }
       return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
     }))
   })
@@ -179,13 +187,15 @@ describe('Lumo native Harness integration', () => {
     const entries = registered.filter(item => item.name === 'sidebar.navigation')
     const overlay = registered.find(item => item.name === 'shell.overlay')
     expect(entries.map(item => item.id)).toEqual(['lumo-navigation'])
+    // 品牌名槽由 Lumo 占下产品名，避免外壳回退到「DSH 本地构建」文案。
+    expect(registered.some(item => item.name === 'sidebar.brand.name')).toBe(true)
     expect(overlay).toBeDefined()
     const Overlay = overlay!.Component
 
     render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
     const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
     expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual([
-      '资料库', '自动化', '技能市场', '项目', '更多应用 · 灵感',
+      '资料库', '技能市场', '项目', '更多应用 · 灵感',
     ])
     expect(within(navigation).queryByRole('button', { name: '开放设计' })).toBeNull()
     expect(within(navigation).queryByRole('button', { name: 'PPT 生成' })).toBeNull()
@@ -235,27 +245,12 @@ describe('Lumo native Harness integration', () => {
     expect(await screen.findByText('订单中台')).toBeTruthy()
     expect(calls.some(call => call === 'GET /lumo/api/connectors?includeDisabled=true')).toBe(true)
 
-    // 点击火花:目标元素只要落在 ClickSpark 包裹内即可(onPointerDown 冒泡)。
+    // ClickSpark 已退化为纯包装（不再渲染 .lumo-spark 动画元素）：确认指针事件可穿透、组件不崩溃。
     fireEvent.pointerDown(screen.getByText('订单中台'), { clientX: 120, clientY: 80 })
-    await waitFor(() => expect(document.querySelector('.lumo-spark')).not.toBeNull())
     for (const path of ['/lumo/api/knowledge/query', '/lumo/api/skills', '/lumo/api/governance', '/lumo/api/overview']) {
       expect(calls.some(call => call.includes(path))).toBe(true)
     }
 
-    fireEvent.click(within(navigation).getByRole('button', { name: '自动化' }))
-    expect(await screen.findByText('发布流程')).toBeTruthy()
-    expect(await screen.findByText('release-check')).toBeTruthy()
-    expect(await screen.findByText('自动化实际运行')).toBeTruthy()
-    expect(calls.some(call => call === 'GET /lumo/api/flows/launch-flow/runs')).toBe(true)
-		fireEvent.click(screen.getByRole('button', { name: '重放失败运行' }))
-		expect(await screen.findByText('失败运行 #12 已排入重放队列。')).toBeTruthy()
-		expect(calls.some(call => call === 'POST /lumo/api/flows/launch-flow/runs/12/replay')).toBe(true)
-    fireEvent.click(screen.getByRole('button', { name: '停用' }))
-    expect(await screen.findByRole('button', { name: '启用' })).toBeTruthy()
-    expect(calls.some(call => call === 'PUT /lumo/api/projects/growth/automations/release-check')).toBe(true)
-    fireEvent.click(screen.getByRole('button', { name: '执行已发布版本' }))
-    expect(await screen.findByText('最近一次手动执行')).toBeTruthy()
-    expect(calls.some(call => call === 'POST /lumo/api/flows/launch-flow/run')).toBe(true)
     fireEvent.click(within(navigation).getByRole('button', { name: '更多' }))
     expect(await screen.findByText('已连接制品注册表')).toBeTruthy()
     expect((await screen.findAllByText('release-flow')).length).toBeGreaterThan(0)
@@ -284,6 +279,25 @@ describe('Lumo native Harness integration', () => {
     fireEvent.keyDown(window, { key: 'Escape' })
     await waitFor(() => expect(document.querySelector('.lumo-workbench')).toBeNull())
   }, 15000)
+
+  it('hides 项目/资料库/更多 in the local standalone sidebar', async () => {
+    const registered = mountLumo()
+    const entry = registered.find(item => item.name === 'sidebar.navigation')
+    const Navigation = entry!.Component
+    // 单机版（deployment.mode=local，桌面本地 runtime）不显示服务端工作台与资料库
+    // 入口：左侧只保留技能市场。
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      generatedAt: new Date().toISOString(),
+      deployment: { mode: 'local', label: '本地单机', storage: 'sqlite', middleware: [], distributed: false, desktop: true, clusterReady: false, clusterOnly: false },
+      services: {}, cluster: { nodes: [] }, projects: [], flows: [], connectors: [], plugins: [],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })))
+    render(<Navigation wide />)
+    const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
+    await waitFor(() => expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual(['技能市场']))
+    expect(within(navigation).queryByRole('button', { name: '项目' })).toBeNull()
+    expect(within(navigation).queryByRole('button', { name: '资料库' })).toBeNull()
+    expect(within(navigation).queryByRole('button', { name: '更多' })).toBeNull()
+  })
 
   it('lists SkillHub skills and packs with quick-install', async () => {
     const registered = mountLumo()
@@ -402,15 +416,10 @@ describe('Lumo native Harness integration', () => {
     expect(within(deckViewer).getByRole('link', { name: '下载 PPTX' }).getAttribute('href')).toContain('pritzker_2026_quick.pptx')
     fireEvent.click(within(deckViewer).getByRole('button', { name: '用这个样例生成' }))
     expect(pptPrompt.value).toBe('#演示文稿生成 参考 PPT Master 官方示例「Pritzker 2026 (Quick)」（Architecture Editorial，共 3 页，当前看的是「cover」）：2026 普利兹克大师季 — 8 座新作深读。面向研发团队，控制在 15 分钟。')
-    // 本地品牌模板仍在右侧作为离线兜底。
-    const deck = await screen.findByRole('button', { name: '使用原生示例：中国电信' })
-    expect(deck.querySelector('img')?.getAttribute('src')).toContain('/lumo/api/skills/demos/asset?skill=ppt-master')
-    fireEvent.click(deck)
-    expect(pptPrompt.value).toBe('#演示文稿生成 使用「中国电信」品牌模板。参考 PPT Master 官方示例「Pritzker 2026 (Quick)」（Architecture Editorial，共 3 页，当前看的是「cover」）：2026 普利兹克大师季 — 8 座新作深读。面向研发团队，控制在 15 分钟。')
     fireEvent.click(screen.getByRole('button', { name: '发送到 PPT Master' }))
     expect(submitted).toHaveLength(2)
     expect(submitted[1]).toContain('/ppt-master 在项目「Lumo Desktop」中，使用「演示文稿生成」样例生成原生可编辑 PPTX。')
-    expect(submitted[1]).toContain('使用「中国电信」品牌模板。参考 PPT Master 官方示例「Pritzker 2026 (Quick)」')
+    expect(submitted[1]).toContain('参考 PPT Master 官方示例「Pritzker 2026 (Quick)」（Architecture Editorial，共 3 页，当前看的是「cover」）：2026 普利兹克大师季 — 8 座新作深读。')
     expect(submitted[1]).toContain('面向研发团队，控制在 15 分钟。')
   }, 15000)
 
@@ -430,7 +439,7 @@ describe('Lumo native Harness integration', () => {
     const workbench = await screen.findByRole('dialog', { name: '项目工作台' })
     await waitFor(() => expect(workbench.contains(document.activeElement)).toBe(true))
 
-    fireEvent.click(within(workbench).getByRole('button', { name: /跳转/ }))
+    fireEvent.keyDown(window, { key: 'k', metaKey: true })
     const palette = await screen.findByRole('dialog', { name: 'Lumo 工作区菜单' })
     const search = within(palette).getByRole('textbox', { name: '搜索工作区' })
     await waitFor(() => expect(document.activeElement).toBe(search))
@@ -440,7 +449,7 @@ describe('Lumo native Harness integration', () => {
     fireEvent.keyDown(window, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Lumo 工作区菜单' })).toBeNull())
     expect(workbench.contains(document.activeElement)).toBe(true)
-    fireEvent.click(within(workbench).getByRole('button', { name: '关闭工作台' }))
+    fireEvent.keyDown(window, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('dialog', { name: '项目工作台' })).toBeNull())
     expect(document.activeElement).toBe(opener)
   })

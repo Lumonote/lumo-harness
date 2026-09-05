@@ -31,6 +31,8 @@ const PATCHED = [
   'packages/client/ui-sidebar/src/client/index.ts',
   'packages/client/ui-sidebar/src/client/contract/slots.ts',
   'packages/client/ui-sidebar/src/client/SidebarRoot.tsx',
+  'packages/session/session-format-v0-to-v1/src/relationships.ts',
+  'packages/client/ui-model-selection/src/client/directory.ts',
   // 根 tsdown.config.ts 在列表尾部：前面 0-5 的下标是既有测试的读取约定。
   'tsdown.config.ts',
 ]
@@ -95,6 +97,10 @@ describe('applyLumoDshOverrides', () => {
     expect(sidebarSlots).toContain("| 'sidebar.navigation'")
     const sidebarRoot = read(root, PATCHED[5]!)
     expect(sidebarRoot).toContain("renderSlot('sidebar.navigation', { wide })")
+
+    const relationships = read(root, PATCHED[6]!)
+    expect(relationships).toContain('LUMO_SESSION_RECOVERY')
+    expect(relationships).toContain("assertNoUnresolvedTools(toolLifecycles, 'turn/start recovery')")
   })
 
   it('首页无会话时 hero 座位只在 hero 模式渲染,会话仍走上游的 input.dock 槽', () => {

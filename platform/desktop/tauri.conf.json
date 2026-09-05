@@ -1,10 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Lumo",
+  "productName": "DeepSeek Harness",
   "version": "0.1.0",
   "identifier": "io.lumo.desktop",
   "build": {
-    "beforeBuildCommand": "sh desktop/make-icons.sh && node desktop/build-runtime.mjs",
+    "beforeBuildCommand": "bash -c 'cd \"$(git rev-parse --show-toplevel)\" && sh platform/desktop/make-icons.sh && node platform/desktop/build-runtime.mjs'",
     "devUrl": "http://127.0.0.1:3080",
     "frontendDist": "../desktop-assets"
   },
@@ -16,7 +16,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/Lumo.icns", "icons/icon.png"],
+    "icon": [
+      "icons/Lumo.icns",
+      "icons/icon.png"
+    ],
     "resources": {
       "target/lumo-runtime": "runtime"
     }

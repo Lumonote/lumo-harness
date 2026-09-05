@@ -73,6 +73,14 @@ const upstreamPluginSpecs = [
   // Dream Skin：桌面换肤/主题插件（8 套 iOS / Linear 式清透冷调主题 + 弥散光壁纸 +
   // 每用户强调色）。纯原生 --dsw-* token 实现，经其 cordis.patch.yml 在 Web 壳激活。
   'dsh-dream-skin@8.30.1',
+  // 任务看板：dsh web GUI 的 Host 权威任务台帐（替换 Lumo 左侧菜单「自动化」入口）。
+  '@linxin666/dsh-client-ui-task-board@0.3.14',
+  // 侧边栏底座：VSCode 式右侧工作台 + 三方侧边栏页面扩展。
+  'dsh-better-sidebar@0.18.0',
+  // 多智能体团队（AgentTeams）：自然语言编排船长/成员/带依赖任务与消息，Web 树状监控（0.1.15）。
+  '@nanmicoder/dsh-agent-teams@0.1.15',
+  // Univer 办公文档：DSH × Univer 协作网关与查看器——内联预览、浮动工作台与会话结束审阅（0.2.14）。
+  'dsh-univer-office@0.2.14',
   // 版本漂移纪律：与 dsh-node/src/plugins.ts 的 BASE_PROFILE_PLUGINS 保持一致。
   // 两个提升是 dsh-settings 0.1.2 移除旧 API 的直接后果（installSettingsSection /
   // settingsNamespace），@anweat/dsh-browser 因无适配新版而退出基线，见其注释。
@@ -91,10 +99,11 @@ prepareUpstreamPlugins()
 // what Vite resolves from the workspace package exports, and they contain the
 // homepage composer seats and sidebar navigation slot added for Lumo. The
 // isolated snapshot contains source only, so emit lib/types before tsdown.
+buildDshSessionFormatMigration()
 rebuildDshHostArtifacts()
-// 快照对被覆盖包（ui-conversation/ui-sidebar）不投影 lib/（其产物必须从打补丁后的
+// 快照对被覆盖的客户端包不投影 lib/（其产物必须从打补丁后的
 // 快照源码重建），而它们的 tsdown 配置又消费 lib/types —— 全量 client pass 之前
-// 必须先 tsc 出这两包的类型，否则 UNRESOLVED_ENTRY lib/types/index.js。
+// 必须先 tsc 出这些包的类型，否则 UNRESOLVED_ENTRY lib/types/index.js。
 buildDshClientPackages()
 rebuildDshClientArtifacts()
 
@@ -133,6 +142,15 @@ const moduleSearchRoots = [
   dshNodeRoot,
   resolve(repoRoot, 'platform', 'dsh-plugins'),
   upstreamPluginRoot,
+  // Web 扩展插件把 react/react-dom 声明为必选 peer（dsh-better-sidebar、
+  // @linxin666/dsh-client-ui-task-board；dsh-context/dsh-dream-skin 的 react 是可选的，
+  // 不被遍历点名）。这两个包在 Web 壳里只出现在 devDependencies（Vite 就地编译进前端
+  // bundle），闭包遍历不读 devDependencies，向上回溯也到不了 apps/web 的 node_modules
+  // （兄弟包）——react 因此只能撞上 lumo-ui 的 link: 依赖（指向源树 ui-jobs 的副本），
+  // react-dom 则完全落空。把 Web 壳挂进搜索根，两包都能以壳内实例（apps/web/node_modules
+  // 软链 → .pnpm 存储）解析，与壳渲染同源；react 在 link: 目标可用时仍走已入队副本，
+  // 版本与壳一致（18.3.1）。
+  resolve(dshRoot, 'apps', 'web'),
 ]
 const packageSources = new Map()
 const packageQueue = []
@@ -296,6 +314,9 @@ const nodeSource = findPortableNode()
 cpSync(nodeSource, runtimeNode)
 chmodSync(runtimeNode, 0o755)
 assertBinaryArchitecture(runtimeNode, '打包 Node')
+// 把随 Node 发行的 corepack/npm 与 pnpm shim 塞进 runtime，并落到 PATH——否则打包后插件市场
+// 更新插件时会报“未找到 pnpm/corepack/npx”（见 stageNodeTooling 与 lumo-runtime.sh）。
+stageNodeTooling(nodeSource, resolve(stagingRoot, 'bin'), resolve(stagingRoot, 'lib', 'node_modules'))
 
 const runtimeNodeSource = resolve(dshNodeRoot)
 cpSync(runtimeNodeSource, resolve(stagingRoot, 'dsh-node'), {
@@ -417,6 +438,11 @@ function pruneStagedRuntime() {
   keepOnly(join(modulesRoot, 'onnxruntime-node', 'bin', 'napi-v6', 'darwin'), (name) => name === targetArch, removeTree)
   keepOnly(join(modulesRoot, 'node-pty', 'prebuilds'), (name) => name === `darwin-${targetArch}`, removeTree)
   keepOnly(join(modulesRoot, '@anthropic-ai', 'claude-agent-sdk', 'vendor', 'ripgrep'), (name) => name === 'COPYING' || name === `${targetArch}-darwin`, removeTree)
+  // 1.5) fs-ext 原生锁定桩：fs-ext@2.1.1 的 C++ 无法在打包 Node 24 的 V8 头上编译，
+  //    而桌面 worker 是单进程（无跨进程写入者），与上游 browser-worker 部署的
+  //    fs-ext stub 同语义（session-persistence-jsonl/src/lease.ts）。替换闭包里
+  //    复制进来的包体（见 runtime-stubs/fs-ext）。
+  stageFsExtStub()
   // 2) onnxruntime-web：目标架构的 native binding 可用时只留 JS 壳；缺失时保留
   //    WASM 作为 optional native 依赖的降级路径，不能因体积裁剪把 fallback 一并删掉。
   const onnxWebDist = join(modulesRoot, 'onnxruntime-web', 'dist')
@@ -446,6 +472,15 @@ function pruneStagedRuntime() {
     }
   }
   return reclaimed
+}
+
+/** 用桌面单进程桩替换闭包里复制出的 fs-ext 原生包（原因见调用处注释）。 */
+function stageFsExtStub() {
+  const target = resolve(modulesRoot, 'fs-ext')
+  const stubRoot = resolve(desktopRoot, 'runtime-stubs', 'fs-ext')
+  if (!existsSync(stubRoot)) throw new Error(`缺少 fs-ext 桩目录：${stubRoot}`)
+  rmSync(target, { recursive: true, force: true })
+  cpSync(stubRoot, target, { recursive: true, dereference: true })
 }
 
 function keepOnly(directory, keep, removeTree) {
@@ -669,9 +704,8 @@ function buildLumoUiPlugin() {
 // 附加入口形状）。依赖开发树旧 lib 是这个构建链最大的坑——旧产物会同包。
 // 快照的 node_modules 软链指向开发树 packages/*（linkWorkspaceModules），
 // 因此再生产物必须回拷开发树，否则闭包遍历/TS 解析落回旧 lib。
-// 注意：绝不在快照内跑 tsc——快照的 tsconfig paths 指向自身包，而 node_modules
-// 软链回开发树，同一类型会在两边各自声明（TS2717/私有属性分裂）。lib/types 的
-// 唯一事实源是开发树（prepare 投影 + 回拷闭环），快照只跑 tsdown 打包与 typert。
+// 未覆盖的包复用投影的 lib/types，避免全量 tsc 跨越快照与开发树的两套类型声明。
+// 被覆盖的 host 包先由 buildDshSessionFormatMigration 单包编译。
 function rebuildDshHostArtifacts() {
   console.log('重建 DSH host 面产物（tsdown 包与 typert remote 投影）...')
   const tsdown = resolve(dshRoot, 'node_modules', '.bin', 'tsdown')
@@ -679,6 +713,20 @@ function rebuildDshHostArtifacts() {
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) throw new Error(`DSH host 面产物重建失败：${String(result.status ?? result.signal)}`)
   mirrorSnapshotLibsBackToSource()
+}
+
+// The session-format recovery overlay is a host package, but its generated
+// `lib` is intentionally excluded from prepare-runtime's projection so the
+// patched source is authoritative. Emit its TypeScript output before the
+// workspace tsdown pass, otherwise tsdown cannot resolve its declared entry.
+function buildDshSessionFormatMigration() {
+  console.log('构建 DSH 会话格式迁移包（含旧日志恢复补丁）...')
+  runWorkspaceBinary(
+    join('packages', 'session', 'session-format-v0-to-v1'),
+    'tsc',
+    ['-p', 'tsconfig.json', '--pretty', 'false'],
+    'DSH 会话格式迁移包类型产物构建失败',
+  )
 }
 
 // Client 面整 workspace 重建：host 面里 clientBundle 包被 SKIP_WORKSPACE_BUILD
@@ -721,12 +769,12 @@ function mirrorSnapshotLibsBackToSource() {
 }
 
 function buildDshClientPackages() {
-  console.log('构建 DSH conversation / sidebar 客户端包...')
+  const packageDirectories = overriddenPackageDirectories.filter((directory) => directory.startsWith('packages/client/'))
+  console.log('构建 DSH 覆盖层客户端包...')
   const tsc = resolve(dshRoot, 'node_modules', '.bin', 'tsc')
   const typecheck = spawnSync(tsc, [
     '-b',
-    'packages/client/ui-conversation/tsconfig.json',
-    'packages/client/ui-sidebar/tsconfig.json',
+    ...packageDirectories.map((directory) => join(directory, 'tsconfig.json')),
     '--pretty', 'false',
   ], {
     cwd: dshRoot,
@@ -735,10 +783,7 @@ function buildDshClientPackages() {
   if (typecheck.error !== undefined) throw typecheck.error
   if (typecheck.status !== 0) throw new Error(`DSH 客户端类型产物构建失败：${String(typecheck.status ?? typecheck.signal)}`)
 
-  for (const packageDirectory of [
-    join('packages', 'client', 'ui-conversation'),
-    join('packages', 'client', 'ui-sidebar'),
-  ]) {
+  for (const packageDirectory of packageDirectories) {
     runWorkspaceBinary(packageDirectory, 'tsdown', [], `${packageDirectory} 客户端包构建失败`)
   }
 }
@@ -830,7 +875,8 @@ function findPortableNode() {
 function downloadOfficialNode(version, target) {
   const cacheDirectory = resolve(nodeCacheRoot, `${version}-${target}`)
   const cached = resolve(cacheDirectory, 'node')
-  if (existsSync(cached)) return cached
+  const cachedCorepack = resolve(cacheDirectory, 'node_modules', 'corepack')
+  if (existsSync(cached) && existsSync(cachedCorepack)) return cached
   const mirror = (process.env['LUMO_NODE_DIST_MIRROR'] ?? 'https://nodejs.org/dist').replace(/\/+$/, '')
   const tarballName = `node-v${version}-${target}.tar.gz`
   mkdirSync(cacheDirectory, { recursive: true })
@@ -848,13 +894,50 @@ function downloadOfficialNode(version, target) {
     rmSync(tarball, { force: true })
     throw new Error(`官方 Node tarball 校验失败：${tarballName} 期望 ${expected} 实际 ${actual}`)
   }
-  const extract = spawnSync('tar', ['-xzf', tarball, '-C', cacheDirectory, '--strip-components', '2', `node-v${version}-${target}/bin/node`], { encoding: 'utf8' })
+  // 除 node 外一并解出 corepack / npm，供打包后的插件市场在需要时更新插件（见 stageNodeTooling）。
+  const extract = spawnSync('tar', ['-xzf', tarball, '-C', cacheDirectory, '--strip-components', '2',
+    `node-v${version}-${target}/bin/node`,
+    `node-v${version}-${target}/lib/node_modules/corepack`,
+    `node-v${version}-${target}/lib/node_modules/npm`,
+  ], { encoding: 'utf8' })
   if (extract.error !== undefined || extract.status !== 0 || !existsSync(cached)) {
     throw new Error(`解压官方 Node 失败：${extract.stderr || extract.error?.message || tarballName}`)
   }
   chmodSync(cached, 0o755)
   rmSync(tarball, { force: true })
   return cached
+}
+
+/**
+ * 把随 Node 发行的 corepack / npm 与一个 pnpm shim 塞进桌面 runtime，让打包后的应用在
+ * 插件市场更新插件时能找到 pnpm/corepack/npx（否则报「未找到 pnpm」）。仅依赖 node
+ * 二进制同目录下的 Node 发行件；LUMO_RUNTIME_NODE 指向裸 node 二进制时跳过并告警（只影响
+ * 开发钉死场景）。shim 用相对路径定位，保证 .app 里的 runtime 可整体搬移。
+ */
+function stageNodeTooling(nodeBinary, binDir, libDir) {
+  const sourceDir = dirname(nodeBinary)
+  const corepackSrc = resolve(sourceDir, 'node_modules', 'corepack')
+  const npmSrc = resolve(sourceDir, 'node_modules', 'npm')
+  if (!existsSync(corepackSrc)) {
+    console.warn(`Lumo: [WARN] 未在 ${sourceDir}/node_modules 找到 corepack；插件更新将不可用（通常因 LUMO_RUNTIME_NODE 指向裸 node 二进制）`)
+    return
+  }
+  mkdirSync(binDir, { recursive: true })
+  mkdirSync(libDir, { recursive: true })
+  cpSync(corepackSrc, resolve(libDir, 'corepack'), { recursive: true, dereference: true })
+  if (existsSync(npmSrc)) cpSync(npmSrc, resolve(libDir, 'npm'), { recursive: true, dereference: true })
+  const shims = [
+    ['corepack', '#!/bin/sh\nexec "$(dirname "$0")/../node" "$(dirname "$0")/../lib/node_modules/corepack/dist/corepack.js" "$@"\n'],
+    ['npm', '#!/bin/sh\nexec "$(dirname "$0")/../node" "$(dirname "$0")/../lib/node_modules/npm/bin/npm-cli.js" "$@"\n'],
+    ['npx', '#!/bin/sh\nexec "$(dirname "$0")/../node" "$(dirname "$0")/../lib/node_modules/npm/bin/npx-cli.js" "$@"\n'],
+    ['pnpm', '#!/bin/sh\nexec "$(dirname "$0")/corepack" pnpm "$@"\n'],
+  ]
+  for (const [name, body] of shims) {
+    const path = resolve(binDir, name)
+    writeFileSync(path, body)
+    chmodSync(path, 0o755)
+  }
+  console.log(`桌面 runtime 已注入 corepack/npm/pnpm shim（${binDir}）`)
 }
 
 function curl(url, destination) {

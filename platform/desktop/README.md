@@ -53,6 +53,10 @@ cargo tauri build --debug --bundles app
 | 上下文洞察 | `dsh-context` | `0.41.3` | 上下文组成、趋势与事件 |
 | 费用统计 | `dsh-cost-meter` | `1.6.7` | 会话、预算、价格和历史费用 |
 | 梦幻皮肤 | `dsh-dream-skin` | `8.30.1` | 8 套高质感主题、弥散光壁纸与每用户强调色（原生 `--dsw-*` 实现） |
+| 任务看板 | `@linxin666/dsh-client-ui-task-board` | `0.3.14` | Host 权威任务台帐：看板任务、真实 DSH 会话执行、定时调度与执行历史（替换左侧菜单原「自动化」入口） |
+| 侧边栏底座 | `dsh-better-sidebar` | `0.18.0` | VSCode 式右侧工作台：资源管理器、编辑器、终端、Git 与子代理页面，并支持三方扩展注册新侧边栏页面 |
+| 多智能体团队 | `@nanmicoder/dsh-agent-teams` | `0.1.15` | 自然语言编排多智能体团队：船长/成员、带依赖任务与消息，Web 树状监控 |
+| Univer 办公文档 | `dsh-univer-office` | `0.2.14` | DSH × Univer 协作网关与查看器：内联预览、浮动工作台与会话结束审阅 |
 
 > 浏览器自动化（`@anweat/dsh-browser` 0.1.10）因依赖已被 dsh 现行版本移除的
 > dsh-settings 旧导出，且上游无适配版本，暂不固定进桌面基线——市场页面也不展示。
@@ -108,20 +112,26 @@ runtime 在后台线程里拉起；本地 Web 端口一应答，窗口就切到�
 `lumo-runtime.sh` 启用了 Node 的磁盘编译缓存（`NODE_COMPILE_CACHE`，落在应用数据目录的
 `runtime/compile-cache`），第二次以后的启动直接复用字节码。
 
-应用在菜单栏有一个模板图标（亮/暗菜单栏自动着色），菜单项为「显示 Lumo」「查看运行时日志」
-「退出 Lumo」。关闭窗口只是把它收进菜单栏，runtime 继续运行；点 Dock 图标或菜单栏的
-「显示 Lumo」即可重新打开。真正退出用菜单栏的「退出 Lumo」或 ⌘Q，此时本地 runtime 会
-一并结束。
+应用在菜单栏有一个模板图标（亮/暗菜单栏自动着色），菜单项为「显示 DeepSeek Harness」
+「查看运行时日志」「退出 DeepSeek Harness」。关闭窗口只是把它收进菜单栏，runtime 继续
+运行；点 Dock 图标或菜单栏的「显示 DeepSeek Harness」即可重新打开。真正退出用菜单栏的
+「退出 DeepSeek Harness」或 ⌘Q，此时本地 runtime 会一并结束。
 
 ## 图标
 
-`icons/logo.png` 是唯一的源图。`make-icons.sh`（`beforeBuildCommand` 里会先跑它）用宿主
-自带的 `swiftc` 与 `iconutil` 生成：
+图标源是 DeepSeek 原生鱼形标志（上游 `packages/client/ui-primitives` 的 FishLogo 路径），
+`icons/deepseek-logo.svg` 是唯一品牌源：既画应用图标也画菜单栏剪影与启动页徽章。
+
+`make-icons.sh`（`beforeBuildCommand` 里会先跑它）用宿主自带的 `swiftc` 与 `iconutil` 生成。
+生成器解析 SVG 里的 `d` 路径（ImageIO 不解码 SVG，CoreGraphics 只认 CGPath），同一路径既画应用图标
+也画菜单栏剪影：
 
 - `icons/icon.png`：1024×1024，内容占 824×824 的圆角矩形（圆角约 22.5%），四周透明，
   与 macOS 系统图标同一规范——直接拿方图当图标就是 Dock 里那个“太正方体”的效果；
 - `icons/Lumo.icns`：完整尺寸集，bundler 原样使用；
-- `icons/tray.png`：44×44 单色模板图标，供菜单栏使用。
+- `icons/tray.png`：44×44 单色模板图标，供菜单栏使用；
+- `desktop-assets/lumo-logo.png`：512×512 品牌蓝圆盘徽章，供启动页 `boot.html` 使用，
+  同时被 `dsh-overrides/brand-web.mjs` 拷成 `/branding/logo.png`（favicon 与工作台品牌标）。
 
 ## 构建期护栏
 

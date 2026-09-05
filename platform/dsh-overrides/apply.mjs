@@ -29,6 +29,8 @@ function patchFile(root, relativePath, replacements, marker = 'LUMO_DSH_OVERLAY'
 export const overriddenPackageDirectories = [
   'packages/client/ui-conversation',
   'packages/client/ui-sidebar',
+  'packages/client/ui-model-selection',
+  'packages/session/session-format-v0-to-v1',
 ]
 
 /**
@@ -140,6 +142,50 @@ export function applyLumoDshOverrides(root) {
         + "      {/* The browsing region fills the column between the controls and the\n",
     ],
   ], 'LUMO_SIDEBAR_NAVIGATION')
+
+  // A desktop process can die after a completed step and before the durable
+  // `turn/end` event is flushed. Older released-v0 logs are otherwise rejected
+  // when the next turn starts, even though all event sequence numbers and
+  // surface references remain intact. Treat exactly that boundary as an
+  // interrupted turn during validation; an open step or unresolved tool still
+  // refuses migration because the boundary is not recoverable without inventing
+  // events. This keeps the source artifact byte-for-byte unchanged.
+  patchFile(root, 'packages/session/session-format-v0-to-v1/src/relationships.ts', [[
+    "      case 'turn/start':\n"
+      + "        if (openTurn !== null || data['turn'] !== nextTurn) {\n"
+      + "          throw new SessionFormatError(`turn/start ${JSON.stringify(data['turn'])} does not open expected turn ${nextTurn}`)\n"
+      + "        }\n",
+    "      case 'turn/start':\n"
+      + "        if (openTurn !== null && openStep === null && nextStep > 1\n"
+      + "          && data['turn'] === openTurn + 1) {\n"
+      + "          // LUMO_SESSION_RECOVERY: a clean next-turn boundary closes an interrupted prior turn.\n"
+      + "          assertNoUnresolvedTools(toolLifecycles, 'turn/start recovery')\n"
+      + "          openTurn = null\n"
+      + "          nextTurn += 1\n"
+      + "        }\n"
+      + "        if (openTurn !== null || data['turn'] !== nextTurn) {\n"
+      + "          throw new SessionFormatError(`turn/start ${JSON.stringify(data['turn'])} does not open expected turn ${nextTurn}`)\n"
+      + "        }\n",
+  ]], 'LUMO_SESSION_RECOVERY')
+
+  patchFile(root, 'packages/client/ui-model-selection/src/client/directory.ts', [
+    [
+      "    if (catalog.status !== 'ready' || catalog.value === null || projected === undefined) {\n",
+      "    // LUMO_MODEL_CATALOG: advisory models do not wait for history restoration.\n"
+        + "    if (catalog.status !== 'ready' || catalog.value === null) {\n",
+    ],
+    [
+      "    const current = projected.next ?? catalog.value.default\n",
+      "    // A missing projection is unknown, not an empty durable selection.\n"
+        + "    const current = projected === undefined\n"
+        + "      ? this.store.getSnapshot().current\n"
+        + "      : projected.next ?? catalog.value.default\n",
+    ],
+    [
+      "      routable: catalog.value.routableProviders.includes(current.provider),\n",
+      "      routable: current === null ? null : catalog.value.routableProviders.includes(current.provider),\n",
+    ],
+  ], 'LUMO_MODEL_CATALOG')
 
   // Root hero extensions need the same public draft/submit face as a live
   // session dock so Lumo can hand an OpenDesign/PPT brief to the native

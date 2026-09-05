@@ -61,6 +61,16 @@ describe('knowledge source management API', () => {
     expect(knowledge.listSources).not.toHaveBeenCalled()
   })
 
+  it('lets the local desktop read sources without admin roles (single-machine vault fallback identity)', async () => {
+    const knowledge = manager()
+    const { res, result } = response()
+    await api({ ...config, deploymentMode: 'local', roles: ['operator'] }, knowledge, undefined, undefined, undefined, request('GET', '/lumo/api/knowledge/sources') as never, res)
+
+    expect(result.status).toBe(200)
+    expect(result.body).toEqual({ realm: 'realm-a', state: 'synchronized', sources: [source] })
+    expect(knowledge.listSources).toHaveBeenCalledWith('realm-a')
+  })
+
   it('takes the realm from the signed/fallback identity rather than the request body', async () => {
     const knowledge = manager()
     const { res, result } = response()

@@ -83,6 +83,30 @@ export const BASE_PLUGIN_CATALOG: readonly BasePluginDescriptor[] = [
     tags: ['架构图', '调度拓扑', '生命周期'], repository: 'https://github.com/tt-a1i/archify', license: 'MIT',
     capability: 'Archify 可验证图谱工作流', accent: '#8fa9df',
   },
+  {
+    id: 'dsh-task-board', packageName: '@linxin666/dsh-client-ui-task-board', version: '0.3.14',
+    label: '任务看板', summary: 'Host 权威任务台帐：看板任务、真实 DSH 会话执行、Host 定时调度与执行历史。', category: '任务编排',
+    tags: ['任务看板', '定时调度', '执行历史'], repository: 'https://github.com/scwlkq/dsh-task-board', license: 'BSD-3-Clause',
+    capability: 'dsh web GUI 任务看板与 Host 调度', accent: '#65b9d8',
+  },
+  {
+    id: 'dsh-better-sidebar', packageName: 'dsh-better-sidebar', version: '0.18.0',
+    label: '侧边栏底座', summary: 'VSCode 式右侧工作台：资源管理器、编辑器、终端、Git 与子代理页面，并支持三方扩展注册新侧边栏页面。', category: '客户端',
+    tags: ['侧边栏', '编辑器', '终端'], repository: 'https://github.com/omdsh-dev/DSH-better-sidebar', license: 'MIT',
+    capability: 'VSCode 风格侧边栏底座与页面扩展', accent: '#7da9ed',
+  },
+  {
+    id: 'dsh-agent-teams', packageName: '@nanmicoder/dsh-agent-teams', version: '0.1.15',
+    label: '多智能体团队', summary: '用自然语言编排多智能体团队协作：船长、成员、带依赖任务与消息，并带 Web 树状监控。', category: '智能体协作',
+    tags: ['多智能体', '任务依赖', '团队协作'], repository: 'https://github.com/NanmiCoder/dsh-agent-teams', license: 'MIT',
+    capability: 'AgentTeams 多智能体编排', accent: '#65b9d8',
+  },
+  {
+    id: 'dsh-univer-office', packageName: 'dsh-univer-office', version: '0.2.14',
+    label: 'Univer 办公文档', summary: 'DSH × Univer 集成：内联预览、浮动工作台窗口与会话结束审阅动作。', category: '文档办公',
+    tags: ['在线文档', '内联预览', '协同审阅'], repository: 'https://github.com/dream-num/dsh-univer-office', license: 'Apache-2.0',
+    capability: 'Univer 协作网关与查看器', accent: '#5bb974',
+  },
 ] as const
 
 export const BASE_PLUGIN_BY_ID: Readonly<Record<string, BasePluginDescriptor>> = Object.fromEntries(

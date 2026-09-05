@@ -88,6 +88,14 @@ export const BASE_PROFILE_PLUGINS = [
   { name: 'dsh-context', spec: 'dsh-context@0.41.3' },
   { name: 'dsh-cost-meter', spec: 'dsh-cost-meter@1.6.7' },
   { name: 'dsh-dream-skin', spec: 'dsh-dream-skin@8.30.1' },
+  // 任务看板：dsh web GUI 的 Host 权威任务台帐（0.3.14）。替换 Lumo 左侧菜单原「自动化」入口。
+  { name: '@linxin666/dsh-client-ui-task-board', spec: '@linxin666/dsh-client-ui-task-board@0.3.14' },
+  // 侧边栏底座：VSCode 式右侧工作台 + 三方侧边栏页面扩展（0.18.0）。
+  { name: 'dsh-better-sidebar', spec: 'dsh-better-sidebar@0.18.0' },
+  // 多智能体团队：自然语言编排船长/成员/带依赖任务与消息，Web 树状监控（0.1.15）。
+  { name: '@nanmicoder/dsh-agent-teams', spec: '@nanmicoder/dsh-agent-teams@0.1.15' },
+  // Univer 办公文档：DSH × Univer 协作网关与查看器——内联预览、浮动工作台与会话结束审阅（0.2.14）。
+  { name: 'dsh-univer-office', spec: 'dsh-univer-office@0.2.14' },
 ] as const
 
 export const OBSOLETE_PROFILE_PLUGINS = ['deepseek-harness-auth'] as const
@@ -105,6 +113,10 @@ const PACKAGED_PROFILE_MODULES = [
   'dsh-context',
   'dsh-cost-meter',
   'dsh-dream-skin',
+  '@linxin666/dsh-client-ui-task-board',
+  'dsh-better-sidebar',
+  '@nanmicoder/dsh-agent-teams',
+  'dsh-univer-office',
 ] as const
 
 export interface ProfilePluginSpec {

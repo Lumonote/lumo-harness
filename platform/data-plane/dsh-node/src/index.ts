@@ -14,9 +14,9 @@
  *   agent 父节点   —— patch 追加 lumo-subagent-remote（子代理经 Scheduler 放置到承载节点）
  */
 import { fileURLToPath } from 'node:url'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
-import { hostname } from 'node:os'
+import { homedir, hostname } from 'node:os'
 import { spawn } from 'node:child_process'
 import { localStorageRows, localVaultRows, profileLifetimeOverlay, profileStorageRows, workflowEngineOverlay } from './workflow.ts'
 import { localSkillSnapshotAssembly, skillSnapshotSource, waitForSkillSnapshotFile } from './skills.ts'
@@ -28,6 +28,13 @@ const here = dirname(fileURLToPath(import.meta.url))
 const packagedRuntimeRoot = process.env['LUMO_RUNTIME_ROOT']
   ? resolve(process.env['LUMO_RUNTIME_ROOT']!)
   : undefined
+// 桌面单机的可写状态一律放进系统应用数据目录（Rust 壳注入 LUMO_RUNTIME_STATE_DIR，
+// 即 ~/Library/Application Support/<AppId>/runtime）。runtime 包本体在应用捆绑内，
+// **每次重装都会被替换**——生成/安装的技能、SkillHub 目录与快照必须落在这里，
+// 绝不可以落 runtime 里（CWD 相对的 .lumo/* 正是重装即丢的根因）。
+const desktopStateDir = process.env['LUMO_RUNTIME_STATE_DIR']
+  ? resolve(process.env['LUMO_RUNTIME_STATE_DIR']!)
+  : resolve(process.env['DSH_HOME'] ?? join(homedir(), 'Library', 'Application Support', 'Lumo', 'dsh'), 'runtime')
 const platformRoot = packagedRuntimeRoot ?? resolve(here, '..', '..', '..')
 const dshRoot = process.env['LUMO_DSH_ROOT']
   ? resolve(process.env['LUMO_DSH_ROOT']!)
@@ -200,6 +207,10 @@ const basePluginRows: PluginSummary[] = [
   { id: 'dsh-context', label: '上下文洞察', description: '查看上下文组成、趋势与注入事件', surface: 'market', kind: 'runtime' },
   { id: 'dsh-cost-meter', label: '费用统计', description: '会话、预算、模型价格与历史费用', surface: 'market', kind: 'runtime' },
   { id: 'dsh-dream-skin', label: '梦幻皮肤', description: '8 套高质感主题、弥散光壁纸与每用户强调色', surface: 'market', kind: 'runtime' },
+  { id: 'dsh-task-board', label: '任务看板', description: 'Host 权威任务台帐：看板任务、真实 DSH 会话执行与定时调度', surface: 'market', kind: 'runtime' },
+  { id: 'dsh-better-sidebar', label: '侧边栏底座', description: 'VSCode 式右侧工作台与三方侧边栏页面扩展', surface: 'market', kind: 'runtime' },
+  { id: 'dsh-agent-teams', label: '多智能体团队', description: '自然语言编排船长/成员、带依赖任务与消息，Web 树状监控', surface: 'operations', kind: 'runtime' },
+  { id: 'dsh-univer-office', label: 'Univer 办公文档', description: 'DSH × Univer 协作网关与查看器：内联预览、浮动工作台与会话结束审阅', surface: 'market', kind: 'runtime' },
   { id: 'gpt-image-2-style-library', label: '图像风格库', description: 'GPT Image 2 模板、风格标签与工业级提示词', surface: 'skills', kind: 'runtime' },
   { id: 'ppt-master', label: '演示文稿生成', description: '生成、编辑和增强原生可编辑 PPTX', surface: 'skills', kind: 'runtime' },
   { id: 'ruflo-orchestration', label: '多智能体编排', description: '在任务运行内组织 Ruflo 智能体拓扑与分工', surface: 'operations', kind: 'runtime' },
@@ -489,6 +500,12 @@ ${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
         clusterStatus: ${JSON.stringify(deployment.clusterReady ? 'ready' : 'not_ready')}
         plugins: ${JSON.stringify(mountedPlugins)}
         desktopHandoffFile: ${JSON.stringify(localMode ? (process.env['LUMO_DESKTOP_HANDOFF_FILE'] ?? '') : '')}
+        # 单机版 SkillHub 状态（目录/安装记录/快照）必须落在应用数据目录：
+        # runtime 包体随重装被替换，CWD 相对的 .lumo/* 重装即丢（生成技能丢失事故根因）。
+        skillhubCatalogFile: ${JSON.stringify(localMode ? join(desktopStateDir, 'skillhub-catalog.json') : '.lumo/skillhub-catalog.json')}
+        skillhubInstallFile: ${JSON.stringify(localMode ? join(desktopStateDir, 'skillhub-installs.json') : '.lumo/skillhub-installs.json')}
+        skillhubRoot: ${JSON.stringify(localMode ? join(desktopStateDir, 'skills') : '.lumo/skills')}
+        skillhubSnapshotFile: ${JSON.stringify(localMode ? join(desktopStateDir, 'skill-snapshot.json') : '.lumo/skill-snapshot.json')}
 ` : ''}
 ${workflowEngineOverlay(role)}
 ${skillFilesystemOverlay}

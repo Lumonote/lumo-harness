@@ -351,7 +351,7 @@ fn report_boot_failure(app: &AppHandle, message: &str) {
         ),
     );
     if let Some(window) = main_window(app) {
-        let _ = window.set_title("Lumo — 本地运行时未启动");
+        let _ = window.set_title("DeepSeek Harness — 本地运行时未启动");
     }
 }
 
@@ -450,9 +450,9 @@ fn reveal_runtime_log(app: &AppHandle) {
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItemBuilder::with_id(MENU_SHOW, "显示 Lumo").build(app)?;
+    let show = MenuItemBuilder::with_id(MENU_SHOW, "显示 DeepSeek Harness").build(app)?;
     let log = MenuItemBuilder::with_id(MENU_LOG, "查看运行时日志").build(app)?;
-    let quit = MenuItemBuilder::with_id(MENU_QUIT, "退出 Lumo").build(app)?;
+    let quit = MenuItemBuilder::with_id(MENU_QUIT, "退出 DeepSeek Harness").build(app)?;
     let menu = MenuBuilder::new(app)
         .item(&show)
         .item(&log)
@@ -464,7 +464,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .icon_as_template(true)
-        .tooltip("Lumo")
+        .tooltip("DeepSeek Harness")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -502,7 +502,7 @@ fn main() {
             // 基色 #0b0e11——启动页、切换到工作台之间以及窗口尺寸变化露出的边缘都不会
             // 再闪出系统浅灰标题栏。
             WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("boot.html".into()))
-                .title("Lumo")
+                .title("DeepSeek Harness")
                 .theme(Some(tauri::Theme::Dark))
                 .background_color(tauri::window::Color(0x0b, 0x0e, 0x11, 0xff))
                 .inner_size(1440.0, 920.0)

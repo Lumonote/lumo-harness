@@ -1,7 +1,7 @@
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { ThemeDefinition, ThemeSnapshot, ThemeTokens } from '@deepseek-ai/dsh-client-ui-theme/client'
 import {
-  LUMO_DEFAULT_THEME, LUMO_THEME_IDENTITY, LUMO_THEME_OPTIONS, LUMO_THEME_STORAGE_KEY, type LumoThemeId,
+  LUMO_THEME_IDENTITY, LUMO_THEME_OPTIONS, type LumoThemeId,
 } from '../theme-catalog.ts'
 
 // id / 标签 / 配色模式的唯一真相源在 ../theme-catalog.ts —— 宿主侧的引导脚本
@@ -10,18 +10,6 @@ export {
   isLumoTheme, LUMO_DEFAULT_THEME, LUMO_THEME_IDENTITY, LUMO_THEME_OPTIONS, LUMO_THEME_STORAGE_KEY,
   type LumoThemeId, type LumoThemeIdentity,
 } from '../theme-catalog.ts'
-
-export const LUMO_THEME_EVENT = 'lumo:set-theme'
-
-function browserStorage(): Storage | undefined {
-  try {
-    if (typeof window === 'undefined') return undefined
-    const storage = window.localStorage
-    return typeof storage?.getItem === 'function' && typeof storage.setItem === 'function' ? storage : undefined
-  } catch {
-    return undefined
-  }
-}
 
 interface DarkThemePalette {
   base: string
@@ -162,26 +150,6 @@ const themes: readonly ThemeDefinition[] = Object.freeze([
   }),
 ])
 
-export function readLumoTheme(): string {
-  const storage = browserStorage()
-  if (storage === undefined) return LUMO_DEFAULT_THEME
-  try {
-    const stored = storage.getItem(LUMO_THEME_STORAGE_KEY)
-    return typeof stored === 'string' && stored !== '' ? stored : LUMO_DEFAULT_THEME
-  } catch {
-    return LUMO_DEFAULT_THEME
-  }
-}
-
-function persistLumoTheme(id: string): void {
-  try { browserStorage()?.setItem(LUMO_THEME_STORAGE_KEY, id) } catch { /* private browsing may reject writes */ }
-  document.cookie = `${LUMO_THEME_STORAGE_KEY}=${encodeURIComponent(id)}; Path=/; Max-Age=31536000; SameSite=Lax`
-}
-
-export function requestLumoTheme(id: string): void {
-  window.dispatchEvent(new CustomEvent<string>(LUMO_THEME_EVENT, { detail: id }))
-}
-
 /** 选择器视图：一个已注册主题的 id、中文名（尽力推演）与强调色取样。 */
 export interface RegisteredThemeView { id: string; label: string; accent: string }
 export interface ThemeRegistryState { themes: RegisteredThemeView[]; activeId: string }
@@ -230,28 +198,15 @@ export function installLumoThemes(ctx: ClientContext): void {
     const disposers = themes
       .filter(theme => !registered.has(theme.id))
       .map(theme => ctx.theme.register(theme))
-    const knownIds = (): Set<string> => new Set(ctx.theme.getTheme().themes.map(theme => theme.id))
-    const activate = (id: string): void => {
-      if (!knownIds().has(id)) return
-      persistLumoTheme(id)
-      ctx.theme.setTheme(id)
-    }
-    const onThemeEvent = (event: Event): void => {
-      const id = (event as CustomEvent<unknown>).detail
-      if (typeof id === 'string' && id !== '') activate(id)
-    }
-    // 注册表视图随主题服务任意变化（含第三方皮肤插件晚到注册）实时刷新；
-    // 若用户持久化的主题在注册前未激活，待其就绪后补一次激活（自愈，不重复覆盖）。
+    // 注册表视图随主题服务任意变化（含 dsh-dream-skin 等第三方皮肤插件）实时刷新。
+    // 主题切换完全交给 DSH 设置（theme.setTheme）——这里绝不能做「自愈」回放
+    // localStorage 里的 Lumo 主题，否则用户在设置里每切一个皮肤主题都会被立即覆盖；
+    // Lumo 表面本身的颜色走 --dsw-alias-* 契约，自动跟随任何激活主题。
     const offThemeChange = ctx.on('theme/change', (snapshot: ThemeSnapshot) => {
       publishThemeRegistry(buildRegistry(snapshot))
-      const persisted = readLumoTheme()
-      if (persisted !== snapshot.active.id && knownIds().has(persisted)) activate(persisted)
     })
-    window.addEventListener(LUMO_THEME_EVENT, onThemeEvent)
     publishThemeRegistry(buildRegistry(ctx.theme.getTheme()))
-    activate(readLumoTheme())
     return () => {
-      window.removeEventListener(LUMO_THEME_EVENT, onThemeEvent)
       offThemeChange()
       for (const dispose of disposers.reverse()) dispose()
     }

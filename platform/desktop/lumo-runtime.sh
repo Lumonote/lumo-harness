@@ -29,4 +29,12 @@ export LUMO_WEB_PORT="${LUMO_WEB_PORT:-3080}"
 export NODE_COMPILE_CACHE="${NODE_COMPILE_CACHE:-$state_dir/compile-cache}"
 mkdir -p "$NODE_COMPILE_CACHE"
 
+# 插件市场更新插件时需要 pnpm/corepack/npx——它们随 Node 一起打包进 runtime/bin，置入 PATH。
+# corepack 下载/缓存 pnpm 到 state 目录，避免写进只读的应用包。
+export PATH="$runtime_root/bin:$PATH"
+export COREPACK_HOME="${COREPACK_HOME:-$state_dir/corepack}"
+export COREPACK_ENABLE_PROJECT_SPEC=0
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+mkdir -p "$COREPACK_HOME"
+
 exec "$runtime_root/node" --experimental-strip-types "$runtime_root/dsh-node/src/index.ts"

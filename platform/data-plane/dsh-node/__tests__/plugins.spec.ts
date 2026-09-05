@@ -36,6 +36,8 @@ describe('profile plugin installation', () => {
       '@lumo/dsh-platform-ui', '@lumo/open-design', '@lumo/archify',
       '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/knowledge-vault', '@lumo/skill-local',
       'dshmarket', '@liustack/modlens', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
+      '@linxin666/dsh-client-ui-task-board', 'dsh-better-sidebar',
+      '@nanmicoder/dsh-agent-teams', 'dsh-univer-office',
     ])
     expect(local).toContainEqual({ name: 'dshmarket', spec: 'dshmarket@1.41.0' })
     expect(local).toContainEqual({ name: 'dsh-context', spec: 'dsh-context@0.41.3' })

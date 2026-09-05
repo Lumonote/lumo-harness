@@ -1,0 +1,7 @@
+{
+  "name": "fs-ext",
+  "version": "2.1.1",
+  "description": "Desktop single-process stub for fs-ext native locking (flock immediate success)",
+  "main": "index.js",
+  "license": "MIT"
+}
