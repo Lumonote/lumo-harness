@@ -143,24 +143,20 @@ export function applyLumoDshOverrides(root) {
     ],
   ], 'LUMO_SIDEBAR_NAVIGATION')
 
-  // A desktop process can die after a completed step and before the durable
-  // `turn/end` event is flushed. Older released-v0 logs are otherwise rejected
-  // when the next turn starts, even though all event sequence numbers and
-  // surface references remain intact. Treat exactly that boundary as an
-  // interrupted turn during validation; an open step or unresolved tool still
-  // refuses migration because the boundary is not recoverable without inventing
-  // events. This keeps the source artifact byte-for-byte unchanged.
+  // A sequential next turn proves the preceding turn was abandoned, including
+  // a step whose closing event was not flushed. Keep all messages and sequence
+  // references; pending tools still require recorded results before migration.
   patchFile(root, 'packages/session/session-format-v0-to-v1/src/relationships.ts', [[
     "      case 'turn/start':\n"
       + "        if (openTurn !== null || data['turn'] !== nextTurn) {\n"
       + "          throw new SessionFormatError(`turn/start ${JSON.stringify(data['turn'])} does not open expected turn ${nextTurn}`)\n"
       + "        }\n",
     "      case 'turn/start':\n"
-      + "        if (openTurn !== null && openStep === null && nextStep > 1\n"
-      + "          && data['turn'] === openTurn + 1) {\n"
-      + "          // LUMO_SESSION_RECOVERY: a clean next-turn boundary closes an interrupted prior turn.\n"
+      + "        if (openTurn !== null && data['turn'] === openTurn + 1) {\n"
+      + "          // LUMO_SESSION_RECOVERY: the sequential next turn abandons an interrupted prior step/turn.\n"
       + "          assertNoUnresolvedTools(toolLifecycles, 'turn/start recovery')\n"
       + "          openTurn = null\n"
+      + "          openStep = null\n"
       + "          nextTurn += 1\n"
       + "        }\n"
       + "        if (openTurn !== null || data['turn'] !== nextTurn) {\n"

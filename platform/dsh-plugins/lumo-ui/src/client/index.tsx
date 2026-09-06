@@ -36,7 +36,7 @@ function activeClientRoots(): WeakSet<object> {
 // entire conversation source project into this package's isolated compiler.
 interface ComposerInputOwner {
   readonly session: unknown
-  readonly input: unknown
+  readonly input: ConversationInputState
   readonly inputActions?: ConversationInputActions
 }
 
@@ -58,7 +58,7 @@ interface ConversationInputActions {
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
     'conversation.input.left': { kind: 'list'; scope: 'session'; owner: ComposerInputOwner }
-    'conversation.composer.dock': { kind: 'list'; scope: 'session'; owner: ComposerInputOwner }
+    'conversation.input.dock': { kind: 'list'; scope: 'session'; owner: ComposerInputOwner }
     'conversation.hero.input.left': { kind: 'list'; scope: 'root'; owner: HeroComposerOwner }
     'conversation.hero.composer.dock': { kind: 'list'; scope: 'root'; owner: HeroComposerOwner }
     // sidebar.navigation 由上游契约（dsh-overrides 补丁后，含 SidebarNavigationOwnerProps
@@ -69,7 +69,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 type Surface = 'knowledge' | 'skills' | 'connectors' | 'operations' | 'design' | 'presentation' | 'account' | 'market' | 'skillhub'
 type OverlayProps = PropsRuntime<'shell.overlay'>
 type SidebarNavigationProps = PropsRuntime<'sidebar.navigation'>
-type ComposerDockProps = PropsRuntime<'conversation.composer.dock'>
+type ComposerDockProps = PropsRuntime<'conversation.input.dock'>
 type HeroComposerDockProps = PropsRuntime<'conversation.hero.composer.dock'>
 
 interface ServiceState { ok: boolean; status: number; error?: string }
@@ -167,8 +167,8 @@ interface SkillSnapshot { complete: boolean; skills: RuntimeSkill[]; error?: str
 interface SkillHubSkill { id: string; name: string; tag: string; description: string; rating: number; downloads: number; source: string; verified: boolean; command: string; apiKey: boolean; icon?: string; publisher?: string; tags?: string[]; homepage?: string }
 interface SkillHubPack { id: string; name: string; role: string; category: string; description: string; skills: number; source: string; command?: string; icon?: string }
 interface SkillHubPlugin { id: string; name: string; category: string; description: string; stars: number; forks: number; source: string; installable: boolean; repo: string; icon?: string; homepage?: string }
-interface SkillHubInstalls { skills: string[]; packs: string[]; plugins: string[] }
-interface SkillHubCatalog { source: 'skillhub' | 'cache' | 'seed'; generatedAt: string; counts: { skills: number; packs: number; plugins: number }; categories?: { skills: string[]; packs: string[]; plugins: string[] }; skills: SkillHubSkill[]; packs: SkillHubPack[]; plugins: SkillHubPlugin[]; installed: SkillHubInstalls }
+interface SkillHubInstalls { skills: string[]; packs: string[]; plugins: string[]; commands?: Record<string, string[]> }
+interface SkillHubCatalog { source: 'skillhub' | 'cache' | 'seed'; generatedAt: string; counts: { skills: number; packs: number; plugins: number }; categories?: { skills: string[]; packs: string[]; plugins: string[] }; skills: SkillHubSkill[]; packs: SkillHubPack[]; plugins: SkillHubPlugin[]; installed: SkillHubInstalls; notice?: string }
 interface SkillHubSearchResult { kind: SkillHubKind; q: string; category: string; source: 'skillhub' | 'cache' | 'seed'; total: number; page: number; pageSize: number; skills: SkillHubSkill[]; packs: SkillHubPack[]; plugins: SkillHubPlugin[] }
 type SkillHubTab = '技能' | '专家包'
 type SkillHubKind = 'skill' | 'pack' | 'plugin'
@@ -197,7 +197,7 @@ const surfaceMeta: Record<Surface, { label: string; eyebrow: string; description
   knowledge: { label: '资料库', eyebrow: '知识连接', description: '检索已发布知识，保留来源、版本与相关度。', short: '资料' },
   design: { label: '开放设计', eyebrow: 'OpenDesign', description: '组织设计上下文，并把任务交给原有 open-design 插件执行。', short: '设计' },
   presentation: { label: 'PPT 生成', eyebrow: 'PPT Master', description: '通过 # 选择样例，再交给原有 ppt-master 插件继续对话生成。', short: '演示' },
-  skillhub: { label: '技能市场', eyebrow: 'SkillHub', description: '直接集成 SkillHub 的技能、专家包与插件，点击即装，安装后在对话中 @ 引用。', short: '市场' },
+  skillhub: { label: '技能市场', eyebrow: 'SkillHub', description: 'SkillHub 技能与专家包', short: '市场' },
   connectors: { label: '连接器', eyebrow: '连接器网关', description: '检查能力清单、调用协议与受控 Web 出站。', short: '连接' },
   account: { label: '用户中心', eyebrow: '身份与安全', description: '查看治理用户身份、安全策略与当前会话。', short: '账户' },
   market: { label: '更多', eyebrow: '应用与灵感', description: '查看已随桌面本地运行时装配的能力，并打开对应功能。', short: '更多' },
@@ -615,11 +615,13 @@ function SidebarNavigation({ wide }: SidebarNavigationProps) {
 }
 
 interface NativeConversationBridge {
+  getDraft(): string
   setDraft(text: string): void
   submit(): void
 }
 
 let nativeConversationBridge: NativeConversationBridge | null = null
+const nativeConversationBridges = new Set<NativeConversationBridge>()
 const nativeConversationListeners = new Set<() => void>()
 
 function publishNativeConversationBridge(next: NativeConversationBridge | null): void {
@@ -635,12 +637,18 @@ function useNativeConversationBridge(): NativeConversationBridge | null {
   )
 }
 
-function NativeConversationBridgeMount({ inputActions }: { inputActions: ConversationInputActions | undefined }) {
+function NativeConversationBridgeMount({ input, inputActions }: { input: ConversationInputState | undefined; inputActions: ConversationInputActions | undefined }) {
+  const draft = useRef('')
+  draft.current = input?.draft ?? ''
   useEffect(() => {
     if (inputActions === undefined) return
-    const bridge: NativeConversationBridge = { setDraft: text => inputActions.setDraft(text), submit: () => inputActions.submit() }
+    const bridge: NativeConversationBridge = { getDraft: () => draft.current, setDraft: text => inputActions.setDraft(text), submit: () => inputActions.submit() }
+    nativeConversationBridges.add(bridge)
     publishNativeConversationBridge(bridge)
-    return () => { if (nativeConversationBridge === bridge) publishNativeConversationBridge(null) }
+    return () => {
+      nativeConversationBridges.delete(bridge)
+      if (nativeConversationBridge === bridge) publishNativeConversationBridge([...nativeConversationBridges].at(-1) ?? null)
+    }
   }, [inputActions])
   return null
 }
@@ -869,13 +877,13 @@ function useFocusTrap(ref: { current: HTMLElement | null }, active: boolean): vo
 }
 
 function OpenDesignDock(props: ComposerDockProps) {
-  return <NativeConversationBridgeMount inputActions={props.inputActions} />
+  return <NativeConversationBridgeMount input={props.input} inputActions={props.inputActions} />
 }
 
 // 首页只保留原生对话桥；开放设计 / PPT 生成改由 /design、/ppt 命令或 ⌘K 打开，
 // 不再在输入框下方常驻一块创作工作台。
 function HeroOpenDesignDock(props: HeroComposerDockProps) {
-  return <NativeConversationBridgeMount inputActions={props.inputActions} />
+  return <NativeConversationBridgeMount input={props.input} inputActions={props.inputActions} />
 }
 
 function CommandPalette({ open, surface, select, close }: { open: boolean; surface: Surface; select: (surface: Surface) => void; close: () => void }) {
@@ -1251,9 +1259,12 @@ function metricValue(value: number): string {
   return String(value)
 }
 
-function mentionInComposer(bridge: NativeConversationBridge | null, token: string): boolean {
-  if (bridge === null) return false
-  bridge.setDraft('@' + token + ' ')
+function mentionInComposer(bridge: NativeConversationBridge | null, names: string[]): boolean {
+  if (bridge === null || names.length === 0) return false
+  const draft = bridge.getDraft()
+  const existing = new Set(draft.split(/\s+/))
+  const tokens = names.map(name => '/' + name).filter(token => !existing.has(token))
+  if (tokens.length) bridge.setDraft(draft + (draft && !/\s$/.test(draft) ? ' ' : '') + tokens.join(' ') + ' ')
   return true
 }
 
@@ -1324,13 +1335,17 @@ function SkillHubSurface() {
       .finally(() => { if (searchSeq.current === seq) setSearching(false) })
   }, [tab, committedQuery, filter, allLabel])
 
-  const install = async (kind: SkillHubKind, id: string, name: string, command?: string) => {
+  const install = async (kind: SkillHubKind, id: string, name: string) => {
+    if (installing !== '') return
     setInstalling(kind + ':' + id); setNotice('')
     try {
       const next = await api<SkillHubCatalog>('/lumo/api/skillhub/install', { method: 'POST', body: JSON.stringify({ kind, id }) })
       setCatalog(next)
-      setNotice('「' + name + '」已安装；在对话框输入 @' + (command ?? id) + ' 即可引用。')
-    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
+      setNotice(next.notice ?? '「' + name + '」已安装。')
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : String(reason))
+      try { setCatalog(await api<SkillHubCatalog>('/lumo/api/skillhub/catalog?cached=1')) } catch { /* keep the installation error */ }
+    }
     finally { setInstalling('') }
   }
 
@@ -1344,12 +1359,9 @@ function SkillHubSurface() {
   const loadedCount = tab === '技能' ? skills.length : packs.length
   const hasMore = total > 0 && loadedCount < total
 
-  const mention = (command: string | undefined, name: string) => {
-    const token = command ?? name
-    if (mentionInComposer(bridge, token)) {
-      // Reveal the native DSH composer (closes the Lumo workbench modal) so the
-      // @ mention lands in a conversation the user can see and send from. The
-      // composer shows the `@token` leading hint; the next Enter sends it.
+  const mention = (kind: SkillHubKind, id: string) => {
+    const names = catalog?.installed.commands?.[`${kind}:${id}`] ?? []
+    if (mentionInComposer(bridge, names)) {
       window.dispatchEvent(new CustomEvent(CLOSE_EVENT))
     } else {
       setNotice('请先选择工作区并创建会话，再把任务交给它。')
@@ -1379,9 +1391,10 @@ function SkillHubSurface() {
       .then(next => {
         if (searchSeq.current !== seq) return
         setResult(next); setTotal(next.total); setPage(next.page ?? nextPage)
-        const seen = new Set(skills.map(item => item.id))
-        const nextSkills = (next.skills ?? []).filter(item => !seen.has(item.id))
-        const nextPacks = (next.packs ?? []).filter(item => !seen.has(item.id))
+        const seenSkills = new Set(skills.map(item => item.id))
+        const seenPacks = new Set(packs.map(item => item.id))
+        const nextSkills = (next.skills ?? []).filter(item => !seenSkills.has(item.id))
+        const nextPacks = (next.packs ?? []).filter(item => !seenPacks.has(item.id))
         setSkills(current => [...current, ...nextSkills])
         setPacks(current => [...current, ...nextPacks])
         // 深层翻页若返回空（或全被去重），说明 service 已到底：把 total 收敛到已加载数防止空转。
@@ -1399,11 +1412,11 @@ function SkillHubSurface() {
   const syncedAt = catalog ? new Date(catalog.generatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''
   const switchTab = (next: SkillHubTab) => { setTab(next); setQuery(''); setFilter('全部'); setCommittedQuery(''); setSkills([]); setPacks([]); setTotal(0); setPage(1); setResult(null) }
 
-  const actions = (kind: SkillHubKind, id: string, name: string, installed: boolean, command?: string, label = '安装') => {
+  const actions = (kind: SkillHubKind, id: string, name: string, installed: boolean, label = '安装') => {
     const busy = installing === (kind + ':' + id)
-    if (installed) return <><span className="lumo-skillhub-installed">已安装</span><button type="button" className="lumo-button lumo-secondary" onClick={() => mention(command, name)} aria-label={'在对话中 @ 引用 ' + name}>@ 对话</button></>
+    if (installed) return <><span className="lumo-skillhub-installed">已安装</span>{catalog?.installed.commands?.[`${kind}:${id}`]?.length ? <button type="button" className="lumo-button lumo-secondary" onClick={() => mention(kind, id)} aria-label={'在对话中使用 ' + name}>用于对话</button> : <span className="lumo-skillhub-installed">自动调用</span>}</>
     if (busy) return <span className="lumo-skillhub-installing"><BusyButton className="lumo-primary" busy>{label}</BusyButton><em>正在安装…</em><span className="lumo-skillhub-progress" role="progressbar" aria-label={`正在安装 ${name}`} aria-valuetext="安装中"><i /></span></span>
-    return <BusyButton className="lumo-primary" onClick={() => void install(kind, id, name, command)}>{label}</BusyButton>
+    return <BusyButton className="lumo-primary" disabled={installing !== ''} onClick={() => void install(kind, id, name)}>{label}</BusyButton>
   }
 
   return <div className="lumo-surface lumo-skillhub-surface">
@@ -1427,13 +1440,13 @@ function SkillHubSurface() {
         <header><SkillHubMark icon={skill.icon} name={skill.name} tone={toneFor(skill.tag)} /><div className="lumo-skillhub-title"><b title={skill.name}>{skill.name}</b><small>{skill.publisher ? skill.publisher + ' · ' : ''}{skill.source}{skill.verified ? <em className="lumo-skillhub-verified">✓ 认证</em> : null}</small></div></header>
         <p>{skill.description || '暂无描述。'}</p>
         <div className="lumo-skillhub-chips"><span className="lumo-skillhub-tag" data-tone={toneFor(skill.tag)}>{skill.tag}</span>{skill.apiKey ? <span className="lumo-skillhub-key">需 API Key</span> : null}{(skill.tags ?? []).slice(0, 2).map(tag => <span key={tag} className="lumo-skillhub-tag">{tag}</span>)}</div>
-        <footer><span className="lumo-skillhub-stats"><span>★ {skill.rating}</span><span>下载 {metricValue(skill.downloads)}</span><code>/{skill.command}</code></span><span className="lumo-skillhub-actions">{actions('skill', skill.id, skill.name, installedSkills.has(skill.id), skill.command)}</span></footer>
+        <footer><span className="lumo-skillhub-stats"><span>★ {skill.rating}</span><span>下载 {metricValue(skill.downloads)}</span><code>/{skill.command}</code></span><span className="lumo-skillhub-actions">{actions('skill', skill.id, skill.name, installedSkills.has(skill.id))}</span></footer>
       </SkillHubCard>)}</div> : <Empty>{skillhubTabMeta[tab].empty}</Empty>)
       : tab === '专家包' ? (packs.length ? <div className="lumo-skillhub-grid">{packs.map((pack, index) => <SkillHubCard key={pack.id} index={index} tone={toneFor(pack.category)}>
         <header><SkillHubMark icon={pack.icon} name={pack.name} tone={toneFor(pack.category)} /><div className="lumo-skillhub-title"><b title={pack.name}>{pack.name}</b><small>{pack.role ? pack.role + ' · ' : ''}{pack.source}</small></div></header>
         <p>{pack.description || '暂无描述。'}</p>
         <div className="lumo-skillhub-chips"><span className="lumo-skillhub-tag" data-tone={toneFor(pack.category)}>{pack.category}</span><span className="lumo-skillhub-tag">{pack.skills} 个技能</span></div>
-        <footer><span className="lumo-skillhub-stats">{pack.command ? <code>/{pack.command}</code> : null}</span><span className="lumo-skillhub-actions">{actions('pack', pack.id, pack.name, installedPacks.has(pack.id), pack.command, '安装专家包')}</span></footer>
+        <footer><span className="lumo-skillhub-stats" /><span className="lumo-skillhub-actions">{actions('pack', pack.id, pack.name, installedPacks.has(pack.id), '安装专家包')}</span></footer>
       </SkillHubCard>)}</div> : <Empty>{skillhubTabMeta[tab].empty}</Empty>)
       : null}
     {!loading && hasMore ? <div ref={listEndRef} className="lumo-skillhub-more" role="status">{searching ? <span><i className="lumo-skillhub-spinner" aria-hidden="true" />正在加载更多…</span> : tab === '技能' ? '继续向下滚动，加载更多技能' : '继续向下滚动，加载更多专家包'}</div> : null}
@@ -2383,8 +2396,8 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'lumo-platform', order: 100 }, LumoOverlay))
 
 
-  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register(
-    { name: 'conversation.composer.dock', id: 'lumo-native-skill-bridge', order: 20, label: 'Lumo 原生技能桥' },
+  ctx.slots.inject('conversation.input.dock', () => ctx.slots.register(
+    { name: 'conversation.input.dock', id: 'lumo-native-skill-bridge', order: 20, label: 'Lumo 原生技能桥' },
     OpenDesignDock,
   ))
   ctx.slots.inject('conversation.hero.composer.dock', () => ctx.slots.register(

@@ -95,6 +95,7 @@ describe('Lumo native Harness integration', () => {
   const calls: string[] = []
 
   beforeEach(() => {
+    vi.stubGlobal('localStorage', window.localStorage)
     history.replaceState({}, '', '/')
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
@@ -141,7 +142,7 @@ describe('Lumo native Harness integration', () => {
         path.startsWith('/lumo/api/skillhub/search') ? (path.includes('kind=pack')
           ? { kind: 'pack', q: '', category: '', source: 'seed', total: 1, page: 1, pageSize: 24, skills: [], packs: [skillhubCatalog.packs[0]!], plugins: [] }
           : { kind: 'skill', q: '', category: '', source: 'seed', total: 1, page: 1, pageSize: 24, skills: [skillhubCatalog.skills[0]!], packs: [], plugins: [] }) :
-        init?.method === 'POST' && path === '/lumo/api/skillhub/install' ? { ...skillhubCatalog, installed: { skills: ['tencent-docs'], packs: ['automation-testing'], plugins: ['modlens'] } } :
+        init?.method === 'POST' && path === '/lumo/api/skillhub/install' ? { ...skillhubCatalog, installed: { skills: ['tencent-docs'], packs: ['automation-testing'], plugins: ['modlens'], commands: { 'skill:tencent-docs': ['docs-live'], 'pack:automation-testing': ['test-first', 'browser-test'] } } } :
         path === '/lumo/api/skills' ? { complete: true, skills: [
           { name: 'open-design', description: '以产物优先的方式创建、完善、预览并导出真实设计产物。', whenToUse: '适用于原型、落地页、看板和视觉升级。', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 'lumo-open-design' },
           { name: 'ppt-master', description: '从主题、文档或现有模板生成、编辑和增强原生可编辑 PPTX。', whenToUse: '适用于演示文稿生成、模板填充和原生 PPTX 编辑。', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 'lumo-creative-skills' },
@@ -305,7 +306,9 @@ describe('Lumo native Harness integration', () => {
     const overlay = registered.find(item => item.name === 'shell.overlay')
     const Entry = entry!.Component
     const Overlay = overlay!.Component
-    render(<><Entry wide /><Overlay /></>)
+    const Dock = registered.find(item => item.name === 'conversation.hero.composer.dock')!.Component
+    const setDraft = vi.fn()
+    render(<><Entry wide /><Overlay /><Dock inputActions={{ setDraft, submit: vi.fn() }} /></>)
 
     fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '技能市场' }))
     // 默认技能 tab：SkillHub 卡片渲染名称、评分、下载量与来源。
@@ -313,17 +316,21 @@ describe('Lumo native Harness integration', () => {
     expect(screen.getByText('下载 71.9万')).toBeTruthy()
     expect(calls.some(call => call === 'GET /lumo/api/skillhub/catalog')).toBe(true)
 
-    // 快速安装：POST 后卡片切换为「已安装」并出现 @ 对话入口。
+    // Use the loaded skill name even when it differs from the marketplace slug.
     fireEvent.click(screen.getByRole('button', { name: '安装' }))
     expect(await screen.findByText('已安装')).toBeTruthy()
     expect(calls.some(call => call === 'POST /lumo/api/skillhub/install')).toBe(true)
-    const mention = screen.getByRole('button', { name: /在对话中 @ 引用/ })
-    expect(mention).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /在对话中使用/ }))
+    expect(setDraft).toHaveBeenLastCalledWith('/docs-live ')
 
     // 第二个 tab：专家包。
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '技能市场' }))
     fireEvent.click(screen.getByRole('tab', { name: /专家包/ }))
     expect(await screen.findByText('自动化测试')).toBeTruthy()
     expect(screen.getByText('6 个技能')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '安装专家包' }))
+    fireEvent.click(await screen.findByRole('button', { name: '在对话中使用 自动化测试' }))
+    expect(setDraft).toHaveBeenLastCalledWith('/test-first /browser-test ')
   }, 15000)
 
   it('keeps the home composer clean and opens creative workbenches only through /design and /ppt', async () => {

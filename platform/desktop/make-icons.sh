@@ -23,5 +23,18 @@ for size in 16 32 128 256 512; do
   sips -z "$size" "$size" "$icons/icon.png" --out "$iconset/icon_${size}x${size}.png" >/dev/null
   sips -z "$double" "$double" "$icons/icon.png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
-iconutil -c icns "$iconset" -o "$icons/Lumo.icns"
+if ! iconutil -c icns "$iconset" -o "$icons/Lumo.icns"; then
+  # macOS 15's iconutil can reject CoreGraphics-generated PNG metadata even
+  # when the iconset has the documented names and pixel dimensions. Keep the
+  # checked-in ICNS only when it is valid and still contains this exact 1024px
+  # source image; otherwise do not silently ship a stale or missing icon.
+  existing="$build/Lumo-existing.iconset"
+  rm -rf "$existing"
+  if ! iconutil -c iconset "$icons/Lumo.icns" -o "$existing" >/dev/null 2>&1 \
+    || ! cmp -s "$icons/icon.png" "$existing/icon_512x512@2x.png"; then
+    echo "无法生成 $icons/Lumo.icns，且现有 ICNS 无效或与 icon.png 不匹配" >&2
+    exit 1
+  fi
+  echo "警告：iconutil 拒绝当前 iconset，保留已验证的 $icons/Lumo.icns" >&2
+fi
 echo "已生成 $icons/Lumo.icns"

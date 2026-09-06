@@ -3,6 +3,8 @@
   "compilerOptions": { "rootDir": "src", "outDir": "lib/types", "types": ["node"], "jsx": "react-jsx" },
   "include": ["src", "src/**/*.d.ts"],
   "references": [
+    { "path": "../../../deepseek-harness/packages/skill/skill" },
+    { "path": "../../../deepseek-harness/packages/skill/skill-filesystem" },
     { "path": "../../../deepseek-harness/vendor/cordis" },
     { "path": "../../../deepseek-harness/packages/client/ui-renderer" },
     { "path": "../../../deepseek-harness/packages/client/ui-layout" },

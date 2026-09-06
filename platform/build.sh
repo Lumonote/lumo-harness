@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# 一键构建入口：12 个 Docker 镜像 + macOS 桌面包（darwin-arm64 / darwin-x64）。
+# 一键构建入口：12 个 Docker 镜像 + 桌面包（macOS / Windows）。
 #
 # 本地与 CI（.github/workflows/release.yml）共用这一份脚本，避免「本地能跑、CI 产出
 # 不一样」的双份维护。设计见 docs/superpowers/specs/2026-09-02-one-click-build-design.md。
 #
 #   ./platform/build.sh                        # 默认 = --targets images
 #   ./platform/build.sh --targets darwin-arm64
+#   ./platform/build.sh --targets win-x64       # Windows MSI + NSIS 安装包
 #   ./platform/build.sh --targets all          # 镜像 + 本机架构桌面包
 #   ./platform/build.sh --targets images --push --registry ghcr.io/lumo-harness \
 #                       --platform linux/amd64,linux/arm64
@@ -55,8 +56,8 @@ usage() {
 usage: $0 [--targets <list>] [--registry <prefix>] [--version <v>] [--push]
           [--platform <p1,p2>] [--jobs <n>] [--dry-run]
 
-  --targets   逗号分隔：images | darwin-arm64 | darwin-x64 | all | win-x64（报错）
-              默认 images。all = 镜像 + 宿主架构桌面包（非 macOS 上仅镜像）。
+  --targets   逗号分隔：images | darwin-arm64 | darwin-x64 | win-x64 | all
+              默认 images。all = 镜像 + 宿主架构桌面包（非桌面宿主上仅镜像）。
   --registry  设置后镜像 tag 为 <registry>/<name>:<version>；否则 lumo/<name>:dev
   --version   默认读 platform/package.json
   --push      推送镜像，需配合 --registry；推送前校验三处版本一致
@@ -99,14 +100,20 @@ done
 
 # ---- 宿主 ----
 # LUMO_BUILD_HOST_OS / LUMO_BUILD_HOST_ARCH 仅供 --dry-run 测试模拟另一台构建机。
-host_os="${LUMO_BUILD_HOST_OS:-$(uname -s)}"
+raw_host_os="${LUMO_BUILD_HOST_OS:-$(uname -s)}"
+case "$raw_host_os" in
+  Darwin) host_os="Darwin" ;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT) host_os="Windows" ;;
+  *) host_os="$raw_host_os" ;;
+esac
 host_arch="${LUMO_BUILD_HOST_ARCH:-$(uname -m)}"
 case "$host_arch" in
-  arm64|aarch64) host_arch="arm64" ;;
-  x86_64|amd64) host_arch="x64" ;;
+  arm64|aarch64|ARM64) host_arch="arm64" ;;
+  x86_64|amd64|AMD64|x64) host_arch="x64" ;;
 esac
 host_desktop_target=""
 [[ "$host_os" == "Darwin" ]] && host_desktop_target="darwin-$host_arch"
+[[ "$host_os" == "Windows" ]] && host_desktop_target="win-$host_arch"
 
 if [[ -z "$jobs" ]]; then
   jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4)"
@@ -130,22 +137,6 @@ add_desktop_target() {
   esac
 }
 
-print_windows_gap() {
-  cat >&2 <<'EOF'
-build.sh: --targets win-x64 尚不支持。桌面打包链从头到尾假设「macOS + 构建机架构」，
-Windows 是一次独立的移植工作（设计 §1），不是给脚本加一个 flag：
-
-  位置                                  硬编码                                    后果
-  desktop/build-runtime.mjs keepOnly    只保留 darwin 原生二进制                   非 darwin 的 onnxruntime/node-pty/ripgrep 被删
-  desktop/build-runtime.mjs otool/lipo  Mach-O 专用可移植性与架构闸门              Node 与 Python 的唯一闸门
-  upstream/install-components.sh        宿主 python3 -m venv → bin/python          Windows venv 是 Scripts/python.exe
-  desktop/lumo-runtime.sh               #!/bin/sh、~/Library/Application Support   Windows 无 POSIX shell，路径不成立
-  desktop/src/main.rs                   候选路径全是 lumo-runtime.sh + Contents/   启动器只认 macOS .app 布局
-  desktop/make-dmg.sh                   hdiutil                                   macOS 专用
-EOF
-  exit 2
-}
-
 IFS=',' read -r -a requested <<<"$targets_arg"
 for target in "${requested[@]}"; do
   target="$(echo "$target" | tr -d '[:space:]')"
@@ -158,16 +149,20 @@ for target in "${requested[@]}"; do
       add_desktop_target "$target"
       ;;
     all)
-      # all 是「尽力而为」：非 macOS 上只出镜像并说明。
+      # all 是「尽力而为」：非 macOS/Windows 上只出镜像并说明。
       want_images=1
-      if [[ -n "$host_desktop_target" ]]; then
+      if [[ "$host_os" == "Darwin" || "$host_os" == "Windows" ]]; then
         add_desktop_target "$host_desktop_target"
       else
-        echo "build.sh: 宿主 $host_os 不是 macOS，--targets all 仅构建镜像，跳过桌面包"
+        echo "build.sh: 宿主 $host_os 不支持桌面包，--targets all 仅构建镜像，跳过桌面包"
       fi
       ;;
-    win-x64) print_windows_gap ;;
-    *) die "未知 target：${target}（可用：images, darwin-arm64, darwin-x64, all）" ;;
+    win-x64)
+      [[ "$host_os" == "Windows" ]] || die "$target 只能在 Windows 上构建（当前宿主：${host_os}）"
+      [[ "$host_arch" == "x64" ]] || die "$target 需要 x64 Windows 构建机（当前架构：${host_arch}）"
+      add_desktop_target "$target"
+      ;;
+    *) die "未知 target：${target}（可用：images, darwin-arm64, darwin-x64, win-x64, all）" ;;
   esac
 done
 [[ $want_images -eq 1 || -n "$desktop_targets" ]] || die "没有可构建的 target：$targets_arg"
@@ -277,30 +272,50 @@ build_images() {
 
 # ---- 桌面包（§4）----
 build_desktop() {
-  local target="$1" arch="${1#darwin-}"
-  local lipo_arch="x86_64"
-  [[ "$arch" == "arm64" ]] && lipo_arch="arm64"
+  local target="$1"
   echo "== 桌面包 $target =="
   if [[ "$target" != "$host_desktop_target" ]]; then
-    # x64 venv 必须在 x64 环境里建（native wheel），Rust 壳同理；跨架构走 CI。
-    die "$target 不能在 $host_desktop_target 宿主上构建：PPT venv 与 Rust 壳都要求宿主架构一致。请走 CI（release.yml 的 macos-13 = x64 / macos-14 = arm64）。"
+    # native Python wheels 与 Rust 壳都要求宿主平台/架构一致。
+    die "$target 不能在 $host_desktop_target 宿主上构建：PPT venv 与 Rust 壳都要求宿主平台和架构一致。"
   fi
   ensure_dsh_source_unless_dry
   run bash "$platform_root/upstream/install-components.sh" --target "$target"
-  # tauri 的 beforeBuildCommand 调 build-runtime.mjs；target 经环境变量传入
-  # （与 package.json 的 desktop:dmg 一样在 desktop/ 目录下执行）。
-  run env "LUMO_DESKTOP_TARGET=$target" cargo tauri build --bundles app
-  run bash "$platform_root/desktop/make-dmg.sh"
-  # 唯一能证明「x64 包真是 x64 包」的检查（§6）。
-  local node_bin="$platform_root/desktop/target/release/bundle/macos/Lumo.app/Contents/Resources/runtime/node"
-  if [[ $dry_run -eq 1 ]]; then
-    printf '+ lipo -archs %q  # 断言 == %s\n' "$node_bin" "$lipo_arch"
-  else
-    local archs; archs="$(lipo -archs "$node_bin")"
-    [[ "$archs" == "$lipo_arch" ]] || die "打包 Node 架构为 [$archs]，期望 ${lipo_arch}：$node_bin"
-    echo "桌面包 Node 架构校验通过：$archs"
-    ls "$platform_root"/desktop/target/release/bundle/dmg/Lumo_*_*.dmg
-  fi
+  # tauri 的 beforeBuildCommand 调 build-runtime.mjs；target 经环境变量传入。
+  case "$target" in
+    darwin-arm64|darwin-x64)
+      run env "LUMO_DESKTOP_TARGET=$target" cargo tauri build --bundles app
+      run bash "$platform_root/desktop/make-dmg.sh"
+      # 唯一能证明「x64 包真是 x64 包」的检查。
+      local arch="${target#darwin-}" lipo_arch="x86_64"
+      [[ "$arch" == "arm64" ]] && lipo_arch="arm64"
+      local node_bin="$platform_root/desktop/target/release/bundle/macos/DeepSeek Harness.app/Contents/Resources/runtime/node"
+      if [[ $dry_run -eq 1 ]]; then
+        printf '+ lipo -archs %q  # 断言 == %s\n' "$node_bin" "$lipo_arch"
+      else
+        local archs; archs="$(lipo -archs "$node_bin")"
+        [[ "$archs" == "$lipo_arch" ]] || die "打包 Node 架构为 [$archs]，期望 ${lipo_arch}：$node_bin"
+        echo "桌面包 Node 架构校验通过：$archs"
+        ls "$platform_root"/desktop/target/release/bundle/dmg/DeepSeek-Harness_*_*.dmg
+      fi
+      ;;
+    win-x64)
+      run env "LUMO_DESKTOP_TARGET=$target" cargo tauri build --bundles msi,nsis
+      local bundle_root="$platform_root/desktop/target/release/bundle"
+      if [[ $dry_run -eq 1 ]]; then
+        printf '+ test -n "$(find %q -type f -name "*.msi" -print -quit)"  # Windows MSI\n' "$bundle_root/msi"
+        printf '+ test -n "$(find %q -type f -name "*.exe" -print -quit)"  # Windows NSIS\n' "$bundle_root/nsis"
+      else
+        local msi nsis
+        msi="$(find "$bundle_root/msi" -type f -name '*.msi' -print -quit 2>/dev/null || true)"
+        nsis="$(find "$bundle_root/nsis" -type f -name '*.exe' -print -quit 2>/dev/null || true)"
+        [[ -n "$msi" ]] || die "Windows MSI 产物不存在：$bundle_root/msi"
+        [[ -n "$nsis" ]] || die "Windows NSIS 产物不存在：$bundle_root/nsis"
+        echo "Windows 安装包构建完成："
+        printf '  %s\n  %s\n' "$msi" "$nsis"
+      fi
+      ;;
+    *) die "内部错误：未知桌面 target：$target" ;;
+  esac
 }
 
 # ---- 第一铁律收尾（§6）----

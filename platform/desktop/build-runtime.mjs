@@ -18,6 +18,8 @@ import { createRequire } from 'node:module'
 import { arch as hostArch, platform as hostPlatform } from 'node:os'
 import { createHash } from 'node:crypto'
 import { overriddenPackageDirectories } from '../dsh-overrides/apply.mjs'
+import { resolveWorkspaceNodeTool } from './node-tools.mjs'
+import { prepareSkillHubArchive, stageSkillHub } from './skillhub-tooling.mjs'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(desktopRoot, '..', '..')
@@ -42,13 +44,14 @@ const bundledSkillSources = resolve(repoRoot, 'platform', 'upstream', 'skill-sou
 // ---- 构建目标 ----
 // 桌面包按 target 选二进制（Node、Python），而不是「构建机上恰好有什么」。target 由
 // build.sh 经 LUMO_DESKTOP_TARGET 传入（tauri 的 beforeBuildCommand 不接受参数），
-// 也可直接 `node build-runtime.mjs --target darwin-x64`。默认宿主架构。
-// 目前只发 macOS：keepOnly(..., 'darwin') 仍只保留 darwin 原生二进制；Windows/Linux
-// 是独立移植（设计 §1），不是给这里加一个 target 名字。
-const SUPPORTED_TARGETS = ['darwin-arm64', 'darwin-x64']
+// 也可直接 `node build-runtime.mjs --target win-x64`。默认宿主平台与架构。
+const SUPPORTED_TARGETS = ['darwin-arm64', 'darwin-x64', 'win-x64']
 const buildTarget = resolveBuildTarget()
-const targetArch = buildTarget.slice('darwin-'.length)
-// lipo -archs 报 x86_64 而非 x64。
+const targetPlatform = buildTarget.startsWith('win-') ? 'win32' : 'darwin'
+const targetArch = buildTarget.slice(targetPlatform === 'win32' ? 'win-'.length : 'darwin-'.length)
+const targetNativePty = targetPlatform === 'win32' ? `win32-${targetArch}` : `darwin-${targetArch}`
+const targetNativeRipgrep = targetPlatform === 'win32' ? `${targetArch}-win32` : `${targetArch}-darwin`
+// lipo -archs 报 x86_64 而非 x64；Windows 目标只有官方 x64 Node。
 const targetLipoArch = targetArch === 'x64' ? 'x86_64' : 'arm64'
 // 与 nodejs.org 发布文件名一致；LUMO_RUNTIME_NODE 钉死本地文件时不下载。
 const RUNTIME_NODE_VERSION = process.env['LUMO_RUNTIME_NODE_VERSION'] ?? '24.19.0'
@@ -93,6 +96,7 @@ if (!existsSync(resolve(dshRoot, 'package.json'))) {
 // The packaged app must not run pnpm or reach the registry on first launch.
 // Resolve the upstream plugin packages once while building, then copy their
 // complete production dependency closure into the app bundle below.
+const skillhubArchive = prepareSkillHubArchive(resolve(repoRoot, 'platform', '.build', 'skillhub'))
 prepareUpstreamPlugins()
 
 // Rebuild the resident DSH client packages first: their compiled clients are
@@ -309,14 +313,17 @@ const pptPython = bundlePptPython()
 const prunedBytes = pruneStagedRuntime()
 assertTargetNativePayload()
 
-const runtimeNode = resolve(stagingRoot, 'node')
+const runtimeNode = resolve(stagingRoot, targetPlatform === 'win32' ? 'node.exe' : 'node')
 const nodeSource = findPortableNode()
 cpSync(nodeSource, runtimeNode)
-chmodSync(runtimeNode, 0o755)
+if (targetPlatform !== 'win32') chmodSync(runtimeNode, 0o755)
 assertBinaryArchitecture(runtimeNode, '打包 Node')
 // 把随 Node 发行的 corepack/npm 与 pnpm shim 塞进 runtime，并落到 PATH——否则打包后插件市场
 // 更新插件时会报“未找到 pnpm/corepack/npx”（见 stageNodeTooling 与 lumo-runtime.sh）。
 stageNodeTooling(nodeSource, resolve(stagingRoot, 'bin'), resolve(stagingRoot, 'lib', 'node_modules'))
+// Both launchers export bin/skillhub.mjs. Ship the actual CLI and check it using
+// the final, pruned Python runtime before Tauri is allowed to bundle resources.
+const skillhub = stageSkillHub(stagingRoot, skillhubArchive, targetPlatform)
 
 const runtimeNodeSource = resolve(dshNodeRoot)
 cpSync(runtimeNodeSource, resolve(stagingRoot, 'dsh-node'), {
@@ -330,10 +337,11 @@ cpSync(runtimeNodeSource, resolve(stagingRoot, 'dsh-node'), {
   },
 })
 
-const launcherSource = resolve(desktopRoot, 'lumo-runtime.sh')
-const launcherDestination = resolve(stagingRoot, 'lumo-runtime.sh')
+const launcherName = targetPlatform === 'win32' ? 'lumo-runtime.cmd' : 'lumo-runtime.sh'
+const launcherSource = resolve(desktopRoot, launcherName)
+const launcherDestination = resolve(stagingRoot, launcherName)
 cpSync(launcherSource, launcherDestination)
-chmodSync(launcherDestination, 0o755)
+if (targetPlatform !== 'win32') chmodSync(launcherDestination, 0o755)
 
 writeFileSync(resolve(stagingRoot, 'runtime-manifest.json'), `${JSON.stringify({
   target: buildTarget,
@@ -341,8 +349,9 @@ writeFileSync(resolve(stagingRoot, 'runtime-manifest.json'), `${JSON.stringify({
   nodeSource,
   packageCount: packageSources.size,
   python: pptPython,
+  skillhub,
   prunedBytes,
-  entrypoint: 'lumo-runtime.sh',
+  entrypoint: launcherName,
   upstreamPlugins: upstreamPluginSpecs,
   bundledSkills: JSON.parse(readFileSync(bundledSkillSources, 'utf8')).skills,
   generatedAt: new Date().toISOString(),
@@ -356,7 +365,10 @@ console.log(`桌面 runtime 已准备：${buildTarget}，${packageSources.size} 
 runPlatformScript('assert-pristine.mjs', [sourceDshRoot], '构建把产物写回了上游源码树')
 
 function bundlePptPython() {
-  const venvPython = resolve(pptVenvRoot, 'bin', 'python')
+  const windows = targetPlatform === 'win32'
+  const venvPython = windows
+    ? resolve(pptVenvRoot, 'Scripts', 'python.exe')
+    : resolve(pptVenvRoot, 'bin', 'python')
   if (!existsSync(venvPython)) {
     throw new Error(`无法构建桌面 runtime：PPT Master Python 环境不存在（${pptVenvRoot}）。请先执行 platform/upstream/install-components.sh --target ${buildTarget}`)
   }
@@ -371,11 +383,13 @@ function bundlePptPython() {
   const baseRoot = realpathSync(inspected.base)
   const sitePackages = realpathSync(inspected.site)
   const versionDirectory = `python${inspected.version}`
-  const baseSitePackages = resolve(baseRoot, 'lib', versionDirectory, 'site-packages')
+  const baseSitePackages = windows
+    ? resolve(baseRoot, 'Lib', 'site-packages')
+    : resolve(baseRoot, 'lib', versionDirectory, 'site-packages')
   const destination = resolve(stagingRoot, 'python')
   const portableExecutable = realpathSync(venvPython)
-  if (!isPortableDarwinBinary(portableExecutable)) {
-    throw new Error(`PPT Master Python 不是可重定位的 macOS 解释器：${portableExecutable}`)
+  if (!isPortableRuntimeBinary(portableExecutable)) {
+    throw new Error(`PPT Master Python 不是可重定位的 ${targetPlatform} 解释器：${portableExecutable}`)
   }
   assertBinaryArchitecture(portableExecutable, 'PPT Master Python')
 
@@ -390,7 +404,10 @@ function bundlePptPython() {
       return !rel.split(sep).some((part) => part === '__pycache__')
     },
   })
-  cpSync(sitePackages, resolve(destination, 'lib', versionDirectory, 'site-packages'), {
+  const runtimeSitePackages = windows
+    ? resolve(destination, 'Lib', 'site-packages')
+    : resolve(destination, 'lib', versionDirectory, 'site-packages')
+  cpSync(sitePackages, runtimeSitePackages, {
     recursive: true,
     dereference: true,
     filter(source) {
@@ -398,8 +415,10 @@ function bundlePptPython() {
       return !relative(sitePackages, source).split(sep).some((part) => part === '__pycache__')
     },
   })
-  const runtimePython = resolve(destination, 'bin', 'python3')
-  chmodSync(runtimePython, 0o755)
+  const runtimePython = windows
+    ? resolve(destination, 'python.exe')
+    : resolve(destination, 'bin', 'python3')
+  if (!windows) chmodSync(runtimePython, 0o755)
   const verify = spawnSync(runtimePython, ['-c', 'import pptx, yaml, fitz, flask; print("LUMO_PPT_IMPORTS_OK")'], {
     encoding: 'utf8',
     env: { ...process.env, PYTHONHOME: destination, PYTHONNOUSERSITE: '1', PYTHONDONTWRITEBYTECODE: '1' },
@@ -413,7 +432,7 @@ function bundlePptPython() {
       || [verify.stderr, verify.stdout].filter((value) => value?.trim()).join('\n').trim()
     throw new Error(`打包后的 PPT Master Python 不可用：${detail || '依赖导入失败'}`)
   }
-  return { version: inspected.version, entrypoint: 'python/bin/python3', skill: 'ppt-master@5.1.0' }
+  return { version: inspected.version, entrypoint: windows ? 'python/python.exe' : 'python/bin/python3', skill: 'ppt-master@5.1.0' }
 }
 
 // ---- 产物体积裁剪 ----
@@ -431,13 +450,14 @@ function pruneStagedRuntime() {
     reclaimed += lstatSync(path).size
     rmSync(path, { force: true })
   }
-  const targetOnnxBinding = join(modulesRoot, 'onnxruntime-node', 'bin', 'napi-v6', 'darwin', targetArch, 'onnxruntime_binding.node')
+  const targetOnnxBinding = join(modulesRoot, 'onnxruntime-node', 'bin', 'napi-v6', targetPlatform, targetArch, 'onnxruntime_binding.node')
   const hasTargetOnnx = existsSync(targetOnnxBinding)
-  // 1) 原生二进制只保留当前桌面架构。此前两种 darwin 架构一起打包，
+  // 1) 原生二进制只保留当前桌面平台和架构。此前多种平台/架构一起打包，
   //    不仅浪费几十 MB，还可能让 x64 Node 误加载 arm64 ONNX 动态库。
-  keepOnly(join(modulesRoot, 'onnxruntime-node', 'bin', 'napi-v6', 'darwin'), (name) => name === targetArch, removeTree)
-  keepOnly(join(modulesRoot, 'node-pty', 'prebuilds'), (name) => name === `darwin-${targetArch}`, removeTree)
-  keepOnly(join(modulesRoot, '@anthropic-ai', 'claude-agent-sdk', 'vendor', 'ripgrep'), (name) => name === 'COPYING' || name === `${targetArch}-darwin`, removeTree)
+  keepOnly(join(modulesRoot, 'onnxruntime-node', 'bin', 'napi-v6'), (name) => name === targetPlatform, removeTree)
+  keepOnly(join(modulesRoot, 'onnxruntime-node', 'bin', 'napi-v6', targetPlatform), (name) => name === targetArch, removeTree)
+  keepOnly(join(modulesRoot, 'node-pty', 'prebuilds'), (name) => name === targetNativePty, removeTree)
+  keepOnly(join(modulesRoot, '@anthropic-ai', 'claude-agent-sdk', 'vendor', 'ripgrep'), (name) => name === 'COPYING' || name === targetNativeRipgrep, removeTree)
   // 1.5) fs-ext 原生锁定桩：fs-ext@2.1.1 的 C++ 无法在打包 Node 24 的 V8 头上编译，
   //    而桌面 worker 是单进程（无跨进程写入者），与上游 browser-worker 部署的
   //    fs-ext stub 同语义（session-persistence-jsonl/src/lease.ts）。替换闭包里
@@ -456,10 +476,12 @@ function pruneStagedRuntime() {
   // 3) 全树死重：sourcemap、测试/文档/示例目录。
   pruneDeadWeight(modulesRoot, removeTree, removeFile, { isPackageRoot: false })
   // 4) Python：密封运行时里用不到 pip/ensurepip/idle/turtle 和解释器自带的单元测试。
-  const pythonLibRoot = resolve(stagingRoot, 'python', 'lib')
+  const pythonLibRoot = resolve(stagingRoot, 'python', targetPlatform === 'win32' ? 'Lib' : 'lib')
   if (existsSync(pythonLibRoot)) {
-    for (const versionDirectory of readdirSync(pythonLibRoot)) {
-      const stdlibRoot = join(pythonLibRoot, versionDirectory)
+    const stdlibRoots = targetPlatform === 'win32'
+      ? [pythonLibRoot]
+      : readdirSync(pythonLibRoot).map((versionDirectory) => join(pythonLibRoot, versionDirectory))
+    for (const stdlibRoot of stdlibRoots) {
       for (const name of ['ensurepip', 'idlelib', 'test', 'turtledemo', 'turtle.py']) removeTree(join(stdlibRoot, name))
       const sitePackages = join(stdlibRoot, 'site-packages')
       removeTree(join(sitePackages, 'pip'))
@@ -512,7 +534,7 @@ function pruneDeadWeight(directory, removeTree, removeFile, { scope = 'package-r
 }
 
 function assertTargetNativePayload() {
-  const onnxRoot = join(modulesRoot, 'onnxruntime-node', 'bin', 'napi-v6', 'darwin')
+  const onnxRoot = join(modulesRoot, 'onnxruntime-node', 'bin', 'napi-v6', targetPlatform)
   if (existsSync(onnxRoot)) {
     const entries = readdirSync(onnxRoot)
     if (!entries.includes(targetArch)) {
@@ -524,7 +546,7 @@ function assertTargetNativePayload() {
   }
   const ptyRoot = join(modulesRoot, 'node-pty', 'prebuilds')
   if (existsSync(ptyRoot)) {
-    const expected = `darwin-${targetArch}`
+    const expected = targetNativePty
     const entries = readdirSync(ptyRoot)
     if (!entries.includes(expected)) {
       console.warn(`Lumo: [WARN] node-pty 缺少目标架构 ${expected}，继续构建并禁用 PTY 能力`)
@@ -662,9 +684,11 @@ function prepareUpstreamPlugins() {
   // --config.auto-install-peers=false：几个上游插件把 @deepseek-ai/* 声明为 peer，交集
   // 出来的范围（>=0.1.1 <0.2.0）匹配不上只有预发布号的 dsh-settings。这些 peer 本就该由
   // 下面的闭包遍历从本地 dsh 快照解析——从 registry 再装一份会让包里出现两套 dsh。
-  const result = spawnSync('corepack', [
+  const result = spawnExecutable(process.platform === 'win32' ? 'corepack.cmd' : 'corepack', [
     'pnpm', 'install', '--prod', '--ignore-scripts', '--no-frozen-lockfile',
     '--ignore-workspace', '--config.auto-install-peers=false',
+    '--registry', process.env.LUMO_NPM_REGISTRY ?? 'https://registry.npmjs.org',
+    '--network-concurrency=8', '--fetch-retries=2', '--fetch-retry-mintimeout=2000', '--fetch-retry-maxtimeout=10000',
   ], {
     cwd: upstreamPluginRoot,
     stdio: 'inherit',
@@ -674,25 +698,18 @@ function prepareUpstreamPlugins() {
 }
 
 function buildKnowledgeVaultPlugin() {
-  const tsdown = resolve(dshRoot, 'node_modules', '.bin', 'tsdown')
-  const result = spawnSync(tsdown, ['--config', 'tsdown.config.ts'], { cwd: knowledgeVaultRoot, stdio: 'inherit' })
-  if (result.error !== undefined) throw result.error
-  if (result.status !== 0) throw new Error(`Knowledge Vault 构建失败：${String(result.status ?? result.signal)}`)
+  runWorkspaceBinary(knowledgeVaultRoot, 'tsdown', ['--config', 'tsdown.config.ts'], 'Knowledge Vault 构建失败')
   if (!existsSync(resolve(knowledgeVaultRoot, 'lib', 'index.js'))) {
     throw new Error(`Knowledge Vault 构建失败：lib/index.js 未产出`)
   }
 }
 
 function buildLumoUiPlugin() {
-  const tsc = resolve(dshRoot, 'node_modules', '.bin', 'tsc')
-  const tsdown = resolve(dshRoot, 'node_modules', '.bin', 'tsdown')
-  for (const [command, args] of [
-    [tsc, ['-p', 'tsconfig.json']],
-    [tsdown, ['--config', 'tsdown.config.ts']],
+  for (const [binary, args] of [
+    ['tsc', ['-p', 'tsconfig.json']],
+    ['tsdown', ['--config', 'tsdown.config.ts']],
   ]) {
-    const result = spawnSync(command, args, { cwd: lumoUiRoot, stdio: 'inherit' })
-    if (result.error !== undefined) throw result.error
-    if (result.status !== 0) throw new Error(`Lumo UI 构建失败：${String(result.status ?? result.signal)}`)
+    runWorkspaceBinary(lumoUiRoot, binary, args, 'Lumo UI 构建失败')
   }
 }
 
@@ -708,10 +725,7 @@ function buildLumoUiPlugin() {
 // 被覆盖的 host 包先由 buildDshSessionFormatMigration 单包编译。
 function rebuildDshHostArtifacts() {
   console.log('重建 DSH host 面产物（tsdown 包与 typert remote 投影）...')
-  const tsdown = resolve(dshRoot, 'node_modules', '.bin', 'tsdown')
-  const result = spawnSync(tsdown, ['--env.DSH_BUILD_FACE', 'host'], { cwd: dshRoot, stdio: 'inherit' })
-  if (result.error !== undefined) throw result.error
-  if (result.status !== 0) throw new Error(`DSH host 面产物重建失败：${String(result.status ?? result.signal)}`)
+  runWorkspaceBinary('.', 'tsdown', ['--env.DSH_BUILD_FACE', 'host'], 'DSH host 面产物重建失败')
   mirrorSnapshotLibsBackToSource()
 }
 
@@ -737,10 +751,7 @@ function buildDshSessionFormatMigration() {
 // 修复后的 tsdown.config.ts 下可完整跑通（UNRESOLVED_ENTRY 幻影发生在补丁落地前）。
 function rebuildDshClientArtifacts() {
   console.log('重建 DSH client 面产物（整 workspace：clientBundle 包 node 半 + 浏览器 bundle）...')
-  const tsdown = resolve(dshRoot, 'node_modules', '.bin', 'tsdown')
-  const result = spawnSync(tsdown, ['--env.DSH_BUILD_FACE', 'client'], { cwd: dshRoot, stdio: 'inherit' })
-  if (result.error !== undefined) throw result.error
-  if (result.status !== 0) throw new Error(`DSH client 面产物重建失败：${String(result.status ?? result.signal)}`)
+  runWorkspaceBinary('.', 'tsdown', ['--env.DSH_BUILD_FACE', 'client'], 'DSH client 面产物重建失败')
   mirrorSnapshotLibsBackToSource()
 }
 
@@ -771,17 +782,11 @@ function mirrorSnapshotLibsBackToSource() {
 function buildDshClientPackages() {
   const packageDirectories = overriddenPackageDirectories.filter((directory) => directory.startsWith('packages/client/'))
   console.log('构建 DSH 覆盖层客户端包...')
-  const tsc = resolve(dshRoot, 'node_modules', '.bin', 'tsc')
-  const typecheck = spawnSync(tsc, [
+  runWorkspaceBinary('.', 'tsc', [
     '-b',
     ...packageDirectories.map((directory) => join(directory, 'tsconfig.json')),
     '--pretty', 'false',
-  ], {
-    cwd: dshRoot,
-    stdio: 'inherit',
-  })
-  if (typecheck.error !== undefined) throw typecheck.error
-  if (typecheck.status !== 0) throw new Error(`DSH 客户端类型产物构建失败：${String(typecheck.status ?? typecheck.signal)}`)
+  ], 'DSH 客户端类型产物构建失败')
 
   for (const packageDirectory of packageDirectories) {
     runWorkspaceBinary(packageDirectory, 'tsdown', [], `${packageDirectory} 客户端包构建失败`)
@@ -794,17 +799,15 @@ function buildDshClientPackages() {
 // 就崩。直调二进制既跳过了这层重链，也跳过了 registry。
 function runWorkspaceBinary(packageDirectory, binaryName, args, failureMessage) {
   const cwd = resolve(dshRoot, packageDirectory)
-  const candidates = [
-    resolve(cwd, 'node_modules', '.bin', binaryName),
-    resolve(dshRoot, 'node_modules', '.bin', binaryName),
-  ]
-  const binary = candidates.find((candidate) => existsSync(candidate))
-  if (binary === undefined) {
-    throw new Error(`${failureMessage}：在 ${candidates.join(' 与 ')} 都找不到 ${binaryName}`)
-  }
-  const result = spawnSync(binary, args, { cwd, stdio: 'inherit' })
+  const binary = resolveWorkspaceNodeTool(cwd, dshRoot, binaryName)
+  const result = spawnSync(process.execPath, [binary, ...args], { cwd, stdio: 'inherit' })
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) throw new Error(`${failureMessage}：${String(result.status ?? result.signal)}`)
+}
+
+function spawnExecutable(command, args, options = {}) {
+  const windowsScript = process.platform === 'win32' && /\.(cmd|bat)$/iu.test(command)
+  return spawnSync(command, args, { ...options, ...(windowsScript ? { shell: true } : {}) })
 }
 
 function runPlatformScript(name, args, failureMessage) {
@@ -835,13 +838,19 @@ function resolveBuildTarget() {
   const fromArg = process.argv.find((value) => value.startsWith('--target='))?.slice('--target='.length)
   const requested = fromFlag ?? fromArg ?? process.env['LUMO_DESKTOP_TARGET']
   if (requested === undefined) {
-    if (hostPlatform() !== 'darwin') {
-      throw new Error(`桌面 runtime 只能在 macOS 上构建（当前宿主 ${hostPlatform()}）；Windows/Linux 见设计 §1 的移植清单`)
+    if (hostPlatform() !== 'darwin' && hostPlatform() !== 'win32') {
+      throw new Error(`桌面 runtime 只能在 macOS 或 Windows 上构建（当前宿主 ${hostPlatform()}）`)
     }
-    return `darwin-${hostArch() === 'arm64' ? 'arm64' : 'x64'}`
+    return hostPlatform() === 'win32'
+      ? 'win-x64'
+      : `darwin-${hostArch() === 'arm64' ? 'arm64' : 'x64'}`
   }
   if (!SUPPORTED_TARGETS.includes(requested)) {
     throw new Error(`不支持的桌面构建目标：${requested}（可用：${SUPPORTED_TARGETS.join(', ')}）`)
+  }
+  const expectedHost = requested.startsWith('win-') ? 'win32' : 'darwin'
+  if (hostPlatform() !== expectedHost) {
+    throw new Error(`${requested} 必须在 ${expectedHost === 'win32' ? 'Windows' : 'macOS'} 上构建（当前宿主 ${hostPlatform()}）`)
   }
   return requested
 }
@@ -853,58 +862,79 @@ function findPortableNode() {
     if (!existsSync(pinned)) {
       throw new Error(`LUMO_RUNTIME_NODE 指向的 Node 不存在：${pinned}`)
     }
-    if (!isPortableDarwinBinary(pinned)) {
-      throw new Error(`LUMO_RUNTIME_NODE 指向的 Node 不是自包含的 macOS 可执行文件：${pinned}`)
+    if (!isPortableRuntimeBinary(pinned)) {
+      throw new Error(`LUMO_RUNTIME_NODE 指向的 Node 不是自包含的 ${targetPlatform} 可执行文件：${pinned}`)
     }
     assertBinaryArchitecture(pinned, 'LUMO_RUNTIME_NODE')
     console.log(`打包 Node：${pinned}（LUMO_RUNTIME_NODE 钉死，${nodeVersion(pinned)}）`)
     return pinned
   }
-  // 默认按 target 从 nodejs.org 下载官方 tarball：构建机上装了什么 Node 不再影响产物，
-  // 也是 darwin-x64 能在 M 芯片 CI 之外产出的唯一途径（以前扫 nvm 只能拿到宿主架构）。
+  // 默认按 target 从 nodejs.org 下载官方归档：构建机上装了什么 Node 不再影响产物。
   const downloaded = downloadOfficialNode(RUNTIME_NODE_VERSION, buildTarget)
-  if (!isPortableDarwinBinary(downloaded)) {
-    throw new Error(`下载的官方 Node 不是自包含的 macOS 可执行文件：${downloaded}`)
+  if (!isPortableRuntimeBinary(downloaded)) {
+    throw new Error(`下载的官方 Node 不是自包含的 ${targetPlatform} 可执行文件：${downloaded}`)
   }
   assertBinaryArchitecture(downloaded, '官方 Node')
   console.log(`打包 Node：${downloaded}（nodejs.org v${RUNTIME_NODE_VERSION} ${buildTarget}）`)
   return downloaded
 }
 
-// 缓存到 platform/.build/node/<version>-<target>/node；tarball 经 SHASUMS256.txt 校验。
+// 缓存到 platform/.build/node/<version>-<target>/node[.exe]；归档经 SHASUMS256.txt 校验。
 function downloadOfficialNode(version, target) {
   const cacheDirectory = resolve(nodeCacheRoot, `${version}-${target}`)
-  const cached = resolve(cacheDirectory, 'node')
+  const windows = targetPlatform === 'win32'
+  const cached = resolve(cacheDirectory, windows ? 'node.exe' : 'node')
   const cachedCorepack = resolve(cacheDirectory, 'node_modules', 'corepack')
   if (existsSync(cached) && existsSync(cachedCorepack)) return cached
   const mirror = (process.env['LUMO_NODE_DIST_MIRROR'] ?? 'https://nodejs.org/dist').replace(/\/+$/, '')
-  const tarballName = `node-v${version}-${target}.tar.gz`
+  const archiveName = windows ? `node-v${version}-win-x64.zip` : `node-v${version}-${target}.tar.gz`
   mkdirSync(cacheDirectory, { recursive: true })
-  const tarball = resolve(cacheDirectory, tarballName)
+  const archive = resolve(cacheDirectory, archiveName)
   const shasums = resolve(cacheDirectory, 'SHASUMS256.txt')
-  console.log(`下载官方 Node：${mirror}/v${version}/${tarballName}`)
-  curl(`${mirror}/v${version}/${tarballName}`, tarball)
+  console.log(`下载官方 Node：${mirror}/v${version}/${archiveName}`)
+  curl(`${mirror}/v${version}/${archiveName}`, archive)
   curl(`${mirror}/v${version}/SHASUMS256.txt`, shasums)
   const expected = readFileSync(shasums, 'utf8').split('\n')
     .map((line) => line.trim().split(/\s+/))
-    .find(([, name]) => name === tarballName)?.[0]
-  if (expected === undefined) throw new Error(`SHASUMS256.txt 里没有 ${tarballName}`)
-  const actual = createHash('sha256').update(readFileSync(tarball)).digest('hex')
+    .find(([, name]) => name === archiveName)?.[0]
+  if (expected === undefined) throw new Error(`SHASUMS256.txt 里没有 ${archiveName}`)
+  const actual = createHash('sha256').update(readFileSync(archive)).digest('hex')
   if (actual !== expected) {
-    rmSync(tarball, { force: true })
-    throw new Error(`官方 Node tarball 校验失败：${tarballName} 期望 ${expected} 实际 ${actual}`)
+    rmSync(archive, { force: true })
+    throw new Error(`官方 Node 归档校验失败：${archiveName} 期望 ${expected} 实际 ${actual}`)
   }
-  // 除 node 外一并解出 corepack / npm，供打包后的插件市场在需要时更新插件（见 stageNodeTooling）。
-  const extract = spawnSync('tar', ['-xzf', tarball, '-C', cacheDirectory, '--strip-components', '2',
-    `node-v${version}-${target}/bin/node`,
-    `node-v${version}-${target}/lib/node_modules/corepack`,
-    `node-v${version}-${target}/lib/node_modules/npm`,
-  ], { encoding: 'utf8' })
-  if (extract.error !== undefined || extract.status !== 0 || !existsSync(cached)) {
-    throw new Error(`解压官方 Node 失败：${extract.stderr || extract.error?.message || tarballName}`)
+  // Windows 的官方归档是 zip，macOS 是 tar.gz；两者都只取 node/corepack/npm，
+  // 其余文件交由平台工作区的依赖闭包提供。
+  const extractedRoot = resolve(cacheDirectory, `node-v${version}-${target}`)
+  rmSync(extractedRoot, { recursive: true, force: true })
+  const extract = windows
+    ? spawnSync('tar', ['-xf', archive, '-C', cacheDirectory], { encoding: 'utf8' })
+    : spawnSync('tar', ['-xzf', archive, '-C', cacheDirectory, '--strip-components', '2',
+      `node-v${version}-${target}/bin/node`,
+      `node-v${version}-${target}/lib/node_modules/corepack`,
+      `node-v${version}-${target}/lib/node_modules/npm`,
+    ], { encoding: 'utf8' })
+  if (extract.error !== undefined || extract.status !== 0) {
+    throw new Error(`解压官方 Node 失败：${extract.stderr || extract.error?.message || archiveName}`)
   }
-  chmodSync(cached, 0o755)
-  rmSync(tarball, { force: true })
+  if (windows) {
+    const extractedNode = resolve(extractedRoot, 'node.exe')
+    const extractedCorepack = resolve(extractedRoot, 'node_modules', 'corepack')
+    const extractedNpm = resolve(extractedRoot, 'node_modules', 'npm')
+    if (!existsSync(extractedNode) || !existsSync(extractedCorepack)) {
+      throw new Error(`解压官方 Node 失败：${archiveName} 缺少 node.exe 或 corepack`)
+    }
+    cpSync(extractedNode, cached)
+    mkdirSync(resolve(cacheDirectory, 'node_modules'), { recursive: true })
+    cpSync(extractedCorepack, resolve(cacheDirectory, 'node_modules', 'corepack'), { recursive: true, dereference: true })
+    if (existsSync(extractedNpm)) cpSync(extractedNpm, resolve(cacheDirectory, 'node_modules', 'npm'), { recursive: true, dereference: true })
+    rmSync(extractedRoot, { recursive: true, force: true })
+  }
+  if (!existsSync(cached)) {
+    throw new Error(`解压官方 Node 失败：${archiveName}`)
+  }
+  if (!windows) chmodSync(cached, 0o755)
+  rmSync(archive, { force: true })
   return cached
 }
 
@@ -912,7 +942,7 @@ function downloadOfficialNode(version, target) {
  * 把随 Node 发行的 corepack / npm 与一个 pnpm shim 塞进桌面 runtime，让打包后的应用在
  * 插件市场更新插件时能找到 pnpm/corepack/npx（否则报「未找到 pnpm」）。仅依赖 node
  * 二进制同目录下的 Node 发行件；LUMO_RUNTIME_NODE 指向裸 node 二进制时跳过并告警（只影响
- * 开发钉死场景）。shim 用相对路径定位，保证 .app 里的 runtime 可整体搬移。
+ * 开发钉死场景）。shim 用相对路径定位，保证安装包里的 runtime 可整体搬移。
  */
 function stageNodeTooling(nodeBinary, binDir, libDir) {
   const sourceDir = dirname(nodeBinary)
@@ -926,16 +956,23 @@ function stageNodeTooling(nodeBinary, binDir, libDir) {
   mkdirSync(libDir, { recursive: true })
   cpSync(corepackSrc, resolve(libDir, 'corepack'), { recursive: true, dereference: true })
   if (existsSync(npmSrc)) cpSync(npmSrc, resolve(libDir, 'npm'), { recursive: true, dereference: true })
-  const shims = [
-    ['corepack', '#!/bin/sh\nexec "$(dirname "$0")/../node" "$(dirname "$0")/../lib/node_modules/corepack/dist/corepack.js" "$@"\n'],
-    ['npm', '#!/bin/sh\nexec "$(dirname "$0")/../node" "$(dirname "$0")/../lib/node_modules/npm/bin/npm-cli.js" "$@"\n'],
-    ['npx', '#!/bin/sh\nexec "$(dirname "$0")/../node" "$(dirname "$0")/../lib/node_modules/npm/bin/npx-cli.js" "$@"\n'],
-    ['pnpm', '#!/bin/sh\nexec "$(dirname "$0")/corepack" pnpm "$@"\n'],
-  ]
+  const shims = targetPlatform === 'win32'
+    ? [
+        ['corepack.cmd', '@echo off\r\n"%~dp0..\\node.exe" "%~dp0..\\lib\\node_modules\\corepack\\dist\\corepack.js" %*\r\n'],
+        ['npm.cmd', '@echo off\r\n"%~dp0..\\node.exe" "%~dp0..\\lib\\node_modules\\npm\\bin\\npm-cli.js" %*\r\n'],
+        ['npx.cmd', '@echo off\r\n"%~dp0..\\node.exe" "%~dp0..\\lib\\node_modules\\npm\\bin\\npx-cli.js" %*\r\n'],
+        ['pnpm.cmd', '@echo off\r\ncall "%~dp0corepack.cmd" pnpm %*\r\n'],
+      ]
+    : [
+        ['corepack', '#!/bin/sh\nexec "$(dirname "$0")/../node" "$(dirname "$0")/../lib/node_modules/corepack/dist/corepack.js" "$@"\n'],
+        ['npm', '#!/bin/sh\nexec "$(dirname "$0")/../node" "$(dirname "$0")/../lib/node_modules/npm/bin/npm-cli.js" "$@"\n'],
+        ['npx', '#!/bin/sh\nexec "$(dirname "$0")/../node" "$(dirname "$0")/../lib/node_modules/npm/bin/npx-cli.js" "$@"\n'],
+        ['pnpm', '#!/bin/sh\nexec "$(dirname "$0")/corepack" pnpm "$@"\n'],
+      ]
   for (const [name, body] of shims) {
     const path = resolve(binDir, name)
     writeFileSync(path, body)
-    chmodSync(path, 0o755)
+    if (targetPlatform !== 'win32') chmodSync(path, 0o755)
   }
   console.log(`桌面 runtime 已注入 corepack/npm/pnpm shim（${binDir}）`)
 }
@@ -947,8 +984,13 @@ function curl(url, destination) {
   }
 }
 
-function isPortableDarwinBinary(candidate) {
-  const inspect = spawnSync('/usr/bin/otool', ['-L', candidate], { encoding: 'utf8' })
+function isPortableRuntimeBinary(candidate) {
+  if (targetPlatform === 'win32') {
+    if (!candidate.toLowerCase().endsWith('.exe')) return false
+    const inspect = spawnExecutable(candidate, ['--version'], { encoding: 'utf8' })
+    return inspect.error === undefined && inspect.status === 0
+  }
+  const inspect = spawnExecutable('/usr/bin/otool', ['-L', candidate], { encoding: 'utf8' })
   if (inspect.status !== 0 || inspect.error !== undefined) return false
   return !hasNonSystemDarwinDependency(inspect.stdout)
 }
@@ -956,6 +998,7 @@ function isPortableDarwinBinary(candidate) {
 // 双架构支持的关键闸门：没有它，在 M 上构建 darwin-x64 会产出一个内含 arm64 Node 的
 // 「x64 包」——打包成功、能分发、在 Intel 上直接起不来，且错误信息不指向架构。
 function assertBinaryArchitecture(binary, label) {
+  if (targetPlatform === 'win32') return
   const inspect = spawnSync('/usr/bin/lipo', ['-archs', binary], { encoding: 'utf8' })
   if (inspect.error !== undefined || inspect.status !== 0) {
     throw new Error(`无法读取 ${label} 的架构（lipo -archs）：${binary}\n${inspect.stderr ?? ''}`.trim())

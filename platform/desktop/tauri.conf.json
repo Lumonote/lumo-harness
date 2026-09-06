@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "identifier": "io.lumo.desktop",
   "build": {
-    "beforeBuildCommand": "bash -c 'cd \"$(git rev-parse --show-toplevel)\" && sh platform/desktop/make-icons.sh && node platform/desktop/build-runtime.mjs'",
+    "beforeBuildCommand": {
+      "script": "node before-build.mjs",
+      "cwd": "."
+    },
     "devUrl": "http://127.0.0.1:3080",
     "frontendDist": "../desktop-assets"
   },
@@ -18,7 +21,8 @@
     "targets": "all",
     "icon": [
       "icons/Lumo.icns",
-      "icons/icon.png"
+      "icons/icon.png",
+      "icons/icon.ico"
     ],
     "resources": {
       "target/lumo-runtime": "runtime"

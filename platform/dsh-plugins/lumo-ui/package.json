@@ -21,6 +21,9 @@
   },
   "scripts": { "bundle": "../../../deepseek-harness/node_modules/.bin/tsc -p tsconfig.json && ../../../deepseek-harness/node_modules/.bin/tsdown --config tsdown.config.ts" },
   "dependencies": {
+    "execa": "^9.6.1",
+    "@deepseek-ai/dsh-skill": "link:../../../deepseek-harness/packages/skill/skill",
+    "@deepseek-ai/dsh-skill-filesystem": "link:../../../deepseek-harness/packages/skill/skill-filesystem",
     "@deepseek-ai/cordis": "link:../../../deepseek-harness/vendor/cordis",
     "@deepseek-ai/dsh-client-ui-renderer": "link:../../../deepseek-harness/packages/client/ui-renderer",
     "@deepseek-ai/dsh-client-ui-layout": "link:../../../deepseek-harness/packages/client/ui-layout",

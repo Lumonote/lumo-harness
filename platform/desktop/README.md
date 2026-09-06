@@ -26,7 +26,7 @@ cd platform/desktop
 ./preview-local.sh
 ```
 
-`preview-local.sh` 会使用仓库内的 DSH 运行时启动 `Lumo.app`，并将 SQLite 放到
+`preview-local.sh` 会使用仓库内的 DSH 运行时启动本地应用，并将 SQLite 放到
 `~/Library/Application Support/Lumo/lumo.sqlite`；如果 Web 前端产物不存在，它会先自动构建
 `deepseek-harness/apps/web/dist/index.html`。也可以只构建应用包：
 
@@ -35,13 +35,36 @@ cd platform/desktop
 cargo tauri build --debug --bundles app
 ```
 
-构建结果位于 `target/debug/bundle/macos/Lumo.app`。Tauri 构建前会自动执行
+macOS 构建结果位于 `target/debug/bundle/macos/Lumo.app`。Tauri 构建前会自动执行
 `desktop/build-runtime.mjs`，把自包含 Node、DSH CLI、Web 前端、SQLite 后端和 Lumo 本地
 插件放进 `Lumo.app/Contents/Resources/runtime`；因此解压后双击应用即可看到实际工作台，
 不依赖当前 checkout、pnpm 或开发机上的 Node。应用数据和 SQLite 文件仍保存在系统应用
 数据目录，且不连接服务器中间件。
 
+Windows 使用同一个总入口，在 Git Bash 中执行：
+
+```sh
+./platform/build.sh --targets win-x64
+```
+
+也可以在 Windows 构建机的 `platform` 目录执行 `pnpm run desktop:win`。构建需要 Rust
+MSVC 工具链、Node.js、Python 3.10+、Corepack 和 WebView2；产物位于
+`platform/desktop/target/release/bundle/msi` 与 `platform/desktop/target/release/bundle/nsis`。
+Windows 包内使用 `runtime/lumo-runtime.cmd`、`node.exe` 和 `python/python.exe`，运行时不依赖
+当前 checkout 或开发机上的 Node。
+
 ## 桌面基础插件
+
+技能中心依赖的 SkillHub CLI 在每次桌面构建中自动准备并打入应用包，用户无需另外安装
+CLI 或设置 `LUMO_SKILLHUB_COMMAND`。构建从 [SkillHub 官方安装源](https://skillhub.cn/install/skillhub.md)
+下载 CLI 归档，缓存到 `platform/.build/skillhub/latest.tar.gz`，将 CLI 文件和
+`runtime/bin/skillhub.mjs` 一起打包，复用包内 Node 和 Python。构建会在裁剪完成后执行
+`--version` 和 `install --help` 校验；缺少任一依赖即构建失败。
+
+离线构建可以设置 `LUMO_SKILLHUB_ARCHIVE` 指向预先下载的官方 `latest.tar.gz`。
+删除缓存归档可获取新版本；实际打入的 CLI 版本、归档 SHA-256 和来源记录在
+`runtime/runtime-manifest.json` 的 `skillhub` 字段。技能下载仍需联网，安装目录继续使用
+应用的数据目录。旧安装包缺少 CLI 时需要重新构建并替换应用，修改源码不会修复已安装的副本。
 
 桌面版在构建阶段固定并打包以下 DSH 基础插件，打开应用时直接从包内 runtime 加载，
 不会在首次启动时访问插件仓库或依赖当前项目目录：
@@ -75,7 +98,7 @@ cargo tauri build --debug --bundles app
 仓库运行时从 `platform/upstream/skills` 读取固定 Skill，并将 PPT 解释器指向
 `platform/upstream/skills/ppt-master/.venv/bin/python`。桌面发布包会复制 Skill、Ruflo
 依赖以及可重定位的 Python/PPT 依赖，并把解释器固定为包内
-`runtime/python/bin/python3`；如果构建环境没有准备 PPT `.venv`，打包会直接失败而不是生成
+macOS 使用 `runtime/python/bin/python3`，Windows 使用 `runtime/python/python.exe`；如果构建环境没有准备 PPT `.venv`，打包会直接失败而不是生成
 一个缺少实际功能的应用。所有组件的仓库、提交哈希和许可证记录在
 `platform/upstream/skill-sources.json`。
 
@@ -95,8 +118,9 @@ OpenDesign 仍作为输入框下方的嵌入式创作面板提供；项目和空
 信号橙、炉芯橙、冰蓝和红珊瑚作为单一强调色。这些主题与 `dsh-dream-skin` 共用同一
 token 契约，可并存而不冲突；不依赖服务器中间件，也不会把本地模式变成集群模式。
 
-调试版和正式 `.app` 都优先使用包内 `runtime/lumo-runtime.sh`；只有开发预览才回退到
-checkout 中的 `local-runtime.sh`。如果包内资源损坏或缺失，诊断页会明确显示启动错误。
+调试版和正式包都优先使用包内对应平台的 `runtime/lumo-runtime.sh` 或
+`runtime/lumo-runtime.cmd`；只有开发预览才回退到 checkout 中的 `local-runtime.sh` 或
+`local-runtime.cmd`。如果包内资源损坏或缺失，诊断页会明确显示启动错误。
 正式安装包会把本地 runtime 的 stdout/stderr 追加写入系统应用数据目录的 `runtime.log`；
 如果双击后出现白屏，可先查看该文件（通常位于 `~/Library/Application Support/io.lumo.desktop/`），
 再根据其中的架构、端口或前端加载错误处理，而不必从 Finder 猜测原因。
@@ -122,13 +146,15 @@ runtime 在后台线程里拉起；本地 Web 端口一应答，窗口就切到�
 图标源是 DeepSeek 原生鱼形标志（上游 `packages/client/ui-primitives` 的 FishLogo 路径），
 `icons/deepseek-logo.svg` 是唯一品牌源：既画应用图标也画菜单栏剪影与启动页徽章。
 
-`make-icons.sh`（`beforeBuildCommand` 里会先跑它）用宿主自带的 `swiftc` 与 `iconutil` 生成。
+macOS 的 `make-icons.sh`（`beforeBuildCommand` 里会先跑它）用宿主自带的 `swiftc` 与 `iconutil` 生成。
+Windows 直接使用仓库中的 PNG 图标，不依赖 bash、Swift 或 macOS 工具。
 生成器解析 SVG 里的 `d` 路径（ImageIO 不解码 SVG，CoreGraphics 只认 CGPath），同一路径既画应用图标
 也画菜单栏剪影：
 
 - `icons/icon.png`：1024×1024，内容占 824×824 的圆角矩形（圆角约 22.5%），四周透明，
   与 macOS 系统图标同一规范——直接拿方图当图标就是 Dock 里那个“太正方体”的效果；
 - `icons/Lumo.icns`：完整尺寸集，bundler 原样使用；
+- `icons/icon.ico`：Windows MSI/NSIS 使用的 ICO，构建前由 `before-build.mjs` 从同一 PNG 源生成；
 - `icons/tray.png`：44×44 单色模板图标，供菜单栏使用；
 - `desktop-assets/lumo-logo.png`：512×512 品牌蓝圆盘徽章，供启动页 `boot.html` 使用，
   同时被 `dsh-overrides/brand-web.mjs` 拷成 `/branding/logo.png`（favicon 与工作台品牌标）。

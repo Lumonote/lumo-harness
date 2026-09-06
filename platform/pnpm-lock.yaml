@@ -231,9 +231,18 @@ importers:
       '@deepseek-ai/dsh-host-webserver':
         specifier: link:../../../deepseek-harness/packages/host/webserver
         version: link:../../../deepseek-harness/packages/host/webserver
+      '@deepseek-ai/dsh-skill':
+        specifier: link:../../../deepseek-harness/packages/skill/skill
+        version: link:../../../deepseek-harness/packages/skill/skill
+      '@deepseek-ai/dsh-skill-filesystem':
+        specifier: link:../../../deepseek-harness/packages/skill/skill-filesystem
+        version: link:../../../deepseek-harness/packages/skill/skill-filesystem
       '@deepseek-ai/schemastery':
         specifier: link:../../../deepseek-harness/vendor/schemastery
         version: link:../../../deepseek-harness/vendor/schemastery
+      execa:
+        specifier: ^9.6.1
+        version: 9.6.1
       react:
         specifier: link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react
         version: link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react

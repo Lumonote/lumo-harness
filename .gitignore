@@ -23,6 +23,7 @@ platform/upstream/skills/
 
 # Tauri 由 cargo tauri 生成的能力/ACL schema
 platform/desktop/gen/schemas/
+platform/desktop/icons/icon.ico
 
 
 # Byte-compiled / optimized / DLL files

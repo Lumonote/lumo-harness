@@ -12,6 +12,7 @@ import { registerDesktopHandoff } from './desktop-handoff.ts'
 import { discoverSkillDemos, resolveSkillDemoAsset, type SkillDemo } from './skill-demos.ts'
 import { allowedAssetUrl, createUpstreamDemoService, type GallerySkill, type UpstreamDemoService } from './upstream-demos.ts'
 import { buildCatalog, installItem, refreshCatalog, searchCatalog, type SkillHubConfig, type SkillHubKind } from './skillhub.ts'
+import { registerSkillHubRuntime, type SkillHubRuntime } from './skillhub-runtime.ts'
 
 /** Read-only structural projection of the session-query seam. Keeping the
  * host plugin's build boundary local avoids pulling the platform contract
@@ -412,7 +413,7 @@ function upstreamDemos(): UpstreamDemoService {
   return upstreamDemoService ??= createUpstreamDemoService()
 }
 
-export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, vault: VaultService | undefined, req: IncomingMessage, res: ServerResponse): Promise<void> {
+export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, vault: VaultService | undefined, req: IncomingMessage, res: ServerResponse, skillhubRuntime?: SkillHubRuntime): Promise<void> {
   const pathname = new URL(req.url ?? '/', 'http://lumo.local').pathname
   // 单机版（Local Desktop）：vault 知识源 + fallback 身份,知识管理路由不套 realm 管理员角色门。
   const singleMachine = config.deploymentMode === 'local'
@@ -1088,10 +1089,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     try { writeUpstream(res, await upstream(config, identity, 'connector', '/web/fetch', req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
     return
   }
-  // SkillHub market: catalog + install. The adapter never executes `skillhub
-  // install` from an untrusted body; it only records installs (and delegates to
-  // the configured CLI when present, or performs native download). Materialization
-  // for the runtime goes through the snapshot bridge, not a Web request.
+  // Desktop installs use the same root as the native filesystem skill provider.
   const skillhubUrl = new URL(req.url ?? '/', 'http://lumo.local')
   const skillhubConfig = (): SkillHubConfig => ({
     catalogFile: resolve(config.skillhubCatalogFile ?? '.lumo/skillhub-catalog.json'),
@@ -1100,6 +1098,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     snapshotFile: resolve(config.skillhubSnapshotFile ?? '.lumo/skill-snapshot.json'),
     apiBase: config.skillhubApiBase ?? 'https://api.skillhub.cn',
     command: config.skillhubCommand ?? 'skillhub',
+    runtime: skillhubRuntime,
     preinstalledRepositories: ['liustack/modlens', 'omdsh-dev/dsh-better-sidebar', 'NanmiCoder/dsh-agent-teams'],
   })
   // `catalog` queries SkillHub live (falling back to the on-disk cache, then the
@@ -1140,18 +1139,34 @@ function ops(_req: IncomingMessage, res: ServerResponse): void { res.writeHead(3
 
 export function apply(ctx: Context, config: Config): void {
   assertIdentityConfiguration(config)
+  let skillhubRuntime: SkillHubRuntime | undefined
+  if (config.deploymentMode === 'local') {
+    ctx.inject(['skills'], (skillsCtx) => {
+      const runtime = registerSkillHubRuntime(skillsCtx, resolve(config.skillhubRoot ?? '.lumo/skills'))
+      skillsCtx.effect(() => {
+        skillhubRuntime = runtime
+        return () => { if (skillhubRuntime === runtime) skillhubRuntime = undefined }
+      }, 'lumo-skillhub: installation runtime')
+    })
+  }
   // 预插件区间的深色引导。放在 registerRoutes 之外、inject 门之前：主题与
   // knowledge/skills 是否装配无关，任何形态下白底闪一帧都不可接受。
   ctx.on('webserver/index-inject', (table) => { table.push(lumoBootThemeInjection()) })
   if (config.desktopHandoffFile !== '') registerDesktopHandoff(ctx, config.desktopHandoffFile)
   const registerRoutes = (runtimeCtx: Context): void => {
-    const knowledge = runtimeCtx.get('knowledge') as KnowledgeQueryService | undefined
-    const skills = runtimeCtx.get('skills') as SkillRegistryService | undefined
-    const sessionLogQuery = runtimeCtx.get('sessionLogQuery') as SessionLogQuerySeam | undefined
-    const vault = runtimeCtx.get('knowledgeVault') as VaultService | undefined
-    if (config.deploymentMode !== 'local' && knowledge === undefined) throw new Error('lumo-platform-ui: ctx.knowledge is unavailable')
+    if (config.deploymentMode !== 'local' && runtimeCtx.get('knowledge') === undefined) throw new Error('lumo-platform-ui: ctx.knowledge is unavailable')
     runtimeCtx.effect(() => {
-      const disposeApi = runtimeCtx.webServer.register({ kind: 'prefix', path: '/lumo/api', handler: (req, res) => api(config, knowledge, skills, sessionLogQuery, vault, req, res) })
+      // Local services can become available after the web server starts.
+      const disposeApi = runtimeCtx.webServer.register({
+        kind: 'prefix', path: '/lumo/api', handler: (req, res) => api(
+          config,
+          runtimeCtx.get('knowledge') as KnowledgeQueryService | undefined,
+          runtimeCtx.get('skills') as SkillRegistryService | undefined,
+          runtimeCtx.get('sessionLogQuery') as SessionLogQuerySeam | undefined,
+          runtimeCtx.get('knowledgeVault') as VaultService | undefined,
+          req, res, skillhubRuntime,
+        ),
+      })
       const disposeOps = runtimeCtx.webServer.register({ kind: 'exact', path: '/lumo/ops', handler: ops })
       return () => { disposeApi(); disposeOps() }
     }, 'lumo-platform-ui: same-origin API')

@@ -505,6 +505,7 @@ ${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
         skillhubCatalogFile: ${JSON.stringify(localMode ? join(desktopStateDir, 'skillhub-catalog.json') : '.lumo/skillhub-catalog.json')}
         skillhubInstallFile: ${JSON.stringify(localMode ? join(desktopStateDir, 'skillhub-installs.json') : '.lumo/skillhub-installs.json')}
         skillhubRoot: ${JSON.stringify(localMode ? join(desktopStateDir, 'skills') : '.lumo/skills')}
+        skillhubCommand: ${JSON.stringify(process.env['LUMO_SKILLHUB_COMMAND'] ?? 'skillhub')}
         skillhubSnapshotFile: ${JSON.stringify(localMode ? join(desktopStateDir, 'skill-snapshot.json') : '.lumo/skill-snapshot.json')}
 ` : ''}
 ${workflowEngineOverlay(role)}

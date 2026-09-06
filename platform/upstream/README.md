@@ -12,15 +12,17 @@
 `skill-sources.json` 是可审计来源清单，更新时必须同时修改仓库地址、上游路径、提交哈希、
 版本和许可证。不要使用浮动分支替换固定提交。
 
-在新 checkout 中安装固定依赖：
+在新 checkout 中安装固定依赖。macOS 使用默认宿主架构，Windows 桌面包使用 `win-x64`：
 
 ```sh
 cd platform/upstream
 ./install-components.sh
+# Windows（Git Bash）
+./install-components.sh --target win-x64
 ```
 
-PPT Master 的开发环境安装在忽略提交的 `skills/ppt-master/.venv`。桌面本地预览会自动设置
-`LUMO_PPT_PYTHON`；正式桌面打包器会从这个环境提取可重定位 Python 及依赖并写入应用资源，
+PPT Master 的开发环境安装在忽略提交的 `skills/ppt-master/.venv-<target>`。桌面本地预览会自动设置
+`LUMO_PPT_PYTHON`；正式桌面打包器会从目标环境提取可重定位 Python 及依赖并写入应用资源，
 缺少环境或解释器依赖开发机非系统动态库时直接拒绝打包。服务器镜像则在镜像构建阶段安装
 同一份 `requirements.txt`，任务执行期间不得安装依赖。
 

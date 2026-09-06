@@ -60,7 +60,11 @@ fn workspace_runtime() -> Option<String> {
     // dist/Lumo.app while keeping the release shell independent of a fixed
     // checkout path.
     for _ in 0..12 {
-        let runtime = directory.join("local-runtime.sh");
+        let runtime = directory.join(if cfg!(target_os = "windows") {
+            "local-runtime.cmd"
+        } else {
+            "local-runtime.sh"
+        });
         if runtime.is_file() {
             return Some(runtime.to_string_lossy().into_owned());
         }
@@ -75,15 +79,25 @@ fn bundled_runtime(app: &AppHandle) -> Option<String> {
     let contents_dir = executable_dir.parent().map(|path| path.to_path_buf());
     let mut candidates = vec![
         resource_dir.join("runtime").join("lumo-runtime.sh"),
+        resource_dir.join("runtime").join("lumo-runtime.cmd"),
         resource_dir.join("lumo-runtime.sh"),
+        resource_dir.join("lumo-runtime.cmd"),
         resource_dir
             .join("_up_")
             .join("runtime")
             .join("lumo-runtime.sh"),
         resource_dir
             .join("_up_")
+            .join("runtime")
+            .join("lumo-runtime.cmd"),
+        resource_dir
+            .join("_up_")
             .join("desktop-runtime")
             .join("lumo-runtime.sh"),
+        resource_dir
+            .join("_up_")
+            .join("desktop-runtime")
+            .join("lumo-runtime.cmd"),
     ];
     if let Some(contents) = contents_dir {
         candidates.push(
@@ -92,7 +106,14 @@ fn bundled_runtime(app: &AppHandle) -> Option<String> {
                 .join("runtime")
                 .join("lumo-runtime.sh"),
         );
+        candidates.push(
+            contents
+                .join("Resources")
+                .join("runtime")
+                .join("lumo-runtime.cmd"),
+        );
         candidates.push(contents.join("Resources").join("lumo-runtime.sh"));
+        candidates.push(contents.join("Resources").join("lumo-runtime.cmd"));
     }
     candidates
         .into_iter()
@@ -107,12 +128,22 @@ fn runtime_binary(app: &AppHandle) -> String {
         .or_else(|| bundled_runtime(app))
         .or_else(workspace_runtime)
         .or_else(compiled_workspace_runtime)
-        .unwrap_or_else(|| "lumo-dsh-node".to_string())
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "windows") {
+                "lumo-dsh-node.cmd".to_string()
+            } else {
+                "lumo-dsh-node".to_string()
+            }
+        })
 }
 
 #[cfg(debug_assertions)]
 fn compiled_workspace_runtime() -> Option<String> {
-    let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("local-runtime.sh");
+    let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(if cfg!(target_os = "windows") {
+        "local-runtime.cmd"
+    } else {
+        "local-runtime.sh"
+    });
     runtime
         .is_file()
         .then(|| runtime.to_string_lossy().into_owned())
@@ -238,7 +269,13 @@ fn spawn_runtime(app: &AppHandle) -> Result<String, String> {
     let stderr = log_file
         .try_clone()
         .map_err(|error| format!("无法准备 runtime 日志：{error}"))?;
-    let mut command = Command::new(&runtime);
+    let mut command = if cfg!(target_os = "windows") {
+        let mut command = Command::new("cmd.exe");
+        command.arg("/C").arg(&runtime);
+        command
+    } else {
+        Command::new(&runtime)
+    };
     command
         .env("LUMO_DEPLOYMENT_MODE", "local")
         .env("LUMO_DSH_PROFILE", "web")
@@ -431,7 +468,16 @@ fn terminate_process_tree(process: &mut Child) {
     let _ = process.wait();
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn terminate_process_tree(process: &mut Child) {
+    let pid = process.id().to_string();
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid, "/T", "/F"])
+        .status();
+    let _ = process.wait();
+}
+
+#[cfg(not(any(unix, windows)))]
 fn terminate_process_tree(process: &mut Child) {
     let _ = process.kill();
     let _ = process.wait();
@@ -445,6 +491,13 @@ fn reveal_runtime_log(app: &AppHandle) {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = Command::new("explorer")
+                .arg(format!("/select,{}", path.display()))
+                .spawn();
+        }
+        #[cfg(not(target_os = "windows"))]
         eprintln!("lumo-desktop: runtime log at {}", path.display());
     }
 }

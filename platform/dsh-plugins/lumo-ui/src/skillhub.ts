@@ -3,20 +3,19 @@
  *
  * SkillHub (skillhub.cn) is an external skill source that installs through the
  * `skillhub` CLI into a local directory; it is not a DSH Cordis runtime plugin.
- * This module is the read-side bridge for the UI: it never lets a Web request or
- * the model execute `skillhub install`. Instead it
- *   1. reads a catalog from a local index file (with a bundled seed fallback so
- *      the panel is demonstrable without network or CLI), and
- *   2. tracks installs in a local state file, delegating the real install to the
- *      `skillhub` CLI only when it is present on the host.
- *
- * The catalog mirrors the three SkillHub surfaces: skills (技能), expert packs
- * (专家包) and plugins (插件). After install the UI can @-mention the item in the
- * conversation composer via the native skill bridge.
+ * Desktop installation delegates to the official CLI with the runtime's skill
+ * root, then verifies native discovery before recording success. Expert packs
+ * install their constituent skills and expose their actual `/name` gestures.
+ * DSH plugins are installed through the separate plugin market.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
+import { basename, delimiter, dirname, join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
+import { execa } from 'execa'
+import { isSkillName } from '@deepseek-ai/dsh-skill'
+import type { InstalledSkill, SkillHubRuntime } from './skillhub-runtime.ts'
 
 export type SkillHubKind = 'skill' | 'pack' | 'plugin'
 
@@ -29,7 +28,7 @@ export interface SkillHubSkill {
   downloads: number
   source: string
   verified: boolean
-  /** Native `/command` used to @ the skill in the composer; kebab case. */
+  /** Catalog command hint; installation resolves the actual native name. */
   command: string
   apiKey: boolean
   /** Optional icon URL from SkillHub. */
@@ -53,6 +52,7 @@ export interface SkillHubPack {
   source: string
   /** Optional primary command if installing exposes an entry skill. */
   command?: string
+  skillSlugs?: string[]
   icon?: string
 }
 
@@ -74,6 +74,10 @@ export interface SkillHubInstalls {
   skills: string[]
   packs: string[]
   plugins: string[]
+  /** Actual runtime names, keyed by `kind:id`; old UI-only records have none. */
+  commands?: Record<string, string[]>
+  /** Materialized skill files, used to invalidate receipts after removal. */
+  files?: Record<string, string[]>
 }
 
 export interface SkillHubCategories {
@@ -93,6 +97,8 @@ export interface SkillHubCatalog {
   packs: SkillHubPack[]
   plugins: SkillHubPlugin[]
   installed: SkillHubInstalls
+  /** Transient install feedback (failed constituent skills); never cached. */
+  notice?: string
 }
 
 export interface SkillHubConfig {
@@ -108,6 +114,7 @@ export interface SkillHubConfig {
   apiBase: string
   /** Executable name/path of the `skillhub` CLI; empty disables delegation. */
   command: string
+  runtime?: SkillHubRuntime | undefined
   /** Injectable fetch for testing. */
   fetch?: typeof fetch
   /**
@@ -167,19 +174,31 @@ function readJson<T>(file: string, fallback: T): T {
 
 function writeJson(file: string, value: unknown): void {
   mkdirSync(dirname(file), { recursive: true })
-  const temporary = `${file}.tmp-${process.pid}`
+  const temporary = `${file}.tmp-${randomUUID()}`
   writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
-  writeFileSync(file, readFileSync(temporary))
-  try { writeFileSync(temporary, '') } catch { /* best effort */ }
+  renameSync(temporary, file)
 }
 
 function normalizeInstalls(installs: unknown): SkillHubInstalls {
   const source = (typeof installs === 'object' && installs !== null ? installs : {}) as Record<string, unknown>
   const asStringArray = (value: unknown): string[] => Array.isArray(value) ? value.filter(item => typeof item === 'string') : []
+  const asStringRecord = (value: unknown): Record<string, string[]> => Object.fromEntries(Object.entries(
+    typeof value === 'object' && value !== null && !Array.isArray(value) ? value : {},
+  ).map(([key, item]) => [key, asStringArray(item)]))
+  const commands = Object.fromEntries(Object.entries(asStringRecord(source.commands))
+    .map(([key, names]) => [key, names.filter(isSkillName)]))
+  const files = asStringRecord(source.files)
+  const installed = (key: string): boolean => files[key] !== undefined
+    ? files[key].length > 0 && files[key].every(file => existsSync(file))
+    : Boolean(commands[key]?.length)
+  // Earlier versions wrote success even when the CLI failed. Those records
+  // must offer Install again so the real files can be materialized.
   return {
-    skills: asStringArray(source.skills),
-    packs: asStringArray(source.packs),
+    skills: asStringArray(source.skills).filter(id => installed(`skill:${id}`)),
+    packs: asStringArray(source.packs).filter(id => installed(`pack:${id}`)),
     plugins: asStringArray(source.plugins),
+    commands,
+    files,
   }
 }
 
@@ -316,6 +335,7 @@ function mapPack(p: SkillHubAPISkillSet): SkillHubPack {
     skills: p.skillCount ?? p.skillSlugs?.length ?? 0,
     source: 'SkillHub',
     command: p.slug,
+    ...(p.skillSlugs === undefined ? {} : { skillSlugs: p.skillSlugs }),
     ...(p.iconUrl ? { icon: p.iconUrl } : {}),
   }
 }
@@ -378,7 +398,6 @@ function categoriesFor(prefix: string, values: Iterable<string>): string[] {
  */
 export async function refreshCatalog(config: SkillHubConfig): Promise<SkillHubCatalog> {
   const fetchFn = config.fetch ?? fetch
-  const installed = normalizeInstalls(readJson(config.installFile, EMPTY_INSTALLS))
   const base = config.apiBase.replace(/\/+$/, '')
   try {
     const [categories, hot, sets, pluginPage, skillTotals] = await Promise.all([
@@ -406,7 +425,7 @@ export async function refreshCatalog(config: SkillHubConfig): Promise<SkillHubCa
       skills,
       packs,
       plugins,
-      installed,
+      installed: normalizeInstalls(readJson(config.installFile, EMPTY_INSTALLS)),
     }
     try { writeJson(config.catalogFile, catalog) } catch { /* cache is best effort */ }
     return applyPreinstalledCatalog(catalog, config)
@@ -451,7 +470,7 @@ export interface SkillHubSearchQuery {
   /** Human-readable category label as shown in the UI; '' / 全部 / 全部分类 means no filter. */
   category: string
   limit?: number
-  /** 1-based page; only plugins page server-side, other kinds always answer page 1. */
+  /** 1-based page. */
   page?: number
 }
 
@@ -535,47 +554,116 @@ export async function searchCatalog(config: SkillHubConfig, query: SkillHubSearc
     return { ...empty, total: data.total ?? plugins.length, page: data.page ?? page, pageSize: data.pageSize ?? pageSize, plugins }
   } catch {
     const local = buildCatalog(config)
-    const skills = query.kind === 'skill' ? local.skills.filter(s => (category === '' || s.tag === category) && matchesText(q, s.name, s.description, s.tag)) : []
-    const packs = query.kind === 'pack' ? local.packs.filter(p => (category === '' || p.category === category) && matchesText(q, p.name, p.description, p.role)) : []
+    const skills = query.kind === 'skill' ? local.skills.filter(s => (category === '' || s.tag === category) && matchesText(q, s.id, s.name, s.description, s.tag)) : []
+    const packs = query.kind === 'pack' ? local.packs.filter(p => (category === '' || p.category === category) && matchesText(q, p.id, p.name, p.description, p.role)) : []
     const plugins = query.kind === 'plugin' ? local.plugins.filter(p => (category === '' || p.category === category) && matchesText(q, p.name, p.description, p.category)) : []
     if (query.kind === 'plugin') return { ...empty, source: local.source, total: plugins.length, page, pageSize, plugins: pageSlice(plugins, page, pageSize) }
     const localItems = query.kind === 'skill' ? skills : packs
-    return { ...empty, source: local.source, total: localItems.length, page, pageSize, skills, packs }
+    return { ...empty, source: local.source, total: localItems.length, page, pageSize, skills: pageSlice(skills, page, pageSize), packs: pageSlice(packs, page, pageSize) }
   }
 }
 
-/**
- * Record an install. When a `skillhub` CLI is available we delegate the real
- * install into the snapshot root; otherwise (offline / seed mode) we only mark the
- * item installed so the UI reflects it. We never let a request body drive what the
- * runtime loads — materialization goes through the snapshot bridge.
- */
+const installing = new Map<string, Promise<SkillHubCatalog>>()
+
+function isInstallId(id: unknown): id is string {
+  return typeof id === 'string' && /^[\w@][\w.@/-]{0,127}$/.test(id)
+    && id.split('/').every(part => part !== '' && part !== '..' && part !== '.')
+}
+
+function recordInstall(config: SkillHubConfig, kind: 'skill' | 'pack', id: string, skills: InstalledSkill[]): void {
+  const installs = normalizeInstalls(readJson(config.installFile, EMPTY_INSTALLS))
+  const bucket = kind === 'skill' ? 'skills' : 'packs'
+  if (!installs[bucket].includes(id)) installs[bucket].push(id)
+  const key = `${kind}:${id}`
+  installs.commands = { ...installs.commands, [key]: [...new Set(skills.filter(skill => skill.userInvocable).map(skill => skill.name))] }
+  installs.files = { ...installs.files, [key]: [...new Set(skills.map(skill => skill.path))] }
+  writeJson(config.installFile, installs)
+}
+
+/** Serialize installs per root so concurrent requests cannot lose receipts. */
 export async function installItem(config: SkillHubConfig, kind: SkillHubKind, id: string): Promise<SkillHubCatalog> {
+  const previous = installing.get(config.root)
+  const pending = (previous ?? Promise.resolve()).catch(() => {}).then(() => install(config, kind, id))
+  installing.set(config.root, pending)
+  try { return await pending } finally { if (installing.get(config.root) === pending) installing.delete(config.root) }
+}
+
+async function install(config: SkillHubConfig, kind: SkillHubKind, id: string): Promise<SkillHubCatalog> {
   if (!['skill', 'pack', 'plugin'].includes(kind)) throw new TypeError(`unknown skillhub kind: ${kind}`)
-  if (!/^[\w.@/-]{1,128}$/.test(id)) throw new TypeError(`skillhub: invalid ${kind} id`)
-  const catalog = buildCatalog(config)
+  if (!isInstallId(id)) throw new TypeError(`skillhub: invalid ${kind} id`)
+  if (kind === 'plugin') throw new TypeError('请在插件市场安装 DSH 插件。')
+  if (config.runtime === undefined) throw new Error('当前运行时未启用本地技能安装。')
+  if (config.command === '') throw new Error('未配置 SkillHub CLI，请先安装 CLI 并配置 skillhubCommand。')
+  let catalog = buildCatalog(config)
   const inCatalog = (c: SkillHubCatalog): boolean => kind === 'skill'
     ? c.skills.some(item => item.id === id)
-    : kind === 'pack'
-      ? c.packs.some(item => item.id === id)
-      : c.plugins.some(item => item.id === id)
+    : c.packs.some(item => item.id === id)
   // Items found through live search may not be in the cached catalog; confirm with SkillHub before installing.
   if (!inCatalog(catalog)) {
-    const live = await searchCatalog(config, { kind, q: kind === 'plugin' ? id.split('/').pop() ?? id : id, category: '' })
+    const live = await searchCatalog(config, { kind, q: id, category: '' })
     if (live.source !== 'skillhub' || !inCatalog({ ...catalog, skills: live.skills, packs: live.packs, plugins: live.plugins })) throw new TypeError(`skillhub: ${kind} ${id} not found in catalog`)
+    catalog = { ...catalog, skills: live.skills, packs: live.packs, plugins: live.plugins }
   }
-
-  // Delegate to the CLI when present (real install + verify into snapshot root).
-  if (config.command !== '') {
-    const result = spawnSync(config.command, ['install', id, '--dir', config.root], { stdio: 'ignore', encoding: 'utf8' })
-    if (result.error === undefined && result.status === 0) {
-      spawnSync(config.command, ['verify', id], { stdio: 'ignore', encoding: 'utf8' })
+  let slugs = kind === 'skill' ? [id] : catalog.packs.find(pack => pack.id === id)?.skillSlugs
+  // Older catalog caches and seed packs predate constituent-skill metadata.
+  if (kind === 'pack' && !slugs?.length) {
+    const live = await searchCatalog(config, { kind, q: id, category: '' })
+    slugs = live.packs.find(pack => pack.id === id)?.skillSlugs
+  }
+  if (!Array.isArray(slugs) || !slugs.length) throw new Error('无法取得该专家包的技能清单，请检查 SkillHub 连接后重试。')
+  if (!slugs.every(isInstallId)) throw new TypeError('专家包包含非法技能标识')
+  const loaded = new Map<string, InstalledSkill>()
+  // Expert-pack constituents can be individually unavailable (the API published
+  // a stale slug list, or the download endpoint 404s a delisted skill). A pack
+  // install still succeeds for the healthy skills and reports the rest; a
+  // single-skill install keeps failing hard so the UI never lies about it.
+  const skipped: string[] = []
+  mkdirSync(config.root, { recursive: true })
+  for (const slug of new Set(slugs)) {
+    const shortName = slug.split('/').pop()!.replace(/@[^@]+$/, '')
+    const receipts = normalizeInstalls(readJson(config.installFile, EMPTY_INSTALLS))
+    const recordedFiles = new Set(receipts.files?.[`skill:${slug}`] ?? [])
+    const matches = (skill: InstalledSkill): boolean => skill.name === shortName
+      || basename(dirname(skill.path)) === shortName || recordedFiles.has(skill.path)
+    const available = await config.runtime.refresh()
+    let installed = available.filter(matches)
+    if (!installed.length) {
+      const before = new Set(available.map(skill => skill.path))
+      try {
+        const args = ['install', slug, '--dir', config.root]
+        const nodeScript = /\.[cm]?js$/i.test(config.command)
+        await execa(nodeScript ? process.execPath : config.command, nodeScript ? [config.command, ...args] : args, {
+          timeout: 120_000, maxBuffer: 1024 * 1024, windowsHide: true,
+          env: { PATH: [dirname(process.execPath), join(homedir(), '.local', 'bin'), process.env.PATH ?? ''].join(delimiter) },
+        })
+      } catch (error) {
+        const failure = error as Error & { code?: string; stderr?: string }
+        if (failure.code === 'ENOENT') throw new Error('未找到 SkillHub CLI。请按 https://skillhub.cn/install/skillhub.md 安装 CLI，或配置 LUMO_SKILLHUB_COMMAND。')
+        if (kind === 'skill') throw new Error(`SkillHub 安装失败（${slug}）：${(failure.stderr || failure.message).trim().slice(0, 1000)}`)
+        skipped.push(slug)
+        continue
+      }
+      // 服务发现往往慢于 CLI 的收尾（解压重命名、watcher 摄取）：CLI 成功后给
+      // 一小段重试窗口，避免把刚落盘的 SKILL.md 误判成缺失。
+      for (let attempt = 0; attempt < 8 && installed.length === 0; attempt += 1) {
+        if (attempt > 0) await delay(250)
+        installed = (await config.runtime.refresh()).filter(skill => matches(skill) || !before.has(skill.path))
+      }
     }
+    if (installed.length === 0) {
+      if (kind === 'skill') throw new Error(`SkillHub 未安装可加载的 SKILL.md：${slug}`)
+      skipped.push(slug)
+      continue
+    }
+    recordInstall(config, 'skill', slug, installed)
+    for (const skill of installed) loaded.set(skill.path, skill)
   }
-
-  const installs = normalizeInstalls(readJson(config.installFile, EMPTY_INSTALLS))
-  const bucket = kind === 'skill' ? 'skills' : kind === 'pack' ? 'packs' : 'plugins'
-  if (!installs[bucket].includes(id)) installs[bucket].push(id)
-  writeJson(config.installFile, installs)
-  return buildCatalog(config)
+  if (kind === 'pack') recordInstall(config, kind, id, [...loaded.values()])
+  const result = buildCatalog(config)
+  if (skipped.length === 0) return result
+  const name = result.packs.find(pack => pack.id === id)?.name ?? id
+  return {
+    ...result,
+    notice: `「${name}」已安装（${loaded.size} 个技能），${skipped.length} 个构成技能不可用：${skipped.join('、')}。`,
+  }
 }

@@ -1,42 +1,60 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 用法：install-components.sh [--target darwin-arm64|darwin-x64]
+# 用法：install-components.sh [--target darwin-arm64|darwin-x64|win-x64]
 # PPT venv 按 target 分目录（skills/ppt-master/.venv-<target>）；native wheel 决定了
-# 它只能在同架构宿主上建，跨架构会直接报错并指向 CI。默认宿主架构。
+# 它只能在同平台同架构宿主上建，跨平台会直接报错。默认宿主架构。
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 platform_root="$(cd "${script_dir}/.." && pwd)"
 dsh_root="$(cd "${platform_root}/.." && pwd)/deepseek-harness"
 ppt_root="${script_dir}/skills/ppt-master"
 bootstrap_python="${LUMO_PPT_BOOTSTRAP_PYTHON:-}"
 
+raw_host_os="$(uname -s)"
+case "${raw_host_os}" in
+  Darwin) host_os="Darwin" ;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT) host_os="Windows" ;;
+  *) host_os="${raw_host_os}" ;;
+esac
 host_arch="$(uname -m)"
 case "${host_arch}" in
-  arm64|aarch64) host_arch="arm64" ;;
-  x86_64|amd64) host_arch="x64" ;;
+  arm64|aarch64|ARM64) host_arch="arm64" ;;
+  x86_64|amd64|AMD64|x64) host_arch="x64" ;;
 esac
-host_target="darwin-${host_arch}"
+if [[ "${host_os}" == "Windows" ]]; then
+  host_target="win-${host_arch}"
+  native_platform="win32"
+  native_pty_target="win32-${host_arch}"
+else
+  host_target="darwin-${host_arch}"
+  native_platform="darwin"
+  native_pty_target="darwin-${host_arch}"
+fi
 target="${LUMO_DESKTOP_TARGET:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target) [[ $# -ge 2 ]] || { echo "--target 需要参数" >&2; exit 64; }; target="$2"; shift 2 ;;
     --target=*) target="${1#*=}"; shift ;;
-    *) echo "usage: $0 [--target darwin-arm64|darwin-x64]" >&2; exit 64 ;;
+    *) echo "usage: $0 [--target darwin-arm64|darwin-x64|win-x64]" >&2; exit 64 ;;
   esac
 done
 [[ -n "${target}" ]] || target="${host_target}"
 case "${target}" in
-  darwin-arm64|darwin-x64) ;;
-  *) echo "Lumo: 不支持的 target：${target}（可用：darwin-arm64, darwin-x64）" >&2; exit 64 ;;
+  darwin-arm64|darwin-x64|win-x64) ;;
+  *) echo "Lumo: 不支持的 target：${target}（可用：darwin-arm64, darwin-x64, win-x64）" >&2; exit 64 ;;
 esac
-if [[ "$(uname -s)" != "Darwin" || "${target}" != "${host_target}" ]]; then
-  echo "Lumo: ${target} 的 PPT venv 必须在同架构 macOS 上建（当前 $(uname -s) ${host_target}）：native wheel 无法跨架构安装。请走 CI（release.yml：macos-13 = x64，macos-14 = arm64）。" >&2
+if [[ ( "${host_os}" != "Darwin" && "${host_os}" != "Windows" ) || "${target}" != "${host_target}" ]]; then
+  echo "Lumo: ${target} 的 PPT venv 必须在同平台同架构宿主上建（当前 ${host_os} ${host_target}）：native wheel 无法跨平台安装。" >&2
   exit 1
 fi
 ppt_venv="${ppt_root}/.venv-${target}"
+if [[ "${target}" == "win-x64" && "${host_arch}" != "x64" ]]; then
+  echo "Lumo: Windows 桌面包目前只支持 x64 构建机（当前架构：${host_arch}）。" >&2
+  exit 1
+fi
 
 if [[ -z "${bootstrap_python}" ]]; then
-  bootstrap_python="$(command -v python3 || true)"
+  bootstrap_python="$(command -v python3 || command -v python || command -v py || true)"
 fi
 if [[ -z "${bootstrap_python}" || ! -x "${bootstrap_python}" ]]; then
   echo "Lumo: 安装 PPT Master 需要 Python 3.10+；也可设置 LUMO_PPT_BOOTSTRAP_PYTHON。" >&2
@@ -51,10 +69,15 @@ if [[ ! -f "${ppt_root}/requirements.txt" ]]; then
   exit 1
 fi
 
-if [[ ! -x "${ppt_venv}/bin/python" ]]; then
+if [[ "${host_os}" == "Windows" ]]; then
+  venv_python="${ppt_venv}/Scripts/python.exe"
+else
+  venv_python="${ppt_venv}/bin/python"
+fi
+if [[ ! -x "${venv_python}" ]]; then
   "${bootstrap_python}" -m venv "${ppt_venv}"
 fi
-"${ppt_venv}/bin/python" -m pip install -r "${ppt_root}/requirements.txt"
+"${venv_python}" -m pip install -r "${ppt_root}/requirements.txt"
 
 cd "${platform_root}"
 
@@ -75,8 +98,8 @@ native_path_exists() {
 
 native_target_ready() {
   local arch="$1"
-  native_path_exists "*/onnxruntime-node/bin/napi-v6/darwin/${arch}" \
-    && native_path_exists "*/node-pty/prebuilds/darwin-${arch}/pty.node"
+  native_path_exists "*/onnxruntime-node/bin/napi-v6/${native_platform}/${arch}" \
+    && native_path_exists "*/node-pty/prebuilds/${native_pty_target}/pty.node"
 }
 
 keep_only_directory() {
@@ -97,13 +120,29 @@ prune_non_target_native_payloads() {
   for root in "${platform_root}/node_modules" "${platform_root}/data-plane/dsh-node/node_modules" "${dsh_root}/node_modules"; do
     [[ -d "${root}" ]] || continue
     while IFS= read -r -d '' napi_root; do
-      keep_only_directory "${napi_root}" darwin
-      keep_only_directory "${napi_root}/darwin" "${host_arch}"
+      keep_only_directory "${napi_root}" "${native_platform}"
+      keep_only_directory "${napi_root}/${native_platform}" "${host_arch}"
     done < <(find "${root}" -path '*/onnxruntime-node/bin/napi-*' -type d -print0 2>/dev/null)
     while IFS= read -r -d '' pty_root; do
-      keep_only_directory "${pty_root}" "darwin-${host_arch}"
+      keep_only_directory "${pty_root}" "${native_pty_target}"
     done < <(find "${root}" -path '*/node-pty/prebuilds' -type d -print0 2>/dev/null)
   done
+}
+
+corepack_bin="$(command -v corepack || command -v corepack.cmd || true)"
+if [[ -z "${corepack_bin}" ]]; then
+  echo "Lumo: 安装桌面组件需要 corepack（随 Node.js 提供）。" >&2
+  exit 1
+fi
+
+run_pnpm() {
+  "${corepack_bin}" pnpm "$@"
+}
+
+run_pnpm_install() {
+  # Network flags are install options; pnpm rebuild rejects them.
+  run_pnpm --registry "${LUMO_NPM_REGISTRY:-https://registry.npmjs.org}" \
+    --network-concurrency=8 --fetch-retries=2 --fetch-retry-mintimeout=2000 --fetch-retry-maxtimeout=10000 "$@"
 }
 
 refresh_native=0
@@ -111,7 +150,7 @@ if [[ "${LUMO_FORCE_NATIVE_INSTALL:-0}" == "1" ]] || ! native_target_ready "${ho
   echo "Lumo: ${host_target} 原生 optional 依赖缺失，定向刷新 onnxruntime-node/node-pty。"
   refresh_native=1
 fi
-corepack pnpm --config.confirmModulesPurge=false install --frozen-lockfile
+run_pnpm_install --config.confirmModulesPurge=false install --frozen-lockfile
 
 if [[ ${refresh_native} -eq 1 ]]; then
   # node-pty belongs to the upstream DSH workspace, not the platform workspace.
@@ -126,14 +165,14 @@ if [[ ${refresh_native} -eq 1 ]]; then
   if [[ -f "${dsh_root}/pnpm-lock.yaml" ]]; then
     if ! (
       cd "${dsh_root}"
-      corepack pnpm --filter @deepseek-ai/dsh-subprocess-local rebuild node-pty
+      run_pnpm --filter @deepseek-ai/dsh-subprocess-local rebuild node-pty
     ); then
       echo "Lumo: [WARN] node-pty 定向刷新失败，将继续构建（PTY 能力不可用）。" >&2
     fi
   else
     echo "Lumo: [WARN] 找不到 deepseek-harness 工作区，跳过 node-pty 刷新：${dsh_root}" >&2
   fi
-  if ! corepack pnpm rebuild onnxruntime-node; then
+  if ! run_pnpm rebuild onnxruntime-node; then
     echo "Lumo: [WARN] onnxruntime-node 定向刷新失败，将继续构建（原生推理不可用）。" >&2
   fi
 fi

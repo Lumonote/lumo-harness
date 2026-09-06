@@ -9,6 +9,7 @@ export LUMO_PACKAGED_RUNTIME=1
 export LUMO_RUNTIME_ROOT="$runtime_root"
 export LUMO_RUNTIME_NODE_MODULES="$runtime_root/node_modules"
 export LUMO_BUNDLED_SKILLS_ROOT="$runtime_root/skills"
+export LUMO_SKILLHUB_COMMAND="${LUMO_SKILLHUB_COMMAND:-$runtime_root/bin/skillhub.mjs}"
 export LUMO_RUFLO_BIN="$runtime_root/node_modules/ruflo/bin/ruflo.js"
 if [ -x "$runtime_root/python/bin/python3" ]; then
   export LUMO_PPT_PYTHON="${LUMO_PPT_PYTHON:-$runtime_root/python/bin/python3}"
