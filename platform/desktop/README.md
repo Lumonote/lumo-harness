@@ -4,8 +4,9 @@
 
 ## 运行边界
 
-桌面应用由 Rust/Tauri 壳启动本地 DSH Web worker，数据只落在系统应用数据目录的
-`lumo.sqlite`。它明确设置 `LUMO_DEPLOYMENT_MODE=local`，并移除 PostgreSQL、Redis、
+桌面应用由 Rust/Tauri 壳启动本地 DSH Web worker，数据保存在系统应用数据目录：
+`lumo.sqlite` 保存平台状态，`dsh/sessions` 保存对话日志，`runtime/skills` 保存安装的技能。
+它明确设置 `LUMO_DEPLOYMENT_MODE=local`，并移除 PostgreSQL、Redis、
 Nacos、MinIO 和连接器网关地址；因此本地模式不会因为机器上恰好运行了某个中间件而
 偷偷切换成分布式模式。
 
@@ -41,6 +42,16 @@ macOS 构建结果位于 `target/debug/bundle/macos/Lumo.app`。Tauri 构建前�
 不依赖当前 checkout、pnpm 或开发机上的 Node。应用数据和 SQLite 文件仍保存在系统应用
 数据目录，且不连接服务器中间件。
 
+隔离构建会排除覆盖层包的旧 `lib/`，并在每个 tsdown 阶段前重新编译对应的 TypeScript
+产物。新增覆盖层包需登记到 `dsh-overrides/apply.mjs` 的 `overriddenPackageDirectories`；
+同时包含主机与客户端代码的包使用 `tsconfig.host.json` 和 `tsconfig.client.json`，
+桌面构建会分别编译两个配置，避免全新快照缺少 `lib/types/index.js`。
+
+同一 checkout 的 runtime 构建共用 `platform/.build/desktop-runtime.lock`，从准备快照到
+产物落盘期间只允许一个构建进程运行。重复启动会显示持锁进程的 PID 并退出，避免同时
+清理、复制 `target/lumo-runtime` 导致 `ENOTEMPTY` 或产物缺失。正常退出及可处理的中断会
+释放锁；强制结束进程后若有残留锁，确认所有构建已停止，再删除该锁目录并重新构建。
+
 Windows 使用同一个总入口，在 Git Bash 中执行：
 
 ```sh
@@ -54,6 +65,19 @@ Windows 包内使用 `runtime/lumo-runtime.cmd`、`node.exe` 和 `python/python.
 当前 checkout 或开发机上的 Node。
 
 ## 桌面基础插件
+
+历史对话支持「全部对话」和「按工作区」两个直接入口。全部对话展开跨工作区的会话列表；
+归档规则保持不变。切换工作区或视图不会移动、删除会话文件。旧版 `session.jsonl.zstd`
+和新版 `session.v2.jsonl.zstd` 可以并存，读取时由 DSH 格式迁移链恢复；诊断日志必须读取
+完整的多帧 Zstandard 数据，单次解压得到的首帧只有会话头部，不能据此判断内容丢失。
+
+专家包安装后只提供一个「用于对话」命令。入口保留专家名称、职责和构成技能路径，
+按任务选择相关技能。打开技能市场时会从本地已安装技能自动修复旧版多命令安装记录，
+不要求重新下载；所有构成技能安装失败时，不再显示专家包安装成功。
+
+可选插件装配失败时，启动器隔离出错插件后重试，并清除上一进程的工作台入口。
+桌面启动页等待本次装配完成后取得鉴权入口；等待期间显示进度，失败时显示原因与日志位置，
+不会再因入口等待超时跳到未鉴权页面。
 
 技能中心依赖的 SkillHub CLI 在每次桌面构建中自动准备并打入应用包，用户无需另外安装
 CLI 或设置 `LUMO_SKILLHUB_COMMAND`。构建从 [SkillHub 官方安装源](https://skillhub.cn/install/skillhub.md)

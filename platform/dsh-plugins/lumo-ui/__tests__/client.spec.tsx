@@ -95,7 +95,13 @@ describe('Lumo native Harness integration', () => {
   const calls: string[] = []
 
   beforeEach(() => {
-    vi.stubGlobal('localStorage', window.localStorage)
+    const values = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value) },
+      removeItem: (key: string) => { values.delete(key) },
+      clear: () => { values.clear() },
+    })
     history.replaceState({}, '', '/')
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
@@ -142,7 +148,7 @@ describe('Lumo native Harness integration', () => {
         path.startsWith('/lumo/api/skillhub/search') ? (path.includes('kind=pack')
           ? { kind: 'pack', q: '', category: '', source: 'seed', total: 1, page: 1, pageSize: 24, skills: [], packs: [skillhubCatalog.packs[0]!], plugins: [] }
           : { kind: 'skill', q: '', category: '', source: 'seed', total: 1, page: 1, pageSize: 24, skills: [skillhubCatalog.skills[0]!], packs: [], plugins: [] }) :
-        init?.method === 'POST' && path === '/lumo/api/skillhub/install' ? { ...skillhubCatalog, installed: { skills: ['tencent-docs'], packs: ['automation-testing'], plugins: ['modlens'], commands: { 'skill:tencent-docs': ['docs-live'], 'pack:automation-testing': ['test-first', 'browser-test'] } } } :
+        init?.method === 'POST' && path === '/lumo/api/skillhub/install' ? { ...skillhubCatalog, installed: { skills: ['tencent-docs'], packs: ['automation-testing'], plugins: ['modlens'], commands: { 'skill:tencent-docs': ['docs-live'], 'pack:automation-testing': ['automation-testing'] } } } :
         path === '/lumo/api/skills' ? { complete: true, skills: [
           { name: 'open-design', description: '以产物优先的方式创建、完善、预览并导出真实设计产物。', whenToUse: '适用于原型、落地页、看板和视觉升级。', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 'lumo-open-design' },
           { name: 'ppt-master', description: '从主题、文档或现有模板生成、编辑和增强原生可编辑 PPTX。', whenToUse: '适用于演示文稿生成、模板填充和原生 PPTX 编辑。', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 'lumo-creative-skills' },
@@ -330,7 +336,7 @@ describe('Lumo native Harness integration', () => {
     expect(screen.getByText('6 个技能')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '安装专家包' }))
     fireEvent.click(await screen.findByRole('button', { name: '在对话中使用 自动化测试' }))
-    expect(setDraft).toHaveBeenLastCalledWith('/test-first /browser-test ')
+    expect(setDraft).toHaveBeenLastCalledWith('/automation-testing ')
   }, 15000)
 
   it('keeps the home composer clean and opens creative workbenches only through /design and /ppt', async () => {

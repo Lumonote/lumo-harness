@@ -1,10 +1,25 @@
-import { describe, expect, it } from 'vitest'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { describe, expect, it, vi } from 'vitest'
+
+vi.mock('node:child_process', () => ({ spawnSync: vi.fn() }))
 
 import {
+  baselineBundlePackages,
+  clearReintroducedPluginQuarantine,
+  ensurePackagedBaselineBundles,
+  ensureProfilePlugins,
+  failedProfilePluginNames,
+  isOptionalProfilePlugin,
   missingProfilePluginSpecs,
   obsoleteProfilePluginNames,
   PLATFORM_PLUGIN_MODULES,
   profilePluginSpecs,
+  profileBundleNames,
+  quarantineProfilePlugins,
+  reconcileBaselineBundles,
 } from '../src/plugins.ts'
 
 describe('profile plugin installation', () => {
@@ -36,8 +51,7 @@ describe('profile plugin installation', () => {
       '@lumo/dsh-platform-ui', '@lumo/open-design', '@lumo/archify',
       '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/knowledge-vault', '@lumo/skill-local',
       'dshmarket', '@liustack/modlens', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
-      '@linxin666/dsh-client-ui-task-board', 'dsh-better-sidebar',
-      '@nanmicoder/dsh-agent-teams', 'dsh-univer-office',
+      '@linxin666/dsh-client-ui-task-board', 'dsh-better-sidebar', 'dsh-univer-office',
     ])
     expect(local).toContainEqual({ name: 'dshmarket', spec: 'dshmarket@1.41.0' })
     expect(local).toContainEqual({ name: 'dsh-context', spec: 'dsh-context@0.41.3' })
@@ -59,5 +73,212 @@ describe('profile plugin installation', () => {
   it('removes the obsolete third-party auth bundle from persistent Web profiles', () => {
     expect(obsoleteProfilePluginNames('web', { 'deepseek-harness-auth': '0.4.0' })).toEqual(['deepseek-harness-auth'])
     expect(obsoleteProfilePluginNames('headless', { 'deepseek-harness-auth': '0.4.0' })).toEqual([])
+  })
+
+  it('continues startup when an optional plugin installer fails or throws', () => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo-install-failure-'))
+    const profileDir = join(root, 'dsh', 'profiles', 'web')
+    mkdirSync(profileDir, { recursive: true })
+    const desired = profilePluginSpecs('web', root, 'local')
+    writeFileSync(join(profileDir, 'package.json'), `${JSON.stringify({
+      dependencies: Object.fromEntries(desired.filter(plugin => plugin.name !== '@yejiming/dsh-data-agent').map(plugin => [plugin.name, plugin.spec])),
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
+    })}\n`)
+    const options = {
+      profile: 'web', platformRoot: root, dshRoot: root, deploymentMode: 'local' as const,
+      env: { DSH_HOME: join(root, 'dsh') } as NodeJS.ProcessEnv,
+    }
+
+    vi.mocked(spawnSync).mockReturnValueOnce({ status: 1 } as ReturnType<typeof spawnSync>)
+    expect(() => ensureProfilePlugins(options)).not.toThrow()
+    vi.mocked(spawnSync).mockImplementationOnce(() => { throw new Error('installer unavailable') })
+    expect(() => ensureProfilePlugins(options)).not.toThrow()
+    expect(profileBundleNames('web', options.env)).toEqual(['@deepseek-ai/dsh-base'])
+  })
+})
+
+describe('baseline bundle reconciliation', () => {
+  it('recognizes an optional bundle in a loader failure while keeping first-party failures loud', () => {
+    const stderr = [
+      'Error: dsh: plugin tree failed to load',
+      'failed to apply loader entry agent-teams (@nanmicoder/dsh-agent-teams):',
+      'ctx.subagents.registerContinuableSetup is not a function',
+    ].join('\n')
+
+    expect(failedProfilePluginNames(stderr, [
+      '@deepseek-ai/dsh-base', '@lumo/dsh-platform-ui', '@nanmicoder/dsh-agent-teams',
+    ])).toEqual(['@nanmicoder/dsh-agent-teams'])
+    expect(isOptionalProfilePlugin('@nanmicoder/dsh-agent-teams')).toBe(true)
+    expect(isOptionalProfilePlugin('@lumo/dsh-platform-ui')).toBe(false)
+    expect(failedProfilePluginNames(stderr, ['@deepseek-ai/dsh-base'])).toEqual([])
+    expect(failedProfilePluginNames(
+      'failed to apply loader entry manual-plugin: incompatible runtime',
+      ['@acme/manual-plugin'],
+    )).toEqual(['@acme/manual-plugin'])
+  })
+
+  it('quarantines only failed bundle layers and permits an explicit re-add', () => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo-quarantine-'))
+    const profileDir = join(root, 'dsh', 'profiles', 'web')
+    mkdirSync(profileDir, { recursive: true })
+    const env = { DSH_HOME: join(root, 'dsh') } as NodeJS.ProcessEnv
+    const manifestPath = join(profileDir, 'package.json')
+    writeFileSync(manifestPath, `${JSON.stringify({
+      name: 'dsh-profile-web',
+      dependencies: {
+        '@nanmicoder/dsh-agent-teams': '0.1.15',
+        '@acme/manual-plugin': '1.0.0',
+      },
+      dsh: {
+        profile: {
+          bundles: [
+            '@deepseek-ai/dsh-base', '@nanmicoder/dsh-agent-teams',
+            '@acme/manual-plugin', '@lumo/dsh-platform-ui',
+          ],
+        },
+      },
+    }, undefined, 2)}\n`)
+
+    expect(quarantineProfilePlugins({
+      profile: 'web', packages: ['@nanmicoder/dsh-agent-teams', '@acme/manual-plugin'], reason: 'loader test', env,
+    })).toEqual(['@nanmicoder/dsh-agent-teams', '@acme/manual-plugin'])
+    expect(profileBundleNames('web', env)).toEqual(['@deepseek-ai/dsh-base', '@lumo/dsh-platform-ui'])
+    const quarantinePath = join(profileDir, '.lumo-plugin-quarantine.json')
+    expect(JSON.parse(readFileSync(quarantinePath, 'utf8'))).toMatchObject({
+      packages: {
+        '@nanmicoder/dsh-agent-teams': { reason: 'loader test' },
+        '@acme/manual-plugin': { reason: 'loader test' },
+      },
+    })
+
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dsh: { profile: { bundles: string[] } } }
+    manifest.dsh.profile.bundles.splice(1, 0, '@nanmicoder/dsh-agent-teams')
+    writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`)
+    expect(clearReintroducedPluginQuarantine('web', env)).toEqual(['@nanmicoder/dsh-agent-teams'])
+    expect(existsSync(quarantinePath)).toBe(true)
+    expect(readFileSync(quarantinePath, 'utf8')).toContain('acme/manual-plugin')
+  })
+
+  it('appends every missing baseline package without duplicating an existing slot', () => {
+    const { bundles, added, removed, owned } = reconcileBaselineBundles({
+      bundles: ['@deepseek-ai/dsh-base', 'dsh-context'],
+      available: ['dshmarket', 'dsh-context', 'dsh-cost-meter'],
+      owned: [],
+    })
+
+    expect(added).toEqual(['dshmarket', 'dsh-cost-meter'])
+    expect(removed).toEqual([])
+    expect(owned).toEqual(['dshmarket', 'dsh-cost-meter'])
+    // `dsh-context` keeps the single slot the market gave it: a second one
+    // would mount its loader rows twice and fail the boot.
+    expect(bundles).toEqual(['@deepseek-ai/dsh-base', 'dsh-context', 'dshmarket', 'dsh-cost-meter'])
+  })
+
+  it('retires only the baseline slots it owns, never a market-owned entry', () => {
+    const { bundles, added, removed, owned } = reconcileBaselineBundles({
+      bundles: ['@deepseek-ai/dsh-base', 'dsh-retired-plugin', 'dshmarket', 'dsh-cost-meter'],
+      available: ['dshmarket'],
+      owned: ['dsh-retired-plugin', 'dshmarket'],
+    })
+
+    expect(removed).toEqual(['dsh-retired-plugin'])
+    expect(added).toEqual([])
+    expect(owned).toEqual(['dshmarket'])
+    expect(bundles).toEqual(['@deepseek-ai/dsh-base', 'dshmarket', 'dsh-cost-meter'])
+  })
+
+  it('carries the whole pinned baseline', () => {
+    expect(baselineBundlePackages()).toEqual([
+      'dshmarket', '@liustack/modlens', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
+      '@linxin666/dsh-client-ui-task-board', 'dsh-better-sidebar', 'dsh-univer-office',
+    ])
+  })
+
+  it('registers the baseline as profile layers in a packaged runtime', () => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo-baseline-'))
+    const runtimeModules = join(root, 'runtime', 'node_modules')
+    for (const name of baselineBundlePackages()) {
+      mkdirSync(join(runtimeModules, ...name.split('/')), { recursive: true })
+      writeFileSync(join(runtimeModules, ...name.split('/'), 'package.json'), '{"name":"x","version":"1.0.0"}\n')
+    }
+    const profileDir = join(root, 'dsh', 'profiles', 'web')
+    mkdirSync(profileDir, { recursive: true })
+    const manifestPath = join(profileDir, 'package.json')
+    writeFileSync(manifestPath, `${JSON.stringify({
+      name: 'dsh-profile-web',
+      private: true,
+      dependencies: { 'dsh-context': '^0.42.0' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-context'], patchReload: 'live' } },
+    }, undefined, 2)}\n`)
+
+    ensurePackagedBaselineBundles({
+      profile: 'web',
+      env: { DSH_HOME: join(root, 'dsh'), LUMO_RUNTIME_NODE_MODULES: runtimeModules } as NodeJS.ProcessEnv,
+    })
+
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      dependencies?: Record<string, string>
+      dsh: { profile: { bundles: string[]; patchReload: string } }
+    }
+    const bundles = manifest.dsh.profile.bundles
+    // The market-owned `dsh-context` slot is preserved, never appended twice.
+    expect(bundles.filter(name => name === 'dsh-context')).toHaveLength(1)
+    expect(bundles.slice(0, 3)).toEqual(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-context'])
+    expect(bundles).toContain('dshmarket')
+    expect(new Set(bundles).size).toBe(bundles.length)
+    // Every other manifest field survives the write.
+    expect(manifest.dependencies).toEqual({ 'dsh-context': '^0.42.0' })
+    expect(manifest.dsh.profile.patchReload).toBe('live')
+
+    // Re-running is a no-op: the reconciled list is already persisted.
+    ensurePackagedBaselineBundles({
+      profile: 'web',
+      env: { DSH_HOME: join(root, 'dsh'), LUMO_RUNTIME_NODE_MODULES: runtimeModules } as NodeJS.ProcessEnv,
+    })
+    expect((JSON.parse(readFileSync(manifestPath, 'utf8')) as { dsh: { profile: { bundles: string[] } } })
+      .dsh.profile.bundles).toEqual(bundles)
+  })
+
+  it('does not re-add a quarantined baseline bundle until it is explicitly reintroduced', () => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo-baseline-quarantine-'))
+    const runtimeModules = join(root, 'runtime', 'node_modules')
+    for (const name of baselineBundlePackages()) {
+      mkdirSync(join(runtimeModules, ...name.split('/')), { recursive: true })
+      writeFileSync(join(runtimeModules, ...name.split('/'), 'package.json'), '{"name":"x","version":"1.0.0"}\n')
+    }
+    const profileDir = join(root, 'dsh', 'profiles', 'web')
+    mkdirSync(profileDir, { recursive: true })
+    const manifestPath = join(profileDir, 'package.json')
+    writeFileSync(manifestPath, `${JSON.stringify({
+      name: 'dsh-profile-web',
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
+    })}\n`)
+    const env = { DSH_HOME: join(root, 'dsh'), LUMO_RUNTIME_NODE_MODULES: runtimeModules } as NodeJS.ProcessEnv
+
+    ensurePackagedBaselineBundles({ profile: 'web', env })
+    expect(quarantineProfilePlugins({
+      profile: 'web', packages: ['dsh-univer-office'], env,
+    })).toEqual(['dsh-univer-office'])
+    ensurePackagedBaselineBundles({ profile: 'web', env })
+    let bundles = (JSON.parse(readFileSync(manifestPath, 'utf8')) as { dsh: { profile: { bundles: string[] } } }).dsh.profile.bundles
+    expect(bundles).not.toContain('dsh-univer-office')
+
+    bundles.push('dsh-univer-office')
+    writeFileSync(manifestPath, `${JSON.stringify({ dsh: { profile: { bundles } } })}\n`)
+    ensurePackagedBaselineBundles({ profile: 'web', env })
+    bundles = (JSON.parse(readFileSync(manifestPath, 'utf8')) as { dsh: { profile: { bundles: string[] } } }).dsh.profile.bundles
+    expect(bundles).toContain('dsh-univer-office')
+  })
+
+  it('leaves a profile it cannot initialize alone instead of writing a partial manifest', () => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo-baseline-missing-'))
+    const runtimeModules = join(root, 'runtime', 'node_modules')
+    mkdirSync(resolve(runtimeModules, 'dshmarket'), { recursive: true })
+
+    expect(() => ensurePackagedBaselineBundles({
+      profile: 'web',
+      env: { DSH_HOME: join(root, 'dsh'), LUMO_RUNTIME_NODE_MODULES: runtimeModules } as NodeJS.ProcessEnv,
+    })).not.toThrow()
+    expect(existsSync(join(root, 'dsh', 'profiles', 'web', 'package.json'))).toBe(false)
   })
 })

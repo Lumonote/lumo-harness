@@ -7,7 +7,7 @@ import SkillRegistry from '@deepseek-ai/dsh-skill'
 import { afterEach, describe, expect, it } from 'vitest'
 import { api, type Config } from '../src/index.ts'
 import { registerSkillHubRuntime, type SkillHubRuntime } from '../src/skillhub-runtime.ts'
-import { buildCatalog, installItem, type SkillHubConfig } from '../src/skillhub.ts'
+import { buildCatalog, installItem, loadCatalog, type SkillHubConfig } from '../src/skillhub.ts'
 
 const roots: string[] = []
 const contexts: Context[] = []
@@ -50,8 +50,9 @@ async function setup() {
     source: 'skillhub',
     skills: [{ id: 'catalog-name', name: 'Catalog name' }, { id: 'broken', name: 'Broken' }],
     packs: [
-      { id: 'expert-pack', name: 'Expert pack', skillSlugs: ['catalog-name', 'testing-live'] },
+      { id: 'expert-pack', name: 'Expert pack', command: 'expert-entry', skillSlugs: ['catalog-name', 'testing-live'] },
       { id: 'partial-pack', name: 'Partial pack', skillSlugs: ['good-one', 'broken404'] },
+      { id: 'empty-pack', name: 'Empty pack', skillSlugs: ['broken', 'broken404'] },
     ],
     plugins: [],
   }))
@@ -59,6 +60,30 @@ async function setup() {
 }
 
 describe('SkillHub installation and native discovery', () => {
+  it('marks every bundled base plugin installed across seed and cache catalogs', () => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo skillhub base '))
+    roots.push(root)
+    const config: SkillHubConfig = {
+      root: join(root, 'skills'), catalogFile: join(root, 'catalog.json'), installFile: join(root, 'installs.json'),
+      snapshotFile: join(root, 'snapshot.json'), command: 'skillhub', apiBase: 'https://invalid.test',
+      preinstalledRepositories: [
+        'https://github.com/dsh-market/dsh-market.git',
+        'REVOLUTIONLA/dsh-dream-skin/',
+        'bowenliang123/dsh-context',
+        'git@github.com:Han-1413141/dsh-cost-meter.git',
+        'scwlkq/dsh-task-board',
+        'https://github.com/liustack/modlens',
+        'omdsh-dev/DSH-better-sidebar',
+        'NanmiCoder/dsh-agent-teams',
+        'dream-num/dsh-univer-office.git',
+      ],
+    }
+    expect(buildCatalog(config).installed.plugins.sort()).toEqual([
+      'dsh-agent-teams', 'dsh-better-sidebar', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
+      'dsh-market', 'dsh-task-board', 'dsh-univer-office', 'modlens',
+    ])
+  })
+
   it('loads the installed body immediately and rediscovers it in a new runtime', async () => {
     const { config, ctx } = await setup()
     expect((await ctx.skills.snapshot()).skills).toHaveLength(0)
@@ -74,12 +99,44 @@ describe('SkillHub installation and native discovery', () => {
     expect(buildCatalog(config).installed.skills).toEqual(['catalog-name'])
   })
 
-  it('installs each expert-pack skill and records the actual invocation names', async () => {
+  it('installs one expert entry that routes to the constituent skills and survives restart', async () => {
     const { config, ctx } = await setup()
     const catalog = await installItem(config, 'pack', 'expert-pack')
     expect(catalog.installed.packs).toEqual(['expert-pack'])
-    expect(catalog.installed.commands?.['pack:expert-pack']).toEqual(['docs-live', 'testing-live'])
-    expect((await ctx.skills.snapshot()).skills.map(skill => skill.name).sort()).toEqual(['docs-live', 'testing-live'])
+    expect(catalog.installed.commands?.['pack:expert-pack']).toEqual(['expert-entry'])
+    expect((await ctx.skills.snapshot()).skills.map(skill => skill.name).sort()).toEqual(['docs-live', 'expert-entry', 'testing-live'])
+    const entry = await ctx.skills.get('expert-entry')
+    expect(entry?.content).toContain('# Expert pack')
+    expect(entry?.content).toContain('../catalog-name/SKILL.md')
+    expect(entry?.content).toContain('../testing-live/SKILL.md')
+    expect(entry?.invocation).toEqual({ userInvocable: true, modelInvocable: false })
+    await ctx.fiber.dispose()
+    contexts.splice(contexts.indexOf(ctx), 1)
+    const restarted = await runtime(config.root)
+    expect((await restarted.ctx.skills.get('expert-entry'))?.content).toEqual(entry?.content)
+    expect(buildCatalog(config).installed.commands?.['pack:expert-pack']).toEqual(['expert-entry'])
+  })
+
+  it('repairs legacy pack receipts from local skills without downloading again', async () => {
+    const { config, ctx } = await setup()
+    await installItem(config, 'skill', 'catalog-name')
+    const receipts = JSON.parse(readFileSync(config.installFile, 'utf8'))
+    receipts.packs = ['expert-pack']
+    receipts.commands['pack:expert-pack'] = ['docs-live']
+    receipts.files['pack:expert-pack'] = receipts.files['skill:catalog-name']
+    writeFileSync(config.installFile, JSON.stringify(receipts))
+    config.command = ''
+    const catalog = await loadCatalog(config, true)
+    expect(catalog.installed.commands?.['pack:expert-pack']).toEqual(['expert-entry'])
+    expect((await ctx.skills.get('expert-entry'))?.content).toContain('../catalog-name/SKILL.md')
+    expect((await loadCatalog(config, true)).installed).toEqual(catalog.installed)
+  })
+
+  it('does not report an expert pack installed when every constituent fails', async () => {
+    const { config, ctx } = await setup()
+    await expect(installItem(config, 'pack', 'empty-pack')).rejects.toThrow('全部技能均不可用')
+    expect(buildCatalog(config).installed.packs).toEqual([])
+    expect((await ctx.skills.snapshot()).skills).toHaveLength(0)
   })
 
   it('does not report a failed CLI installation as installed', async () => {
@@ -93,9 +150,10 @@ describe('SkillHub installation and native discovery', () => {
     const catalog = await installItem(config, 'pack', 'partial-pack')
     // 一个构成技能 404 不应拖垮整个专家包：健康技能照常安装并记录。
     expect(catalog.installed.packs).toEqual(['partial-pack'])
-    expect(catalog.installed.commands?.['pack:partial-pack']).toEqual(['good-one'])
+    expect(catalog.installed.commands?.['pack:partial-pack']).toEqual(['partial-pack'])
     expect(catalog.notice).toContain('broken404')
-    expect((await ctx.skills.snapshot()).skills.map(skill => skill.name)).toEqual(['good-one'])
+    expect((await ctx.skills.snapshot()).skills.map(skill => skill.name).sort()).toEqual(['good-one', 'partial-pack'])
+    expect((await ctx.skills.get('partial-pack'))?.content).not.toContain('broken404')
   })
 
   it('retries the post-CLI discovery before reporting an unloadable SKILL.md', async () => {
@@ -105,10 +163,10 @@ describe('SkillHub installation and native discovery', () => {
     let calls = 0
     config.runtime = { refresh: async () => (++calls < 3 ? [] : real.refresh()) }
     const catalog = await installItem(config, 'pack', 'expert-pack')
-    expect(catalog.installed.commands?.['pack:expert-pack']).toEqual(['docs-live', 'testing-live'])
+    expect(catalog.installed.commands?.['pack:expert-pack']).toEqual(['expert-entry'])
     expect(calls).toBeGreaterThanOrEqual(3)
-    expect((await ctx.skills.snapshot()).skills.map(skill => skill.name).sort()).toEqual(['docs-live', 'testing-live'])
-  })
+    expect((await ctx.skills.snapshot()).skills.map(skill => skill.name).sort()).toEqual(['docs-live', 'expert-entry', 'testing-live'])
+  }, 15000)
 
   it('passes the installation runtime through the HTTP handler', async () => {
     const { config } = await setup()

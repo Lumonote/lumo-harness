@@ -20,9 +20,13 @@ import { createHash } from 'node:crypto'
 import { overriddenPackageDirectories } from '../dsh-overrides/apply.mjs'
 import { resolveWorkspaceNodeTool } from './node-tools.mjs'
 import { prepareSkillHubArchive, stageSkillHub } from './skillhub-tooling.mjs'
+import { acquireBuildLock } from './build-lock.mjs'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(desktopRoot, '..', '..')
+// Snapshot preparation, compilation and runtime staging share output paths.
+// Hold the lock for the entire process, including failure cleanup.
+acquireBuildLock(resolve(repoRoot, 'platform', '.build', 'desktop-runtime.lock'))
 // CI and local product builds may project an already-modified developer
 // checkout into a clean temporary commit. Accept that clean snapshot directly
 // so the source checkout never needs to be renamed, linked, or edited.
@@ -80,8 +84,7 @@ const upstreamPluginSpecs = [
   '@linxin666/dsh-client-ui-task-board@0.3.14',
   // 侧边栏底座：VSCode 式右侧工作台 + 三方侧边栏页面扩展。
   'dsh-better-sidebar@0.18.0',
-  // 多智能体团队（AgentTeams）：自然语言编排船长/成员/带依赖任务与消息，Web 树状监控（0.1.15）。
-  '@nanmicoder/dsh-agent-teams@0.1.15',
+  // @nanmicoder/dsh-agent-teams 不在桌面包基线（master 不兼容）；仍可通过 SkillHub 安装。
   // Univer 办公文档：DSH × Univer 协作网关与查看器——内联预览、浮动工作台与会话结束审阅（0.2.14）。
   'dsh-univer-office@0.2.14',
   // 版本漂移纪律：与 dsh-node/src/plugins.ts 的 BASE_PROFILE_PLUGINS 保持一致。
@@ -99,11 +102,9 @@ if (!existsSync(resolve(dshRoot, 'package.json'))) {
 const skillhubArchive = prepareSkillHubArchive(resolve(repoRoot, 'platform', '.build', 'skillhub'))
 prepareUpstreamPlugins()
 
-// Rebuild the resident DSH client packages first: their compiled clients are
-// what Vite resolves from the workspace package exports, and they contain the
-// homepage composer seats and sidebar navigation slot added for Lumo. The
-// isolated snapshot contains source only, so emit lib/types before tsdown.
-buildDshSessionFormatMigration()
+// Overridden packages have no projected lib/. Emit each face before tsdown
+// consumes it, including API packages with separate Host and Client programs.
+buildDshHostPackages()
 rebuildDshHostArtifacts()
 // 快照对被覆盖的客户端包不投影 lib/（其产物必须从打补丁后的
 // 快照源码重建），而它们的 tsdown 配置又消费 lib/types —— 全量 client pass 之前
@@ -126,18 +127,8 @@ console.log('构建 DSH Web 前端资源（含创作与多智能体编排能力�
 runWorkspaceBinary(join('apps', 'web'), 'vite', ['build'], 'DSH Web 前端构建失败')
 runPlatformScript('brand-web.mjs', [dshRoot], 'DSH Web 品牌资源覆盖失败')
 
-// 与 prepare-runtime.mjs 的 retryRemove 同因：并发构建/残留句柄会让 rmdir ENOTEMPTY。
-for (let attempt = 1; ; attempt++) {
-  try {
-    rmSync(stagingRoot, { recursive: true, force: true })
-    break
-  } catch (error) {
-    if (attempt >= 4) throw error
-    console.warn(`清理 ${stagingRoot} 失败（${String(error)}），重试 ${attempt}...`)
-    const until = Date.now() + attempt * 500
-    while (Date.now() < until) { /* busy-wait */ }
-  }
-}
+// The build lock excludes competing writers; retry transient filesystem errors.
+rmSync(stagingRoot, { recursive: true, force: true, maxRetries: 4, retryDelay: 500 })
 mkdirSync(modulesRoot, { recursive: true })
 
 const moduleSearchRoots = [
@@ -373,8 +364,13 @@ function bundlePptPython() {
     throw new Error(`无法构建桌面 runtime：PPT Master Python 环境不存在（${pptVenvRoot}）。请先执行 platform/upstream/install-components.sh --target ${buildTarget}`)
   }
   const probe = spawnSync(venvPython, ['-c', [
-    'import json, site, sys',
-    'print(json.dumps({"base": sys.base_prefix, "version": f"{sys.version_info.major}.{sys.version_info.minor}", "site": site.getsitepackages()[0]}))',
+    'import json, pathlib, site, sys',
+    // Windows returns the venv prefix itself as getsitepackages()[0]; select
+    // the actual site-packages directory on every platform.
+    'paths = site.getsitepackages()',
+    'site_packages = next((path for path in paths if pathlib.Path(path).name.lower() == "site-packages"), None)',
+    'assert site_packages is not None, "site-packages not found: " + repr(paths)',
+    'print(json.dumps({"base": sys.base_prefix, "version": f"{sys.version_info.major}.{sys.version_info.minor}", "site": site_packages}))',
   ].join('; ')], { encoding: 'utf8' })
   if (probe.error !== undefined || probe.status !== 0) {
     throw new Error(`无法读取 PPT Master Python 环境：${probe.stderr || probe.error?.message || '未知错误'}`)
@@ -722,25 +718,25 @@ function buildLumoUiPlugin() {
 // 快照的 node_modules 软链指向开发树 packages/*（linkWorkspaceModules），
 // 因此再生产物必须回拷开发树，否则闭包遍历/TS 解析落回旧 lib。
 // 未覆盖的包复用投影的 lib/types，避免全量 tsc 跨越快照与开发树的两套类型声明。
-// 被覆盖的 host 包先由 buildDshSessionFormatMigration 单包编译。
+// 被覆盖的 host 包先由 buildDshHostPackages 单包编译。
 function rebuildDshHostArtifacts() {
   console.log('重建 DSH host 面产物（tsdown 包与 typert remote 投影）...')
   runWorkspaceBinary('.', 'tsdown', ['--env.DSH_BUILD_FACE', 'host'], 'DSH host 面产物重建失败')
   mirrorSnapshotLibsBackToSource()
 }
 
-// The session-format recovery overlay is a host package, but its generated
-// `lib` is intentionally excluded from prepare-runtime's projection so the
-// patched source is authoritative. Emit its TypeScript output before the
-// workspace tsdown pass, otherwise tsdown cannot resolve its declared entry.
-function buildDshSessionFormatMigration() {
-  console.log('构建 DSH 会话格式迁移包（含旧日志恢复补丁）...')
-  runWorkspaceBinary(
-    join('packages', 'session', 'session-format-v0-to-v1'),
-    'tsc',
-    ['-p', 'tsconfig.json', '--pretty', 'false'],
-    'DSH 会话格式迁移包类型产物构建失败',
-  )
+// Compile only the overridden Host programs against projected dependencies.
+// A dual-face package's root config is solution-only, so tsc -p must select
+// tsconfig.host.json explicitly to emit the entry consumed by tsdown.
+function buildDshHostPackages() {
+  console.log('构建 DSH 覆盖层主机包...')
+  for (const directory of overriddenPackageDirectories) {
+    const hostConfig = existsSync(resolve(dshRoot, directory, 'tsconfig.host.json'))
+      ? 'tsconfig.host.json'
+      : directory.startsWith('packages/client/') ? undefined : 'tsconfig.json'
+    if (hostConfig === undefined) continue
+    runWorkspaceBinary(directory, 'tsc', ['-p', hostConfig, '--pretty', 'false'], `${directory} 主机类型产物构建失败`)
+  }
 }
 
 // Client 面整 workspace 重建：host 面里 clientBundle 包被 SKIP_WORKSPACE_BUILD
@@ -780,16 +776,20 @@ function mirrorSnapshotLibsBackToSource() {
 }
 
 function buildDshClientPackages() {
-  const packageDirectories = overriddenPackageDirectories.filter((directory) => directory.startsWith('packages/client/'))
+  const clientConfigs = overriddenPackageDirectories.flatMap((directory) => {
+    if (existsSync(resolve(dshRoot, directory, 'tsconfig.client.json'))) return [join(directory, 'tsconfig.client.json')]
+    return directory.startsWith('packages/client/') ? [join(directory, 'tsconfig.json')] : []
+  })
   console.log('构建 DSH 覆盖层客户端包...')
   runWorkspaceBinary('.', 'tsc', [
     '-b',
-    ...packageDirectories.map((directory) => join(directory, 'tsconfig.json')),
+    ...clientConfigs,
     '--pretty', 'false',
   ], 'DSH 客户端类型产物构建失败')
 
-  for (const packageDirectory of packageDirectories) {
-    runWorkspaceBinary(packageDirectory, 'tsdown', [], `${packageDirectory} 客户端包构建失败`)
+  for (const config of clientConfigs) {
+    const packageDirectory = dirname(config)
+    runWorkspaceBinary(packageDirectory, 'tsdown', ['--env.DSH_BUILD_FACE', 'client'], `${packageDirectory} 客户端包构建失败`)
   }
 }
 

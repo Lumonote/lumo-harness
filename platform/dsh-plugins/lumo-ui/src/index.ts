@@ -11,7 +11,7 @@ import { lumoBootThemeInjection } from './boot-theme.ts'
 import { registerDesktopHandoff } from './desktop-handoff.ts'
 import { discoverSkillDemos, resolveSkillDemoAsset, type SkillDemo } from './skill-demos.ts'
 import { allowedAssetUrl, createUpstreamDemoService, type GallerySkill, type UpstreamDemoService } from './upstream-demos.ts'
-import { buildCatalog, installItem, refreshCatalog, searchCatalog, type SkillHubConfig, type SkillHubKind } from './skillhub.ts'
+import { loadCatalog, installItem, searchCatalog, type SkillHubConfig, type SkillHubKind } from './skillhub.ts'
 import { registerSkillHubRuntime, type SkillHubRuntime } from './skillhub-runtime.ts'
 
 /** Read-only structural projection of the session-query seam. Keeping the
@@ -1099,14 +1099,24 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     apiBase: config.skillhubApiBase ?? 'https://api.skillhub.cn',
     command: config.skillhubCommand ?? 'skillhub',
     runtime: skillhubRuntime,
-    preinstalledRepositories: ['liustack/modlens', 'omdsh-dev/dsh-better-sidebar', 'NanmiCoder/dsh-agent-teams'],
+    preinstalledRepositories: [
+      'https://github.com/dsh-market/dsh-market.git',
+      'RevolutionLA/dsh-dream-skin',
+      'bowenliang123/dsh-context',
+      'Han-1413141/dsh-cost-meter',
+      'scwlkq/dsh-task-board',
+      'liustack/modlens',
+      'omdsh-dev/DSH-better-sidebar',
+      'NanmiCoder/dsh-agent-teams',
+      'dream-num/dsh-univer-office',
+    ],
   })
   // `catalog` queries SkillHub live (falling back to the on-disk cache, then the
   // seed); `catalog?cached=1` reads only local state; `refresh` is an alias that
   // always goes to the network.
   if (req.method === 'GET' && (pathname === '/lumo/api/skillhub/catalog' || pathname === '/lumo/api/skillhub/refresh')) {
     const cachedOnly = pathname === '/lumo/api/skillhub/catalog' && skillhubUrl.searchParams.get('cached') === '1'
-    try { writeJson(res, 200, cachedOnly ? buildCatalog(skillhubConfig()) : await refreshCatalog(skillhubConfig())) } catch (error) { writeJson(res, 502, { error: error instanceof Error ? error.message : 'skillhub catalog unavailable' }) }
+    try { writeJson(res, 200, await loadCatalog(skillhubConfig(), cachedOnly)) } catch (error) { writeJson(res, 502, { error: error instanceof Error ? error.message : 'skillhub catalog unavailable' }) }
     return
   }
   // Live search against SkillHub: `?kind=skill|pack|plugin&q=...&category=...&page=n` (only plugins page server-side).

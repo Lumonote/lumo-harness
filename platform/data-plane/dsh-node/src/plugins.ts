@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -92,13 +92,42 @@ export const BASE_PROFILE_PLUGINS = [
   { name: '@linxin666/dsh-client-ui-task-board', spec: '@linxin666/dsh-client-ui-task-board@0.3.14' },
   // 侧边栏底座：VSCode 式右侧工作台 + 三方侧边栏页面扩展（0.18.0）。
   { name: 'dsh-better-sidebar', spec: 'dsh-better-sidebar@0.18.0' },
-  // 多智能体团队：自然语言编排船长/成员/带依赖任务与消息，Web 树状监控（0.1.15）。
-  { name: '@nanmicoder/dsh-agent-teams', spec: '@nanmicoder/dsh-agent-teams@0.1.15' },
+  // @nanmicoder/dsh-agent-teams 不在桌面包基线：0.1.15 调用了 master 已移除的
+  // ctx.subagents.registerContinuableSetup，Loader 会直接拒绝整树启动。仍可通过
+  // SkillHub 手动安装；dsh-node 的插件隔离会在失败时自动 quarantine 并重试。
   // Univer 办公文档：DSH × Univer 协作网关与查看器——内联预览、浮动工作台与会话结束审阅（0.2.14）。
   { name: 'dsh-univer-office', spec: 'dsh-univer-office@0.2.14' },
 ] as const
 
 export const OBSOLETE_PROFILE_PLUGINS = ['deepseek-harness-auth'] as const
+
+/**
+ * First-party packages are part of the platform contract. Everything else is
+ * an independently versioned plugin and may be disabled when its loader
+ * cannot be applied.
+ */
+export function isOptionalProfilePlugin(packageName: string): boolean {
+  return !packageName.startsWith('@deepseek-ai/') && !packageName.startsWith('@lumo/')
+}
+
+/** Extract profile bundle names mentioned by a failed Loader composition. */
+export function failedProfilePluginNames(stderr: string, candidates: readonly string[]): string[] {
+  if (!/failed to apply loader entry|plugin tree failed|failed to resolve|err_module_not_found|cannot find (?:module|package)/iu.test(stderr)) return []
+  const normalized = stderr.replaceAll('\\', '/')
+  const loaderIds = [...stderr.matchAll(/failed to apply loader entry\s+([^\s(]+)/giu)]
+    .map(match => match[1]?.replace(/[:;,]+$/gu, ''))
+    .filter((id): id is string => id !== undefined)
+  return candidates.filter(name => {
+    if (!isOptionalProfilePlugin(name)) return false
+    const shortName = name.split('/').pop() ?? name
+    return normalized.includes(name) || loaderIds.includes(name) || loaderIds.includes(shortName)
+  })
+}
+
+/** Package names of the pinned baseline: what a packaged runtime must mount as profile layers. */
+export function baselineBundlePackages(): string[] {
+  return BASE_PROFILE_PLUGINS.map(({ name }) => name)
+}
 
 const PACKAGED_PROFILE_MODULES = [
   '@deepseek-ai/dsh-storage-sqlite',
@@ -115,7 +144,6 @@ const PACKAGED_PROFILE_MODULES = [
   'dsh-dream-skin',
   '@linxin666/dsh-client-ui-task-board',
   'dsh-better-sidebar',
-  '@nanmicoder/dsh-agent-teams',
   'dsh-univer-office',
 ] as const
 
@@ -177,20 +205,31 @@ export function ensureProfilePlugins(options: {
   const env = options.env ?? process.env
   if (env['LUMO_PACKAGED_RUNTIME'] === '1') {
     ensurePackagedProfileModules(options.profile, env)
+    // Modules alone mount nothing: the baseline must also become bundle
+    // layers, which is what `dsh plugin add` would have done outside a package.
+    ensurePackagedBaselineBundles({ profile: options.profile, env })
     return
   }
+  clearReintroducedPluginQuarantine(options.profile, env)
   if (env['LUMO_AUTO_INSTALL_PLUGINS'] === '0') return
 
   const installed = profileDependencies(options.profile, env)
   const obsolete = obsoleteProfilePluginNames(options.profile, installed)
   if (obsolete.length > 0) {
     console.log(`dsh-node: removing obsolete profile plugin(s): ${obsolete.join(', ')}`)
-    const removed = runProfileManager(options, env, ['remove', ...obsolete])
-    if (removed.error) throw new Error(`dsh-node: obsolete plugin removal failed: ${removed.error.message}`)
-    if (removed.status !== 0) {
-      throw new Error(`dsh-node: obsolete plugin removal exited with status ${removed.status ?? 'unknown'}`)
+    let removed: ReturnType<typeof spawnSync> | undefined
+    try {
+      removed = runProfileManager(options, env, ['remove', ...obsolete])
+    } catch (error: unknown) {
+      console.warn(`dsh-node: obsolete plugin removal failed; continuing without blocking startup: ${error instanceof Error ? error.message : String(error)}`)
     }
-    for (const name of obsolete) delete installed[name]
+    if (removed !== undefined && (removed.error || removed.status !== 0)) {
+      console.warn(
+        `dsh-node: obsolete plugin removal failed; continuing without blocking startup: ${removed.error?.message ?? `exit ${removed.status ?? 'unknown'}`}`,
+      )
+    } else if (removed !== undefined) {
+      for (const name of obsolete) delete installed[name]
+    }
   }
 
   const missing = missingProfilePluginSpecs(
@@ -199,11 +238,26 @@ export function ensureProfilePlugins(options: {
   )
   if (missing.length === 0) return
 
-  console.log(`dsh-node: installing ${missing.length} profile plugin(s): ${missing.map(({ name }) => name).join(', ')}`)
-  const result = runProfileManager(options, env, ['add', ...missing.map(({ spec }) => spec)])
-  if (result.error) throw new Error(`dsh-node: profile plugin installation failed: ${result.error.message}`)
-  if (result.status !== 0) {
-    throw new Error(`dsh-node: profile plugin installation exited with status ${result.status ?? 'unknown'}`)
+  for (const plugin of missing) {
+    console.log(`dsh-node: installing profile plugin ${plugin.name}`)
+    let result: ReturnType<typeof spawnSync>
+    try {
+      result = runProfileManager(options, env, ['add', plugin.spec])
+    } catch (error: unknown) {
+      if (isOptionalProfilePlugin(plugin.name)) {
+        console.warn(`dsh-node: optional plugin ${plugin.name} could not be installed; skipping: ${error instanceof Error ? error.message : String(error)}`)
+        continue
+      }
+      throw error
+    }
+    if (result.error || result.status !== 0) {
+      const detail = result.error?.message ?? `exit ${result.status ?? 'unknown'}`
+      if (isOptionalProfilePlugin(plugin.name)) {
+        console.warn(`dsh-node: optional plugin ${plugin.name} could not be installed; skipping: ${detail}`)
+        continue
+      }
+      throw new Error(`dsh-node: profile plugin installation failed for ${plugin.name}: ${detail}`)
+    }
   }
 }
 
@@ -223,6 +277,10 @@ function ensurePackagedProfileModules(profile: string, env: NodeJS.ProcessEnv): 
   for (const name of PACKAGED_PROFILE_MODULES) {
     const target = resolve(runtimeModules, ...name.split('/'))
     if (!existsSync(resolve(target, 'package.json'))) {
+      if (isOptionalProfilePlugin(name)) {
+        console.warn(`dsh-node: optional plugin ${name} is absent from the packaged runtime; skipping`)
+        continue
+      }
       throw new Error(`dsh-node: packaged runtime is missing ${name}`)
     }
     const link = resolve(modulesDir, ...name.split('/'))
@@ -244,15 +302,277 @@ function ensurePackagedProfileModules(profile: string, env: NodeJS.ProcessEnv): 
   }
 }
 
+/** Outcome of one {@link reconcileBaselineBundles} pass. */
+export interface BaselineBundleReconciliation {
+  /** The bundle list to persist (kept entries first, appended baseline last). */
+  bundles: string[]
+  /** Baseline packages this pass appended. */
+  added: string[]
+  /** Bundles this pass retired because the runtime stopped carrying them. */
+  removed: string[]
+  /** Baseline packages the app owns in this profile after the pass. */
+  owned: string[]
+}
+
+/**
+ * Merge the pinned baseline into one profile's `dsh.profile.bundles`.
+ *
+ * Membership, not ordering, is the whole contract: a bundle layer mounts its
+ * package's own loader rows, so naming a package twice makes the Loader reject
+ * the tree (`duplicate loader entry id`) and the app fails to boot. A package
+ * the profile already carries — installed through the market, or added by
+ * `dsh plugin add` — therefore keeps its single slot.
+ *
+ * Retirement is scoped to what the app added itself (`owned`): bundle
+ * resolution is fail-loud, so a baseline package a newer build stops carrying
+ * must leave the list, while a market-owned entry is never the app's to drop.
+ */
+export function reconcileBaselineBundles(options: {
+  /** The profile's current `dsh.profile.bundles` list. */
+  bundles: readonly string[]
+  /** Baseline packages this runtime actually carries. */
+  available: readonly string[]
+  /** Baseline packages a previous pass appended to this profile. */
+  owned: readonly string[]
+}): BaselineBundleReconciliation {
+  const { bundles, available, owned } = options
+  const removed = owned.filter(name => !available.includes(name))
+  const kept = bundles.filter(name => !removed.includes(name))
+  const added = available.filter(name => !kept.includes(name))
+  const ownedNames = [...new Set([...owned.filter(name => available.includes(name)), ...added])]
+  return { bundles: [...kept, ...added], added, removed, owned: ownedNames }
+}
+
+/** Filename of the app-owned baseline record beside a profile manifest. */
+const BASELINE_RECORD_FILENAME = '.lumo-baseline-bundles.json'
+const QUARANTINE_RECORD_FILENAME = '.lumo-plugin-quarantine.json'
+
+interface PluginQuarantineRecord {
+  packages?: Record<string, { reason?: string; quarantinedAt?: string }>
+}
+
+function profileManifestPath(profile: string, env: NodeJS.ProcessEnv): string {
+  const dshHome = env['DSH_HOME'] ?? resolve(homedir(), '.dsh')
+  return resolve(dshHome, 'profiles', profile, 'package.json')
+}
+
+/** Read the bundle layer names currently configured for a profile. */
+export function profileBundleNames(profile: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  const manifestPath = profileManifestPath(profile, env)
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { dsh?: { profile?: { bundles?: unknown } } }
+    return Array.isArray(manifest.dsh?.profile?.bundles)
+      ? manifest.dsh.profile.bundles.filter((name): name is string => typeof name === 'string')
+      : []
+  } catch {
+    return []
+  }
+}
+
+function profileQuarantinePath(profile: string, env: NodeJS.ProcessEnv): string {
+  const dshHome = env['DSH_HOME'] ?? resolve(homedir(), '.dsh')
+  return resolve(dshHome, 'profiles', profile, QUARANTINE_RECORD_FILENAME)
+}
+
+function readPluginQuarantine(path: string): Set<string> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as PluginQuarantineRecord
+    return new Set(Object.keys(parsed.packages ?? {}))
+  } catch {
+    return new Set()
+  }
+}
+
+function writePluginQuarantine(path: string, packages: Iterable<string>, reason = 'loader failed'): void {
+  const entries = Object.fromEntries([...new Set(packages)].map(name => [name, {
+    reason,
+    quarantinedAt: new Date().toISOString(),
+  }]))
+  if (Object.keys(entries).length === 0) {
+    rmSync(path, { force: true })
+    return
+  }
+  mkdirSync(resolve(path, '..'), { recursive: true })
+  writeFileSync(path, `${JSON.stringify({ packages: entries }, undefined, 2)}\n`)
+}
+
+/**
+ * Remove failed optional bundles from a profile before retrying its boot.
+ * Dependencies remain installed so the user can re-enable a fixed version;
+ * only the composition layer is quarantined.
+ */
+export function quarantineProfilePlugins(options: {
+  profile: string
+  packages: readonly string[]
+  reason?: string
+  env?: NodeJS.ProcessEnv
+}): string[] {
+  const env = options.env ?? process.env
+  const manifestPath = profileManifestPath(options.profile, env)
+  if (!existsSync(manifestPath)) return []
+  let manifest: { dsh?: { profile?: { bundles?: unknown } } }
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as typeof manifest
+  } catch {
+    return []
+  }
+  const bundles = profileBundleNames(options.profile, env)
+  const failed = [...new Set(options.packages)].filter(name => isOptionalProfilePlugin(name) && bundles.includes(name))
+  if (failed.length === 0) return []
+  const nextBundles = bundles.filter(name => !failed.includes(name))
+  writeFileSync(manifestPath, `${JSON.stringify({
+    ...manifest,
+    dsh: {
+      ...manifest.dsh,
+      profile: { ...manifest.dsh?.profile, bundles: nextBundles },
+    },
+  }, undefined, 2)}\n`)
+  const quarantinePath = profileQuarantinePath(options.profile, env)
+  const existing = readPluginQuarantine(quarantinePath)
+  for (const name of failed) existing.add(name)
+  writePluginQuarantine(quarantinePath, existing, options.reason)
+  return failed
+}
+
+/**
+ * A package that is present in the profile again was explicitly re-added by
+ * the user. Treat that as an opt-in retry and clear its old quarantine mark.
+ */
+export function clearReintroducedPluginQuarantine(profile: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  const bundles = profileBundleNames(profile, env)
+  const path = profileQuarantinePath(profile, env)
+  const quarantined = readPluginQuarantine(path)
+  const reintroduced = [...quarantined].filter(name => bundles.includes(name))
+  if (reintroduced.length === 0) return []
+  for (const name of reintroduced) quarantined.delete(name)
+  writePluginQuarantine(path, quarantined)
+  return reintroduced
+}
+
+/** Whether `packageName` resolves from any of the given `node_modules` roots. */
+function resolvesPackage(packageName: string, moduleRoots: readonly string[]): boolean {
+  const segments = packageName.split('/')
+  return moduleRoots.some(root => existsSync(resolve(root, ...segments, 'package.json')))
+}
+
+/**
+ * Let the official CLI create a missing profile so its manifest carries the
+ * shipped bundle tuple. Only `--dump-default-config` initializes a profile
+ * without booting the tree it describes; the dump output is discarded.
+ * @returns whether the profile manifest exists afterwards.
+ */
+function initProfileManifest(profile: string, dshCli: string | undefined, env: NodeJS.ProcessEnv): boolean {
+  if (dshCli === undefined || !existsSync(dshCli)) return false
+  const result = spawnSync(process.execPath, [dshCli, '--profile', profile, '--dump-default-config'], {
+    env,
+    stdio: 'pipe',
+    encoding: 'utf8',
+    timeout: 5 * 60_000,
+  })
+  if (result.error !== undefined || result.status !== 0) {
+    console.warn(
+      `dsh-node: profile ${profile} 初始化失败，基线插件本次不挂载：${result.error?.message ?? result.stderr ?? `退出码 ${result.status ?? '未知'}`}`,
+    )
+    return false
+  }
+  return true
+}
+
+/**
+ * Register the pinned baseline as profile bundle layers.
+ *
+ * A packaged runtime cannot run `dsh plugin add`, and the official
+ * reconciliation that promotes an installed, bundle-declaring dependency into
+ * a `dsh.profile.bundles` layer only runs inside that command — so without
+ * this the baseline packages sit in `node_modules` while the loader tree
+ * mounts none of them: shipped plugins look uninstalled and the capabilities
+ * they own (context, task board, agent teams, ...) are simply absent.
+ */
+export function ensurePackagedBaselineBundles(options: {
+  profile: string
+  env?: NodeJS.ProcessEnv
+}): void {
+  const env = options.env ?? process.env
+  const runtimeModules = env['LUMO_RUNTIME_NODE_MODULES']
+  if (runtimeModules === undefined || runtimeModules.trim() === '') {
+    throw new Error('dsh-node: packaged runtime is missing LUMO_RUNTIME_NODE_MODULES')
+  }
+  const dshHome = env['DSH_HOME'] ?? resolve(homedir(), '.dsh')
+  const profilesDir = resolve(dshHome, 'profiles')
+  const profileDir = resolve(profilesDir, options.profile)
+  const manifestPath = resolve(profileDir, 'package.json')
+  if (!existsSync(manifestPath) && !initProfileManifest(options.profile, env['LUMO_DSH_CLI'], env)) return
+  if (!existsSync(manifestPath)) return
+
+  let manifest: { dsh?: { profile?: { bundles?: unknown; patchReload?: string } } }
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as typeof manifest
+  } catch (error: unknown) {
+    console.warn(`dsh-node: profile ${options.profile} 的 package.json 无法解析，跳过基线插件登记：${String(error)}`)
+    return
+  }
+
+  // Bundle resolution walks the dsh installation first, then the profile
+  // directory; the shared fallback is the profile's own parent walk.
+  const moduleRoots = [runtimeModules, resolve(profileDir, 'node_modules'), resolve(profilesDir, 'node_modules')]
+  const current = Array.isArray(manifest.dsh?.profile?.bundles)
+    ? manifest.dsh.profile.bundles.filter((name): name is string => typeof name === 'string')
+    : []
+  const quarantinePath = profileQuarantinePath(options.profile, env)
+  const quarantined = readPluginQuarantine(quarantinePath)
+  // Seeing a quarantined bundle in the manifest means the user explicitly
+  // re-added it (for example after updating the package), so allow one retry.
+  const reintroduced = [...quarantined].filter(name => current.includes(name))
+  if (reintroduced.length > 0) {
+    for (const name of reintroduced) quarantined.delete(name)
+    writePluginQuarantine(quarantinePath, quarantined)
+  }
+  const available = baselineBundlePackages()
+    .filter(name => !quarantined.has(name) || current.includes(name))
+    .filter(name => resolvesPackage(name, moduleRoots))
+  const recordPath = resolve(profileDir, BASELINE_RECORD_FILENAME)
+  const owned = readBaselineRecord(recordPath)
+  const { bundles, added, removed, owned: nextOwned } = reconcileBaselineBundles({ bundles: current, available, owned })
+  if (removed.length > 0) {
+    console.warn(`dsh-node: 退役 ${removed.length} 个基线插件 bundle(s)：${removed.join(', ')}`)
+  }
+  if (added.length > 0) {
+    console.log(`dsh-node: 登记 ${added.length} 个基线插件 bundle(s)：${added.join(', ')}`)
+  }
+  if (added.length === 0 && removed.length === 0 && nextOwned.length === owned.length) return
+
+  writeFileSync(manifestPath, `${JSON.stringify({
+    ...manifest,
+    dsh: {
+      ...manifest.dsh,
+      profile: { ...manifest.dsh?.profile, bundles },
+    },
+  }, undefined, 2)}\n`)
+  writeFileSync(recordPath, `${JSON.stringify({ packages: nextOwned }, undefined, 2)}\n`)
+}
+
+/** Read the baseline packages a previous pass appended to this profile. */
+function readBaselineRecord(path: string): string[] {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { packages?: unknown }
+    return Array.isArray(parsed.packages) ? parsed.packages.filter((name): name is string => typeof name === 'string') : []
+  } catch {
+    return []
+  }
+}
+
 function runProfileManager(
   options: { profile: string; dshRoot: string },
   env: NodeJS.ProcessEnv,
   args: string[],
 ): ReturnType<typeof spawnSync> {
   const managerEnv = profileManagerEnv(env)
+  const windowsCorepack = process.platform === 'win32'
   return spawnSync(
-    'corepack',
-    ['pnpm', 'run', 'dsh', 'plugin', '--profile', options.profile, ...args],
+    windowsCorepack ? 'cmd.exe' : 'corepack',
+    windowsCorepack
+      ? ['/d', '/s', '/c', 'corepack.cmd', 'pnpm', 'run', 'dsh', 'plugin', '--profile', options.profile, ...args]
+      : ['pnpm', 'run', 'dsh', 'plugin', '--profile', options.profile, ...args],
     {
       cwd: options.dshRoot,
       env: managerEnv,

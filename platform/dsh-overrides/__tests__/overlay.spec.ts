@@ -35,6 +35,12 @@ const PATCHED = [
   'packages/client/ui-model-selection/src/client/directory.ts',
   // 根 tsdown.config.ts 在列表尾部：前面 0-5 的下标是既有测试的读取约定。
   'tsdown.config.ts',
+  'packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx',
+  'packages/client/ui-workspace/src/client/locales.ts',
+  // LUMO_STREAM_RESILIENCE：流韧性三补丁（背压/载波退避/会话自动重开）。
+  'packages/api/gateway/src/stream-server.ts',
+  'packages/api/gateway/src/client/remote-stream.ts',
+  'packages/api/session-controller/src/client/sessions/session.ts',
 ]
 
 const temporaries: string[] = []
@@ -101,6 +107,34 @@ describe('applyLumoDshOverrides', () => {
     const relationships = read(root, PATCHED[6]!)
     expect(relationships).toContain('LUMO_SESSION_RECOVERY')
     expect(relationships).toContain("assertNoUnresolvedTools(toolLifecycles, 'turn/start recovery')")
+
+    const history = read(root, 'packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx')
+    expect(history).toContain('data-lumo-history-toggle')
+    expect(history).toContain("actions.setGroupBy('flat'); setQuery('')")
+    expect(history).toContain("actions.setGroupBy('workspace'); setQuery('')")
+    expect(read(root, 'packages/client/ui-workspace/src/client/locales.ts')).toContain("'groupBy.flat': '全部对话'")
+
+    // LUMO_STREAM_RESILIENCE：三处流韧性补丁都落上，且带各自的护栏标记。
+    const streamServer = read(root, 'packages/api/gateway/src/stream-server.ts')
+    expect(streamServer).toContain('LUMO_SEND_FLUSH_TIMEOUT_MS')
+    expect(streamServer).toContain('LUMO_SEND_BUFFERED_LIMIT')
+    expect(streamServer).toContain('bufferedAmount > LUMO_SEND_BUFFERED_LIMIT')
+    expect(streamServer).toContain('did not flush before the deadline')
+
+    const remoteStream = read(root, 'packages/api/gateway/src/client/remote-stream.ts')
+    expect(remoteStream).toContain('LUMO_CARRIER_BACKOFF')
+    expect(remoteStream).toContain('if (attempt <= 5)')
+    // 保留原有「首次失败立即重试」的快速路径，只有后续失败才退避。
+    expect(remoteStream).toContain('if (attempt === 1) return')
+
+    const session = read(root, 'packages/api/session-controller/src/client/sessions/session.ts')
+    expect(session).toContain('scheduleStreamReopen')
+    expect(session).toContain('private reopenTimer')
+    // terminal 失败不再是不归路：failEventStream 与 doOpen catch 都必须挂上自动重开。
+    expect(session.match(/this\.scheduleStreamReopen\(\)/gu)?.length).toBeGreaterThanOrEqual(2)
+    // 剪枝时清掉重开定时器，避免僵尸复活。
+    expect(session).toContain('a pruned session must not resurrect itself')
+
   })
 
   it('首页无会话时 hero 座位只在 hero 模式渲染,会话仍走上游的 input.dock 槽', () => {

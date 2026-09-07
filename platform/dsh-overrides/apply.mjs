@@ -29,8 +29,13 @@ function patchFile(root, relativePath, replacements, marker = 'LUMO_DSH_OVERLAY'
 export const overriddenPackageDirectories = [
   'packages/client/ui-conversation',
   'packages/client/ui-sidebar',
+  'packages/client/ui-workspace',
   'packages/client/ui-model-selection',
   'packages/session/session-format-v0-to-v1',
+  // LUMO_STREAM_RESILIENCE: 聊天「内容消失 / 对话卡住」链路修复涉及的三个包
+  // （服务端 WS mux 背压、客户端载波退避、Session 事件流自动重开）。
+  'packages/api/gateway',
+  'packages/api/session-controller',
 ]
 
 /**
@@ -143,6 +148,29 @@ export function applyLumoDshOverrides(root) {
     ],
   ], 'LUMO_SIDEBAR_NAVIGATION')
 
+  patchFile(root, 'packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx', [[
+    '      <div className={css.sectionHeader}>\n',
+    `      {wide && (
+        <div data-lumo-history-toggle className={css.sectionHeader}>
+          <button type="button" className={css.iconButton} style={{ width: 'auto', padding: '0 8px' }}
+            aria-pressed={groupBy === 'flat'} onClick={() => { actions.setGroupBy('flat'); setQuery('') }}>
+            {t('groupBy.flat')}
+          </button>
+          <button type="button" className={css.iconButton} style={{ width: 'auto', padding: '0 8px' }}
+            aria-pressed={groupBy === 'workspace'} onClick={() => { actions.setGroupBy('workspace'); setQuery('') }}>
+            {t('groupBy.workspace')}
+          </button>
+        </div>
+      )}
+      <div className={css.sectionHeader}>
+`,
+  ]], 'data-lumo-history-toggle')
+
+  patchFile(root, 'packages/client/ui-workspace/src/client/locales.ts', [
+    ["  'groupBy.flat': '单列表',", "  'groupBy.flat': '全部对话',"],
+    ["  'groupBy.flat': 'In one list',", "  'groupBy.flat': 'All conversations',"],
+  ], "'All conversations'")
+
   // A sequential next turn proves the preceding turn was abandoned, including
   // a step whose closing event was not flushed. Keep all messages and sequence
   // references; pending tools still require recorded results before migration.
@@ -205,6 +233,191 @@ export function applyLumoDshOverrides(root) {
     "  renderSlot, renderSlotChain, selectWorkspace, t,\n",
     "  renderSlot, renderSlotChain, selectWorkspace, inputActions, t, // LUMO_HERO_INPUT_BRIDGE\n",
   ]], 'LUMO_HERO_INPUT_BRIDGE')
+
+  // ── LUMO_STREAM_RESILIENCE ─────────────────────────────────────────────────
+  // 桌面端「聊天内容突然消失 / 对话卡住」的链路修复。因果链：
+  //   1. gateway stream-server 的 send() 把所有帧排进共享写链 this.writes，单个
+  //      flush 回调不触发（WebView 停止消费/背压）会永久冻结整条连接的全部流，
+  //      且无超时 —— 「卡住」。
+  //   2. 客户端 RemoteStream 的载波重试在连接看似存活时第 2 次失败直接 terminal，
+  //      无退避 —— 宿主短暂繁忙即被误判为终态。
+  //   3. Session.failEventStream 收到 terminal 后置 openState='error' 且不自愈，
+  //      会话停在错误态直到手动刷新 —— 「消失」。
+  // 三处补丁对应消除 1/2/3。
+
+  // 1) 服务端：每帧 flush 加截止时间 + bufferedAmount 上限；毒化 socket 直接
+  //    terminate，让客户端走既有载波重连，而不是陪它一起冻结。
+  patchFile(root, 'packages/api/gateway/src/stream-server.ts', [
+    [
+      "const MAX_MISSED_HEARTBEATS = 2\n",
+      "const MAX_MISSED_HEARTBEATS = 2\n"
+        + "// LUMO_STREAM_BACKPRESSURE: per-frame flush deadline and buffered-byte cap;\n"
+        + "// both must exceed the heartbeat interval so heartbeat pongs stay the\n"
+        + "// authoritative liveness signal.\n"
+        + "const LUMO_SEND_FLUSH_TIMEOUT_MS = 30_000\n"
+        + "const LUMO_SEND_BUFFERED_LIMIT = 8 * 1024 * 1024\n",
+    ],
+    [
+      "    const delivery = this.writes.then(() => new Promise<void>((resolve, reject) => {\n"
+        + "      if (this.socket.readyState !== WebSocket.OPEN) {\n"
+        + "        reject(new Error('api gateway: Remote stream socket is closed'))\n"
+        + "        return\n"
+        + "      }\n"
+        + "      this.socket.send(text, (error) => {\n"
+        + "        if (error) reject(error)\n"
+        + "        else resolve()\n"
+        + "      })\n"
+        + "    }))\n",
+      "    const delivery = this.writes.then(() => new Promise<void>((resolve, reject) => {\n"
+        + "      if (this.socket.readyState !== WebSocket.OPEN) {\n"
+        + "        reject(new Error('api gateway: Remote stream socket is closed'))\n"
+        + "        return\n"
+        + "      }\n"
+        + "      // LUMO_STREAM_BACKPRESSURE: a peer that stops draining the socket used\n"
+        + "      // to wedge the shared writes chain forever, freezing every logical\n"
+        + "      // stream on this connection with no timeout. Terminate the toxic\n"
+        + "      // socket so clients reconnect via carrier retry instead of hanging.\n"
+        + "      if (this.socket.bufferedAmount > LUMO_SEND_BUFFERED_LIMIT) {\n"
+        + "        this.socket.terminate()\n"
+        + "        reject(new Error('api gateway: Remote stream socket backpressure exceeded'))\n"
+        + "        return\n"
+        + "      }\n"
+        + "      let settled = false\n"
+        + "      const timer = setTimeout(() => {\n"
+        + "        settled = true\n"
+        + "        this.socket.terminate()\n"
+        + "        reject(new Error('api gateway: Remote stream send did not flush before the deadline'))\n"
+        + "      }, LUMO_SEND_FLUSH_TIMEOUT_MS)\n"
+        + "      this.socket.send(text, (error) => {\n"
+        + "        if (settled) return\n"
+        + "        settled = true\n"
+        + "        clearTimeout(timer)\n"
+        + "        if (error) reject(error)\n"
+        + "        else resolve()\n"
+        + "      })\n"
+        + "    }))\n",
+    ],
+  ], 'LUMO_STREAM_BACKPRESSURE')
+
+  // 2) 客户端：连接看似存活时的连续载波失败由「第 2 次即 terminal」改为有界指数
+  //    退避（2/4/8s，5 次封顶），宿主短暂繁忙不再撕裂会话的事件窗口。
+  patchFile(root, 'packages/api/gateway/src/client/remote-stream.ts', [[
+    "  signal.throwIfAborted()\n"
+      + "  if (connection.generation.getSnapshot() !== undefined) {\n"
+      + "    if (attempt === 1) return\n"
+      + "    throw error\n"
+      + "  }\n",
+    "  signal.throwIfAborted()\n"
+      + "  if (connection.generation.getSnapshot() !== undefined) {\n"
+      + "    if (attempt === 1) return\n"
+      + "    // LUMO_CARRIER_BACKOFF: an alive-looking connection that keeps failing\n"
+      + "    // the carrier used to go terminal on the second attempt, tearing the\n"
+      + "    // session's event window down. A bounded exponential backoff lets a\n"
+      + "    // busy or restarting host self-heal before the domain layer sees a\n"
+      + "    // terminal error.\n"
+      + "    if (attempt <= 5) {\n"
+      + "      await new Promise<void>((resolve, reject) => {\n"
+      + "        let timer: ReturnType<typeof setTimeout> | undefined\n"
+      + "        const aborted = (): void => {\n"
+      + "          if (timer !== undefined) clearTimeout(timer)\n"
+      + "          reject(new Error('Remote stream retry backoff aborted', { cause: signal.reason }))\n"
+      + "        }\n"
+      + "        timer = setTimeout(() => {\n"
+      + "          signal.removeEventListener('abort', aborted)\n"
+      + "          resolve()\n"
+      + "        }, Math.min(1000 * 2 ** (attempt - 2), 8000))\n"
+      + "        signal.addEventListener('abort', aborted, { once: true })\n"
+      + "      })\n"
+      + "      return\n"
+      + "    }\n"
+      + "    throw error\n"
+      + "  }\n",
+  ]], 'LUMO_CARRIER_BACKOFF')
+
+  // 3) Session 层：terminal 失败后保留事件窗口（eventSource 本就不清），并以有界
+  //    退避自动重开事件流；open() 成功走 replace 全量恢复窗口，无需手动刷新。
+  patchFile(root, 'packages/api/session-controller/src/client/sessions/session.ts', [
+    [
+      "  /** Owns the addressed page/follow lifecycle while this Session is open. */\n"
+        + "  private events: SessionEventStream | undefined\n",
+      "  /** Owns the addressed page/follow lifecycle while this Session is open. */\n"
+        + "  private events: SessionEventStream | undefined\n"
+        + "  // LUMO_STREAM_RESILIENCE: pending auto-reopen timer and consecutive-failure count.\n"
+        + "  private reopenTimer: ReturnType<typeof setTimeout> | undefined\n"
+        + "  private reopenAttempts = 0\n",
+    ],
+    [
+      "      this.retireFailedSubmission(requestId)\n"
+        + "    }\n"
+        + "    this.openGeneration++\n"
+        + "    const events = this.events\n",
+      "      this.retireFailedSubmission(requestId)\n"
+        + "    }\n"
+        + "    if (this.reopenTimer !== undefined) {\n"
+        + "      clearTimeout(this.reopenTimer) // LUMO_STREAM_RESILIENCE: a pruned session must not resurrect itself.\n"
+        + "      this.reopenTimer = undefined\n"
+        + "    }\n"
+        + "    this.openGeneration++\n"
+        + "    const events = this.events\n",
+    ],
+    [
+      "      await events.open({ maxMessages: PAGE_MESSAGES })\n"
+        + "      if (generation !== this.openGeneration || this.events !== events) return\n"
+        + "      this.openState = 'open'\n",
+      "      await events.open({ maxMessages: PAGE_MESSAGES })\n"
+        + "      if (generation !== this.openGeneration || this.events !== events) return\n"
+        + "      this.openState = 'open'\n"
+        + "      this.reopenAttempts = 0 // LUMO_STREAM_RESILIENCE: a healthy open resets the backoff ladder.\n",
+    ],
+    [
+      "      if (!isRemoteFailure(error)) throw error\n"
+        + "      this.events = undefined\n"
+        + "      this.openState = 'error'\n"
+        + "      this.openError = error\n"
+        + "    } finally {\n",
+      "      if (!isRemoteFailure(error)) throw error\n"
+        + "      this.events = undefined\n"
+        + "      this.openState = 'error'\n"
+        + "      this.openError = error\n"
+        + "      // LUMO_STREAM_RESILIENCE: same as failEventStream — keep the\n"
+        + "      // resident eventSource window and schedule a bounded reopen\n"
+        + "      // instead of leaving the session stuck in error until refresh.\n"
+        + "      this.scheduleStreamReopen()\n"
+        + "    } finally {\n",
+    ],
+    [
+      "    this.openState = 'error'\n"
+        + "    this.openError = error\n"
+        + "    void events.dispose()\n"
+        + "    this.notifier.markDirty()\n"
+        + "  }\n",
+      "    this.openState = 'error'\n"
+        + "    this.openError = error\n"
+        + "    void events.dispose()\n"
+        + "    this.notifier.markDirty()\n"
+        + "    // LUMO_STREAM_RESILIENCE: the visible event window survives in\n"
+        + "    // eventSource; a bounded backoff reopen restores live delivery\n"
+        + "    // (open() → replace) instead of leaving the session dead until a\n"
+        + "    // manual refresh.\n"
+        + "    this.scheduleStreamReopen()\n"
+        + "  }\n"
+        + "\n"
+        + "  /** LUMO_STREAM_RESILIENCE: bounded exponential-backoff reopen of the event stream. */\n"
+        + "  private scheduleStreamReopen(): void {\n"
+        + "    if (this.reopenTimer !== undefined || this.openState !== 'error') return\n"
+        + "    if (this.reopenAttempts >= 5) return\n"
+        + "    const attempt = ++this.reopenAttempts\n"
+        + "    this.reopenTimer = setTimeout(() => {\n"
+        + "      this.reopenTimer = undefined\n"
+        + "      if (this.openState !== 'error' || this.removed) return\n"
+        + "      void this.open().catch(() => undefined).then(() => {\n"
+        + "        // A failed reopen lands back in the 'error' state; keep backing off.\n"
+        + "        if (this.openState === 'error') this.scheduleStreamReopen()\n"
+        + "      })\n"
+        + "    }, Math.min(1000 * 2 ** (attempt - 1), 15000))\n"
+        + "  }\n",
+    ],
+  ], 'LUMO_STREAM_RESILIENCE')
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

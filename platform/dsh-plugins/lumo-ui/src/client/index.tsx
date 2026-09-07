@@ -1310,7 +1310,11 @@ function SkillHubSurface() {
 
   const load = useCallback(async () => {
     setLoading(true); setError('')
-    try { setCatalog(await api<SkillHubCatalog>('/lumo/api/skillhub/catalog')) }
+    try {
+      const next = await api<SkillHubCatalog>('/lumo/api/skillhub/catalog')
+      setCatalog(next)
+      setNotice(next.notice ?? '')
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
     finally { setLoading(false) }
   }, [])

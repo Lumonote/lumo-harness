@@ -14,14 +14,20 @@
  *   agent 父节点   —— patch 追加 lumo-subagent-remote（子代理经 Scheduler 放置到承载节点）
  */
 import { fileURLToPath } from 'node:url'
-import { dirname, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
 import { spawn } from 'node:child_process'
 import { localStorageRows, localVaultRows, profileLifetimeOverlay, profileStorageRows, workflowEngineOverlay } from './workflow.ts'
 import { localSkillSnapshotAssembly, skillSnapshotSource, waitForSkillSnapshotFile } from './skills.ts'
 import { startNacosRegistration } from './nacos.ts'
-import { ensureProfilePlugins, PLATFORM_PLUGIN_MODULES } from './plugins.ts'
+import {
+  ensureProfilePlugins,
+  failedProfilePluginNames,
+  profileBundleNames,
+  quarantineProfilePlugins,
+  PLATFORM_PLUGIN_MODULES,
+} from './plugins.ts'
 import { assertLocalStoragePath, resolveDeploymentProfile, withClusterStatus } from './deployment.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -138,21 +144,13 @@ const extraArgs = process.argv.slice(2).filter((arg) => arg !== '--')
 
 ensureProfilePlugins({ profile: dshProfile, platformRoot, dshRoot, deploymentMode: deployment.mode })
 
-// These rows mirror the upstream plugins' own cordis.patch.yml files. The
-// package files are linked by ensureProfilePlugins (or staged into the app
-// bundle for a packaged desktop build), so the profile mounts real plugin
-// entrypoints without asking the app to download anything at launch.
-// @anweat/dsh-browser 自 0.1.10（最新版）仍 import 已被 dsh master 移除的
-// settingsNamespace，会整树炸掉；从桌面包基线移除（见 plugins.ts 的版本漂移纪律）。
-const basePluginPatchRows = `${isWebProfile ? `    - id: dsh-market
-      name: dshmarket
-    - id: modlens
-      name: '@liustack/modlens'
-    - id: dsh-context
-      name: dsh-context
-    - id: cost-meter
-      name: dsh-cost-meter
-` : ''}`
+// 基线插件（dsh-market/modlens/dsh-context/cost-meter/...）**不在这里挂载**。
+// 它们各自在 package.json 里声明 `dsh.bundle.patch`，只能作为 profile 的
+// `dsh.profile.bundles` 层加载：官方 profile boot 先套 bundle 层再套本 patch，
+// 同一个 loader id 出现两次会被 Loader 直接判重复并拒绝启动（曾经因为
+// dsh-context 崩在 `duplicate loader entry id`）。登记由 plugins.ts 的
+// ensurePackagedBaselineBundles 完成（开发态则由 `dsh plugin add` 的官方
+// reconcile 完成），insert 段只留给 Lumo 自己的覆盖层。
 
 function integerEnv(name: string, fallback: number): number {
   const value = Number(process.env[name] ?? fallback)
@@ -315,7 +313,6 @@ ${isWebProfile ? `${localMode ? `# Local desktop serves the native DSH Web shell
   disabled: true
 `}
 - insert:
-${basePluginPatchRows}
 ${localMode ? localStorageRows(dshProfile, sqlitePath) + localVaultRows(sqlitePath, platformRealm) : `    - id: lumo-object-store
       name: ${JSON.stringify(objectStoreEntry)}
       inject: []
@@ -543,38 +540,90 @@ const nacosRegistration = !localMode && role === 'node' && process.env['LUMO_NAC
   : { close: async (): Promise<void> => {} }
 
 const packagedDshCli = process.env['LUMO_DSH_CLI']
-const childCommand = packagedDshCli ? process.execPath : 'corepack'
-const childArgs = packagedDshCli ? [packagedDshCli, ...dshArgs] : ['pnpm', 'run', 'dsh', ...dshArgs]
-const child = spawn(childCommand, childArgs, {
-    cwd: dshRoot,
-    stdio: 'inherit',
-    env: {
-      ...process.env,
-    // The platform package is deliberately outside the ignored DSH source
-    // tree. NODE_PATH lets the untouched official profile resolve its package
-    // name while the package's own dependencies remain workspace links.
-      NODE_PATH: [
-        process.env['LUMO_RUNTIME_NODE_MODULES'],
-        resolve(platformRoot, 'data-plane/dsh-node/node_modules'),
-        process.env['NODE_PATH'],
-      ].filter(Boolean).join(':'),
-    },
-  })
-
+const windowsCorepack = process.platform === 'win32' && packagedDshCli === undefined
+const childCommand = packagedDshCli
+  ? process.execPath
+  : windowsCorepack ? 'cmd.exe' : 'corepack'
+const childArgs = packagedDshCli
+  ? [packagedDshCli, ...dshArgs]
+  : windowsCorepack
+    ? ['/d', '/s', '/c', 'corepack.cmd', 'pnpm', 'run', 'dsh', ...dshArgs]
+    : ['pnpm', 'run', 'dsh', ...dshArgs]
 let stopping = false
+const childEnv: NodeJS.ProcessEnv = {
+  ...process.env,
+  // The platform package is deliberately outside the ignored DSH source
+  // tree. NODE_PATH lets the untouched official profile resolve its package
+  // name while the package's own dependencies remain workspace links.
+  NODE_PATH: [
+    process.env['LUMO_RUNTIME_NODE_MODULES'],
+    resolve(platformRoot, 'data-plane/dsh-node/node_modules'),
+    process.env['NODE_PATH'],
+  ].filter(Boolean).join(delimiter),
+}
+let child: ReturnType<typeof spawn> | undefined
+let recoveryAttempts = 0
+const maxRecoveryAttempts = 32
 const forwardSignal = (signal: NodeJS.Signals): void => {
   if (stopping) return
   stopping = true
-  child.kill(signal)
+  child?.kill(signal)
 }
 process.once('SIGTERM', () => forwardSignal('SIGTERM'))
 process.once('SIGINT', () => forwardSignal('SIGINT'))
-child.once('error', (error) => {
-  console.error(`dsh-node: 官方 CLI 启动失败: ${error.message}`)
-})
-child.once('exit', (code, signal) => {
+
+const finish = (code: number): void => {
   void nacosRegistration.close().finally(() => {
     rmSync(patchPath, { force: true })
-    process.exit(signal === null ? (code ?? 1) : 1)
+    process.exit(code)
   })
-})
+}
+
+/**
+ * A third-party bundle is allowed to fail independently. The official loader
+ * aborts the whole tree, so remove only the named optional bundle and retry
+ * the same invocation. Core Lumo/DSH packages remain fail-loud.
+ */
+const launchChild = (): void => {
+  let stderr = ''
+  const handoffFile = childEnv['LUMO_DESKTOP_HANDOFF_FILE']
+  if (handoffFile) rmSync(handoffFile, { force: true })
+  const nextChild = spawn(childCommand, childArgs, {
+    cwd: dshRoot,
+    // Keep stdout interactive while teeing stderr for recovery diagnostics.
+    stdio: ['inherit', 'inherit', 'pipe'],
+    env: childEnv,
+  })
+  child = nextChild
+  nextChild.stderr?.setEncoding('utf8')
+  nextChild.stderr?.on('data', (chunk: string | Buffer) => {
+    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+    process.stderr.write(text)
+    stderr = (stderr + text).slice(-256 * 1024)
+  })
+  nextChild.once('error', (error) => {
+    console.error(`dsh-node: 官方 CLI 启动失败: ${error.message}`)
+  })
+  nextChild.once('close', (code, signal) => {
+    if (nextChild !== child) return
+    if (!stopping && signal === null && code !== 0 && recoveryAttempts < maxRecoveryAttempts) {
+      const candidates = profileBundleNames(dshProfile, childEnv)
+      const failed = failedProfilePluginNames(stderr, candidates)
+      const quarantined = quarantineProfilePlugins({
+        profile: dshProfile,
+        packages: failed,
+        reason: 'DSH Loader rejected optional plugin',
+        env: childEnv,
+      })
+      if (quarantined.length > 0) {
+        recoveryAttempts += quarantined.length
+        console.warn(`dsh-node: 已隔离失败插件并重试启动：${quarantined.join(', ')}`)
+        launchChild()
+        return
+      }
+    }
+    finish(signal === null ? (code ?? 1) : 1)
+  })
+}
+
+launchChild()

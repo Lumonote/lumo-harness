@@ -5,13 +5,13 @@
  * `skillhub` CLI into a local directory; it is not a DSH Cordis runtime plugin.
  * Desktop installation delegates to the official CLI with the runtime's skill
  * root, then verifies native discovery before recording success. Expert packs
- * install their constituent skills and expose their actual `/name` gestures.
+ * install their constituent skills behind one native expert entry skill.
  * DSH plugins are installed through the separate plugin market.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
-import { basename, delimiter, dirname, join } from 'node:path'
+import { basename, delimiter, dirname, join, relative } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { execa } from 'execa'
 import { isSkillName } from '@deepseek-ai/dsh-skill'
@@ -150,7 +150,13 @@ const SEED_PACKS: SkillHubPack[] = [
 const SEED_PLUGINS: SkillHubPlugin[] = [
   { id: 'dsh-routing-suite', name: 'yjh051108/dsh-routing-suite', category: '模型推理', description: 'dsh-routing-suite - injector + router-standard kit: install the runtime injector first, then the task-aware reasoning-mode router preset (measured P1-P23).', stars: 7000, forks: 147, source: 'GitHub', installable: true, repo: 'yjh051108/dsh-routing-suite' },
   { id: 'modlens', name: 'liustack/modlens', category: '模型推理', description: 'The first vision plugin for DeepSeek Harness, and the vision bridge for every text-only coding agent. Paste an image, get structured JSON evidence (OCR, layout, semantics).', stars: 3800, forks: 112, source: 'GitHub', installable: true, repo: 'liustack/modlens' },
+  { id: 'dsh-dream-skin', name: 'RevolutionLA/dsh-dream-skin', category: '趣味换装', description: 'DSH 主题换肤与每用户强调色。', stars: 2600, forks: 128, source: 'GitHub', installable: true, repo: 'RevolutionLA/dsh-dream-skin' },
+  { id: 'dsh-context', name: 'bowenliang123/dsh-context', category: '记忆', description: '查看上下文组成、趋势、注入、压缩和每一步消息。', stars: 2400, forks: 96, source: 'GitHub', installable: true, repo: 'bowenliang123/dsh-context' },
+  { id: 'dsh-cost-meter', name: 'Han-1413141/dsh-cost-meter', category: '安全管理', description: '统计会话、预算、模型价格与历史费用。', stars: 1800, forks: 63, source: 'GitHub', installable: true, repo: 'Han-1413141/dsh-cost-meter' },
+  { id: 'dsh-task-board', name: 'scwlkq/dsh-task-board', category: '工作流', description: 'Host 权威任务台帐、定时调度与执行历史。', stars: 2100, forks: 84, source: 'GitHub', installable: true, repo: 'scwlkq/dsh-task-board' },
   { id: 'dsh-better-sidebar', name: 'omdsh-dev/dsh-better-sidebar', category: '客户端', description: '开放的侧边栏底座,支持三方拓展注册新侧边栏页面。内置文件渲染编辑/终端/侧边对话/Git/子代理页面 | Open sidebar foundation, supports third-party extensions.', stars: 3200, forks: 284, source: 'GitHub', installable: true, repo: 'omdsh-dev/dsh-better-sidebar' },
+  { id: 'dsh-agent-teams', name: 'NanmiCoder/dsh-agent-teams', category: '工作流', description: '自然语言编排多智能体团队协作。', stars: 1900, forks: 72, source: 'GitHub', installable: true, repo: 'NanmiCoder/dsh-agent-teams' },
+  { id: 'dsh-univer-office', name: 'dream-num/dsh-univer-office', category: '工作流', description: 'DSH × Univer 协作网关与办公文档查看器。', stars: 1700, forks: 58, source: 'GitHub', installable: true, repo: 'dream-num/dsh-univer-office' },
   { id: 'dsh-market', name: 'dsh-market/dsh-market', category: '客户端', description: 'The plugin market inside DeepSeek Harness - browse, search, one-click install. - DSH 可视化插件市场', stars: 3100, forks: 162, source: 'GitHub', installable: true, repo: 'dsh-market/dsh-market' },
   { id: 'dsh-tui', name: 'ccch1mneyyy/dsh-tui', category: '客户端', description: 'DSH 官方公众号收录的 TUI 补位插件:Claude Code 风,鲸鱼顶栏/实时状态/流式思考/双击 Esc 回滚/上下文进度+TPS。npm 一键装。DSH official WeChat featured.', stars: 2800, forks: 147, source: 'GitHub', installable: true, repo: 'ccch1mneyyy/dsh-tui' },
 ]
@@ -362,10 +368,16 @@ function mapPlugin(p: SkillHubAPIPlugin, categories: CategoryMap): SkillHubPlugi
  * misleading「安装」button for a bundled plugin.
  */
 function applyPreinstalledCatalog(catalog: SkillHubCatalog, config: SkillHubConfig): SkillHubCatalog {
-  const repos = new Set(config.preinstalledRepositories ?? [])
+  const normalizeRepo = (value: string): string => value.trim()
+    .replace(/^https?:\/\/(?:www\.)?github\.com\//iu, '')
+    .replace(/^git@github\.com:/iu, '')
+    .replace(/\.git\/?$/iu, '')
+    .replace(/^\/+|\/+$/gu, '')
+    .toLowerCase()
+  const repos = new Set((config.preinstalledRepositories ?? []).map(normalizeRepo).filter(Boolean))
   if (repos.size === 0) return catalog
   const extra = catalog.plugins
-    .filter(plugin => repos.has(plugin.repo))
+    .filter(plugin => repos.has(normalizeRepo(plugin.repo)))
     .map(plugin => plugin.id)
   if (extra.length === 0) return catalog
   return {
@@ -570,22 +582,115 @@ function isInstallId(id: unknown): id is string {
     && id.split('/').every(part => part !== '' && part !== '..' && part !== '.')
 }
 
-function recordInstall(config: SkillHubConfig, kind: 'skill' | 'pack', id: string, skills: InstalledSkill[]): void {
+function recordInstall(config: SkillHubConfig, kind: 'skill' | 'pack', id: string, skills: InstalledSkill[], commands = skills.filter(skill => skill.userInvocable).map(skill => skill.name)): void {
   const installs = normalizeInstalls(readJson(config.installFile, EMPTY_INSTALLS))
+  const previous = JSON.stringify(installs)
   const bucket = kind === 'skill' ? 'skills' : 'packs'
   if (!installs[bucket].includes(id)) installs[bucket].push(id)
   const key = `${kind}:${id}`
-  installs.commands = { ...installs.commands, [key]: [...new Set(skills.filter(skill => skill.userInvocable).map(skill => skill.name))] }
+  installs.commands = { ...installs.commands, [key]: [...new Set(commands)] }
   installs.files = { ...installs.files, [key]: [...new Set(skills.map(skill => skill.path))] }
-  writeJson(config.installFile, installs)
+  if (JSON.stringify(installs) !== previous) writeJson(config.installFile, installs)
 }
 
 /** Serialize installs per root so concurrent requests cannot lose receipts. */
 export async function installItem(config: SkillHubConfig, kind: SkillHubKind, id: string): Promise<SkillHubCatalog> {
+  return serializeInstall(config, () => install(config, kind, id))
+}
+
+async function serializeInstall(config: SkillHubConfig, operation: () => Promise<SkillHubCatalog>): Promise<SkillHubCatalog> {
   const previous = installing.get(config.root)
-  const pending = (previous ?? Promise.resolve()).catch(() => {}).then(() => install(config, kind, id))
+  const pending = (previous ?? Promise.resolve()).catch(() => {}).then(operation)
   installing.set(config.root, pending)
   try { return await pending } finally { if (installing.get(config.root) === pending) installing.delete(config.root) }
+}
+
+async function installPackEntry(config: SkillHubConfig, pack: SkillHubPack, skills: InstalledSkill[]): Promise<void> {
+  if (config.runtime === undefined) throw new Error('当前运行时未启用本地技能安装。')
+  const digest = createHash('sha256').update(pack.id).digest('hex').slice(0, 16)
+  const command = pack.command && isSkillName(pack.command) ? pack.command
+    : isSkillName(pack.id) ? pack.id : `expert-${digest}`
+  const directory = join(config.root, `lumo-expert-${digest}`)
+  const file = join(directory, 'SKILL.md')
+  const constituents = skills.filter(skill => skill.path !== file)
+  if (constituents.length === 0) throw new Error(`「${pack.name}」没有可用技能，未安装专家入口。`)
+  const existing = constituents.find(skill => skill.name === command && skill.userInvocable)
+  if (existing !== undefined) {
+    recordInstall(config, 'pack', pack.id, constituents, [existing.name])
+    return
+  }
+  const content = [
+    '---',
+    `name: ${command}`,
+    `description: ${JSON.stringify(`以「${pack.name}」专家身份处理任务。${pack.description ?? ''}`)}`,
+    'user-invocable: true',
+    'disable-model-invocation: true',
+    '---',
+    `# ${pack.name}`,
+    '',
+    `你是「${pack.name}」${pack.role ? `，角色：${pack.role}` : '专家'}。${pack.description ?? ''}`,
+    '在当前对话中以此专家身份理解任务、执行并给出统一答复，直到用户明确切换角色。',
+    '根据任务选择下列相关技能，先读取对应 SKILL.md 并遵循其中的步骤、资源路径和前置条件。',
+    '不必同时执行所有技能，也不要要求用户逐个输入技能命令。保持已有对话上下文。',
+    '',
+    '## 可用技能',
+    ...constituents.map(skill => `- ${skill.name}: ${JSON.stringify(relative(directory, skill.path).replaceAll('\\', '/'))}`),
+    '',
+  ].join('\n')
+  mkdirSync(directory, { recursive: true })
+  const unchanged = existsSync(file) && readFileSync(file, 'utf8') === content
+  const discovered = skills.find(skill => skill.path === file && skill.name === command && skill.userInvocable)
+  if (unchanged && discovered !== undefined) {
+    recordInstall(config, 'pack', pack.id, [...constituents, discovered], [discovered.name])
+    return
+  }
+  if (!unchanged) {
+    const temporary = `${file}.tmp-${randomUUID()}`
+    writeFileSync(temporary, content, { mode: 0o600 })
+    renameSync(temporary, file)
+  }
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (attempt > 0) await delay(250)
+    const entry = (await config.runtime.refresh()).find(skill => skill.path === file && skill.name === command && skill.userInvocable)
+    if (entry !== undefined) {
+      recordInstall(config, 'pack', pack.id, [...constituents, entry], [entry.name])
+      return
+    }
+  }
+  throw new Error(`专家入口未能加载：${command}`)
+}
+
+export async function loadCatalog(config: SkillHubConfig, cachedOnly = false): Promise<SkillHubCatalog> {
+  return serializeInstall(config, async () => {
+    const catalog = cachedOnly ? buildCatalog(config) : await refreshCatalog(config)
+    if (config.runtime === undefined || catalog.installed.packs.length === 0) return catalog
+    const available = await config.runtime.refresh()
+    const unavailable = new Set<string>()
+    const notices: string[] = []
+    for (const id of catalog.installed.packs) {
+      const key = `pack:${id}`
+      const commands = catalog.installed.commands?.[key] ?? []
+      const files = catalog.installed.files?.[key]
+      const loaded = available.filter(skill => files ? files.includes(skill.path) : commands.includes(skill.name))
+      const pack = catalog.packs.find(item => item.id === id) ?? { id, name: id, role: '', category: '', description: '', skills: loaded.length, source: 'cache' }
+      try {
+        await installPackEntry(config, pack, loaded)
+      } catch (error) {
+        unavailable.add(id)
+        notices.push(`「${pack.name}」专家入口暂不可用，请重新安装：${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    const installed = buildCatalog(config).installed
+    return {
+      ...catalog,
+      installed: {
+        ...installed,
+        packs: installed.packs.filter(id => !unavailable.has(id)),
+        commands: Object.fromEntries(Object.entries(installed.commands ?? {}).filter(([key]) => !key.startsWith('pack:') || !unavailable.has(key.slice(5)))),
+      },
+      ...(notices.length ? { notice: notices.join('；') } : {}),
+    }
+  })
 }
 
 async function install(config: SkillHubConfig, kind: SkillHubKind, id: string): Promise<SkillHubCatalog> {
@@ -658,7 +763,10 @@ async function install(config: SkillHubConfig, kind: SkillHubKind, id: string): 
     recordInstall(config, 'skill', slug, installed)
     for (const skill of installed) loaded.set(skill.path, skill)
   }
-  if (kind === 'pack') recordInstall(config, kind, id, [...loaded.values()])
+  if (kind === 'pack') {
+    if (loaded.size === 0) throw new Error(`专家包的全部技能均不可用：${skipped.join('、')}`)
+    await installPackEntry(config, catalog.packs.find(pack => pack.id === id)!, [...loaded.values()])
+  }
   const result = buildCatalog(config)
   if (skipped.length === 0) return result
   const name = result.packs.find(pack => pack.id === id)?.name ?? id

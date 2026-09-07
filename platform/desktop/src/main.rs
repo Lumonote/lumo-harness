@@ -318,24 +318,16 @@ fn spawn_runtime(app: &AppHandle) -> Result<String, String> {
     log_stage(app, &format!("127.0.0.1:{port} 已就绪"));
     let base_url = format!("http://127.0.0.1:{port}");
     boot_eval(app, "window.__lumoBoot.status(\"等待工作台入口…\")");
-    match wait_for_handoff(app, &handoff_file, &base_url) {
-        Ok(url) => {
-            log_stage(app, "已取得带 token 的工作台入口");
-            Ok(url)
-        }
-        Err(message) => {
-            // 没拿到 token 就退回裸 URL：上一次会话的签名 cookie 仍在 30 天有效期内时
-            // 依然能进；真的进不去，dsh 的 401 页会说明原因，日志里也留有这一行。
-            log_stage(app, &format!("{message}；改用裸地址 {base_url}"));
-            Ok(base_url)
-        }
-    }
+    let url = wait_for_handoff(app, &handoff_file, &base_url)?;
+    log_stage(app, "已取得带 token 的工作台入口");
+    Ok(url)
 }
 
-/// 等插件写出握手文件并校验它确实指向本地回环端口。端口已应答后装配通常在几秒内完成；
-/// 这里的上限只覆盖极慢机器，且失败后还有裸地址兜底。
+/// 等插件装配与故障恢复完成，取得经过鉴权的本地入口后再离开启动页。
 fn wait_for_handoff(app: &AppHandle, file: &PathBuf, base_url: &str) -> Result<String, String> {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let started = Instant::now();
+    let deadline = started + BOOT_DEADLINE;
+    let mut last_tick = 0;
     let expected_prefix = format!("{base_url}/");
     loop {
         if let Some(status) = runtime_exit_status(app)? {
@@ -347,11 +339,27 @@ fn wait_for_handoff(app: &AppHandle, file: &PathBuf, base_url: &str) -> Result<S
                 return Ok(url.to_string());
             }
             if !url.is_empty() {
-                return Err(format!("握手文件 {} 指向了非本地地址：{url}", file.display()));
+                return Err(format!("握手文件 {} 指向了非本地地址", file.display()));
             }
         }
-        if Instant::now() >= deadline {
-            return Err(format!("30 秒内未取得工作台入口（{}）", file.display()));
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(format!(
+                "{} 秒内未取得工作台入口（{}），请查看运行时日志中的插件装配错误",
+                BOOT_DEADLINE.as_secs(),
+                file.display()
+            ));
+        }
+        let elapsed = now.duration_since(started).as_secs();
+        if elapsed != last_tick {
+            last_tick = elapsed;
+            boot_eval(
+                app,
+                &format!(
+                    "window.__lumoBoot.status({})",
+                    js_string(&format!("正在装配工作台并恢复插件…（已 {elapsed} 秒）"))
+                ),
+            );
         }
         thread::sleep(Duration::from_millis(100));
     }
