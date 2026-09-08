@@ -11,3 +11,22 @@ spec:
 ---
 {{- end }}
 {{- end }}
+{{- if .Values.deviceGateway.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lumo-platform.name" . }}-device-gateway
+  {{- with .Values.deviceGateway.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.deviceGateway.service.type }}
+  selector: { lumo.dev/service: governance }
+  ports:
+    - name: tls-device
+      port: {{ .Values.deviceGateway.service.port }}
+      targetPort: device-tls
+      protocol: TCP
+---
+{{- end }}

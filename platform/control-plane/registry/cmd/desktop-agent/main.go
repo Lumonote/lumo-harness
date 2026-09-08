@@ -1,0 +1,600 @@
+// desktop-agent connects outbound to a device gateway, installs its approved
+// registry closure, and accepts only fixed manifest runtime commands explicitly
+// allowed by this device's operator. It has no control-plane credential.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/lumo-harness/platform/registry/internal/artifactruntime"
+	"github.com/lumo-harness/platform/registry/internal/plan"
+	"github.com/lumo-harness/platform/registry/internal/provisioner"
+	"github.com/lumo-harness/platform/registry/internal/trust"
+)
+
+type identity struct {
+	Realm       string    `json:"realm"`
+	NodeID      string    `json:"node_id"`
+	Gateway     string    `json:"gateway"`
+	Key         string    `json:"key"`
+	Certificate string    `json:"certificate"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+type artifact struct {
+	Name          string `json:"name"`
+	Version       string `json:"version"`
+	Digest        string `json:"digest"`
+	PayloadDigest string `json:"payload_digest,omitempty"`
+}
+type policy struct {
+	Name          string     `json:"name"`
+	Version       string     `json:"version"`
+	ClientVersion string     `json:"client_version"`
+	Artifacts     []artifact `json:"artifacts"`
+	Shape         plan.Shape `json:"shape"`
+}
+type command struct {
+	ID       string `json:"id"`
+	Action   string `json:"action"`
+	Revision int64  `json:"revision"`
+	Body     struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"body"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+type message struct {
+	Type          string          `json:"type"`
+	Revision      int64           `json:"revision,omitempty"`
+	ClientVersion string          `json:"client_version,omitempty"`
+	Installed     []artifact      `json:"installed,omitempty"`
+	Error         string          `json:"error,omitempty"`
+	CommandID     string          `json:"command_id,omitempty"`
+	State         string          `json:"state,omitempty"`
+	Result        json.RawMessage `json:"result,omitempty"`
+	Policy        *policy         `json:"policy,omitempty"`
+	Commands      []command       `json:"commands,omitempty"`
+	OS            string          `json:"os,omitempty"`
+	Arch          string          `json:"arch,omitempty"`
+}
+type options struct {
+	gateway, realm, nodeID, stateDir, installDir, caFile, codeFile, clientVersion, allowed string
+	trustFile, shapeJSON string
+	shape plan.Shape
+	maxRuntime                                                                             time.Duration
+}
+
+func main() {
+	if err := run(); err != nil {
+		log.Print(err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	var o options
+	flag.StringVar(&o.gateway, "gateway", "", "HTTPS device gateway origin")
+	flag.StringVar(&o.realm, "realm", "", "registered realm")
+	flag.StringVar(&o.nodeID, "node", "", "registered node ID")
+	flag.StringVar(&o.stateDir, "state-dir", "", "absolute private device identity directory")
+	flag.StringVar(&o.installDir, "install-dir", "", "absolute approved artifact directory")
+	flag.StringVar(&o.caFile, "server-ca", "", "optional gateway server CA PEM file; otherwise system roots")
+	flag.StringVar(&o.trustFile, "trust-file", "", "absolute independently provisioned publisher trust file")
+	flag.StringVar(&o.shapeJSON, "shape", "{}", "locally available capabilities as JSON")
+	flag.StringVar(&o.codeFile, "enrollment-code-file", "", "file containing the one-time activation code")
+	flag.StringVar(&o.clientVersion, "client-version", "0.1.0", "client version approved in device policy")
+	flag.StringVar(&o.allowed, "allow-runtime-digests", "", "explicit local consent: comma-separated exact manifest digests permitted to execute")
+	flag.DurationVar(&o.maxRuntime, "max-runtime", time.Minute, "maximum lifetime of a locally approved process (up to 5m)")
+	flag.Parse()
+	if !filepath.IsAbs(o.trustFile) { return errors.New("desktop-agent: -trust-file is required") }
+	if _, err := trust.LoadFile(o.trustFile); err != nil { return err }
+	decoder := json.NewDecoder(strings.NewReader(o.shapeJSON)); decoder.DisallowUnknownFields()
+	if decoder.Decode(&o.shape) != nil || decoder.Decode(&struct{}{}) != io.EOF { return errors.New("desktop-agent: invalid -shape") }
+	u, err := url.Parse(o.gateway)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return errors.New("desktop-agent: gateway must be an exact HTTPS origin")
+	}
+	o.gateway = strings.TrimRight(o.gateway, "/")
+	idPattern := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	if !idPattern.MatchString(o.realm) || !idPattern.MatchString(o.nodeID) || !filepath.IsAbs(o.stateDir) || !filepath.IsAbs(o.installDir) || o.maxRuntime <= 0 || o.maxRuntime > 5*time.Minute {
+		return errors.New("desktop-agent: realm, node, absolute directories and a runtime limit up to 5m are required")
+	}
+	if filepath.Clean(o.stateDir) == string(filepath.Separator) || filepath.Clean(o.installDir) == string(filepath.Separator) {
+		return errors.New("desktop-agent: dedicated identity and installation directories are required")
+	}
+	for _, pair := range [][2]string{{o.stateDir,o.installDir},{o.installDir,o.stateDir},{o.installDir,o.trustFile}} {
+		rel, err := filepath.Rel(pair[0], pair[1])
+		if err != nil || (rel != ".." && !strings.HasPrefix(rel,".."+string(filepath.Separator))) { return errors.New("desktop-agent: identity, trust and artifact storage must not overlap") }
+	}
+	if err = os.MkdirAll(o.stateDir, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(o.stateDir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("desktop-agent: identity directory must not be a symlink")
+	}
+	if err = os.Chmod(o.stateDir, 0o700); err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	id, err := loadIdentity(ctx, o)
+	if err != nil {
+		return err
+	}
+	for {
+		if !id.ExpiresAt.After(time.Now().Add(time.Hour)) {
+			id, err = renewIdentity(ctx, o, id)
+			if err != nil {
+				return err
+			}
+		}
+		err = connect(ctx, o, id)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			log.Print("desktop-agent: connection interrupted; reconnecting")
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+func tlsConfig(o options, id identity) (*tls.Config, error) {
+	config := &tls.Config{MinVersion: tls.VersionTLS13}
+	if o.caFile != "" {
+		raw, err := os.ReadFile(o.caFile)
+		if err != nil {
+			return nil, err
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(raw) {
+			return nil, errors.New("desktop-agent: invalid server CA")
+		}
+		config.RootCAs = pool
+	}
+	if id.Certificate != "" {
+		pair, err := tls.X509KeyPair([]byte(id.Certificate), []byte(id.Key))
+		if err != nil {
+			return nil, err
+		}
+		config.Certificates = []tls.Certificate{pair}
+	}
+	return config, nil
+}
+
+func client(o options, id identity) (*http.Client, error) {
+	config, err := tlsConfig(o, id)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: config}, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, nil
+}
+
+func request(ctx context.Context, client *http.Client, endpoint string, input, output any) error {
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := client.Do(req)
+	if err != nil {
+		return errors.New("desktop-agent: gateway request failed")
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("desktop-agent: gateway returned HTTP %d", res.StatusCode)
+	}
+	return json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(output)
+}
+
+func atomicJSON(path string, value any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".device-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if err = f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err = f.Write(raw); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
+func csr(id identity) (string, error) {
+	block, _ := pem.Decode([]byte(id.Key))
+	if block == nil {
+		return "", errors.New("desktop-agent: invalid private key")
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return "", err
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	if err != nil {
+		return "", err
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})), nil
+}
+
+func loadIdentity(ctx context.Context, o options) (identity, error) {
+	path := filepath.Join(o.stateDir, "identity.json")
+	raw, err := os.ReadFile(path)
+	if err == nil {
+		var id identity
+		if json.Unmarshal(raw, &id) != nil || id.Realm != o.realm || id.NodeID != o.nodeID || id.Gateway != o.gateway {
+			return id, errors.New("desktop-agent: identity binding mismatch")
+		}
+		if id.Certificate != "" && o.codeFile == "" {
+			return id, nil
+		}
+		return enroll(ctx, o, id)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return identity{}, err
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return identity{}, err
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return identity{}, err
+	}
+	id := identity{Realm: o.realm, NodeID: o.nodeID, Gateway: o.gateway, Key: string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))}
+	if err = atomicJSON(path, id); err != nil {
+		return id, err
+	}
+	return enroll(ctx, o, id)
+}
+
+func enroll(ctx context.Context, o options, id identity) (identity, error) {
+	if o.codeFile == "" {
+		return id, errors.New("desktop-agent: first enrollment requires -enrollment-code-file")
+	}
+	raw, err := os.ReadFile(o.codeFile)
+	if err != nil {
+		return id, err
+	}
+	code := strings.TrimSpace(string(raw))
+	if len(code) != 43 {
+		return id, errors.New("desktop-agent: invalid enrollment code")
+	}
+	requestCSR, err := csr(id)
+	if err != nil {
+		return id, err
+	}
+	httpClient, err := client(o, identity{})
+	if err != nil {
+		return id, err
+	}
+	defer httpClient.CloseIdleConnections()
+	var response struct {
+		Certificate string    `json:"certificate"`
+		ExpiresAt   time.Time `json:"expires_at"`
+	}
+	if err = request(ctx, httpClient, o.gateway+"/device/enroll", map[string]string{"realm": o.realm, "node_id": o.nodeID, "code": code, "csr": requestCSR}, &response); err != nil {
+		return id, err
+	}
+	id.Certificate, id.ExpiresAt = response.Certificate, response.ExpiresAt
+	if _, err = tlsConfig(o, id); err != nil {
+		return id, err
+	}
+	return id, atomicJSON(filepath.Join(o.stateDir, "identity.json"), id)
+}
+
+func renewIdentity(ctx context.Context, o options, id identity) (identity, error) {
+	requestCSR, err := csr(id)
+	if err != nil {
+		return id, err
+	}
+	httpClient, err := client(o, id)
+	if err != nil {
+		return id, err
+	}
+	defer httpClient.CloseIdleConnections()
+	var response struct {
+		Certificate string    `json:"certificate"`
+		ExpiresAt   time.Time `json:"expires_at"`
+	}
+	if err = request(ctx, httpClient, o.gateway+"/device/renew", map[string]string{"csr": requestCSR}, &response); err != nil {
+		return id, err
+	}
+	id.Certificate, id.ExpiresAt = response.Certificate, response.ExpiresAt
+	if _, err = tlsConfig(o, id); err != nil {
+		return id, err
+	}
+	return id, atomicJSON(filepath.Join(o.stateDir, "identity.json"), id)
+}
+
+func connect(parent context.Context, o options, id identity) error {
+	tlsConf, err := tlsConfig(o, id)
+	if err != nil {
+		return err
+	}
+	dialer := websocket.Dialer{TLSClientConfig: tlsConf, HandshakeTimeout: 10 * time.Second}
+	ws, res, err := dialer.DialContext(parent, "wss"+strings.TrimPrefix(o.gateway, "https")+"/device/connect", nil)
+	if res != nil && res.Body != nil {
+		_ = res.Body.Close()
+	}
+	if err != nil {
+		return errors.New("desktop-agent: device connection failed")
+	}
+	defer ws.Close()
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	ws.SetReadLimit(4 << 20)
+	_ = ws.SetReadDeadline(time.Now().Add(30*time.Second))
+	supervisor := artifactruntime.NewSupervisor(5 * time.Second)
+	defer func() {
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = supervisor.StopAll(shutdown)
+	}()
+	httpClient, err := client(o, id)
+	if err != nil {
+		return err
+	}
+	defer httpClient.CloseIdleConnections()
+	installer := provisioner.New(o.gateway+"/device/registry", o.installDir)
+	installer.Client = httpClient
+	installer.TrustFile = o.trustFile
+	var writeMu, snapshotMu sync.Mutex
+	snapshot := message{Type: "heartbeat", ClientVersion: o.clientVersion, Error: "reconcile_required"}
+	write := func(value message) error {
+		if value.Type == "heartbeat" { value.OS, value.Arch = runtime.GOOS, runtime.GOARCH; if value.OS == "darwin" { value.OS = "macos" } }
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		return ws.WriteJSON(value)
+	}
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		defer ws.Close()
+		defer cancel()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			snapshotMu.Lock()
+			value := snapshot
+			snapshotMu.Unlock()
+			if write(value) != nil {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !id.ExpiresAt.After(time.Now().Add(time.Hour)) {
+					return
+				}
+			}
+		}
+	}()
+	defer func() { cancel(); _ = ws.Close(); <-heartbeatDone }()
+	incoming := make(chan message, 8)
+	go func() {
+		defer close(incoming)
+		defer cancel()
+		for {
+			var next message
+			if ws.ReadJSON(&next) != nil {
+				return
+			}
+			_ = ws.SetReadDeadline(time.Now().Add(30*time.Second))
+			// Lease messages are consumed immediately even during a long download.
+			if next.Type == "status" { continue }
+			select {
+			case incoming <- next:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	reconcileTimer := time.NewTicker(time.Minute)
+	defer reconcileTimer.Stop()
+	var desired *policy
+	var revision int64
+	setSnapshot := func(state *provisioner.InstallState, err error) {
+		next := message{Type: "heartbeat", ClientVersion: o.clientVersion, Revision: revision}
+		if err != nil || state == nil {
+			next.Revision = 0
+			next.Error = "install_failed"
+		} else {
+			for _, item := range state.Installed {
+				next.Installed = append(next.Installed, artifact{Name: item.Name, Version: item.Version, Digest: item.Digest, PayloadDigest: item.PayloadDigest})
+			}
+		}
+		snapshotMu.Lock()
+		snapshot = next
+		snapshotMu.Unlock()
+	}
+	reconcile := func() error {
+		if desired == nil {
+			return errors.New("desktop-agent: no approved policy")
+		}
+		if desired.ClientVersion != o.clientVersion {
+			err := errors.New("desktop-agent: client version does not match approved policy")
+			setSnapshot(nil, err)
+			return err
+		}
+		state, changed, err := installer.Reconcile(ctx, desired.Name, desired.Version, o.shape)
+		setSnapshot(state, err)
+		if err != nil || changed {
+			_ = supervisor.StopAll(ctx)
+		}
+		if writeErr := writeSnapshot(&snapshotMu, &snapshot, write); writeErr != nil { cancel(); return writeErr }
+		return err
+	}
+	allowed := map[string]bool{}
+	for _, digest := range strings.Split(o.allowed, ",") {
+		if digest != "" {
+			if !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(digest) {
+				return errors.New("desktop-agent: invalid locally approved digest")
+			}
+			allowed[digest] = true
+		}
+	}
+	journal := filepath.Join(o.stateDir, "commands")
+	if err = os.MkdirAll(journal, 0o700); err != nil {
+		return err
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-reconcileTimer.C:
+			if err := reconcile(); err != nil {
+				log.Print("desktop-agent: artifact reconciliation failed")
+			}
+		case next, ok := <-incoming:
+			if !ok {
+				return errors.New("desktop-agent: device disconnected")
+			}
+			if next.Type == "desired" {
+				if next.Policy == nil || next.Revision < 1 {
+					return errors.New("desktop-agent: invalid desired policy")
+				}
+				_ = supervisor.StopAll(ctx)
+				desired, revision = next.Policy, next.Revision
+				installer.PinnedDigests = map[string]string{}
+				for _, item := range desired.Artifacts {
+					key := item.Name+"@"+item.Version
+					if _, exists := installer.PinnedDigests[key]; exists { return errors.New("desktop-agent: duplicate approved artifact") }
+					installer.PinnedDigests[key] = item.Digest
+				}
+				if err := reconcile(); err != nil {
+					log.Print("desktop-agent: artifact reconciliation failed")
+				}
+				continue
+			}
+			if next.Type != "commands" {
+				return errors.New("desktop-agent: unknown gateway message")
+			}
+			for _, cmd := range next.Commands {
+				result := message{Type: "result", CommandID: cmd.ID, State: "failed", Result: json.RawMessage(`{"error":"command_denied"}`)}
+				if !regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`).MatchString(cmd.ID) {
+					return errors.New("desktop-agent: invalid command ID")
+				}
+				claimed, err := os.OpenFile(filepath.Join(journal, cmd.ID), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+				if err != nil {
+					if !errors.Is(err, os.ErrExist) {
+						return err
+					}
+					if write(result) != nil {
+						return errors.New("desktop-agent: result delivery failed")
+					}
+					continue
+				}
+				_, err = claimed.WriteString("claimed\n")
+				if err == nil {
+					err = claimed.Sync()
+				}
+				closeErr := claimed.Close()
+				if err != nil {
+					return err
+				}
+				if closeErr != nil {
+					return closeErr
+				}
+				if cmd.ExpiresAt.After(time.Now()) && cmd.Revision == revision && desired != nil {
+					switch cmd.Action {
+					case "reconcile":
+						if reconcile() == nil {
+							result.State = "completed"
+							result.Result = json.RawMessage(`{"converged":true}`)
+						}
+					case "start":
+						consented := false
+						for _, item := range desired.Artifacts {
+							if item.Name == cmd.Body.Name && item.Version == cmd.Body.Version && allowed[item.Digest] {
+								consented = true
+							}
+						}
+						if consented && reconcile() == nil && ctx.Err() == nil && cmd.ExpiresAt.After(time.Now()) {
+							spec, err := installer.RuntimeSpec(cmd.Body.Name, cmd.Body.Version)
+							if err == nil {
+								status, err := supervisor.Start(spec)
+								if err == nil {
+									result.State = "completed"
+									result.Result, _ = json.Marshal(status)
+									go func(runtimeID string, startedAt time.Time) {
+										select {
+										case <-ctx.Done():
+										case <-time.After(o.maxRuntime):
+										}
+										stop, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+										defer cancel()
+										if current, ok := supervisor.Status(runtimeID); ok && current.StartedAt.Equal(startedAt) { _, _ = supervisor.Stop(stop, runtimeID) }
+									}(spec.ID, status.StartedAt)
+								}
+							}
+						}
+					case "stop":
+						status, err := supervisor.Stop(ctx, cmd.Body.Name+"@"+cmd.Body.Version)
+						if err == nil {
+							result.State = "completed"
+							result.Result, _ = json.Marshal(status)
+						}
+					}
+				}
+				if write(result) != nil {
+					return errors.New("desktop-agent: result delivery failed")
+				}
+			}
+		}
+	}
+}
+
+func writeSnapshot(mu *sync.Mutex, snapshot *message, write func(message) error) error {
+	mu.Lock(); value := *snapshot; mu.Unlock(); return write(value)
+}

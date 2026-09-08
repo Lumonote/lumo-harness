@@ -267,13 +267,14 @@ services:
       - LUMO_CLUSTER_ID=${LUMO_CLUSTER_ID:-cluster-a}
       - LUMO_AUTH_HOST=0.0.0.0
       - LUMO_AUTH_PORT=3080
-      - "LUMO_AUTH_PUBLIC_URL=http://127.0.0.1:${LUMO_CONSOLE_PORT:-4173}"
+      - "LUMO_AUTH_PUBLIC_URL=${LUMO_AUTH_PUBLIC_URL:-http://127.0.0.1:${LUMO_CONSOLE_PORT:-4173}}"
+      - "LUMO_AUTH_SECURE_COOKIE=${LUMO_AUTH_SECURE_COOKIE:-false}"
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       - "LUMO_IDENTITY_ASSERTION_SECRET=${LUMO_IDENTITY_ASSERTION_SECRET:-}"
       - LUMO_WEB_PORT=3080
       - LUMO_NODE_ID=lumo-web
       - LUMO_ROLE=agent
-      - LUMO_REALM=dev
+      - "LUMO_REALM=${LUMO_REALM:-dev}"
       - "LUMO_USER_ID=${LUMO_USER_ID:-dev-user}"
       - "LUMO_USER_ROLE=${LUMO_USER_ROLE:-operator}"
       - "LUMO_PROJECT_ID=${LUMO_PROJECT_ID:-dev-project}"
@@ -486,7 +487,21 @@ services:
   connector-gateway:
     build: { context: ../control-plane, dockerfile: connector-gateway/Dockerfile }
     image: lumo/connector-gateway:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_REDIS_ADDR=redis:6379", "LUMO_LISTEN=:8082", "LUMO_OPA_ADDR=http://opa:8181", "LUMO_VAULT_ADDR=http://vault:8200", "LUMO_VAULT_TOKEN=${LUMO_VAULT_TOKEN:-dev-root-token}", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment:
+      - "LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
+      - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
+      - LUMO_REDIS_ADDR=redis:6379
+      - LUMO_LISTEN=:8082
+      - LUMO_OPA_ADDR=http://opa:8181
+      - LUMO_VAULT_ADDR=http://vault:8200
+      - "LUMO_VAULT_TOKEN=${LUMO_VAULT_TOKEN:-dev-root-token}"
+      - "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
+      - "LUMO_ADMIN_ROLES=${LUMO_CONNECTOR_ADMIN_ROLES:-admin,realm_admin,platform_admin}"
+      - "LUMO_CONNECTOR_OAUTH_ENABLED=${LUMO_CONNECTOR_OAUTH_ENABLED:-false}"
+      - "LUMO_CONNECTOR_OAUTH_CALLBACK_URL=${LUMO_CONNECTOR_OAUTH_CALLBACK_URL:-}"
+      - "LUMO_CONNECTOR_OAUTH_STATE_KEY=${LUMO_CONNECTOR_OAUTH_STATE_KEY:-}"
+      - "LUMO_CONNECTOR_OAUTH_VAULT_MOUNT=${LUMO_CONNECTOR_OAUTH_VAULT_MOUNT:-secret}"
+      - "LUMO_CONNECTOR_OAUTH_VAULT_PREFIX=${LUMO_CONNECTOR_OAUTH_VAULT_PREFIX:-lumo/connector-oauth}"
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
@@ -523,6 +538,8 @@ services:
       - LUMO_LISTEN=:8089
       - LUMO_DEPLOYMENT_MODE=cluster
       - LUMO_CLUSTER_STATUS=ready
+      # Enable the separate device TLS listener with compose.cluster.devices.yml.
+      - LUMO_DESKTOP_GATEWAY_ENABLED=false
       - "LUMO_AUTH_BOOTSTRAP_REALM=${LUMO_REALM:-dev}"
       - "LUMO_AUTH_BOOTSTRAP_USER_ID=${LUMO_AUTH_BOOTSTRAP_USER_ID:-admin}"
       - "LUMO_AUTH_BOOTSTRAP_USERNAME=${LUMO_AUTH_BOOTSTRAP_USERNAME:-admin}"
@@ -537,6 +554,15 @@ services:
       # Optional: base64-encoded 32-byte AES-GCM key. MFA stays unavailable
       # until an operator supplies this through the deployment secret store.
       - "LUMO_AUTH_MFA_KEY=${LUMO_AUTH_MFA_KEY:-}"
+      - "LUMO_AUTH_OIDC_ISSUER=${LUMO_AUTH_OIDC_ISSUER:-}"
+      - "LUMO_AUTH_OIDC_CLIENT_ID=${LUMO_AUTH_OIDC_CLIENT_ID:-}"
+      - "LUMO_AUTH_OIDC_CLIENT_SECRET=${LUMO_AUTH_OIDC_CLIENT_SECRET:-}"
+      - "LUMO_AUTH_OIDC_REDIRECT_URL=${LUMO_AUTH_OIDC_REDIRECT_URL:-}"
+      - "LUMO_AUTH_OIDC_REALM=${LUMO_AUTH_OIDC_REALM:-}"
+      - "LUMO_AUTH_OIDC_DEPARTMENT_CLAIM=${LUMO_AUTH_OIDC_DEPARTMENT_CLAIM:-}"
+      - "LUMO_AUTH_OIDC_DEFAULT_DEPARTMENT=${LUMO_AUTH_OIDC_DEFAULT_DEPARTMENT:-}"
+      - "LUMO_AUTH_OIDC_ALLOW_SIGNUP=${LUMO_AUTH_OIDC_ALLOW_SIGNUP:-false}"
+      - "LUMO_AUTH_OIDC_ALLOW_LOOPBACK_HTTP=${LUMO_AUTH_OIDC_ALLOW_LOOPBACK_HTTP:-false}"
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["18089:8089"]

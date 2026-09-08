@@ -10,6 +10,7 @@ require (
 replace github.com/lumo-harness/platform/observability => ../observability
 
 require (
+	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/minio/minio-go/v7 v7.3.0
 )

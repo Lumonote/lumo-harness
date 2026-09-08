@@ -3,6 +3,8 @@ kind: ConfigMap
 metadata:
   name: {{ include "lumo-platform.name" . }}-config
 data:
+  LUMO_DEPLOYMENT_MODE: cluster
+  LUMO_CLUSTER_STATUS: ready
   LUMO_PG_DSN: {{ .Values.postgres.dsn | quote }}
   REGISTRY_PG_DSN: {{ .Values.postgres.dsn | quote }}
   LUMO_REDIS_ADDR: {{ .Values.redis.address | quote }}

@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	authcrypto "github.com/lumo-harness/platform/governance/internal/auth"
+	"github.com/lumo-harness/platform/governance/internal/device"
 	"github.com/lumo-harness/platform/governance/internal/domain"
 	"github.com/lumo-harness/platform/governance/internal/server"
 	"github.com/lumo-harness/platform/governance/internal/store"
@@ -90,6 +92,30 @@ func main() {
 		os.Exit(2)
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	oidcSignup, err := envBool("LUMO_AUTH_OIDC_ALLOW_SIGNUP", false)
+	if err != nil {
+		log.Error("invalid OIDC configuration", "err", err)
+		os.Exit(2)
+	}
+	oidcLoopback, err := envBool("LUMO_AUTH_OIDC_ALLOW_LOOPBACK_HTTP", false)
+	if err != nil {
+		log.Error("invalid OIDC configuration", "err", err)
+		os.Exit(2)
+	}
+	oidcConfig := authcrypto.OIDCConfig{
+		Issuer: os.Getenv("LUMO_AUTH_OIDC_ISSUER"), ClientID: os.Getenv("LUMO_AUTH_OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("LUMO_AUTH_OIDC_CLIENT_SECRET"), RedirectURL: os.Getenv("LUMO_AUTH_OIDC_REDIRECT_URL"),
+		Realm: os.Getenv("LUMO_AUTH_OIDC_REALM"), DepartmentClaim: os.Getenv("LUMO_AUTH_OIDC_DEPARTMENT_CLAIM"),
+		DefaultDepartment: os.Getenv("LUMO_AUTH_OIDC_DEFAULT_DEPARTMENT"), AllowSignup: oidcSignup, AllowLoopbackHTTP: oidcLoopback,
+	}
+	if err := oidcConfig.Validate(); err != nil {
+		log.Error("invalid OIDC configuration", "err", err)
+		os.Exit(2)
+	}
+	if oidcConfig.Enabled() && mode != domain.ModeCluster {
+		log.Error("OIDC requires cluster deployment mode")
+		os.Exit(2)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if _, err := observability.ConfigureOTelFromEnv(ctx, "lumo-governance"); err != nil {
@@ -131,6 +157,27 @@ func main() {
 		log.Info("bootstrap user ready", "realm", envOr("LUMO_AUTH_BOOTSTRAP_REALM", "dev"), "user_id", bootstrapUserID)
 	}
 
+	var deviceGateway *device.Gateway
+	if os.Getenv("LUMO_DESKTOP_GATEWAY_ENABLED") == "true" {
+		if domain.RequireCluster(mode, *clusterStatus) != nil {
+			log.Error("desktop gateway requires Cluster ready")
+			os.Exit(2)
+		}
+		deviceGateway, err = device.New(device.Options{Store: st, Listen: envOr("LUMO_DESKTOP_GATEWAY_LISTEN", ":8090"), PublicURL: os.Getenv("LUMO_DESKTOP_GATEWAY_PUBLIC_URL"),
+			RegistryURL: os.Getenv("LUMO_REGISTRY_URL"), ControlToken: os.Getenv("LUMO_CONTROL_PLANE_TOKEN"), ServerCertFile: os.Getenv("LUMO_DESKTOP_GATEWAY_CERT_FILE"), ServerKeyFile: os.Getenv("LUMO_DESKTOP_GATEWAY_KEY_FILE"),
+			IssuerCertFile: os.Getenv("LUMO_DESKTOP_ISSUER_CERT_FILE"), IssuerKeyFile: os.Getenv("LUMO_DESKTOP_ISSUER_KEY_FILE"), AllowedScopes: strings.Split(envOr("LUMO_DESKTOP_ALLOWED_SCOPES", "skills:use,kb:query"), ","),
+			ProcessRuntime: os.Getenv("LUMO_DESKTOP_PROCESS_RUNTIME") == "true", PolicyURL: os.Getenv("LUMO_DESKTOP_POLICY_URL")})
+		if err != nil {
+			log.Error("invalid desktop gateway configuration", "err", err)
+			os.Exit(2)
+		}
+		go func() {
+			if err := deviceGateway.Serve(ctx); err != nil {
+				log.Error("desktop gateway stopped", "err", err)
+				stop()
+			}
+		}()
+	}
 	srv := server.New(st, server.Config{
 		DeploymentMode:    mode,
 		ClusterStatus:     *clusterStatus,
@@ -143,12 +190,23 @@ func main() {
 		AuthCaptchaTTL:    envSeconds("LUMO_AUTH_CAPTCHA_TTL_SECONDS", 120),
 		AuthMFAKey:        os.Getenv("LUMO_AUTH_MFA_KEY"),
 		WebAuthn:          webauthnConfig,
+		OIDC:              oidcConfig,
+		DeviceGateway:     deviceGateway,
 	}, log)
 	mux := http.NewServeMux()
 	srv.Register(mux)
 	log.Info("governance started", "addr", *listen, "deployment_mode", mode, "cluster_status", *clusterStatus)
 	httpSrv := &http.Server{Addr: *listen, Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)), ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutdown)
+	}()
 	if err := observability.Serve(httpSrv); err != nil {
+		if errors.Is(err, http.ErrServerClosed) {
+			return
+		}
 		log.Error("governance stopped", "err", err)
 		os.Exit(1)
 	}

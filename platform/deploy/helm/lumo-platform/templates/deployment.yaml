@@ -1,3 +1,37 @@
+{{- if and .Values.deviceGateway.istioIngress.enabled (not .Values.deviceGateway.enabled) }}
+{{- fail "deviceGateway.enabled must be true when deviceGateway.istioIngress.enabled=true" }}
+{{- end }}
+{{- if .Values.deviceGateway.enabled }}
+{{- if not .Values.services.governance.enabled }}
+{{- fail "services.governance.enabled must be true when deviceGateway.enabled=true" }}
+{{- end }}
+{{- $publicUrl := required "deviceGateway.publicUrl is required" .Values.deviceGateway.publicUrl }}
+{{- $public := urlParse $publicUrl }}
+{{- if or (ne $public.scheme "https") (empty $public.host) (not (empty $public.userinfo)) (not (empty $public.path)) (not (empty $public.query)) (not (empty $public.fragment)) }}
+{{- fail "deviceGateway.publicUrl must be an exact HTTPS origin without credentials, path, query, or fragment" }}
+{{- end }}
+{{- if or (lt (int .Values.deviceGateway.port) 1) (gt (int .Values.deviceGateway.port) 65535) (eq (int .Values.deviceGateway.port) (int .Values.services.governance.port)) }}
+{{- fail "deviceGateway.port must be a valid port distinct from services.governance.port" }}
+{{- end }}
+{{- if or (lt (int .Values.deviceGateway.service.port) 1) (gt (int .Values.deviceGateway.service.port) 65535) }}
+{{- fail "deviceGateway.service.port must be a valid TCP port" }}
+{{- end }}
+{{- if not (has .Values.deviceGateway.service.type (list "ClusterIP" "NodePort" "LoadBalancer")) }}
+{{- fail "deviceGateway.service.type must be ClusterIP, NodePort, or LoadBalancer" }}
+{{- end }}
+{{- if and .Values.deviceGateway.istioIngress.enabled (ne .Values.deviceGateway.service.type "ClusterIP") }}
+{{- fail "deviceGateway.service.type must remain ClusterIP when deviceGateway.istioIngress.enabled=true" }}
+{{- end }}
+{{- if and (not .Values.services.registry.enabled) (empty .Values.deviceGateway.registryUrl) }}
+{{- fail "deviceGateway.registryUrl is required when services.registry.enabled=false" }}
+{{- end }}
+{{- if and .Values.deviceGateway.processRuntime (empty .Values.deviceGateway.policyUrl) }}
+{{- fail "deviceGateway.policyUrl is required when deviceGateway.processRuntime=true" }}
+{{- end }}
+{{- if and .Values.deviceGateway.istioIngress.enabled (not .Values.serviceMesh.istio.enabled) }}
+{{- fail "serviceMesh.istio.enabled must be true when deviceGateway.istioIngress.enabled=true" }}
+{{- end }}
+{{- end }}
 {{- range $name, $cfg := .Values.services }}
 {{- if $cfg.enabled }}
 apiVersion: apps/v1
@@ -23,19 +57,80 @@ spec:
       {{- if $.Values.serviceMesh.istio.enabled }}
       annotations:
         sidecar.istio.io/inject: "true"
+        {{- if and (eq $name "governance") $.Values.deviceGateway.enabled }}
+        traffic.sidecar.istio.io/excludeInboundPorts: {{ $.Values.deviceGateway.port | quote }}
+        {{- end }}
       {{- end }}
     spec:
+      {{- if and (eq $name "governance") $.Values.deviceGateway.enabled }}
+      securityContext:
+        fsGroup: 10001
+      {{- end }}
       containers:
         - name: {{ $name }}
           image: {{ $.Values.image.repository }}/{{ $name }}:{{ $.Values.image.tag }}
           imagePullPolicy: {{ $.Values.image.pullPolicy }}
-          ports: [{ name: http, containerPort: {{ $cfg.port }} }]
-          envFrom: [{ configMapRef: { name: {{ include "lumo-platform.name" $ }}-config } }]
+          ports:
+            - name: http
+              containerPort: {{ $cfg.port }}
+            {{- if and (eq $name "governance") $.Values.deviceGateway.enabled }}
+            - name: device-tls
+              containerPort: {{ $.Values.deviceGateway.port }}
+            {{- end }}
+          envFrom:
+            - configMapRef: { name: {{ include "lumo-platform.name" $ }}-config }
+            {{- if and (eq $name "governance") $.Values.governance.authSecret }}
+            - secretRef: { name: {{ $.Values.governance.authSecret | quote }}, optional: false }
+            {{- end }}
           env:
+            - name: LUMO_LISTEN
+              value: {{ printf ":%v" $cfg.port | quote }}
             - name: LUMO_CONTROL_PLANE_TOKEN
               valueFrom: { secretKeyRef: { name: {{ $.Values.controlPlaneAuth.tokenSecret }}, key: {{ $.Values.controlPlaneAuth.tokenKey }}, optional: false } }
             - name: LUMO_VAULT_TOKEN
               valueFrom: { secretKeyRef: { name: {{ $.Values.vault.tokenSecret }}, key: token, optional: true } }
+            {{- if eq $name "governance" }}
+            - name: LUMO_DESKTOP_GATEWAY_ENABLED
+              value: {{ $.Values.deviceGateway.enabled | quote }}
+            {{- if $.Values.deviceGateway.enabled }}
+            - name: LUMO_DESKTOP_GATEWAY_LISTEN
+              value: {{ printf ":%v" $.Values.deviceGateway.port | quote }}
+            - name: LUMO_DESKTOP_GATEWAY_PUBLIC_URL
+              value: {{ $.Values.deviceGateway.publicUrl | quote }}
+            - name: LUMO_REGISTRY_URL
+              value: {{ default (printf "http://%s-registry:%v" (include "lumo-platform.name" $) $.Values.services.registry.port) $.Values.deviceGateway.registryUrl | quote }}
+            - name: LUMO_DESKTOP_GATEWAY_CERT_FILE
+              value: /etc/lumo/device-server/server.crt
+            - name: LUMO_DESKTOP_GATEWAY_KEY_FILE
+              value: /etc/lumo/device-server/server.key
+            - name: LUMO_DESKTOP_ISSUER_CERT_FILE
+              value: /etc/lumo/device-issuer/issuer.crt
+            - name: LUMO_DESKTOP_ISSUER_KEY_FILE
+              value: /etc/lumo/device-issuer/issuer.key
+            - name: LUMO_DESKTOP_ALLOWED_SCOPES
+              value: {{ join "," $.Values.deviceGateway.allowedScopes | quote }}
+            - name: LUMO_DESKTOP_PROCESS_RUNTIME
+              value: {{ $.Values.deviceGateway.processRuntime | quote }}
+            - name: LUMO_DESKTOP_POLICY_URL
+              value: {{ $.Values.deviceGateway.policyUrl | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if eq $name "connector-gateway" }}
+            - name: LUMO_ADMIN_ROLES
+              value: {{ $.Values.connectorOAuth.adminRoles | quote }}
+            {{- if $.Values.connectorOAuth.enabled }}
+            - name: LUMO_CONNECTOR_OAUTH_ENABLED
+              value: "true"
+            - name: LUMO_CONNECTOR_OAUTH_CALLBACK_URL
+              value: {{ required "connectorOAuth.callbackUrl is required" $.Values.connectorOAuth.callbackUrl | quote }}
+            - name: LUMO_CONNECTOR_OAUTH_STATE_KEY
+              valueFrom: { secretKeyRef: { name: {{ required "connectorOAuth.stateKeySecret is required" $.Values.connectorOAuth.stateKeySecret | quote }}, key: {{ $.Values.connectorOAuth.stateKeyKey | quote }}, optional: false } }
+            - name: LUMO_CONNECTOR_OAUTH_VAULT_MOUNT
+              value: {{ $.Values.connectorOAuth.vaultMount | quote }}
+            - name: LUMO_CONNECTOR_OAUTH_VAULT_PREFIX
+              value: {{ $.Values.connectorOAuth.vaultPrefix | quote }}
+            {{- end }}
+            {{- end }}
             {{- if eq $name "collaborator" }}
             - name: LUMO_INSTANCE
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
@@ -52,6 +147,15 @@ spec:
               mountPath: /etc/lumo/trust
               readOnly: true
           {{- end }}
+          {{- if and (eq $name "governance") $.Values.deviceGateway.enabled }}
+          volumeMounts:
+            - name: device-server
+              mountPath: /etc/lumo/device-server
+              readOnly: true
+            - name: device-issuer
+              mountPath: /etc/lumo/device-issuer
+              readOnly: true
+          {{- end }}
           readinessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 5, periodSeconds: 10 }
           livenessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 15, periodSeconds: 20 }
           resources:
@@ -61,6 +165,29 @@ spec:
       volumes:
         - name: registry-trust
           secret: { secretName: {{ $.Values.registry.trustSecret }}, optional: false }
+      {{- end }}
+      {{- if and (eq $name "governance") $.Values.deviceGateway.enabled }}
+      volumes:
+        - name: device-server
+          secret:
+            secretName: {{ required "deviceGateway.tlsSecret is required" $.Values.deviceGateway.tlsSecret | quote }}
+            optional: false
+            defaultMode: 0440
+            items:
+              - key: {{ required "deviceGateway.tlsCertKey is required" $.Values.deviceGateway.tlsCertKey | quote }}
+                path: server.crt
+              - key: {{ required "deviceGateway.tlsKeyKey is required" $.Values.deviceGateway.tlsKeyKey | quote }}
+                path: server.key
+        - name: device-issuer
+          secret:
+            secretName: {{ required "deviceGateway.issuerSecret is required" $.Values.deviceGateway.issuerSecret | quote }}
+            optional: false
+            defaultMode: 0440
+            items:
+              - key: {{ required "deviceGateway.issuerCertKey is required" $.Values.deviceGateway.issuerCertKey | quote }}
+                path: issuer.crt
+              - key: {{ required "deviceGateway.issuerKeyKey is required" $.Values.deviceGateway.issuerKeyKey | quote }}
+                path: issuer.key
       {{- end }}
 ---
 {{- end }}

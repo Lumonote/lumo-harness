@@ -20,6 +20,7 @@ import {
   type ThemeRegistryState,
 } from './themes.ts'
 import './lumo.css'
+import { ClusterNodesPanel, SkillAccessPanel, ProjectMembersPanel, ConnectorManifestPanel, AgentPresetEditor, FlowManagementPanel, type AgentPreset, type ProjectMember } from './cluster-panels.tsx'
 
 // A desktop WebView can evaluate more than one copy of this bundle while the
 // native shell is recovering from a loader replay. Keep the root-scoped mount
@@ -89,16 +90,13 @@ interface DelegationCreated { task?: DelegatedTask; run?: { id: string; state: s
 interface TaskRun { id: string; attempt: number; worker_id: string; session_ref?: string; scheduler_task_id?: string; assigned_node_id?: string; state: string; failure_kind?: string; last_error?: string; started_at?: string; ended_at?: string; created_at: string }
 interface TaskAuditEvent { id: string; event: string; actor: string; detail: Record<string, unknown>; created_at: string }
 interface PermissionDecision { allowed: boolean; action: string; reason: string; matched_policies: string[] }
-interface AgentPreset {
-  id: string; project_id?: string; name: string; description?: string; owner_user_id: string; status: 'active' | 'disabled'
-  version: string; revision: number; provider: string; model_ref: string; system_prompt_ref?: string; connector_ids: string[]; knowledge_space_ids: string[]
-  max_concurrency: number; trust_level?: string; residency?: string; max_budget_cents: number; timeout_seconds: number; max_delegation_depth: number
-}
 interface WorkerProfile { worker_id: string; worker_kind: 'human' | 'agent'; display_name: string; status: string; runtime_status?: string; runtime_updated_at?: string; active_tasks: number; load: number; max_concurrency: number; eligible: boolean }
 interface GovernanceRole { id: string; name: string; description?: string; status: string }
 interface GovernanceDepartment { id: string; name: string; parent_dept_id?: string; manager_user_id?: string; status: string }
 type AssignmentMode = 'auto' | 'manual'
 interface DirectoryUser { id: string; display_name: string; primary_dept_id?: string; status?: string }
+interface UserRole { role_id: string; name: string; status: string; expires_at?: string; granted_by: string }
+interface UserAccess { username: string; login_enabled: boolean; local_login_enabled?: boolean; roles: UserRole[]; oidc_available?: boolean; oidc_issuer?: string; oidc?: { issuer: string; subject: string; enabled: boolean } }
 interface Plugin { id: string; label: string; description: string; surface: Surface; kind: 'runtime' | 'governance' }
 interface RegistryArtifact {
   name: string; version: string; kind: 'Component' | 'Skill' | 'Agent' | 'Connector' | 'Flow'; publisher: string
@@ -168,7 +166,7 @@ interface SkillHubSkill { id: string; name: string; tag: string; description: st
 interface SkillHubPack { id: string; name: string; role: string; category: string; description: string; skills: number; source: string; command?: string; icon?: string }
 interface SkillHubPlugin { id: string; name: string; category: string; description: string; stars: number; forks: number; source: string; installable: boolean; repo: string; icon?: string; homepage?: string }
 interface SkillHubInstalls { skills: string[]; packs: string[]; plugins: string[]; commands?: Record<string, string[]> }
-interface SkillHubCatalog { source: 'skillhub' | 'cache' | 'seed'; generatedAt: string; counts: { skills: number; packs: number; plugins: number }; categories?: { skills: string[]; packs: string[]; plugins: string[] }; skills: SkillHubSkill[]; packs: SkillHubPack[]; plugins: SkillHubPlugin[]; installed: SkillHubInstalls; notice?: string }
+interface SkillHubCatalog { source: 'skillhub' | 'cache' | 'seed'; generatedAt: string; counts: { skills: number; packs: number; plugins: number }; categories?: { skills: string[]; packs: string[]; plugins: string[] }; skills: SkillHubSkill[]; packs: SkillHubPack[]; plugins: SkillHubPlugin[]; installed: SkillHubInstalls; notice?: string; canInstall?: boolean }
 interface SkillHubSearchResult { kind: SkillHubKind; q: string; category: string; source: 'skillhub' | 'cache' | 'seed'; total: number; page: number; pageSize: number; skills: SkillHubSkill[]; packs: SkillHubPack[]; plugins: SkillHubPlugin[] }
 type SkillHubTab = '技能' | '专家包'
 type SkillHubKind = 'skill' | 'pack' | 'plugin'
@@ -181,7 +179,8 @@ interface StudioScope { projectId: string; spaceId: string }
 interface GovernanceSnapshot { features: UpstreamResult; departments: UpstreamResult; roles: UpstreamResult; catalog: UpstreamResult; effective: UpstreamResult; permissions: UpstreamResult }
 type AuthAccount = {
   mode: 'session'; provider: 'lumo-governance'; username: string; displayName: string; userId: string
-  realm: string; roles: string[]; department: string; clientIp: string; captchaMode: 'always'
+  realm: string; roles: string[]; department: string; clientIp: string; captchaMode: 'always' | 'identity-provider'
+  localAuthEnabled?: boolean; authMethod?: 'local' | 'oidc'
 }
 type AuthSession = { id: string; client_ip: string; created_at: string; last_seen_at: string; expires_at: string; current: boolean }
 type AuthSecurityEvent = { id: number; event: string; client_ip?: string; detail: Record<string, unknown>; created_at: string }
@@ -301,6 +300,9 @@ function localizedSecurityEvent(event: string): string {
   return ({
     login_succeeded: '登录成功', login_failed: '登录失败', login_locked: '登录锁定', logout: '主动登出',
     session_revoked: '会话已撤销', sessions_revoked: '其他会话已撤销', password_changed: '密码已更新',
+    user_created: '账户已创建', user_updated: '账户资料已更新', credentials_reset: '管理员重置凭证',
+    oidc_login: '企业账号登录', oidc_linked: '企业身份已关联', oidc_unlinked: '企业身份已解除',
+    role_assigned: '角色已分配', role_revoked: '角色已撤销',
   } as Record<string, string>)[event] ?? event
 }
 
@@ -1194,6 +1196,7 @@ function SkillsSurface() {
   }
   const createVersion = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    const form = event.currentTarget
     if (selectedGoverned === null) return
     const fields = new FormData(event.currentTarget)
     const version = String(fields.get('version') ?? '').trim()
@@ -1202,7 +1205,7 @@ function SkillsSurface() {
     setPublishingVersion(true)
     try {
       const next = await api<GovernedSkillVersion>(`/lumo/api/governance/skills/${encodeURIComponent(selectedGoverned.id)}/versions`, { method: 'POST', body: JSON.stringify({ version, content }) })
-      setSelectedVersion(next); setSelectedGoverned({ ...selectedGoverned, current_version: next.version }); event.currentTarget.reset()
+      setSelectedVersion(next); setSelectedGoverned({ ...selectedGoverned, current_version: next.version }); form.reset()
       setNotice(`已保存不可覆盖的治理版本 ${next.version}；它尚未自动发布到运行时。`); await load()
     } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
     finally { setPublishingVersion(false) }
@@ -1235,6 +1238,7 @@ function SkillsSurface() {
       {governed.length ? <div className="lumo-table-list">{governed.map(skill => <div key={skill.id} className={selectedGoverned?.id === skill.id ? 'selected' : ''}><span><b>{localizedSkillName(skill.name)}</b><small>{skill.description || '未填写用途说明'} · 创建者 {skill.created_by}</small></span><i>{localizedSkillKind(skill.kind)}</i><em>{localizedVisibility(skill.visibility)} · 草稿 {skill.current_version}{skill.published_version ? ` · 已发布 ${skill.published_version}` : ' · 未发布'}</em><button type="button" className="lumo-button lumo-secondary lumo-version-open" onClick={() => void viewGoverned(skill)}>查看内容</button></div>)}</div> : <Empty>{governance?.catalog.error || '当前部署模式没有治理技能目录，运行时技能目录仍可独立使用。'}</Empty>}
     </Section>
     {selectedGoverned ? <Section title={`治理版本 · ${localizedSkillName(selectedGoverned.name)}`} meta={versionLoading ? '正在读取不可变来源内容' : `当前草稿 ${selectedGoverned.current_version}${selectedGoverned.published_version ? ` · 已发布治理源 ${selectedGoverned.published_version}` : ' · 尚未发布治理源'}`}><div className="lumo-governed-version-layout"><div className="lumo-governed-source"><p>{selectedVersion ? `来源摘要 ${selectedVersion.digest} · 创建者 ${selectedVersion.created_by}` : '版本内容会显示在这里。'}</p><pre>{selectedVersion?.content ?? (versionLoading ? '正在读取…' : '未能读取该版本内容。')}</pre><small>{selectedGoverned.published_version === selectedVersion?.version ? `此版本已选为治理运行时源${selectedGoverned.published_digest ? ` · ${selectedGoverned.published_digest}` : ''}；还需由受信任发布器签名为 Registry Bundle，节点安装事实以 Provisioner 回报为准。` : '这是治理草稿内容，尚未成为可构建的运行时源。'}</small></div><form className="lumo-stacked-form lumo-version-form" onSubmit={createVersion}><b>保存新草稿版本</b><label><span>新版本号</span><input name="version" maxLength={64} placeholder="例如：1.1.0" /></label><label><span>新版本内容</span><textarea name="content" aria-label="新技能版本内容" maxLength={131072} rows={7} placeholder={'---\nname: campaign-review\ndescription: 审核营销活动内容\n---\n\n版本一经保存不能覆盖。'} /></label><div className="lumo-form-actions"><BusyButton type="submit" busy={publishingVersion} className="lumo-primary">保存新版本</BusyButton><BusyButton type="button" busy={promotingVersion} disabled={selectedVersion === null || selectedVersion.version === selectedGoverned.published_version} className="lumo-secondary" onClick={() => void publishVersion()}>发布为运行时源</BusyButton></div><small>仅创建者或 realm_admin 可以读取和写入来源；发布运行时源仅限 realm_admin。签名制品构建与节点实际安装分别由受保护发布器和 Provisioner 完成。</small></form></div></Section> : null}
+    {selectedGoverned ? <SkillAccessPanel key={selectedGoverned.id} request={api} skillID={selectedGoverned.id} version={selectedVersion?.version ?? selectedGoverned.current_version} /> : null}
   </div>
 }
 
@@ -1340,7 +1344,7 @@ function SkillHubSurface() {
   }, [tab, committedQuery, filter, allLabel])
 
   const install = async (kind: SkillHubKind, id: string, name: string) => {
-    if (installing !== '') return
+    if (installing !== '' || catalog?.canInstall === false) return
     setInstalling(kind + ':' + id); setNotice('')
     try {
       const next = await api<SkillHubCatalog>('/lumo/api/skillhub/install', { method: 'POST', body: JSON.stringify({ kind, id }) })
@@ -1419,6 +1423,7 @@ function SkillHubSurface() {
   const actions = (kind: SkillHubKind, id: string, name: string, installed: boolean, label = '安装') => {
     const busy = installing === (kind + ':' + id)
     if (installed) return <><span className="lumo-skillhub-installed">已安装</span>{catalog?.installed.commands?.[`${kind}:${id}`]?.length ? <button type="button" className="lumo-button lumo-secondary" onClick={() => mention(kind, id)} aria-label={'在对话中使用 ' + name}>用于对话</button> : <span className="lumo-skillhub-installed">自动调用</span>}</>
+    if (catalog?.canInstall === false) return <span className="lumo-skillhub-installed">仅管理员可安装</span>
     if (busy) return <span className="lumo-skillhub-installing"><BusyButton className="lumo-primary" busy>{label}</BusyButton><em>正在安装…</em><span className="lumo-skillhub-progress" role="progressbar" aria-label={`正在安装 ${name}`} aria-valuetext="安装中"><i /></span></span>
     return <BusyButton className="lumo-primary" disabled={installing !== ''} onClick={() => void install(kind, id, name)}>{label}</BusyButton>
   }
@@ -1684,6 +1689,7 @@ function ConnectorsSurface() {
     <Section title="连接器目录" meta={`${connectors.length} 个可见能力`} actions={<label className="lumo-filter"><span>搜索</span><input value={filter} onChange={event => setFilter(event.target.value)} placeholder="连接器名称、协议或 ID" /></label>}>
       {connectors.length ? <div className="lumo-connector-layout"><div className="lumo-connector-grid">{connectors.map((connector, index) => <SpotlightCard className={`lumo-connector-card ${selected?.id === connector.id ? 'selected' : ''}`} index={index} key={connector.id} onClick={() => setSelectedId(connector.id ?? '')}><header><span className="lumo-connector-mark">{(connector.name ?? connector.id ?? 'C').slice(0, 1).toUpperCase()}</span><div><b>{connector.name ?? connector.id}</b><small>{connector.protocol ?? '未知协议'} · {connector.operations?.length ?? 0} 项操作</small></div><i className={`lumo-status-dot ${connector.enabled === false ? 'disabled' : ''}`} /></header><div className="lumo-operation-list">{connector.operations?.slice(0, 5).map(operation => <span key={operation.name}>{operation.method || '调用'} · {operation.name}</span>)}</div><footer><span>{connector.enabled === false ? '已停用 · 可恢复' : connector.version ? `能力清单 v${connector.version}` : '能力清单已启用'}</span><span>查看能力 ↗</span></footer>{connector.enabled === false ? <BusyButton className="lumo-primary lumo-small" onClick={event => { event.stopPropagation(); void enable(connector) }}>恢复连接器</BusyButton> : confirm === connector.id ? <div className="lumo-inline-confirm" onClick={event => event.stopPropagation()}><p>停用后运行中的工作流将无法调用它。</p><span><BusyButton onClick={() => setConfirm(null)}>取消</BusyButton><BusyButton className="lumo-danger" onClick={() => void remove(connector)}>确认停用</BusyButton></span></div> : <BusyButton className="lumo-danger lumo-small" onClick={event => { event.stopPropagation(); setConfirm(connector.id ?? null) }}>停用连接器</BusyButton>}</SpotlightCard>)}</div><aside className="lumo-inspector lumo-connector-inspector">{selected ? <><span className="lumo-inspector-label">连接器检查</span><h3>连接器详情 · {selected.name ?? selected.id}</h3><p>所有外部调用都经过网关策略、凭证闸门、限流、熔断和审计。</p><div className="lumo-detail-stack"><div><span>连接器 ID</span><b>{selected.id}</b></div><div><span>协议</span><b>{selected.protocol ?? '未声明'}</b></div><div><span>版本</span><b>{selected.version ?? '未声明'}</b></div><div><span>可用操作</span><b>{selected.operations?.length ?? 0}</b></div></div><div className="lumo-operation-detail"><span>操作面</span>{selected.operations?.length ? selected.operations.map(operation => <div key={operation.name}><b>{operation.name}</b><small>{operation.method || '调用'} · {operation.write ? '写入需审批' : '只读'}</small></div>) : <Empty>该能力清单没有声明操作。</Empty>}</div>{selected.enabled === false ? <Empty>该连接器已停用，恢复后才能再次调用。</Empty> : <form className="lumo-invoke-form" onSubmit={invoke}><label><span>操作</span><select value={invokeOperation} onChange={event => setInvokeOperation(event.target.value)}><option value="" disabled>选择操作</option>{operations.map(operation => <option key={operation.name} value={operation.name}>{operation.name} · {operation.method || '调用'}</option>)}</select></label><label><span>路径参数 JSON</span><textarea rows={2} value={pathParams} onChange={event => setPathParams(event.target.value)} placeholder='{"id":"order-42"}' /></label><label><span>查询参数 JSON</span><textarea rows={2} value={queryParams} onChange={event => setQueryParams(event.target.value)} placeholder='{"limit":"20"}' /></label><label><span>请求体 JSON</span><textarea rows={3} value={invokeBody} onChange={event => setInvokeBody(event.target.value)} placeholder='{"dryRun":true}' /></label><BusyButton type="submit" busy={invokeBusy} className="lumo-primary">受控调用</BusyButton></form>}{invokeResult ? <div className="lumo-invoke-result"><div><b>{invokeResult.status ?? '未返回'}</b><span>{invokeResult.contentType ?? '响应'} · {invokeResult.durationMs ?? 0} ms</span></div><small>{invokeResult.redacted ? '响应已按策略脱敏' : '响应未脱敏'}</small><pre>{typeof invokeResult.body === 'string' ? invokeResult.body : JSON.stringify(invokeResult.body ?? {}, null, 2)}</pre></div> : null}</> : <Empty>当前没有可见连接器。</Empty>}</aside></div> : <Empty>{loading ? '正在读取连接器能力清单' : '连接器清单为空；登记成功的能力清单会出现在这里。'}</Empty>}
     </Section>
+    {data.deployment.clusterReady ? <ConnectorManifestPanel request={api} refresh={load} /> : null}
     <Section title="高敏感写入审批" meta="审批绑定连接器版本、操作和请求参数；每次批准只能执行一次" actions={<BusyButton busy={loading} onClick={() => void load()}>刷新</BusyButton>}>
       {approvals.length ? <div className="lumo-market-note-grid">{approvals.map(approval => <div key={approval.id}><span>{approval.status === 'pending' ? '等待管理员处理' : approval.status === 'approved' ? '已批准 · 等待一次执行' : approval.status === 'consumed' ? '已使用' : approval.status === 'expired' ? '已过期' : '已拒绝'}</span><b>{approval.connector_id} · {approval.operation}</b><small>申请人 {approval.requester_user_id} · v{approval.connector_version} · 到期 {approval.expires_at}{approval.approver_user_id ? ` · 处理人 ${approval.approver_user_id}` : ''}</small>{approval.status === 'pending' ? <span className="lumo-surface-actions"><BusyButton busy={approvalBusy === `approve:${approval.id}`} onClick={() => void decideApproval(approval, 'approve')}>批准</BusyButton><BusyButton className="lumo-danger" busy={approvalBusy === `reject:${approval.id}`} onClick={() => void decideApproval(approval, 'reject')}>拒绝</BusyButton></span> : null}{approval.status === 'approved' && selected?.id === approval.connector_id && invokeOperation === approval.operation ? <BusyButton className="lumo-primary" busy={invokeBusy} onClick={() => void invokeCurrent(approval.id)}>按已批准请求执行</BusyButton> : null}</div>)}</div> : <Empty>没有待展示的连接器审批。高敏感写操作会在网关策略命中后创建一次性审批。</Empty>}
     </Section>
@@ -1842,7 +1848,7 @@ function OperationsSurface() {
   }, [profileUserID])
   const run = async <T,>(key: string, success: string, operation: () => Promise<T>): Promise<T | undefined> => { setBusy(key); try { const result = await operation(); setNotice(success); await load(); return result } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)); return undefined } finally { setBusy('') } }
   const createProject = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = event.currentTarget; const name = String(new FormData(form).get('name') ?? '').trim(); if (!name) return; await run('project', `项目「${name}」已创建。`, () => api('/lumo/api/projects', { method: 'POST', body: JSON.stringify({ name }) })); form.reset() }
-  const createFlow = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = event.currentTarget; const fields = new FormData(form); const project = String(fields.get('project') ?? ''); const name = String(fields.get('name') ?? '').trim(); if (!project || !name) return; await run('flow', `流程「${name}」已创建为草稿。`, () => api(`/lumo/api/projects/${encodeURIComponent(project)}/flows`, { method: 'POST', body: JSON.stringify({ name, definition: { nodes: [{ id: 'start', operator: 'identity' }], edges: [] } }) })); form.reset() }
+  const createFlow = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = event.currentTarget; const fields = new FormData(form); const project = String(fields.get('project') ?? ''); const name = String(fields.get('name') ?? '').trim(); if (!project || !name) return; const created = await run('flow', `流程「${name}」已创建为草稿。`, () => api(`/lumo/api/projects/${encodeURIComponent(project)}/flows`, { method: 'POST', body: JSON.stringify({ name, definition: { nodes: [{ id: 'start', operator: 'identity' }], edges: [] } }) })); if (created !== undefined) form.reset() }
   const openProject = async (project: Row) => { if (!project.id) return; setBusy(project.id); try { setDashboard(await api(`/lumo/api/projects/${encodeURIComponent(project.id)}/dashboard`)) } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy('') } }
   const triggerFlow = async (flow: Row, action: 'submit' | 'review' | 'run' | 'deprecate' | 'rollback') => {
     const flowID = flow.id; if (!flowID) return
@@ -1964,6 +1970,9 @@ function OperationsSurface() {
   return <div className="lumo-surface">
     <SurfaceIntro surface="operations" trailing={<div className="lumo-sync-control"><span><i className="lumo-live-dot" /> {loading ? '同步中' : '实时连接'}</span><BusyButton className="lumo-secondary lumo-small" busy={loading} onClick={() => void load()}>刷新数据</BusyButton></div>} />
     <DeploymentBanner deployment={data.deployment} />
+    {data.deployment.clusterReady ? <ClusterNodesPanel request={api} /> : null}
+    {data.deployment.clusterReady ? <AgentPresetEditor request={api} presets={agentPresets} refresh={load} /> : null}
+    {data.deployment.clusterReady ? <FlowManagementPanel request={api} projects={data.projects} refresh={load} /> : null}
     {notice ? <Notice error={notice.includes('失败') || notice.includes('unavailable')} close={() => setNotice('')}>{notice}</Notice> : null}
     <div className="lumo-metric-grid"><Metric label="控制服务" value={`${online}/${Object.keys(data.services).length || 5}`} note={loading ? '同步中' : '实时健康'} tone="mint" /><Metric label="执行节点" value={String(data.cluster.nodes.length)} note={data.cluster.leader?.holder ?? '等待主节点'} /><Metric label="装配插件" value={String(data.plugins.length)} note="生效装配" /><Metric label="当前项目" value={String(data.projects.length)} note={data.generatedAt ? `同步 ${formatSync(data.generatedAt)}` : '尚未同步'} /></div>
     <Section title="服务与调度" meta={data.generatedAt ? `同步 ${formatSync(data.generatedAt)}` : '尚未同步'}><div className="lumo-service-grid">{Object.entries(data.services).map(([name, service], index) => <SpotlightCard className="lumo-service-card" index={index} key={name}><i className={service.ok ? 'online' : 'offline'} /><span><b>{localizedServiceName(name)}</b><small>{service.ok ? '就绪' : service.error || '不可用'}</small></span><em>{service.ok ? '在线' : '未连接'}</em></SpotlightCard>)}</div>{data.cluster.nodes.length ? <div className="lumo-node-strip">{data.cluster.nodes.map(node => <span key={node.node_id}><i />{node.node_id}<small>{node.capacity ?? 0} 个名额</small></span>)}</div> : <div className="lumo-inline-empty">调度目录暂时没有执行节点。</div>}</Section>
@@ -1976,11 +1985,11 @@ function OperationsSurface() {
     <Section title="平台能力" meta="根据当前装配状态自动分组"><div className="lumo-platform-groups">{grouped.map(group => <div className="lumo-platform-group" key={group.label}><header><b>{group.label}</b><span>{group.plugins.length} 个模块</span></header><div>{group.plugins.map(plugin => <button type="button" key={plugin.id} onClick={() => openSurface(plugin.surface)}><span>{plugin.label.slice(0, 1)}</span><b>{plugin.label}</b><small>{plugin.description}</small><i>{localizedPluginKind(plugin.kind)}</i></button>)}</div></div>)}{ungrouped.length ? <div className="lumo-platform-group"><header><b>其他已装配能力</b><span>{ungrouped.length} 个模块</span></header><div>{ungrouped.map(plugin => <button type="button" key={plugin.id} onClick={() => openSurface(plugin.surface)}><span>{plugin.label.slice(0, 1)}</span><b>{plugin.label}</b><small>{plugin.description}</small><i>{localizedPluginKind(plugin.kind)}</i></button>)}</div></div> : null}{!grouped.length && !ungrouped.length ? <Empty>当前没有额外的插件声明。</Empty> : null}</div><div className="lumo-governance-strip"><span><b>{roles.length}</b>角色策略</span><span><b>{departments.length}</b>组织节点</span><span className={governance?.features.ok ? 'ready' : ''}><b>{governance?.features.ok ? '已启用' : '未启用'}</b>治理特性</span></div></Section>
     <Section title="任务执行视图" meta="Task → 当前 Run 投影 · 非子 Agent 运行树"><OrchestrationTopology tasks={delegations} busy={busy} cancel={cancelTask} retry={retryTask} reassign={reassignTask} showRuns={showTaskRuns} /></Section>
     {runsTask ? <Section title={`执行尝试 · ${runsTask.title}`} meta={`${taskRuns.length} 次不可变 Run`} actions={<BusyButton className="lumo-secondary lumo-small" onClick={() => { setRunsTask(null); setTaskRuns([]); setTaskAudit([]) }}>关闭</BusyButton>}><div className="lumo-compact-list">{taskRuns.length ? taskRuns.map(run => <div key={run.id}><span><b>尝试 {run.attempt} · {localizedTaskState(run.state)}</b><small>{run.worker_id} · {run.assigned_node_id ?? '等待节点'}{run.last_error ? ` · ${run.last_error}` : ''}</small></span><em>{run.ended_at ? `结束 ${formatSync(run.ended_at)}` : run.started_at ? `开始 ${formatSync(run.started_at)}` : formatSync(run.created_at)}</em></div>) : <Empty>该任务尚未生成 Run；创建新尝试时会保留旧调度记录。</Empty>}</div><div className="lumo-compact-list"><header><b>操作审计</b><span>{taskAudit.length} 条</span></header>{taskAudit.length ? taskAudit.map(event => <div key={event.id}><span><b>{event.event}</b><small>{event.actor} · {Object.entries(event.detail).map(([key, value]) => `${key}=${String(value)}`).join(' · ') || '无额外详情'}</small></span><em>{formatSync(event.created_at)}</em></div>) : <Empty>尚无可显示的控制操作。</Empty>}</div></Section> : null}
-    {dashboard ? <DashboardSheet data={dashboard} close={() => setDashboard(null)} refresh={refreshDashboard} lifecycle={projectLifecycle} /> : null}
+    {dashboard ? <DashboardSheet data={dashboard} clusterReady={data.deployment.clusterReady} close={() => setDashboard(null)} refresh={refreshDashboard} lifecycle={projectLifecycle} /> : null}
   </div>
 }
 
-function DashboardSheet({ data, close, refresh, lifecycle }: { data: Dashboard; close: () => void; refresh: () => Promise<void>; lifecycle: (action: 'archive' | 'unarchive') => Promise<void> }) {
+function DashboardSheet({ data, clusterReady, close, refresh, lifecycle }: { data: Dashboard; clusterReady: boolean; close: () => void; refresh: () => Promise<void>; lifecycle: (action: 'archive' | 'unarchive') => Promise<void> }) {
   const project = data.project ?? {}
   const [spaceName, setSpaceName] = useState('')
   const [automationID, setAutomationID] = useState('')
@@ -1995,11 +2004,12 @@ function DashboardSheet({ data, close, refresh, lifecycle }: { data: Dashboard; 
   const saveAutomation = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!projectID || !automationID.trim() || !triggerSpec.trim() || !flowRef.trim()) return; setResourceBusy('automation'); setResourceNotice(''); try { await api(`/lumo/api/projects/${encodeURIComponent(projectID)}/automations/${encodeURIComponent(automationID.trim())}`, { method: 'PUT', body: JSON.stringify({ triggerKind, triggerSpec: triggerSpec.trim(), flowRef: flowRef.trim(), enabled: true }) }); setResourceNotice('自动化调度已保存。'); await refresh() } catch (reason) { setResourceNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setResourceBusy('') } }
   const spaces = (data.spaces ?? []) as Array<Record<string, unknown>>
   const automations = (data.automations ?? []) as unknown as Array<Record<string, unknown>>
-  return <aside className="lumo-sheet" aria-label="项目详情"><header><div><span className="lumo-eyebrow">项目详情卡</span><h3>{project.name ?? project.id}</h3><p>{data.yourRole ?? '成员'} · {project.realm ?? '未设置'} · {project.status === 'active' ? '启用中' : project.status ?? '未声明状态'}</p></div><div className="lumo-sheet-actions"><BusyButton className="lumo-secondary lumo-small" onClick={() => void refresh()}>刷新</BusyButton><BusyButton className="lumo-danger lumo-small" onClick={() => void lifecycle(project.status === 'archived' ? 'unarchive' : 'archive')}>{project.status === 'archived' ? '恢复项目' : '归档项目'}</BusyButton><MagneticButton aria-label="关闭项目详情" className="lumo-quiet" onClick={close}>×</MagneticButton></div></header><div className="lumo-fact-grid">{facts.map(([label, value]) => <div key={String(label)}><small>{label}</small><b>{String(value)}</b></div>)}</div>{resourceNotice ? <Notice close={() => setResourceNotice('')}>{resourceNotice}</Notice> : null}<div className="lumo-sheet-grid"><div><h4>知识空间</h4>{spaces.length ? <div className="lumo-sheet-list">{spaces.map(space => <span key={String(space.spaceId ?? space.id)}><b>{String(space.name ?? space.spaceId ?? space.id)}</b><small>{String(space.spaceId ?? space.id ?? '')}</small></span>)}</div> : <Empty>项目还没有知识空间。</Empty>}<form className="lumo-resource-form" onSubmit={addSpace}><input aria-label="知识空间名称" value={spaceName} onChange={event => setSpaceName(event.target.value)} placeholder="新空间名称" /><BusyButton type="submit" busy={resourceBusy === 'space'} className="lumo-primary lumo-small">新建空间</BusyButton></form></div><div><h4>自动化调度</h4>{automations.length ? <div className="lumo-sheet-list">{automations.map(automation => <span key={String(automation.automationId ?? automation.id)}><b>{String(automation.automationId ?? automation.id)}</b><small>{String(automation.triggerKind ?? '')} · {String(automation.flowRef ?? '')} · {automation.enabled === false ? '停用' : '启用'}</small></span>)}</div> : <Empty>项目还没有自动化规则。</Empty>}<form className="lumo-resource-form lumo-automation-form" onSubmit={saveAutomation}><input aria-label="自动化 ID" value={automationID} onChange={event => setAutomationID(event.target.value)} placeholder="automation-id" /><select aria-label="触发类型" value={triggerKind} onChange={event => setTriggerKind(event.target.value)}><option value="event">事件</option><option value="cron">定时</option><option value="webhook">Webhook</option></select><input aria-label="触发规则" value={triggerSpec} onChange={event => setTriggerSpec(event.target.value)} placeholder="事件名或 cron 表达式" /><input aria-label="流程引用" value={flowRef} onChange={event => setFlowRef(event.target.value)} placeholder="flow-id" /><BusyButton type="submit" busy={resourceBusy === 'automation'} className="lumo-primary lumo-small">保存规则</BusyButton></form></div></div></aside>
+  return <aside className="lumo-sheet" aria-label="项目详情"><header><div><span className="lumo-eyebrow">项目详情卡</span><h3>{project.name ?? project.id}</h3><p>{data.yourRole ?? '成员'} · {project.realm ?? '未设置'} · {project.status === 'active' ? '启用中' : project.status ?? '未声明状态'}</p></div><div className="lumo-sheet-actions"><BusyButton className="lumo-secondary lumo-small" onClick={() => void refresh()}>刷新</BusyButton><BusyButton className="lumo-danger lumo-small" onClick={() => void lifecycle(project.status === 'archived' ? 'unarchive' : 'archive')}>{project.status === 'archived' ? '恢复项目' : '归档项目'}</BusyButton><MagneticButton aria-label="关闭项目详情" className="lumo-quiet" onClick={close}>×</MagneticButton></div></header><div className="lumo-fact-grid">{facts.map(([label, value]) => <div key={String(label)}><small>{label}</small><b>{String(value)}</b></div>)}</div>{resourceNotice ? <Notice close={() => setResourceNotice('')}>{resourceNotice}</Notice> : null}{clusterReady ? <ProjectMembersPanel request={api} projectID={projectID} members={(data.members ?? []) as ProjectMember[]} editable={data.yourRole === 'owner' && project.status === 'active'} refresh={refresh} /> : null}<div className="lumo-sheet-grid"><div><h4>知识空间</h4>{spaces.length ? <div className="lumo-sheet-list">{spaces.map(space => <span key={String(space.spaceId ?? space.id)}><b>{String(space.name ?? space.spaceId ?? space.id)}</b><small>{String(space.spaceId ?? space.id ?? '')}</small></span>)}</div> : <Empty>项目还没有知识空间。</Empty>}<form className="lumo-resource-form" onSubmit={addSpace}><input aria-label="知识空间名称" value={spaceName} onChange={event => setSpaceName(event.target.value)} placeholder="新空间名称" /><BusyButton type="submit" busy={resourceBusy === 'space'} className="lumo-primary lumo-small">新建空间</BusyButton></form></div><div><h4>自动化调度</h4>{automations.length ? <div className="lumo-sheet-list">{automations.map(automation => <span key={String(automation.automationId ?? automation.id)}><b>{String(automation.automationId ?? automation.id)}</b><small>{String(automation.triggerKind ?? '')} · {String(automation.flowRef ?? '')} · {automation.enabled === false ? '停用' : '启用'}</small></span>)}</div> : <Empty>项目还没有自动化规则。</Empty>}<form className="lumo-resource-form lumo-automation-form" onSubmit={saveAutomation}><input aria-label="自动化 ID" value={automationID} onChange={event => setAutomationID(event.target.value)} placeholder="automation-id" /><select aria-label="触发类型" value={triggerKind} onChange={event => setTriggerKind(event.target.value)}><option value="event">事件</option><option value="cron">定时</option><option value="webhook">Webhook</option></select><input aria-label="触发规则" value={triggerSpec} onChange={event => setTriggerSpec(event.target.value)} placeholder="事件名或 cron 表达式" /><input aria-label="流程引用" value={flowRef} onChange={event => setFlowRef(event.target.value)} placeholder="flow-id" /><BusyButton type="submit" busy={resourceBusy === 'automation'} className="lumo-primary lumo-small">保存规则</BusyButton></form></div></div></aside>
 }
 
 function AccountSurface() {
   const [account, setAccount] = useState<AuthAccount | null>(null)
+  const [organizationEnabled, setOrganizationEnabled] = useState(false)
   const [sessions, setSessions] = useState<AuthSession[]>([])
 	const [securityEvents, setSecurityEvents] = useState<AuthSecurityEvent[]>([])
 	const [mfa, setMFA] = useState<AuthMFAStatus | null>(null)
@@ -2011,19 +2021,24 @@ function AccountSurface() {
   const [notice, setNotice] = useState('')
   const authHeaders = { 'X-Lumo-Auth-Request': '1' }
   const load = useCallback(async () => { setLoading(true); try {
-    const passkeyResult = api<AuthPasskeyStatus>('/auth/account/passkeys', { headers: authHeaders }).catch(reason => {
+    const nextAccount = await api<AuthAccount>('/auth/account', { headers: authHeaders })
+    const passkeyResult = nextAccount.localAuthEnabled === false ? Promise.resolve<AuthPasskeyStatus>({ configured: false, passkeys: [] }) : api<AuthPasskeyStatus>('/auth/account/passkeys', { headers: authHeaders }).catch(reason => {
       if (reason instanceof ApiError && reason.status === 503 && errorMessage(reason.body, '') === 'passkey_unavailable') return { configured: false, passkeys: [] }
       throw reason
     })
-    const [nextAccount, sessionResult, eventResult, mfaResult, nextPasskeys] = await Promise.all([
-      api<AuthAccount>('/auth/account', { headers: authHeaders }),
+    const [sessionResult, eventResult, mfaResult, nextPasskeys] = await Promise.all([
       api<{ sessions?: AuthSession[] }>('/auth/account/sessions', { headers: authHeaders }),
       api<{ events?: AuthSecurityEvent[] }>('/auth/account/security-events', { headers: authHeaders }),
-      api<AuthMFAStatus>('/auth/account/mfa', { headers: authHeaders }), passkeyResult,
+      nextAccount.localAuthEnabled === false ? Promise.resolve<AuthMFAStatus>({ configured: false, enabled: false }) : api<AuthMFAStatus>('/auth/account/mfa', { headers: authHeaders }), passkeyResult,
     ])
     setAccount(nextAccount); setSessions(sessionResult.sessions ?? []); setSecurityEvents(eventResult.events ?? []); setMFA(mfaResult); setPasskeyStatus(nextPasskeys); setNotice('')
   } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setLoading(false) } }, [])
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    let active = true
+    void api<{ organization: boolean }>('/lumo/api/capabilities').then(value => { if (active) setOrganizationEnabled(value.organization === true) }).catch(() => { if (active) setOrganizationEnabled(false) })
+    return () => { active = false }
+  }, [])
   const savePassword = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = event.currentTarget; const fields = new FormData(form); const currentPassword = String(fields.get('currentPassword') ?? ''); const newPassword = String(fields.get('newPassword') ?? ''); const confirmation = String(fields.get('confirmation') ?? ''); if (newPassword !== confirmation) { setNotice('两次输入的新密码不一致。'); return } setBusy(true); try { await api('/auth/account/password', { method: 'POST', headers: authHeaders, body: JSON.stringify({ currentPassword, newPassword }) }); location.assign('/auth/login?state=password-changed') } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy(false) } }
   const logout = async () => { setBusy(true); try { await api('/auth/logout', { method: 'POST', headers: authHeaders }); location.assign('/auth/login') } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)); setBusy(false) } }
   const revoke = async (session: AuthSession) => { setBusy(true); try { await api(`/auth/account/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE', headers: authHeaders }); if (session.current) { location.assign('/auth/login?state=expired'); return }; setNotice('会话已撤销。'); await load() } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy(false) } }
@@ -2061,13 +2076,16 @@ function AccountSurface() {
     <SurfaceIntro surface="account" trailing={<div className="lumo-account-state"><i className="lumo-live-dot" /> 会话受保护</div>} />
     {notice ? <Notice error={account === null && !loading} close={() => setNotice('')}>{notice}</Notice> : null}
     <Section title="身份概览" meta="治理用户"><div className="lumo-account-hero"><div className="lumo-avatar"><Glyph surface="account" /></div><div><span>{account?.displayName ?? (loading ? '读取中' : '未读取')}</span><b>{account?.username ?? 'lumo-governance'}</b><small>{account ? `${account.realm} · ${account.department || '未分配部门'} · ${account.clientIp}` : '正在读取当前身份'}</small></div><BusyButton busy={busy} className="lumo-danger" onClick={() => void logout()}>退出登录</BusyButton></div></Section>
+    {account?.authMethod === 'oidc' ? <Section title="企业登录"><div className="lumo-session-facts"><div><span>身份验证</span><b>企业身份提供方</b></div><div><span>角色</span><b>{account.roles.join(' · ') || '未分配'}</b></div></div></Section> : null}
+    {account && account.localAuthEnabled !== false ? <>
     <div className="lumo-account-grid"><Section title="登录保护" meta="固定安全基线"><div className="lumo-security-list"><div><i className="ready" /><span><b>交互式验证码</b><small>每次登录必填点选，一张验证码仅验证一次</small></span><em>始终开启</em></div><div><i className="ready" /><span><b>会话凭据</b><small>HttpOnly Cookie，服务端仅存令牌摘要</small></span><em>不可见令牌</em></div><div><i className="ready" /><span><b>权限来源</b><small>{account?.roles.join(' · ') || '读取中'}</small></span><em>角色权限</em></div></div></Section><Section title="修改密码" meta="更新后撤销全部旧会话"><form className="lumo-stacked-form" onSubmit={savePassword}><label><span>当前密码</span><input name="currentPassword" type="password" autoComplete="current-password" required /></label><label><span>新密码</span><input name="newPassword" type="password" autoComplete="new-password" minLength={10} maxLength={256} required /></label><label><span>确认新密码</span><input name="confirmation" type="password" autoComplete="new-password" minLength={10} maxLength={256} required /></label><BusyButton type="submit" busy={busy} className="lumo-primary">更新并重新登录</BusyButton></form></Section></div>
     <Section title="双重验证（TOTP）" meta={mfa === null ? '正在读取 MFA 状态' : mfa.configured ? mfa.enabled ? '已启用 · 登录时要求 6 位动态验证码' : '可配置 · 尚未启用' : '当前部署未配置 MFA 加密密钥'}>{mfa?.configured ? <div className="lumo-mfa-panel">{totpEnrollment ? <><p>在验证器中手动添加以下密钥；它仅在本页显示一次。</p><code>{totpEnrollment.secret}</code><small>待确认至 {formatSync(totpEnrollment.expires_at)}；输入验证器当前显示的 6 位代码。</small></> : <p>{mfa.enabled ? `已于 ${mfa.enrolled_at ? formatSync(mfa.enrolled_at) : '此前'} 启用。停用需要当前动态验证码。` : '启用后，密码和交互验证码通过后还必须提供 TOTP 动态验证码。'}</p>}<label><span>动态验证码</span><input value={mfaCode} onChange={event => setMFACode(event.target.value.replace(/\D/gu, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" placeholder="6 位验证码" /></label><div>{totpEnrollment ? <BusyButton busy={busy} className="lumo-primary" onClick={() => void confirmMFA()}>确认启用</BusyButton> : mfa.enabled ? <BusyButton busy={busy} className="lumo-danger" onClick={() => void disableMFA()}>停用 MFA</BusyButton> : <BusyButton busy={busy} className="lumo-primary" onClick={() => void beginMFA()}>开始绑定验证器</BusyButton>}</div></div> : <Empty>MFA 未启用：管理员需要设置 `LUMO_AUTH_MFA_KEY`（base64 编码的 32 字节密钥）后，系统才会保存加密的 TOTP 因子。</Empty>}</Section>
     <Section title="Passkey" meta={passkeyStatus === null ? '正在读取配置' : passkeyStatus.configured ? `${passkeyStatus.passkeys?.length ?? 0} 个已绑定 · ${passkeyStatus.rp_id}` : '当前部署未配置可信 RPID/origin'}>{passkeyStatus?.configured ? <div className="lumo-mfa-panel"><p>Passkey 仅接受当前可信域的 ES256 凭据；启用用户验证时，设备必须完成本地生物识别或 PIN 校验。</p>{passkeyStatus.passkeys?.length ? <div className="lumo-table-list">{passkeyStatus.passkeys.map(passkey => <div key={passkey.id}><span><b>{passkey.label || '未命名 Passkey'}</b><small>添加于 {formatSync(passkey.created_at)}{passkey.last_used_at ? ` · 最近使用 ${formatSync(passkey.last_used_at)}` : ''}</small></span><BusyButton busy={busy} className="lumo-danger lumo-small" onClick={() => void removePasskey(passkey)}>移除</BusyButton></div>)}</div> : <Empty>尚未添加 Passkey。</Empty>}<div><BusyButton busy={busy} className="lumo-primary" onClick={() => void enrollPasskey()}>添加 Passkey</BusyButton></div></div> : <Empty>管理员需要设置 `LUMO_AUTH_WEBAUTHN_RP_ID`、`LUMO_AUTH_WEBAUTHN_RP_NAME` 与精确的 `LUMO_AUTH_WEBAUTHN_ORIGINS`；未完成可信配置时不会降级启用。</Empty>}</Section>
+    </> : null}
     <Section title="活跃会话" meta={loading ? '正在读取已认证会话' : `${sessions.length} 个未过期会话`} actions={<BusyButton className="lumo-secondary" busy={busy || loading} disabled={!sessions.some(session => !session.current)} onClick={() => void revokeOthers()}>退出其他设备</BusyButton>}>{sessions.length ? <div className="lumo-table-list lumo-session-list">{sessions.map(session => <div key={session.id}><span><b>{session.current ? '当前浏览器' : '已登录设备'}</b><small>{session.client_ip || 'IP 未记录'} · 最近活跃 {formatSync(session.last_seen_at)}</small></span><i>{session.current ? '当前会话' : `到期 ${formatSync(session.expires_at)}`}</i><BusyButton className={session.current ? 'lumo-danger lumo-small' : 'lumo-secondary lumo-small'} busy={busy} onClick={() => void revoke(session)}>{session.current ? '退出此会话' : '撤销'}</BusyButton></div>)}</div> : <Empty>{loading ? '正在读取会话。' : '没有可撤销的活跃会话。'}</Empty>}</Section>
     <Section title="安全事件" meta={loading ? '正在读取账户审计' : `${securityEvents.length} 条最近事件`}><div className="lumo-table-list">{securityEvents.length ? securityEvents.map(event => <div key={event.id}><span><b>{localizedSecurityEvent(event.event)}</b><small>{event.client_ip || '当前会话'}{Object.keys(event.detail).length ? ` · ${Object.entries(event.detail).map(([key, value]) => `${key}=${String(value)}`).join(' · ')}` : ''}</small></span><em>{formatSync(event.created_at)}</em></div>) : <Empty>{loading ? '正在读取安全事件。' : '暂无可显示的账户安全事件。'}</Empty>}</div></Section>
     <Section title="会话详情" meta="服务端解析结果"><div className="lumo-session-facts"><div><span>用户 ID</span><b>{account?.userId ?? '读取中'}</b></div><div><span>Realm</span><b>{account?.realm ?? '读取中'}</b></div><div><span>部门</span><b>{account?.department || '未分配'}</b></div><div><span>验证码模式</span><b>{account?.captchaMode ?? '读取中'}</b></div></div></Section>
-    {account?.roles.some(role => ['platform_admin', 'realm_admin', 'admin'].includes(role)) ? <OrganizationManagement /> : null}
+    {organizationEnabled && account?.roles.some(role => ['platform_admin', 'realm_admin', 'admin'].includes(role)) ? <OrganizationManagement /> : null}
   </div>
 }
 
@@ -2077,34 +2095,184 @@ function OrganizationManagement() {
   const [departments, setDepartments] = useState<GovernanceDepartment[]>([])
   const [selectedUserID, setSelectedUserID] = useState('')
   const [selectedRoleID, setSelectedRoleID] = useState('')
+  const [editingDepartment, setEditingDepartment] = useState<GovernanceDepartment | null>(null)
+  const [editingRole, setEditingRole] = useState<GovernanceRole | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [query, setQuery] = useState('')
+  const [search, setSearch] = useState('')
+  const [status, setStatus] = useState('all')
+  const [loading, setLoading] = useState(true)
+  const [access, setAccess] = useState<UserAccess | null>(null)
+  const [accessError, setAccessError] = useState('')
+  const [revision, setRevision] = useState(0)
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState('')
+  const [error, setError] = useState('')
+  const selected = users.find(user => user.id === selectedUserID)
+  const sequence = useRef(0)
+  useEffect(() => { const timer = window.setTimeout(() => setSearch(query.trim()), 250); return () => window.clearTimeout(timer) }, [query])
   const load = useCallback(async () => {
+    const current = ++sequence.current
+    setLoading(true)
     try {
       const [userResult, roleResult, departmentResult] = await Promise.all([
-        api<{ users?: DirectoryUser[] }>('/lumo/api/users'), api<{ roles?: GovernanceRole[] }>('/lumo/api/roles'), api<{ departments?: GovernanceDepartment[] }>('/lumo/api/departments'),
+        api<{ users?: DirectoryUser[] }>('/lumo/api/users' + (search ? `?q=${encodeURIComponent(search)}` : '')), api<{ roles?: GovernanceRole[] }>('/lumo/api/roles'), api<{ departments?: GovernanceDepartment[] }>('/lumo/api/departments'),
       ])
+      if (current !== sequence.current) return
       setUsers(userResult.users ?? []); setRoles(roleResult.roles ?? []); setDepartments(departmentResult.departments ?? [])
-      setSelectedUserID(current => current || userResult.users?.[0]?.id || ''); setSelectedRoleID(current => current || roleResult.roles?.[0]?.id || '')
-    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
-  }, [])
-  useEffect(() => { void load() }, [load])
-  const run = async (key: string, success: string, operation: () => Promise<unknown>) => { setBusy(key); try { await operation(); setNotice(success); await load() } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy('') } }
-  const createUser = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); const form = event.currentTarget; const fields = new FormData(form); const id = String(fields.get('id') ?? '').trim(); const displayName = String(fields.get('display_name') ?? '').trim()
-    if (!id || !displayName) { setNotice('请填写用户 ID 和显示名称。'); return }
-    await run('org-user-create', `治理用户「${displayName}」已写入目录。`, () => api(`/lumo/api/users/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ display_name: displayName, primary_dept_id: String(fields.get('primary_dept_id') ?? '').trim(), status: 'active' }) })); form.reset()
+      setSelectedUserID(id => userResult.users?.some(user => user.id === id) ? id : userResult.users?.[0]?.id ?? '')
+      setSelectedRoleID(id => roleResult.roles?.some(role => role.id === id && role.status === 'active') ? id : roleResult.roles?.find(role => role.status === 'active')?.id ?? '')
+      setError('')
+    } catch (reason) { if (current === sequence.current) setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { if (current === sequence.current) setLoading(false) }
+  }, [search])
+  useEffect(() => { void load(); return () => { sequence.current++ } }, [load])
+  useEffect(() => {
+    setAccess(null); setAccessError('')
+    if (!selectedUserID || creating) return
+    let active = true
+    void api<UserAccess>(`/lumo/api/users/${encodeURIComponent(selectedUserID)}/access`)
+      .then(value => { if (active) setAccess(value) })
+      .catch(reason => { if (active) setAccessError(reason instanceof Error ? reason.message : String(reason)) })
+    return () => { active = false }
+  }, [selectedUserID, creating, revision])
+  const run = async (key: string, success: string, operation: () => Promise<unknown>): Promise<boolean> => {
+    if (busy) return false
+    setBusy(key); setError(''); setNotice('')
+    try { await operation(); setNotice(success); await load(); setRevision(value => value + 1); return true }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); return false }
+    finally { setBusy('') }
   }
-  const toggleUser = async (user: DirectoryUser) => {
-    const status = user.status === 'disabled' ? 'active' : 'disabled'
-    await run(`org-user-${user.id}`, `用户「${user.display_name}」已${status === 'active' ? '启用' : '停用'}。`, () => api(`/lumo/api/users/${encodeURIComponent(user.id)}`, { method: 'PUT', body: JSON.stringify({ display_name: user.display_name, primary_dept_id: user.primary_dept_id ?? '', status }) }))
+  const saveUser = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const form = event.currentTarget
+    const fields = new FormData(form)
+    const displayName = String(fields.get('display_name') ?? '').trim()
+    const body = { display_name: displayName, primary_dept_id: String(fields.get('primary_dept_id') ?? '') }
+    if (creating) {
+      const id = String(fields.get('id') ?? '').trim()
+      const password = String(fields.get('password') ?? '')
+      if (password !== String(fields.get('confirmation') ?? '')) { setError('两次输入的密码不一致。'); return }
+      if (await run('user', `用户「${displayName}」已创建。`, () => api('/lumo/api/users', { method: 'POST', body: JSON.stringify({ ...body, id, username: String(fields.get('username') ?? '').trim(), password }) }))) {
+        form.reset(); setCreating(false); setQuery(''); setSearch(''); setSelectedUserID(id)
+      }
+    } else if (selected) {
+      await run('user', `用户「${displayName}」已更新。`, () => api(`/lumo/api/users/${encodeURIComponent(selected.id)}`, { method: 'PUT', body: JSON.stringify({ ...body, status: String(fields.get('status') ?? 'active') }) }))
+    }
   }
-  const assignRole = async () => { if (!selectedUserID || !selectedRoleID) return; await run('org-role', '角色分配已保存。', () => api(`/lumo/api/users/${encodeURIComponent(selectedUserID)}/roles/${encodeURIComponent(selectedRoleID)}`, { method: 'PUT', body: '{}' })) }
-  const createDepartment = async (event: FormEvent<HTMLFormElement>) => {
+  const saveCredentials = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!selected) return
+    const form = event.currentTarget; const fields = new FormData(form)
+    const password = String(fields.get('password') ?? '')
+    if (password !== String(fields.get('confirmation') ?? '')) { setError('两次输入的密码不一致。'); return }
+    if (await run('credentials', '登录凭证已更新，原有会话已失效。', () => api(`/lumo/api/users/${encodeURIComponent(selected.id)}/credentials`, { method: 'PUT', body: JSON.stringify({ username: String(fields.get('username') ?? '').trim(), password }) }))) form.reset()
+  }
+  const linkOIDC = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!selected) return
+    const subject = String(new FormData(event.currentTarget).get('subject') ?? '')
+    await run('oidc', '企业身份已关联。', () => api(`/lumo/api/users/${encodeURIComponent(selected.id)}/oidc`, { method: 'PUT', body: JSON.stringify({ subject }) }))
+  }
+  const assignRole = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!selectedUserID || !selectedRoleID) return
+    const expiry = String(new FormData(event.currentTarget).get('expires_at') ?? '')
+    await run('role', '角色分配已保存。', () => api(`/lumo/api/users/${encodeURIComponent(selectedUserID)}/roles/${encodeURIComponent(selectedRoleID)}`, { method: 'PUT', body: JSON.stringify({ expires_at: expiry ? new Date(expiry).toISOString() : null }) }))
+  }
+  const revokeRole = async (role: UserRole) => {
+    await run(`revoke-${role.role_id}`, `角色「${role.name}」已撤销。`, () => api(`/lumo/api/users/${encodeURIComponent(selectedUserID)}/roles/${encodeURIComponent(role.role_id)}`, { method: 'DELETE' }))
+  }
+  const saveDepartment = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const form = event.currentTarget; const fields = new FormData(form); const name = String(fields.get('name') ?? '').trim(); if (!name) return
-    await run('org-department', `部门「${name}」已创建。`, () => api('/lumo/api/departments', { method: 'POST', body: JSON.stringify({ name, parent_dept_id: String(fields.get('parent_dept_id') ?? '').trim(), manager_user_id: String(fields.get('manager_user_id') ?? '').trim() }) })); form.reset()
+    const body = { name, parent_dept_id: String(fields.get('parent_dept_id') ?? ''), manager_user_id: String(fields.get('manager_user_id') ?? '').trim(), ...(editingDepartment ? { status: String(fields.get('status') ?? 'active') } : {}) }
+    if (await run('department', `部门「${name}」已${editingDepartment ? '更新' : '创建'}。`, () => api(`/lumo/api/departments${editingDepartment ? `/${encodeURIComponent(editingDepartment.id)}` : ''}`, { method: editingDepartment ? 'PUT' : 'POST', body: JSON.stringify(body) }))) { form.reset(); setEditingDepartment(null) }
   }
-  return <Section title="组织管理" meta="仅 realm_admin · 用户目录、部门与角色分配"><div className="lumo-organization-grid"><div><div className="lumo-table-list">{users.length ? users.map(user => <div key={user.id}><span><b>{user.display_name}</b><small>{user.id} · {user.primary_dept_id || '未分配部门'}</small></span><em>{user.status ?? 'active'}</em><BusyButton className={user.status === 'disabled' ? 'lumo-secondary lumo-small' : 'lumo-danger lumo-small'} busy={busy === `org-user-${user.id}`} onClick={() => void toggleUser(user)}>{user.status === 'disabled' ? '启用' : '停用'}</BusyButton></div>) : <Empty>正在读取治理用户目录。</Empty>}</div><form className="lumo-governance-form lumo-organization-form" onSubmit={createUser}><label><span>用户 ID</span><input name="id" required maxLength={128} placeholder="例如：lin" /></label><label><span>显示名称</span><input name="display_name" required maxLength={160} placeholder="例如：林青" /></label><label><span>主部门</span><input name="primary_dept_id" placeholder="可选部门 ID" /></label><BusyButton type="submit" busy={busy === 'org-user-create'} className="lumo-primary">写入治理用户</BusyButton></form></div><div><div className="lumo-organization-controls"><label><span>用户</span><select value={selectedUserID} onChange={event => setSelectedUserID(event.target.value)}>{users.map(user => <option key={user.id} value={user.id}>{user.display_name}</option>)}</select></label><label><span>角色</span><select value={selectedRoleID} onChange={event => setSelectedRoleID(event.target.value)}>{roles.filter(role => role.status === 'active').map(role => <option key={role.id} value={role.id}>{role.name}</option>)}</select></label><BusyButton className="lumo-primary" busy={busy === 'org-role'} disabled={!selectedUserID || !selectedRoleID} onClick={() => void assignRole()}>分配角色</BusyButton></div><div className="lumo-compact-list">{departments.length ? departments.map(department => <div key={department.id}><span><b>{department.name}</b><small>{department.id}{department.parent_dept_id ? ` · 上级 ${department.parent_dept_id}` : ''}</small></span><em>{department.status}</em></div>) : <Empty>尚无部门；可创建根部门。</Empty>}</div><form className="lumo-governance-form lumo-organization-form" onSubmit={createDepartment}><label><span>部门名称</span><input name="name" required maxLength={160} placeholder="例如：交付部" /></label><label><span>上级部门 ID</span><input name="parent_dept_id" placeholder="留空即根部门" /></label><label><span>负责人用户 ID</span><input name="manager_user_id" placeholder="可选" /></label><BusyButton type="submit" busy={busy === 'org-department'} className="lumo-primary">创建部门</BusyButton></form></div></div>{notice ? <Notice error={notice.includes('forbidden')} close={() => setNotice('')}>{notice}</Notice> : null}<p className="lumo-form-hint">此处管理的是已存在的治理身份与组织归属；系统尚未实现邮箱/企业目录邀请和凭证发放，因此不会把“写入目录”标称为“已邀请”。</p></Section>
+  const saveRole = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); const form = event.currentTarget; const fields = new FormData(form)
+    const body = { name: String(fields.get('name') ?? '').trim(), description: String(fields.get('description') ?? '').trim(), ...(editingRole ? { status: String(fields.get('status') ?? 'active') } : { id: String(fields.get('id') ?? '').trim() }) }
+    if (await run('catalog-role', `角色已${editingRole ? '更新' : '创建'}。`, () => api(`/lumo/api/roles${editingRole ? `/${encodeURIComponent(editingRole.id)}` : ''}`, { method: editingRole ? 'PUT' : 'POST', body: JSON.stringify(body) }))) { form.reset(); setEditingRole(null) }
+  }
+  const canParentDepartment = (department: GovernanceDepartment) => {
+    if (department.status !== 'active') return false
+    const visited = new Set<string>()
+    let current: GovernanceDepartment | undefined = department
+    while (current) {
+      if (current.id === editingDepartment?.id || visited.has(current.id)) return false
+      visited.add(current.id)
+      current = departments.find(item => item.id === current?.parent_dept_id)
+    }
+    return true
+  }
+  const statusName = (value?: string) => value === 'disabled' ? '已停用' : value === 'suspended' ? '已暂停' : '正常'
+  const visible = users.filter(user => status === 'all' || (user.status ?? 'active') === status)
+  const departmentOptions = departments.filter(department => department.status === 'active').map(department => <option key={department.id} value={department.id}>{department.name}</option>)
+  return <Section title="组织管理" meta={loading ? '正在同步' : `${visible.length} 位用户`} actions={<div className="lumo-form-actions"><BusyButton className="lumo-secondary" busy={loading} disabled={Boolean(busy)} onClick={() => void load()}>刷新</BusyButton><BusyButton className="lumo-primary" disabled={Boolean(busy)} onClick={() => { setCreating(true); setError(''); setNotice('') }}>新建用户</BusyButton></div>}>
+    {error ? <Notice error>{error}</Notice> : null}
+    {notice ? <Notice close={() => setNotice('')}>{notice}</Notice> : null}
+    <div className="lumo-organization-grid">
+      <div>
+        <div className="lumo-organization-filter"><label><span>搜索用户</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="名称或用户 ID" /></label><label><span>用户状态</span><select value={status} onChange={event => setStatus(event.target.value)}><option value="all">全部状态</option><option value="active">正常</option><option value="suspended">已暂停</option><option value="disabled">已停用</option></select></label></div>
+        <div className="lumo-organization-users" aria-label="用户目录" aria-busy={loading}>{visible.map(user => <button type="button" key={user.id} className={!creating && selectedUserID === user.id ? 'selected' : ''} disabled={Boolean(busy)} aria-pressed={!creating && selectedUserID === user.id} onClick={() => { setSelectedUserID(user.id); setCreating(false); setError(''); setNotice('') }}><span><b>{user.display_name}</b><small>{user.id} · {departments.find(department => department.id === user.primary_dept_id)?.name ?? (user.primary_dept_id || '未分配部门')}</small></span><em>{statusName(user.status)}</em></button>)}</div>
+        {!visible.length ? <Empty>{loading ? '正在读取用户。' : error ? '用户目录读取失败。' : '没有匹配的用户。'}</Empty> : null}
+      </div>
+      <div className="lumo-organization-detail">
+        {creating || selected ? <>
+          <h3>{creating ? '新建用户' : selected!.display_name}</h3>
+          <form key={creating ? 'create' : `${selected!.id}:${selected!.display_name}:${selected!.status}:${selected!.primary_dept_id}`} className="lumo-governance-form lumo-user-form" onSubmit={saveUser} aria-label={creating ? '新建用户' : '用户资料'}>
+            {creating ? <label><span>用户 ID</span><input name="id" required maxLength={128} pattern="[A-Za-z0-9_\x2d][A-Za-z0-9._\x2d]{0,127}" /></label> : null}
+            <label><span>显示名称</span><input name="display_name" required maxLength={160} defaultValue={creating ? '' : selected?.display_name} /></label>
+            <label><span>主部门</span><select name="primary_dept_id" defaultValue={creating ? '' : selected?.primary_dept_id ?? ''}><option value="">未分配</option>{!creating && selected?.primary_dept_id && !departments.some(department => department.id === selected.primary_dept_id && department.status === 'active') ? <option value={selected.primary_dept_id}>{selected.primary_dept_id}</option> : null}{departmentOptions}</select></label>
+            {creating ? <><label><span>登录名</span><input name="username" required maxLength={128} autoComplete="off" /></label><label><span>初始密码</span><input name="password" type="password" required minLength={10} maxLength={72} autoComplete="new-password" /></label><label><span>确认密码</span><input name="confirmation" type="password" required minLength={10} maxLength={72} autoComplete="new-password" /></label></> : <label><span>状态</span><select name="status" defaultValue={selected?.status ?? 'active'}><option value="active">正常</option><option value="suspended">暂停</option><option value="disabled">停用</option></select></label>}
+            <div className="lumo-user-form-actions"><BusyButton type="submit" busy={busy === 'user'} disabled={Boolean(busy)} className="lumo-primary">{creating ? '创建用户' : '保存资料'}</BusyButton>{creating ? <BusyButton className="lumo-secondary" disabled={Boolean(busy)} onClick={() => setCreating(false)}>取消</BusyButton> : null}</div>
+          </form>
+          {!creating && selected ? <>
+            {accessError ? <Notice error>{accessError}</Notice> : null}
+            {access ? <>
+              <h3>本地登录凭证 <small>{access.username ? (access.local_login_enabled ?? access.login_enabled) ? '可登录' : '登录已停用' : '未设置'}</small></h3>
+              <form key={`${selected.id}:${access.username}:${revision}`} className="lumo-governance-form lumo-user-form" onSubmit={saveCredentials} aria-label="登录凭证">
+                <label><span>登录名</span><input name="username" required maxLength={128} defaultValue={access.username} autoComplete="off" /></label><label><span>新密码</span><input name="password" type="password" required minLength={10} maxLength={72} autoComplete="new-password" /></label><label><span>确认新密码</span><input name="confirmation" type="password" required minLength={10} maxLength={72} autoComplete="new-password" /></label><div className="lumo-user-form-actions"><BusyButton type="submit" busy={busy === 'credentials'} disabled={Boolean(busy)} className="lumo-danger">{access.username ? '重置登录凭证' : '设置登录凭证'}</BusyButton></div>
+              </form>
+              {access.oidc_available || access.oidc ? <>
+                <h3>企业身份 <small>{access.oidc ? access.oidc.enabled ? '已关联' : '已解除' : '未关联'}{!access.oidc_available ? ' · 身份源未启用' : ''}</small></h3>
+                <form key={`oidc:${selected.id}:${revision}`} className="lumo-governance-form lumo-user-form" onSubmit={linkOIDC} aria-label="企业身份">
+                  <label><span>身份提供方</span><input value={access.oidc?.issuer ?? access.oidc_issuer ?? ''} readOnly /></label>
+                  <label><span>企业用户标识（sub）</span><input name="subject" required maxLength={255} defaultValue={access.oidc?.subject ?? ''} readOnly={Boolean(access.oidc)} autoComplete="off" /></label>
+                  <div className="lumo-user-form-actions">{access.oidc?.enabled ? <BusyButton className="lumo-danger" busy={busy === 'oidc'} disabled={Boolean(busy)} onClick={() => void run('oidc', '企业身份已解除，相关登录会话已撤销。', () => api(`/lumo/api/users/${encodeURIComponent(selected.id)}/oidc`, { method: 'DELETE' }))}>解除关联</BusyButton> : <BusyButton type="submit" className="lumo-primary" busy={busy === 'oidc'} disabled={Boolean(busy) || !access.oidc_available || selected.status !== 'active' || Boolean(access.oidc && access.oidc.issuer !== access.oidc_issuer)}>{access.oidc ? '恢复关联' : '关联企业身份'}</BusyButton>}</div>
+                </form>
+              </> : null}
+              <h3>已分配角色</h3>
+              <div className="lumo-organization-roles">{access.roles.map(role => <div key={role.role_id}><span><b>{role.name}</b><small>{role.expires_at ? `到期 ${new Date(role.expires_at).toLocaleString('zh-CN')}` : '长期有效'}{role.status !== 'active' ? ' · 已停用' : role.expires_at && Date.parse(role.expires_at) <= Date.now() ? ' · 已过期' : ''}</small></span><BusyButton className="lumo-danger lumo-small" busy={busy === `revoke-${role.role_id}`} disabled={Boolean(busy)} onClick={() => void revokeRole(role)} aria-label={`撤销角色 ${role.name}`}>撤销</BusyButton></div>)}</div>
+              {!access.roles.length ? <Empty>尚未分配角色。</Empty> : null}
+              <form className="lumo-organization-controls" onSubmit={assignRole}><label><span>角色</span><select value={selectedRoleID} onChange={event => setSelectedRoleID(event.target.value)}>{roles.filter(role => role.status === 'active').map(role => <option key={role.id} value={role.id}>{role.name}</option>)}</select></label><label><span>到期时间</span><input name="expires_at" type="datetime-local" /></label><BusyButton type="submit" className="lumo-primary" busy={busy === 'role'} disabled={Boolean(busy) || !selectedRoleID}>分配角色</BusyButton></form>
+            </> : !accessError ? <Empty>正在读取用户权限。</Empty> : null}
+          </> : null}
+        </> : <Empty>请选择用户。</Empty>}
+      </div>
+    </div>
+    <div className="lumo-organization-grid lumo-organization-catalogs">
+      <div><h3>部门目录</h3><div className="lumo-compact-list">{departments.map(department => <div key={department.id}><span><b>{department.name}</b><small>{department.id}{department.parent_dept_id ? ` · 上级 ${department.parent_dept_id}` : ''}</small></span><em>{department.status === 'active' ? '正常' : '已停用'}</em><BusyButton className="lumo-secondary lumo-small" disabled={Boolean(busy)} onClick={() => setEditingDepartment(department)}>编辑</BusyButton></div>)}</div>
+        <h3>{editingDepartment ? `编辑部门 · ${editingDepartment.name}` : '新建部门'}</h3>
+        <form key={editingDepartment?.id ?? 'new-department'} className="lumo-governance-form lumo-user-form" onSubmit={saveDepartment}>
+          <label><span>部门名称</span><input name="name" required maxLength={160} defaultValue={editingDepartment?.name ?? ''} /></label>
+          <label><span>上级部门</span><select name="parent_dept_id" defaultValue={editingDepartment?.parent_dept_id ?? ''}><option value="">根部门</option>{departments.filter(canParentDepartment).map(department => <option key={department.id} value={department.id}>{department.name}</option>)}</select></label>
+          <label><span>负责人 ID</span><input name="manager_user_id" list="lumo-department-managers" maxLength={128} defaultValue={editingDepartment?.manager_user_id ?? ''} /><datalist id="lumo-department-managers">{users.filter(user => user.status === 'active').map(user => <option key={user.id} value={user.id}>{user.display_name}</option>)}</datalist></label>
+          {editingDepartment ? <label><span>状态</span><select name="status" defaultValue={editingDepartment.status}><option value="active">正常</option><option value="disabled">停用</option></select></label> : null}
+          <div className="lumo-user-form-actions"><BusyButton type="submit" busy={busy === 'department'} disabled={Boolean(busy)} className="lumo-primary">{editingDepartment ? '保存部门' : '创建部门'}</BusyButton>{editingDepartment ? <BusyButton className="lumo-secondary" disabled={Boolean(busy)} onClick={() => setEditingDepartment(null)}>取消</BusyButton> : null}</div>
+        </form>
+      </div>
+      <div><h3>角色目录</h3><div className="lumo-compact-list">{roles.map(role => <div key={role.id}><span><b>{role.name}</b><small>{role.id}{role.description ? ` · ${role.description}` : ''}</small></span><em>{role.status === 'active' ? '正常' : '已停用'}</em><BusyButton className="lumo-secondary lumo-small" disabled={Boolean(busy)} onClick={() => setEditingRole(role)}>编辑</BusyButton></div>)}</div>
+        <h3>{editingRole ? `编辑角色 · ${editingRole.name}` : '新建角色'}</h3>
+        <form key={editingRole?.id ?? 'new-role'} className="lumo-governance-form lumo-user-form" onSubmit={saveRole}>
+          <label><span>角色 ID</span><input name="id" required readOnly={Boolean(editingRole)} defaultValue={editingRole?.id ?? ''} maxLength={128} pattern="[A-Za-z0-9_\x2d][A-Za-z0-9._\x2d]{0,127}" /></label>
+          <label><span>角色名称</span><input name="name" required maxLength={160} defaultValue={editingRole?.name ?? ''} /></label>
+          <label><span>角色说明</span><input name="description" maxLength={500} defaultValue={editingRole?.description ?? ''} /></label>
+          {editingRole ? <label><span>状态</span><select name="status" defaultValue={editingRole.status}><option value="active">正常</option><option value="disabled">停用</option></select></label> : null}
+          <div className="lumo-user-form-actions"><BusyButton type="submit" busy={busy === 'catalog-role'} disabled={Boolean(busy)} className="lumo-primary">{editingRole ? '保存角色' : '创建角色'}</BusyButton>{editingRole ? <BusyButton className="lumo-secondary" disabled={Boolean(busy)} onClick={() => setEditingRole(null)}>取消</BusyButton> : null}</div>
+        </form>
+      </div>
+    </div>
+  </Section>
 }
 
 function OpenDesignSurface({ onConversationStart }: { onConversationStart: () => void }) {

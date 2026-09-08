@@ -1,6 +1,6 @@
 module github.com/lumo-harness/platform/connector-gateway
 
-go 1.24
+go 1.25.0
 
 require github.com/lumo-harness/platform/observability v0.0.0
 
@@ -9,6 +9,7 @@ replace github.com/lumo-harness/platform/observability => ../observability
 require (
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/redis/go-redis/v9 v9.7.0
+	golang.org/x/oauth2 v0.36.0
 )
 
 require (

@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 	"github.com/lumo-harness/platform/connector-gateway/internal/credentials"
 	"github.com/lumo-harness/platform/connector-gateway/internal/domain"
 	"github.com/lumo-harness/platform/connector-gateway/internal/gateway"
+	"github.com/lumo-harness/platform/connector-gateway/internal/oauth"
 	"github.com/lumo-harness/platform/connector-gateway/internal/policy"
 	"github.com/lumo-harness/platform/connector-gateway/internal/ratelimit"
 	"github.com/lumo-harness/platform/connector-gateway/internal/registry"
@@ -131,8 +133,10 @@ func main() {
 	}
 
 	var credStore credentials.Store = credentials.NewEnvStore(*credPrefix)
+	var vaultStore *credentials.VaultStore
 	if vaultAddr := os.Getenv("LUMO_VAULT_ADDR"); vaultAddr != "" {
-		credStore = credentials.NewVaultStore(vaultAddr, os.Getenv("LUMO_VAULT_TOKEN"))
+		vaultStore = credentials.NewVaultStore(vaultAddr, os.Getenv("LUMO_VAULT_TOKEN"))
+		credStore = vaultStore
 		log.Info("启用 Vault 凭证存储")
 	}
 	creds := credentials.NewCaching(credStore, 60*time.Second)
@@ -142,10 +146,33 @@ func main() {
 		policyImpl = policy.NewOPAClient(opaAddr, os.Getenv("LUMO_OPA_POLICY"))
 		log.Info("启用 OPA 策略存储")
 	}
+	var oauthManager *oauth.Manager
+	var managedTokens gateway.ManagedTokens
+	if os.Getenv("LUMO_CONNECTOR_OAUTH_ENABLED") == "true" {
+		stateKey, keyErr := base64.StdEncoding.DecodeString(os.Getenv("LUMO_CONNECTOR_OAUTH_STATE_KEY"))
+		if keyErr != nil || len(stateKey) != 32 || vaultStore == nil || os.Getenv("LUMO_VAULT_TOKEN") == "" {
+			log.Error("connector OAuth requires Vault and a Base64-encoded 32-byte state key")
+			os.Exit(2)
+		}
+		oauthManager, err = oauth.New(oauth.Options{Pool: pool, Vault: vaultStore, Credentials: creds, Policy: policyImpl, Client: gateway.NewEgressClient,
+			CallbackURL: os.Getenv("LUMO_CONNECTOR_OAUTH_CALLBACK_URL"), Mount: envOr("LUMO_CONNECTOR_OAUTH_VAULT_MOUNT", "secret"),
+			Prefix: envOr("LUMO_CONNECTOR_OAUTH_VAULT_PREFIX", "lumo/connector-oauth"), StateKey: stateKey})
+		if err != nil {
+			log.Error("invalid connector OAuth configuration", "err", err)
+			os.Exit(2)
+		}
+		if err = oauthManager.Init(ctx); err != nil {
+			log.Error("initialize connector OAuth store", "err", err)
+			os.Exit(1)
+		}
+		managedTokens = oauthManager
+		go oauthManager.RunMaintenance(ctx, func(err error) { log.Warn("connector OAuth maintenance failed", "err", err) })
+	}
 
 	gw := gateway.New(gateway.Options{
 		Registry: reg,
 		Creds:    creds,
+		OAuth:    managedTokens,
 		Policy:   policyImpl,
 		Limiter:  ratelimit.New(rdb),
 		Breakers: brk,
@@ -171,6 +198,7 @@ func main() {
 			Gateway:    gw,
 			Registry:   reg,
 			Approvals:  approvals,
+			OAuth:      oauthManager,
 			Breakers:   brk,
 			Auth:       headerAuth{},
 			Logger:     log,

@@ -1,0 +1,33 @@
+# Optional device gateway. Supply the HTTPS origin and an existing absolute TLS
+# directory containing server.crt, server.key, issuer.crt, and issuer.key.
+# Merge after compose.cluster.yml; this overlay does not generate credentials.
+# Expose only this port through a TCP/TLS passthrough listener. Keep the original
+# client TLS stream intact, without HTTP termination or the PROXY protocol.
+# A remote load balancer needs an explicit reachable LUMO_DESKTOP_GATEWAY_BIND;
+# the default loopback binding is intended for an ingress on this same host.
+# See ../../docs/desktop-devices.md for certificate and enrollment requirements.
+services:
+  governance:
+    environment:
+      LUMO_DESKTOP_GATEWAY_ENABLED: "true"
+      LUMO_DESKTOP_GATEWAY_LISTEN: ":8090"
+      LUMO_DESKTOP_GATEWAY_PUBLIC_URL: "${LUMO_DESKTOP_GATEWAY_PUBLIC_URL:?Set the exact public HTTPS device gateway origin}"
+      LUMO_REGISTRY_URL: http://registry:8084
+      LUMO_DESKTOP_GATEWAY_CERT_FILE: /etc/lumo/device-tls/server.crt
+      LUMO_DESKTOP_GATEWAY_KEY_FILE: /etc/lumo/device-tls/server.key
+      LUMO_DESKTOP_ISSUER_CERT_FILE: /etc/lumo/device-tls/issuer.crt
+      LUMO_DESKTOP_ISSUER_KEY_FILE: /etc/lumo/device-tls/issuer.key
+      LUMO_DESKTOP_ALLOWED_SCOPES: "${LUMO_DESKTOP_ALLOWED_SCOPES:-skills:use,kb:query}"
+      LUMO_DESKTOP_PROCESS_RUNTIME: "${LUMO_DESKTOP_PROCESS_RUNTIME:-false}"
+      LUMO_DESKTOP_POLICY_URL: "${LUMO_DESKTOP_POLICY_URL:-}"
+    volumes:
+      - type: bind
+        source: "${LUMO_DESKTOP_TLS_DIR:?Set the existing absolute directory containing device gateway TLS and issuer PEM files}"
+        target: /etc/lumo/device-tls
+        read_only: true
+        bind:
+          create_host_path: false
+    ports:
+      - "${LUMO_DESKTOP_GATEWAY_BIND:-127.0.0.1}:${LUMO_DESKTOP_GATEWAY_PORT:-18090}:8090"
+    depends_on:
+      registry: { condition: service_started }

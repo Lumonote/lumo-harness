@@ -16,6 +16,7 @@ import (
 	"github.com/lumo-harness/platform/connector-gateway/internal/breaker"
 	"github.com/lumo-harness/platform/connector-gateway/internal/domain"
 	"github.com/lumo-harness/platform/connector-gateway/internal/gateway"
+	"github.com/lumo-harness/platform/connector-gateway/internal/oauth"
 	"github.com/lumo-harness/platform/connector-gateway/internal/registry"
 	"github.com/lumo-harness/platform/observability"
 )
@@ -31,6 +32,7 @@ type Server struct {
 	reg       registry.Registry
 	brk       *breaker.Group
 	approvals *approval.Store
+	oauth     *oauth.Manager
 	auth      Authenticator
 	log       *slog.Logger
 	maxBody   int64
@@ -43,6 +45,7 @@ type Options struct {
 	Registry    registry.Registry
 	Breakers    *breaker.Group
 	Approvals   *approval.Store
+	OAuth       *oauth.Manager
 	Auth        Authenticator
 	Logger      *slog.Logger
 	MaxBodyByte int64
@@ -66,7 +69,7 @@ func New(o Options) *Server {
 		o.Gateway.SetWebEgress(o.WebEgress)
 	}
 	return &Server{
-		gw: o.Gateway, reg: o.Registry, brk: o.Breakers, approvals: o.Approvals,
+		gw: o.Gateway, reg: o.Registry, brk: o.Breakers, approvals: o.Approvals, oauth: o.OAuth,
 		auth: o.Auth, log: o.Logger,
 		maxBody: o.MaxBodyByte, AdminRoles: o.AdminRoles,
 	}
@@ -77,10 +80,17 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /metrics", handleMetrics)
 	mux.HandleFunc("GET /connectors", s.handleList)
+	mux.HandleFunc("GET /capabilities", s.handleCapabilities)
+	mux.HandleFunc("GET /connectors/{id}/manifest", s.handleManifest)
 	mux.HandleFunc("PUT /connectors/{id}", s.handleRegister)
 	mux.HandleFunc("DELETE /connectors/{id}", s.handleDisable)
 	mux.HandleFunc("POST /connectors/{id}/enable", s.handleEnable)
 	mux.HandleFunc("POST /connectors/{id}/invoke", s.handleInvoke)
+	mux.HandleFunc("GET /connectors/{id}/oauth", s.handleOAuthStatus)
+	mux.HandleFunc("POST /connectors/{id}/oauth/start", s.handleOAuthStart)
+	mux.HandleFunc("POST /connectors/{id}/oauth/callback", s.handleOAuthCallback)
+	mux.HandleFunc("POST /connectors/{id}/oauth/refresh", s.handleOAuthRefresh)
+	mux.HandleFunc("DELETE /connectors/{id}/oauth", s.handleOAuthDisconnect)
 	mux.HandleFunc("GET /approvals", s.handleListApprovals)
 	mux.HandleFunc("POST /approvals/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /approvals/{id}/reject", s.handleReject)
@@ -90,6 +100,41 @@ func (s *Server) Routes() *http.ServeMux {
 
 func handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	observability.Handler(w, nil)
+}
+
+func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	caller, err := s.auth.Authenticate(r)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]bool{"manage": hasAnyRole(caller.Roles, s.AdminRoles), "managedOAuth": s.oauth != nil})
+}
+
+func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
+	caller, err := s.auth.Authenticate(r)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if !hasAnyRole(caller.Roles, s.AdminRoles) {
+		writeErr(w, http.StatusForbidden, "读取连接器配置需要管理员角色")
+		return
+	}
+	connectors, err := s.reg.ListAll(r.Context(), caller.Realm)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "连接器目录读取失败")
+		return
+	}
+	for _, connector := range connectors {
+		if string(connector.ID) == r.PathValue("id") {
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, http.StatusOK, connector)
+			return
+		}
+	}
+	writeErr(w, http.StatusNotFound, "连接器不存在")
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

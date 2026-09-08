@@ -50,6 +50,9 @@ func Validate(c domain.Connector) error {
 			return err
 		}
 	}
+	if strings.HasPrefix(c.Auth.CredentialRef, "oauth:") && (c.Auth.OAuth == nil || !c.Auth.OAuth.Managed || c.Auth.CredentialRef != domain.ManagedOAuthRef) {
+		return fmt.Errorf("connector %s: OAuth references require managed OAuth", c.ID)
+	}
 
 	if len(c.Operations) == 0 {
 		return fmt.Errorf("connector %s: 工具面为空（无可调用操作）", c.ID)
@@ -67,6 +70,17 @@ func Validate(c domain.Connector) error {
 
 func validateOAuth(connectorID string, auth domain.Auth) error {
 	oauth := auth.OAuth
+	if oauth.Managed && auth.CredentialRef != domain.ManagedOAuthRef {
+		return fmt.Errorf("connector %s: managed OAuth requires credentialRef=oauth:managed", connectorID)
+	}
+	if oauth.ClientAuthMethod != "" && oauth.ClientAuthMethod != "client_secret_basic" && oauth.ClientAuthMethod != "client_secret_post" {
+		return fmt.Errorf("connector %s: unsupported OAuth client authentication method", connectorID)
+	}
+	for key, value := range oauth.AuthorizationParams {
+		if (key != "access_type" && key != "prompt" && key != "audience" && key != "resource") || value == "" || len(value) > 1024 || strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("connector %s: invalid OAuth authorization parameter", connectorID)
+		}
+	}
 	if auth.Kind != domain.AuthBearer {
 		return fmt.Errorf("connector %s: OAuth access token must use auth.kind=bearer", connectorID)
 	}
@@ -82,7 +96,7 @@ func validateOAuth(connectorID string, auth domain.Auth) error {
 		"callbackUrl":      oauth.CallbackURL,
 	} {
 		endpoint, err := url.Parse(strings.TrimSpace(raw))
-		if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		if err != nil || raw != strings.TrimSpace(raw) || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.ForceQuery || endpoint.Fragment != "" {
 			return fmt.Errorf("connector %s: OAuth %s must be an exact HTTPS URL without credentials, query, or fragment", connectorID, label)
 		}
 	}
@@ -98,7 +112,7 @@ func validateOAuth(connectorID string, auth domain.Auth) error {
 	seen := map[string]bool{}
 	for _, raw := range oauth.Scopes {
 		scope := strings.TrimSpace(raw)
-		if scope == "" || len(scope) > 128 || strings.ContainsAny(scope, "\r\n") || seen[scope] {
+		if scope == "" || scope != raw || len(scope) > 128 || strings.ContainsAny(scope, " \t\r\n") || seen[scope] {
 			return fmt.Errorf("connector %s: OAuth scopes must be distinct non-empty registered scope names", connectorID)
 		}
 		seen[scope] = true

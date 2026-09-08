@@ -258,7 +258,7 @@ func (s *Store) CompletePasskeyAssertion(ctx context.Context, challenge string, 
 	if err := tx.Commit(ctx); err != nil {
 		return LoginResult{}, err
 	}
-	result, err := s.createAuthSession(ctx, owner.Realm, owner.UserID, clientIP, sessionTTL)
+	result, err := s.createAuthSession(ctx, owner.Realm, owner.UserID, clientIP, sessionTTL, "")
 	if err != nil {
 		return LoginResult{}, err
 	}

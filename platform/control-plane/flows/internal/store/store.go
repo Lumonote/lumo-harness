@@ -182,6 +182,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, DDL); err != nil {
 		return fmt.Errorf("建 flows 表失败: %w", err)
 	}
+	if _, err := s.pool.Exec(ctx, managementDDL); err != nil {
+		return fmt.Errorf("initialize flow change drafts: %w", err)
+	}
 	return nil
 }
 
@@ -584,7 +587,7 @@ func (s *Store) Review(ctx context.Context, id, reviewer string, approve bool, c
 
 	var status string
 	var def json.RawMessage
-	err = tx.QueryRow(ctx, `SELECT status, definition FROM flows WHERE id = $1`, id).Scan(&status, &def)
+	err = tx.QueryRow(ctx, `SELECT status, definition FROM flows WHERE id = $1 FOR UPDATE`, id).Scan(&status, &def)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

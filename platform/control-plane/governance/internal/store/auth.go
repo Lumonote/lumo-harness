@@ -47,6 +47,8 @@ type AuthPrincipal struct {
 	PrimaryDeptID    string    `json:"primary_dept_id,omitempty"`
 	Roles            []string  `json:"roles"`
 	SessionExpiresAt time.Time `json:"session_expires_at"`
+	LocalAuthEnabled bool      `json:"local_auth_enabled"`
+	AuthMethod       string    `json:"auth_method"`
 }
 
 // AuthSession is a safe device/session projection. It never returns the token
@@ -136,11 +138,15 @@ func (s *Store) EnsureBootstrapAuthUser(ctx context.Context, input BootstrapAuth
 		input.Realm, input.UserID, input.DisplayName, input.Department); err != nil {
 		return fmt.Errorf("bootstrap user: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `
+	credential, err := tx.Exec(ctx, `
 		INSERT INTO governance_auth_credentials (realm,user_id,username,password_hash)
 		VALUES ($1,$2,$3,$4) ON CONFLICT (realm,user_id) DO NOTHING`,
-		input.Realm, input.UserID, input.Username, hash); err != nil {
+		input.Realm, input.UserID, input.Username, hash)
+	if err != nil {
 		return fmt.Errorf("bootstrap credential: %w", err)
+	}
+	if credential.RowsAffected() == 0 {
+		return tx.Commit(ctx)
 	}
 	for _, role := range input.Roles {
 		role = strings.TrimSpace(role)
@@ -268,7 +274,7 @@ func (s *Store) Login(ctx context.Context, request LoginRequest, policy AuthPoli
 	if _, err := s.pool.Exec(ctx, `DELETE FROM governance_auth_failures WHERE realm=$1 AND username=$2 AND client_ip=$3`, realm, username, clientIP); err != nil {
 		return LoginResult{}, err
 	}
-	result, err := s.createAuthSession(ctx, realm, userID, clientIP, policy.SessionTTL)
+	result, err := s.createAuthSession(ctx, realm, userID, clientIP, policy.SessionTTL, passwordHash)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -278,7 +284,7 @@ func (s *Store) Login(ctx context.Context, request LoginRequest, policy AuthPoli
 	return result, nil
 }
 
-func (s *Store) createAuthSession(ctx context.Context, realm, userID, clientIP string, ttl time.Duration) (LoginResult, error) {
+func (s *Store) createAuthSession(ctx context.Context, realm, userID, clientIP string, ttl time.Duration, expectedPasswordHash string) (LoginResult, error) {
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
@@ -290,10 +296,30 @@ func (s *Store) createAuthSession(ctx context.Context, realm, userID, clientIP s
 	if _, err := s.pool.Exec(ctx, `DELETE FROM governance_auth_sessions WHERE expires_at <= now()`); err != nil {
 		return LoginResult{}, err
 	}
-	if _, err := s.pool.Exec(ctx, `
+	tx, err := s.beginOrganizationChange(ctx, realm)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Recheck the credential under a lock so a concurrent reset or suspension
+	// cannot leave a newly issued session authenticated by an obsolete password.
+	var currentHash string
+	err = tx.QueryRow(ctx, `SELECT c.password_hash FROM governance_auth_credentials c
+		JOIN governance_users u ON u.realm=c.realm AND u.id=c.user_id
+		WHERE c.realm=$1 AND c.user_id=$2 AND c.enabled AND u.status='active' FOR SHARE OF c,u`, realm, userID).Scan(&currentHash)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && expectedPasswordHash != "" && currentHash != expectedPasswordHash) {
+		return LoginResult{}, ErrInvalidLogin
+	}
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO governance_auth_sessions (token_hash,realm,user_id,client_ip,expires_at)
 		VALUES ($1,$2,$3,$4,$5)`, authcrypto.TokenHash(token), realm, userID, strings.TrimSpace(clientIP), expiresAt); err != nil {
 		return LoginResult{}, fmt.Errorf("create session: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return LoginResult{}, err
 	}
 	principal, err := s.authPrincipal(ctx, realm, userID)
 	if err != nil {
@@ -366,14 +392,18 @@ func (s *Store) Session(ctx context.Context, token string) (AuthPrincipal, error
 	if token == "" {
 		return AuthPrincipal{}, ErrNotFound
 	}
-	var realm, userID string
+	var realm, userID, issuer string
 	var expiresAt time.Time
 	err := s.pool.QueryRow(ctx, `
-		SELECT s.realm,s.user_id,s.expires_at
+		SELECT s.realm,s.user_id,s.expires_at,s.oidc_issuer
 		FROM governance_auth_sessions s
 		JOIN governance_users u ON u.realm=s.realm AND u.id=s.user_id
-		WHERE s.token_hash=$1 AND s.expires_at>now() AND u.status='active'`, authcrypto.TokenHash(token)).
-		Scan(&realm, &userID, &expiresAt)
+		WHERE s.token_hash=$1 AND s.expires_at>now() AND u.status='active' AND (
+		  (s.oidc_issuer='' AND EXISTS(SELECT 1 FROM governance_auth_credentials c WHERE c.realm=u.realm AND c.user_id=u.id AND c.enabled))
+		  OR (s.oidc_issuer<>'' AND s.oidc_issuer=$2 AND s.realm=$3 AND EXISTS(
+		    SELECT 1 FROM governance_auth_oidc_identities i WHERE i.realm=u.realm AND i.user_id=u.id AND i.issuer=s.oidc_issuer AND i.enabled))
+		)`, authcrypto.TokenHash(token), s.oidcIssuer, s.oidcRealm).
+		Scan(&realm, &userID, &expiresAt, &issuer)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AuthPrincipal{}, ErrNotFound
 	}
@@ -385,6 +415,9 @@ func (s *Store) Session(ctx context.Context, token string) (AuthPrincipal, error
 		return AuthPrincipal{}, err
 	}
 	principal.SessionExpiresAt = expiresAt
+	if issuer != "" {
+		principal.AuthMethod = "oidc"
+	}
 	_, _ = s.pool.Exec(ctx, `UPDATE governance_auth_sessions SET last_seen_at=now() WHERE token_hash=$1`, authcrypto.TokenHash(token))
 	return principal, nil
 }
@@ -392,11 +425,12 @@ func (s *Store) Session(ctx context.Context, token string) (AuthPrincipal, error
 func (s *Store) authPrincipal(ctx context.Context, realm, userID string) (AuthPrincipal, error) {
 	var principal AuthPrincipal
 	err := s.pool.QueryRow(ctx, `
-		SELECT u.realm,u.id,c.username,u.display_name,u.primary_dept_id
+		SELECT u.realm,u.id,COALESCE(c.username,i.username,u.id),u.display_name,u.primary_dept_id,COALESCE(c.enabled,false)
 		FROM governance_users u
-		JOIN governance_auth_credentials c ON c.realm=u.realm AND c.user_id=u.id
+		LEFT JOIN governance_auth_credentials c ON c.realm=u.realm AND c.user_id=u.id
+		LEFT JOIN governance_auth_oidc_identities i ON i.realm=u.realm AND i.user_id=u.id
 		WHERE u.realm=$1 AND u.id=$2`, realm, userID).
-		Scan(&principal.Realm, &principal.UserID, &principal.Username, &principal.DisplayName, &principal.PrimaryDeptID)
+		Scan(&principal.Realm, &principal.UserID, &principal.Username, &principal.DisplayName, &principal.PrimaryDeptID, &principal.LocalAuthEnabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AuthPrincipal{}, ErrNotFound
 	}
@@ -412,6 +446,7 @@ func (s *Store) authPrincipal(ctx context.Context, realm, userID string) (AuthPr
 		return AuthPrincipal{}, err
 	}
 	defer rows.Close()
+	principal.AuthMethod = "local"
 	principal.Roles = []string{}
 	for rows.Next() {
 		var role string

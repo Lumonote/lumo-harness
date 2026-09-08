@@ -68,6 +68,7 @@ type Item struct {
 	Kind      manifest.Kind     `json:"kind"`
 	Publisher string            `json:"publisher"`
 	Digest    string            `json:"digest"`
+	Signature []byte            `json:"signature,omitempty"`
 	Scopes    []string          `json:"scopes"`
 	Requires  manifest.Requires `json:"requires"`
 }
@@ -131,7 +132,7 @@ func Build(ctx context.Context, nodes []resolve.Node, target Shape, objs objstor
 		}
 		items = append(items, Item{
 			Name: m.Name, Version: m.Version, Kind: m.Kind, Publisher: m.Publisher,
-			Digest: n.Digest, Scopes: m.Scopes, Requires: m.Requires,
+			Digest: n.Digest, Signature: append([]byte(nil), n.Sig...), Scopes: m.Scopes, Requires: m.Requires,
 		})
 	}
 

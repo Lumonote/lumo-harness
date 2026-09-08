@@ -21,6 +21,7 @@
 | 文档 | 内容 |
 |------|------|
 | **[`2026-08-28-cluster-organization-desktop-and-artifact-distribution-design.md`](./superpowers/specs/2026-08-28-cluster-organization-desktop-and-artifact-distribution-design.md)** | Cluster 专属功能门禁、PC 桌面节点注册与运营、用户/角色/部门、技能分发与自定义技能、不可变 Bundle、Nacos 期望态与多 Agent 委派权限交集 |
+| **[`cluster-gap-analysis.md`](./cluster-gap-analysis.md)** | **集群模式功能缺口清单**（2026-09-08）：5 条静默 P0、6 条装配缺口、8 项设计能力零命中、部署与验收不闭环，逐条带 file:line 与建议补齐顺序 |
 | **[`2026-08-29-task-control-and-dispatch-design.md`](./superpowers/specs/2026-08-29-task-control-and-dispatch-design.md)** | **业务控制面 §23**（P5a–P5e 已落地）：统一 Worker（人/Agent 同尺）、五维归一化派单与置信度分档、任务/Run 拆分与评审闸门、证据链汇报（stale fail-closed）、集群派单与本机多智能体入口。含**外部研究稿的选型映射护栏**（§1：Kafka/NATS/LiteLLM/Volcano 等一律不采纳）与 Agent 授权死路径缺陷（§2.3） |
 
 ## 二、阅读路径

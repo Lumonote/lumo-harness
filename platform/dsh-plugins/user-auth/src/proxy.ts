@@ -1,14 +1,17 @@
-import { createHmac } from 'node:crypto'
+import { createHmac, randomBytes } from 'node:crypto'
 import { createServer, request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { Duplex } from 'node:stream'
 
 import { GovernanceApiError, GovernanceAuthClient, type Principal } from './client.ts'
 import { loginPage, loginScript, resolveLoginTheme, type LoginPageOptions } from './html.ts'
+import { CONNECTOR_OAUTH_CALLBACK, CONNECTOR_OAUTH_COOKIE, ConnectorOAuthClient, ConnectorOAuthError, connectorIDPattern, openConnectorBridge, sealConnectorBridge, type ConnectorOAuthStart } from './connector-oauth.ts'
 
 const SESSION_COOKIE = 'lumo_auth_session'
 const CAPTCHA_COOKIE = 'lumo_auth_captcha'
+const OIDC_COOKIE = 'lumo_auth_oidc'
 const MAX_AUTH_BODY_BYTES = 16 * 1024
+const SESSION_RECHECK_MS = 5_000
 const SESSION_CACHE_MS = 15_000
 const MAX_SESSION_CACHE = 2_048
 const upgradedConnections = new WeakMap<Server, Set<Duplex>>()
@@ -24,11 +27,13 @@ export interface AuthProxyOptions {
   port: number
   publicBaseUrl?: string
   secureCookie: boolean
+  clusterMode?: boolean
   realm: string
   projectId?: string
   identityAssertionSecret: string
   upstreamPort: number
-  client: GovernanceAuthClient
+	client: GovernanceAuthClient
+	connectorOAuth?: ConnectorOAuthClient
   logger: AuthProxyLogger
 }
 
@@ -42,8 +47,8 @@ function parseCookies(req: IncomingMessage): Map<string, string> {
   return values
 }
 
-function authCookie(name: string, value: string, options: { secure: boolean; maxAge?: number }): string {
-  const parts = [`${name}=${encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', 'SameSite=Strict']
+function authCookie(name: string, value: string, options: { secure: boolean; maxAge?: number; sameSite?: 'Strict' | 'Lax' }): string {
+  const parts = [`${name}=${encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', `SameSite=${options.sameSite ?? 'Strict'}`]
   if (options.secure) parts.push('Secure')
   if (options.maxAge !== undefined) parts.push(`Max-Age=${String(options.maxAge)}`)
   return parts.join('; ')
@@ -54,7 +59,7 @@ function stripAuthCookies(value: string | undefined): string | undefined {
   const kept = value.split(';').map(item => item.trim()).filter(item => {
     const at = item.indexOf('=')
     const name = at < 0 ? item : item.slice(0, at)
-    return name !== SESSION_COOKIE && name !== CAPTCHA_COOKIE
+    return name !== SESSION_COOKIE && name !== CAPTCHA_COOKIE && name !== OIDC_COOKIE && name !== CONNECTOR_OAUTH_COOKIE
   })
   return kept.length === 0 ? undefined : kept.join('; ')
 }
@@ -113,15 +118,15 @@ function writeJson(res: ServerResponse, status: number, body?: unknown, headers:
 }
 
 function redirect(res: ServerResponse, location: string, headers: Record<string, string | string[]> = {}): void {
-  res.writeHead(303, { Location: location, 'Cache-Control': 'no-store', ...headers })
+  res.writeHead(303, { Location: location, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', ...headers })
   res.end()
 }
 
-class SessionCache {
-  private readonly values = new Map<string, { value: Principal; expiresAt: number }>()
+class SessionVerifier {
   private readonly pending = new Map<string, Promise<Principal | undefined>>()
+  private readonly values = new Map<string, { value: Principal; expiresAt: number }>()
 
-  constructor(private readonly client: GovernanceAuthClient) {}
+  constructor(private readonly client: GovernanceAuthClient, private readonly realm: string, private readonly cacheMs: number) {}
 
   async get(token: string | undefined): Promise<Principal | undefined> {
     if (token === undefined || token === '') return undefined
@@ -129,13 +134,10 @@ class SessionCache {
     if (cached !== undefined && cached.expiresAt > Date.now()) return cached.value
     const active = this.pending.get(token)
     if (active !== undefined) return active
+    // Cluster sessions share only concurrent reads; standalone retains its cache.
     const request = this.client.session(token).then(principal => {
-      this.values.set(token, { value: principal, expiresAt: Date.now() + SESSION_CACHE_MS })
-      while (this.values.size > MAX_SESSION_CACHE) {
-        const oldest = this.values.keys().next().value as string | undefined
-        if (oldest === undefined) break
-        this.values.delete(oldest)
-      }
+      if (principal.realm !== this.realm) return undefined
+      this.set(token, principal)
       return principal
     }).catch((error: unknown) => {
       if (error instanceof GovernanceApiError && error.status === 401) return undefined
@@ -146,18 +148,28 @@ class SessionCache {
   }
 
   set(token: string, principal: Principal): void {
-    this.values.set(token, { value: principal, expiresAt: Date.now() + SESSION_CACHE_MS })
+    if (this.cacheMs <= 0 || principal.realm !== this.realm) return
+    this.values.set(token, { value: principal, expiresAt: Date.now() + this.cacheMs })
+    while (this.values.size > MAX_SESSION_CACHE) {
+      const oldest = this.values.keys().next().value
+      if (oldest === undefined) break
+      this.values.delete(oldest)
+    }
   }
 
   delete(token: string | undefined): void {
     if (token !== undefined) this.values.delete(token)
   }
 
-  deleteUser(userId: string): void {
+  deleteUser(userID: string): void {
     for (const [token, cached] of this.values) {
-      if (cached.value.user_id === userId) this.values.delete(token)
+      if (cached.value.user_id === userID) this.values.delete(token)
     }
   }
+}
+
+function principalIdentity(principal: Principal): string {
+  return JSON.stringify([principal.realm, principal.user_id, principal.primary_dept_id ?? '', [...principal.roles].sort()])
 }
 
 function assertionHeaders(principal: Principal, options: AuthProxyOptions): Record<string, string> {
@@ -231,7 +243,7 @@ function proxyHttp(req: IncomingMessage, res: ServerResponse, principal: Princip
     if (setCookies !== undefined) {
       const filtered = setCookies.filter(cookie => {
         const name = cookie.slice(0, cookie.indexOf('=')).trim()
-        return name !== SESSION_COOKIE && name !== CAPTCHA_COOKIE
+        return name !== SESSION_COOKIE && name !== CAPTCHA_COOKIE && name !== OIDC_COOKIE
       })
       if (filtered.length === 0) delete headers['set-cookie']
       else headers['set-cookie'] = filtered
@@ -282,7 +294,7 @@ function proxyUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, princi
 
 function loginState(url: URL): LoginPageOptions['state'] {
   const state = url.searchParams.get('state')
-  return state === 'invalid' || state === 'locked' || state === 'expired' || state === 'unavailable' || state === 'password-changed' ? state : undefined
+  return state === 'invalid' || state === 'locked' || state === 'expired' || state === 'unavailable' || state === 'password-changed' || state === 'oidc-failed' ? state : undefined
 }
 
 function stringFields(body: Record<string, unknown>, fields: readonly string[]): Record<string, string> | undefined {
@@ -301,13 +313,53 @@ function sessionCookie(result: { token: string; expires_at: string }, options: A
   })
 }
 
+function oidcRedirectMatches(redirectUrl: string | undefined, options: AuthProxyOptions, path = '/auth/oidc/callback'): boolean {
+  if (!options.clusterMode || !options.publicBaseUrl || !redirectUrl) return false
+  try {
+    const base = new URL(options.publicBaseUrl)
+    if (base.username || base.password || base.search || base.hash || base.pathname !== '/') return false
+    if (base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname))) return false
+    if (base.protocol === 'https:' && !options.secureCookie) return false
+    return redirectUrl === new URL(path, base).href
+  } catch { return false }
+}
+
 export function createAuthProxy(options: AuthProxyOptions): Server {
-  const sessions = new SessionCache(options.client)
+  const sessions = new SessionVerifier(options.client, options.realm, options.clusterMode ? 0 : SESSION_CACHE_MS)
   const server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://lumo-auth.local')
       const requestCookies = parseCookies(req)
       const sessionToken = requestCookies.get(SESSION_COOKIE)
+
+      if (req.method === 'GET' && url.pathname === '/auth/connector-oauth/complete.js') {
+        res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' })
+        res.end("location.replace(document.body.dataset.return || '/?lumo=connectors')")
+        return
+      }
+      if (req.method === 'GET' && url.pathname === CONNECTOR_OAUTH_CALLBACK) {
+        if (!options.clusterMode || !options.connectorOAuth) { writeJson(res, 404, { error: 'not_found' }); return }
+        let connectorId = ''
+        let outcome = 'failed'
+        try {
+          const bridge = openConnectorBridge(requestCookies.get(CONNECTOR_OAUTH_COOKIE) ?? '', options.identityAssertionSecret, options.realm, options.publicBaseUrl ?? '')
+          connectorId = bridge.connectorId
+          const state = url.searchParams.get('state') ?? ''
+          if (!/^[A-Za-z0-9_-]{43}$/u.test(state) || ['state', 'code', 'error'].some(key => url.searchParams.getAll(key).length > 1)) throw new ConnectorOAuthError(400)
+          // Always re-read Governance at callback time. Removed roles, revoked
+          // sessions, and disabled users cannot complete an outstanding grant.
+          const principal = await options.client.session(bridge.sessionToken)
+          if (principal.realm !== options.realm || (sessionToken && sessionToken !== bridge.sessionToken)) throw new ConnectorOAuthError(401)
+          await options.connectorOAuth.call(principal, bridge.sessionToken, bridge.connectorId, 'callback', {
+            browser: bridge.browser, state, code: url.searchParams.get('code') ?? '', error: url.searchParams.get('error') ?? '',
+          })
+          outcome = 'connected'
+        } catch { /* Provider responses and credentials are never reflected or logged. */ }
+        res.setHeader('Set-Cookie', authCookie(CONNECTOR_OAUTH_COOKIE, '', { secure: options.secureCookie, maxAge: 0, sameSite: 'Lax' }))
+        const destination = `/?lumo=connectors&amp;connector=${encodeURIComponent(connectorId)}&amp;oauth=${outcome}`
+        writeHtml(res, 200, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>连接器授权</title><script src="/auth/connector-oauth/complete.js" defer></script></head><body data-return="${destination}"><a href="${destination}">返回连接器</a></body></html>`)
+        return
+      }
 
       if (req.method === 'GET' && url.pathname === '/auth/login.js') {
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'", 'X-Content-Type-Options': 'nosniff' })
@@ -316,7 +368,54 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
       }
       if (req.method === 'GET' && url.pathname === '/auth/login') {
         if (await sessions.get(sessionToken) !== undefined) { redirect(res, '/'); return }
-        writeHtml(res, 200, loginPage({ ...(loginState(url) === undefined ? {} : { state: loginState(url)! }), theme: resolveLoginTheme(requestCookies.get('lumo-theme')) }))
+        let oidcEnabled = false
+        if (options.clusterMode) {
+          try {
+            const oidc = await options.client.oidcStatus(options.realm)
+            oidcEnabled = oidc.enabled && oidcRedirectMatches(oidc.redirect_url, options)
+          } catch { /* Local credentials remain available during provider discovery failures. */ }
+        }
+        writeHtml(res, 200, loginPage({ ...(loginState(url) === undefined ? {} : { state: loginState(url)! }), theme: resolveLoginTheme(requestCookies.get('lumo-theme')), oidcEnabled }))
+        return
+      }
+      if (req.method === 'GET' && url.pathname === '/auth/oidc/complete.js') {
+        res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
+        res.end("location.replace('/')")
+        return
+      }
+      if (req.method === 'GET' && url.pathname === '/auth/oidc/start') {
+        if (!options.clusterMode) { writeJson(res, 404, { error: 'not_found' }); return }
+        try {
+          const browser = randomBytes(32).toString('base64url')
+          const result = await options.client.beginOIDCLogin(options.realm, browser)
+          if (!oidcRedirectMatches(result.redirect_url, options)) throw new Error('OIDC redirect configuration mismatch')
+          redirect(res, result.authorization_url, { 'Set-Cookie': authCookie(OIDC_COOKIE, browser, { secure: options.secureCookie, maxAge: result.expires_in, sameSite: 'Lax' }) })
+        } catch {
+          redirect(res, '/auth/login?state=unavailable')
+        }
+        return
+      }
+      if (req.method === 'GET' && url.pathname === '/auth/oidc/callback') {
+        if (!options.clusterMode) { writeJson(res, 404, { error: 'not_found' }); return }
+        const clearOIDC = authCookie(OIDC_COOKIE, '', { secure: options.secureCookie, maxAge: 0, sameSite: 'Lax' })
+        try {
+          const browser = requestCookies.get(OIDC_COOKIE) ?? ''
+          const state = url.searchParams.get('state') ?? ''
+          if (!/^[A-Za-z0-9_-]{43}$/u.test(browser) || !/^[A-Za-z0-9_-]{43}$/u.test(state)
+            || ['state', 'code', 'iss', 'error'].some(key => url.searchParams.getAll(key).length > 1)) throw new Error('Invalid OIDC callback')
+          const result = await options.client.completeOIDCLogin({
+            realm: options.realm, browser, state, code: url.searchParams.get('code') ?? '',
+            issuer: url.searchParams.get('iss') ?? '', error: url.searchParams.get('error') ?? '',
+          }, sourceIp(req))
+          if (result.principal.realm !== options.realm) throw new Error('OIDC realm mismatch')
+          sessions.set(result.token, result.principal)
+          res.setHeader('Set-Cookie', [sessionCookie(result, options), clearOIDC])
+          // Commit a same-origin document before navigating with the Strict session cookie.
+          writeHtml(res, 200, '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>登录中</title><script src="/auth/oidc/complete.js" defer></script></head><body><a href="/">进入 Lumo</a></body></html>')
+        } catch (error) {
+          const state = error instanceof GovernanceApiError && error.status >= 500 ? 'unavailable' : 'oidc-failed'
+          redirect(res, `/auth/login?state=${state}`, { 'Set-Cookie': clearOIDC })
+        }
         return
       }
       if (req.method === 'GET' && url.pathname === '/auth/captcha') {
@@ -404,12 +503,31 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
         else writeJson(res, 401, { error: 'authentication_required', message: '请先登录' })
         return
       }
+      if (req.method === 'POST' && url.pathname === '/auth/connector-oauth/start') {
+        if (!options.clusterMode || !options.connectorOAuth) { writeJson(res, 404, { error: 'not_found' }); return }
+        if (req.headers['x-lumo-auth-request'] !== '1') { writeJson(res, 403, { error: 'auth_request_header_required' }); return }
+        try {
+          const body = await readJson(req)
+          if (typeof body['connectorId'] !== 'string' || !connectorIDPattern.test(body['connectorId'])) throw new ConnectorOAuthError(400)
+          const callback = new URL(CONNECTOR_OAUTH_CALLBACK, options.publicBaseUrl).href
+          if (!oidcRedirectMatches(callback, options, CONNECTOR_OAUTH_CALLBACK)) throw new ConnectorOAuthError(503)
+          const browser = randomBytes(32).toString('base64url')
+          const result = await options.connectorOAuth.call<ConnectorOAuthStart>(principal, sessionToken ?? '', body['connectorId'], 'start', { browser })
+          if (!oidcRedirectMatches(result.callbackUrl, options, CONNECTOR_OAUTH_CALLBACK) || result.expiresIn !== 300) throw new ConnectorOAuthError(503)
+          const authorization = new URL(result.authorizationUrl)
+          if (authorization.protocol !== 'https:' || authorization.username || authorization.password) throw new ConnectorOAuthError(503)
+          const bridge = sealConnectorBridge({ connectorId: body['connectorId'], browser, sessionToken: sessionToken ?? '', expiresAt: Date.now() + 300_000 }, options.identityAssertionSecret, options.realm, options.publicBaseUrl ?? '')
+          writeJson(res, 200, { authorizationUrl: result.authorizationUrl }, { 'Set-Cookie': authCookie(CONNECTOR_OAUTH_COOKIE, bridge, { secure: options.secureCookie, maxAge: 300, sameSite: 'Lax' }) })
+        } catch (error) { writeJson(res, error instanceof ConnectorOAuthError ? error.status : 503, { error: 'connector_oauth_failed', message: '连接器授权暂不可用，请检查配置及管理员权限' }) }
+        return
+      }
       if (req.method === 'GET' && url.pathname === '/auth/account') {
         writeJson(res, 200, {
           mode: 'session', provider: 'lumo-governance', username: principal.username,
           displayName: principal.display_name, userId: principal.user_id, realm: principal.realm,
           roles: principal.roles, department: principal.primary_dept_id ?? '', clientIp: sourceIp(req),
-          captchaMode: 'always',
+          captchaMode: principal.auth_method === 'oidc' ? 'identity-provider' : 'always',
+          authMethod: principal.auth_method ?? 'local', localAuthEnabled: principal.local_auth_enabled !== false,
         })
         return
       }
@@ -583,6 +701,20 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
       const token = parseCookies(req).get(SESSION_COOKIE)
       const principal = await sessions.get(token)
       if (principal === undefined) { rejectUpgrade(socket); return }
+      if (options.clusterMode) {
+        const identity = principalIdentity(principal)
+        let checking = false
+        const timer = setInterval(() => {
+          if (checking || socket.destroyed) return
+          checking = true
+          void sessions.get(token).then(current => {
+            if (current === undefined || principalIdentity(current) !== identity) socket.destroy()
+          }).catch(() => socket.destroy()).finally(() => { checking = false })
+        }, SESSION_RECHECK_MS)
+        timer.unref()
+        socket.once('close', () => clearInterval(timer))
+        if (socket.destroyed) { clearInterval(timer); return }
+      }
       proxyUpgrade(req, socket, head, principal, options, upgradedSockets)
     })().catch(() => rejectUpgrade(socket, 503, 'Service Unavailable'))
   })

@@ -116,6 +116,10 @@ func canSee(f *domain.Flow, c caller) bool {
 func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/projects/{pid}/flows", s.create)
 	mux.HandleFunc("GET /v1/projects/{pid}/flows", s.listProject)
+	mux.HandleFunc("GET /v1/projects/{pid}/flows/management", s.listManaged)
+	mux.HandleFunc("GET /v1/flows/{id}/management", s.managedFlow)
+	mux.HandleFunc("PATCH /v1/flows/{id}/management", s.managedFlow)
+	mux.HandleFunc("POST /v1/flows/{id}/management/change", s.changeFlow)
 	mux.HandleFunc("GET /v1/flows", s.discover)
 	mux.HandleFunc("GET /v1/flows/{id}", s.get)
 	mux.HandleFunc("GET /v1/flows/{id}/versions/{version}", s.getVersion)

@@ -243,6 +243,18 @@ spec:
           env:
             - name: LUMO_DSH_PROFILE
               value: web
+            - name: LUMO_DEPLOYMENT_MODE
+              value: cluster
+            - name: LUMO_CLUSTER_STATUS
+              value: ready
+            - name: LUMO_GOVERNANCE_URL
+              value: {{ .Values.dshWeb.governanceUrl | quote }}
+            - name: LUMO_AUTH_PUBLIC_URL
+              value: {{ .Values.dshWeb.publicUrl | quote }}
+            - name: LUMO_AUTH_SECURE_COOKIE
+              value: {{ .Values.dshWeb.secureCookie | quote }}
+            - name: LUMO_AUTH_PORT
+              value: {{ .Values.dshWeb.port | quote }}
             - name: LUMO_WEB_PORT
               value: {{ .Values.dshWeb.port | quote }}
             - name: LUMO_NODE_ID

@@ -6,6 +6,8 @@ export interface Principal {
   primary_dept_id?: string
   roles: string[]
   session_expires_at: string
+  local_auth_enabled?: boolean
+  auth_method?: 'local' | 'oidc'
 }
 
 export interface CaptchaResponse {
@@ -20,6 +22,9 @@ export interface LoginResponse {
   expires_at: string
   principal: Principal
 }
+
+export interface OIDCStatus { enabled: boolean; issuer?: string; redirect_url?: string }
+export interface OIDCStart { authorization_url: string; redirect_url: string; expires_in: number }
 
 export interface AuthSession {
   id: string
@@ -110,6 +115,22 @@ export class GovernanceAuthClient {
     return body.public_key
   }
 
+  async oidcStatus(realm: string): Promise<OIDCStatus> {
+    return this.json<OIDCStatus>(`/v1/auth/oidc?realm=${encodeURIComponent(realm)}`, {})
+  }
+
+  async beginOIDCLogin(realm: string, browser: string): Promise<OIDCStart> {
+    return this.json<OIDCStart>('/v1/auth/oidc/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ realm, browser }),
+    }, Math.max(this.timeoutMs, 20_000))
+  }
+
+  async completeOIDCLogin(input: { realm: string; state: string; browser: string; code: string; issuer: string; error: string }, clientIp: string): Promise<LoginResponse> {
+    return this.json<LoginResponse>('/v1/auth/oidc/callback', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Lumo-Client-IP': clientIp }, body: JSON.stringify(input),
+    }, Math.max(this.timeoutMs, 35_000))
+  }
+
   async completePasskeyLogin(input: Record<string, string>, clientIp: string): Promise<LoginResponse> {
     return this.json<LoginResponse>('/v1/auth/passkey/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Lumo-Client-IP': clientIp }, body: JSON.stringify(input),
@@ -187,18 +208,18 @@ export class GovernanceAuthClient {
     })
   }
 
-  private async json<T>(path: string, init: RequestInit): Promise<T> {
-    const response = await this.call(path, init)
+  private async json<T>(path: string, init: RequestInit, timeoutMs = this.timeoutMs): Promise<T> {
+    const response = await this.call(path, init, timeoutMs)
     return await response.json() as T
   }
 
-  private async call(path: string, init: RequestInit): Promise<Response> {
+  private async call(path: string, init: RequestInit, timeoutMs = this.timeoutMs): Promise<Response> {
     let response: Response
     try {
       response = await fetch(this.base + path, {
         ...init,
         headers: { Authorization: `Bearer ${this.controlPlaneToken}`, ...(init.headers ?? {}) },
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(timeoutMs),
       })
     } catch (error) {
       throw new GovernanceApiError(503, 'auth_unavailable', error instanceof Error ? error.message : '认证服务不可用')

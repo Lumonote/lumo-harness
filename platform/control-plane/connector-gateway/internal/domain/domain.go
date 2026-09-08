@@ -57,15 +57,22 @@ type Auth struct {
 // PKCE is mandatory for the authorization-code flow.  Client refs resolve via
 // Vault/environment and are never serialized into an audit record or prompt.
 type OAuth2 struct {
-	Provider         string   `json:"provider"`
-	AuthorizationURL string   `json:"authorizationUrl"`
-	TokenURL         string   `json:"tokenUrl"`
-	CallbackURL      string   `json:"callbackUrl"`
-	ClientIDRef      string   `json:"clientIdRef"`
-	ClientSecretRef  string   `json:"clientSecretRef"`
-	Scopes           []string `json:"scopes"`
-	PKCE             bool     `json:"pkce"`
+	Managed             bool              `json:"managed,omitempty"`
+	Provider            string            `json:"provider"`
+	AuthorizationURL    string            `json:"authorizationUrl"`
+	TokenURL            string            `json:"tokenUrl"`
+	CallbackURL         string            `json:"callbackUrl"`
+	ClientIDRef         string            `json:"clientIdRef"`
+	ClientSecretRef     string            `json:"clientSecretRef"`
+	Scopes              []string          `json:"scopes"`
+	PKCE                bool              `json:"pkce"`
+	ClientAuthMethod    string            `json:"clientAuthMethod,omitempty"`
+	AuthorizationParams map[string]string `json:"authorizationParams,omitempty"`
 }
+
+// ManagedOAuthRef is a marker. The realm and connector ID determine the Vault
+// location; a manifest can never choose another connector's token path.
+const ManagedOAuthRef = "oauth:managed"
 
 // Operation 工具面（toolSurface）中的一个可调用操作。
 // 未在此登记的操作一律拒绝 —— 工具面是白名单，不是文档。

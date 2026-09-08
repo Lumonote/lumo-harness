@@ -37,6 +37,7 @@ import (
 type Gateway struct {
 	reg      registry.Registry
 	creds    credentials.Store
+	oauth    ManagedTokens
 	pol      policy.Policy
 	limiter  *ratelimit.Limiter
 	breakers *breaker.Group
@@ -58,9 +59,14 @@ type Gateway struct {
 	webEgress domain.WebEgress
 }
 
+type ManagedTokens interface {
+	AccessToken(context.Context, domain.Caller, domain.Connector) (credentials.Secret, error)
+}
+
 type Options struct {
 	Registry  registry.Registry
 	Creds     credentials.Store
+	OAuth     ManagedTokens
 	Policy    policy.Policy
 	Limiter   *ratelimit.Limiter
 	Breakers  *breaker.Group
@@ -73,6 +79,7 @@ func New(o Options) *Gateway {
 	return &Gateway{
 		reg:        o.Registry,
 		creds:      o.Creds,
+		oauth:      o.OAuth,
 		pol:        o.Policy,
 		limiter:    o.Limiter,
 		breakers:   o.Breakers,
@@ -109,6 +116,14 @@ func newClient(allowPrivate bool) *http.Client {
 			return http.ErrUseLastResponse
 		},
 	}
+}
+
+// NewEgressClient shares DNS rebinding protection and redirect policy with
+// connector invocations, including OAuth token exchange and refresh.
+func NewEgressClient(allowPrivate bool) *http.Client {
+	client := newClient(allowPrivate)
+	client.Timeout = 20 * time.Second
+	return client
 }
 
 // guardDial 在真实建连地址上复核内网禁令。放在 Control 而非解析前，
@@ -219,7 +234,7 @@ func (g *Gateway) Invoke(ctx context.Context, caller domain.Caller, inv domain.I
 	}
 
 	// ── 出站调用 ───────────────────────────────────────────────
-	result, callErr := g.call(ctx, conn, op, inv, target, &rec)
+	result, callErr := g.call(ctx, caller, conn, op, inv, target, &rec)
 	// 4xx 是上游在正常表达「你请求得不对」，不该把熔断器推开；5xx 与传输错误才算故障。
 	finish(callErr == nil && result.Status < 500)
 
@@ -242,6 +257,7 @@ func (g *Gateway) Invoke(ctx context.Context, caller domain.Caller, inv domain.I
 
 func (g *Gateway) call(
 	ctx context.Context,
+	caller domain.Caller,
 	conn domain.Connector,
 	op domain.Operation,
 	inv domain.Invocation,
@@ -268,7 +284,16 @@ func (g *Gateway) call(
 		return domain.Result{}, err
 	}
 	applyHeaders(req, conn, op, inv)
-	if err := g.applyAuth(ctx, req, conn); err != nil {
+	if conn.Auth.OAuth != nil && conn.Auth.OAuth.Managed {
+		if g.oauth == nil {
+			return domain.Result{}, domain.ErrCredential
+		}
+		secret, err := g.oauth.AccessToken(ctx, caller, conn)
+		if err != nil {
+			return domain.Result{}, domain.ErrCredential
+		}
+		req.Header.Set("Authorization", "Bearer "+secret.Reveal())
+	} else if err := g.applyAuth(ctx, req, conn); err != nil {
 		return domain.Result{}, fmt.Errorf("%w: %s", domain.ErrCredential, err)
 	}
 
@@ -321,6 +346,9 @@ func (g *Gateway) call(
 // applyAuth 明文凭证的唯一出现点。注意顺序：先 applyHeaders 后 applyAuth，
 // 保证调用方无法用透传头覆盖掉认证头。
 func (g *Gateway) applyAuth(ctx context.Context, req *http.Request, conn domain.Connector) error {
+	if strings.HasPrefix(conn.Auth.CredentialRef, "oauth:") {
+		return domain.ErrCredential
+	}
 	if conn.Auth.Kind == domain.AuthNone || conn.Auth.Kind == "" {
 		return nil
 	}

@@ -21,6 +21,51 @@ opa:
 vault:
   address: http://vault:8200
   tokenSecret: lumo-vault-token
+connectorOAuth:
+  enabled: false
+  callbackUrl: ""
+  stateKeySecret: ""
+  stateKeyKey: state-key
+  vaultMount: secret
+  vaultPrefix: lumo/connector-oauth
+  adminRoles: admin,realm_admin,platform_admin
+governance:
+  # Existing Secret containing LUMO_AUTH_* environment entries, including
+  # bootstrap credentials and optional MFA, Passkey, and OIDC configuration.
+  authSecret: ""
+deviceGateway:
+  # Application TLS terminates in Governance; the public route must pass TLS
+  # through unchanged so the gateway can verify the device client certificate.
+  enabled: false
+  port: 8090
+  publicUrl: ""
+  # Empty uses this release's Registry service, which must then be enabled.
+  registryUrl: ""
+  tlsSecret: ""
+  tlsCertKey: tls.crt
+  tlsKeyKey: tls.key
+  # A dedicated device CA, shared by every Governance replica.
+  issuerSecret: ""
+  issuerCertKey: ca.crt
+  issuerKeyKey: ca.key
+  allowedScopes: ["skills:use", "kb:query"]
+  processRuntime: false
+  # Exact OPA boolean decision endpoint; required for processRuntime=true.
+  policyUrl: ""
+  service:
+    # A TCP LoadBalancer may expose this dedicated Service directly. It must
+    # preserve the original TLS stream and must not inject the PROXY protocol.
+    type: ClusterIP
+    port: 8090
+    annotations: {}
+  istioIngress:
+    # Requires serviceMesh.istio.enabled and an existing ingress controller.
+    # The chart creates only a TLS PASSTHROUGH Gateway and VirtualService.
+    # publicUrl must use a DNS host and the same public port as this listener.
+    enabled: false
+    selector:
+      istio: ingressgateway
+    port: 443
 registry:
   trustSecret: lumo-registry-trust
 console:
@@ -102,6 +147,9 @@ dshWeb:
   projectsUrl: http://lumo-platform-projects:8086
   flowsUrl: http://lumo-platform-flows:8087
   connectorUrl: http://lumo-platform-connector-gateway:8082
+  governanceUrl: http://lumo-platform-governance:8089
+  publicUrl: ""
+  secureCookie: true
   registryUrl: http://lumo-platform-registry:8084
   nacosAddress: http://nacos:8848
   nacosService: lumo-dsh-node
@@ -134,4 +182,5 @@ services:
   llm-gateway: { enabled: true, port: 8088 }
   flows: { enabled: true, port: 8087 }
   projects: { enabled: true, port: 8086 }
+  governance: { enabled: true, port: 8089 }
   usage-ledger: { enabled: true, port: 8085 }

@@ -22,9 +22,32 @@ Istio SDS 管理，不应创建或挂载通用私钥 Secret。上线前还应启
 | `desktop/` | 本地单机 | Rust/Tauri 桌面包 | SQLite、本机 Agent、本地技能；无 RocketMQ/Nacos/MinIO/Redis/PostgreSQL |
 | `compose.standalone.yml` | 服务器单例 | Docker Compose | PG+pgvector / Redis / MinIO / RocketMQ / Nacos + 平台 Go 服务单实例 |
 | `compose.cluster.yml` | 服务器集群 | Docker Compose | **自研服务多实例 + 中间件单实例**；分布式行为与故障注入调试 |
+| `compose.cluster.devices.yml` | Cluster 设备接入 | Compose 叠加文件 | 独立设备 TLS 监听、服务端证书和设备签发 CA 挂载 |
 | `helm/` | Cluster | 生产 | 控制面服务 Helm chart、健康探针和依赖配置 |
 | `compose.local.yml` | Legacy Local-lite | 本地 | 仅开发/CI：PG + Redis + Embedding，不作为产品发行包 |
 | `migrations/` + `migrate.sh` | — | — | 版本化平台迁移记录与执行入口 |
+
+## 桌面设备 TLS 接入
+
+设备通道仅在 `Cluster ready` 中启用。Compose 使用 `compose.cluster.devices.yml`
+叠加文件；Helm 使用 `deviceGateway.enabled=true`。两种方式都把设备 TLS 流量送到
+Governance 的独立 `8090` 监听，原管理 API 继续使用 `8089`。公网入口必须保留客户端
+TLS 握手，使用 TCP 负载均衡或 TLS passthrough，且不注入 PROXY protocol。
+
+需要预置两套材料：匹配设备入口域名的服务端 TLS 证书与私钥，以及只签发设备客户端
+证书的独立 CA 证书与私钥。Helm 分别读取 `deviceGateway.tlsSecret` 和
+`deviceGateway.issuerSecret`，不会生成或把私钥下发给 Agent。所有 Governance 副本
+必须共享相同的设备 CA、服务端证书、公共入口和 PostgreSQL 状态。
+
+启用 Istio 后，管理端口仍使用 STRICT workload mTLS，设备端口从 Governance sidecar
+入站捕获中排除。`deviceGateway.istioIngress.enabled=true` 可为已有 ingress controller
+创建专用 PASSTHROUGH Gateway/VirtualService；也可以保留默认关闭值，由外部 TCP
+入口连接独立 `device-gateway` Service。设备 Service 的 DestinationRule 只关闭该路径
+上的 mesh TLS 发起，原始设备 mTLS 在 Governance 内验证。
+
+完整的 Compose/Helm 配置、Secret 权限、滚动更新、Agent 激活与恢复流程见
+[`docs/desktop-devices.md`](../../docs/desktop-devices.md)。设备管理从原生 DSH Web
+的 `/lumo/ops` 进入；Agent 不需要控制面 Bearer 令牌。
 
 ## 原生 DSH Web + Lumo 运营面
 

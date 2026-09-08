@@ -276,6 +276,12 @@ function isRealmAdmin(identity: RequestIdentity): boolean {
   return identity.roles.some(role => role === 'platform_admin' || role === 'realm_admin' || role === 'admin')
 }
 
+function requireClusterReady(config: Config, res: ServerResponse): boolean {
+  if (config.deploymentMode === 'cluster' && config.clusterStatus.toLowerCase() === 'ready') return true
+  writeJson(res, 403, { error: 'CLUSTER_ONLY', message: '该功能仅在就绪的集群模式可用' })
+  return false
+}
+
 function sourceManager(knowledge: KnowledgeQueryService | undefined): KnowledgeSourceManagerService | undefined {
   if (knowledge === undefined || typeof knowledge !== 'object') return undefined
   const candidate = knowledge as Partial<KnowledgeSourceManagerService>
@@ -426,6 +432,15 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     return
   }
   if (req.method === 'GET' && pathname === '/lumo/api/overview') { writeJson(res, 200, await overview(config, identity, req)); return }
+
+  if (req.method === 'GET' && pathname === '/lumo/api/capabilities') {
+    writeJson(res, 200, {
+      clusterReady: config.deploymentMode === 'cluster' && config.clusterStatus.toLowerCase() === 'ready',
+      organization: config.deploymentMode === 'cluster' && config.clusterStatus.toLowerCase() === 'ready' && isRealmAdmin(identity),
+      sharedRuntimeInstall: config.deploymentMode !== 'cluster' || isRealmAdmin(identity),
+    })
+    return
+  }
 
   if (req.method === 'GET' && pathname === '/lumo/api/registry/artifacts') {
     if (config.deploymentMode === 'local') {
@@ -735,6 +750,21 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     return
   }
 
+  const skillAccess = pathname.match(/^\/lumo\/api\/governance\/skills\/([^/]+)\/(access|grants|revocations)(?:\/([^/]+))?$/u)
+  if (skillAccess !== null) {
+    if (!requireClusterReady(config, res)) return
+    const skillID = safeID(skillAccess[1]); const accessID = skillAccess[3] === undefined ? undefined : safeID(skillAccess[3])
+    if (skillID === undefined || (skillAccess[3] !== undefined && accessID === undefined)) { writeJson(res, 400, { error: 'invalid skill access id' }); return }
+    const path = `/v1/skills/${encodeURIComponent(skillID)}/${skillAccess[2]}${accessID ? `/${encodeURIComponent(accessID)}` : ''}`
+    if (req.method === 'GET' && skillAccess[2] === 'access' && !accessID) { writeUpstream(res, await upstream(config, identity, 'governance', path, req)); return }
+    if (req.method === 'DELETE' && skillAccess[2] !== 'access' && accessID) { writeUpstream(res, await upstream(config, identity, 'governance', path, req, 'DELETE')); return }
+    if (req.method === 'POST' && skillAccess[2] !== 'access' && !accessID) {
+      try { writeUpstream(res, await upstream(config, identity, 'governance', path, req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+      return
+    }
+    writeJson(res, 405, { error: 'method not allowed' }); return
+  }
+
   const governedSkillPublish = pathname.match(/^\/lumo\/api\/governance\/skills\/([^/]+)\/versions\/([^/]+)\/publish$/u)
   if (governedSkillPublish !== null) {
     const skillID = safeID(governedSkillPublish[1]); const version = safeID(governedSkillPublish[2])
@@ -777,8 +807,28 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     return
   }
 
-  if (req.method === 'GET' && pathname === '/lumo/api/users') {
-    writeUpstream(res, await upstream(config, identity, 'governance', `/v1/users?q=${encodeURIComponent(new URL(req.url ?? '/', 'http://lumo.local').searchParams.get('q') ?? '')}`, req)); return
+  if (pathname === '/lumo/api/users' && (req.method === 'GET' || req.method === 'POST')) {
+    if (req.method === 'GET') {
+      writeUpstream(res, await upstream(config, identity, 'governance', `/v1/users?q=${encodeURIComponent(new URL(req.url ?? '/', 'http://lumo.local').searchParams.get('q') ?? '')}`, req)); return
+    }
+    if (!requireClusterReady(config, res)) return
+    try { writeUpstream(res, await upstream(config, identity, 'governance', '/v1/users', req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  const userAccess = pathname.match(/^\/lumo\/api\/users\/([^/]+)\/(access|credentials|oidc)$/u)
+  if (userAccess !== null) {
+    if (!requireClusterReady(config, res)) return
+    const userID = safeID(userAccess[1])
+    if (userID === undefined) { writeJson(res, 400, { error: 'invalid user id' }); return }
+    const path = `/v1/users/${encodeURIComponent(userID)}/${userAccess[2]}`
+    if (req.method === 'GET' && userAccess[2] === 'access') { writeUpstream(res, await upstream(config, identity, 'governance', path, req)); return }
+    if (req.method === 'DELETE' && userAccess[2] === 'oidc') { writeUpstream(res, await upstream(config, identity, 'governance', path, req, 'DELETE')); return }
+    if (req.method === 'PUT' && (userAccess[2] === 'credentials' || userAccess[2] === 'oidc')) {
+      try { writeUpstream(res, await upstream(config, identity, 'governance', path, req, 'PUT', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+      return
+    }
+    writeJson(res, 405, { error: 'method not allowed' }); return
   }
 
   const userResource = pathname.match(/^\/lumo\/api\/users\/([^/]+)$/u)
@@ -801,10 +851,55 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     return
   }
 
+  const organizationResource = pathname.match(/^\/lumo\/api\/(departments|roles)\/([^/]+)$/u)
+  if (req.method === 'PUT' && organizationResource !== null) {
+    if (!requireClusterReady(config, res)) return
+    const id = safeID(organizationResource[2])
+    if (id === undefined) { writeJson(res, 400, { error: 'invalid organization id' }); return }
+    try { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/${organizationResource[1]}/${encodeURIComponent(id)}`, req, 'PUT', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  const desktopDevice = pathname.match(/^\/lumo\/api\/desktop-nodes\/([^/]+)\/device(?:\/(policy|enrollment|commands))?$/u)
+  if (desktopDevice !== null) {
+    if (!requireClusterReady(config, res)) return
+    const nodeID = safeID(desktopDevice[1])
+    if (nodeID === undefined) { writeJson(res, 400, { error: 'invalid node id' }); return }
+    const resource = desktopDevice[2]
+    const path = `/v1/desktop-nodes/${encodeURIComponent(nodeID)}/device${resource ? `/${resource}` : ''}`
+    if (req.method === 'GET' && (resource === undefined || resource === 'commands')) {
+      writeUpstream(res, await upstream(config, identity, 'governance', path, req)); return
+    }
+    if (req.method === 'POST' && resource === 'enrollment') {
+      writeUpstream(res, await upstream(config, identity, 'governance', path, req, 'POST')); return
+    }
+    if ((req.method === 'PUT' && resource === 'policy') || (req.method === 'POST' && resource === 'commands')) {
+      try { writeUpstream(res, await upstream(config, identity, 'governance', path, req, req.method, await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+      return
+    }
+    writeJson(res, 405, { error: 'method not allowed' }); return
+  }
+
+  const desktopNodes = pathname.match(/^\/lumo\/api\/desktop-nodes(?:\/([^/]+)\/state)?$/u)
+  if (desktopNodes !== null) {
+    if (!requireClusterReady(config, res)) return
+    const nodeID = desktopNodes[1] === undefined ? undefined : safeID(desktopNodes[1])
+    if (desktopNodes[1] !== undefined && nodeID === undefined) { writeJson(res, 400, { error: 'invalid node id' }); return }
+    const path = `/v1/desktop-nodes${nodeID ? `/${encodeURIComponent(nodeID)}/state` : ''}`
+    if (req.method === 'GET' && !nodeID) { writeUpstream(res, await upstream(config, identity, 'governance', path, req)); return }
+    if ((req.method === 'POST' && !nodeID) || (req.method === 'PUT' && nodeID)) {
+      try { writeUpstream(res, await upstream(config, identity, 'governance', path, req, req.method, await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+      return
+    }
+    writeJson(res, 405, { error: 'method not allowed' }); return
+  }
+
   const userRole = pathname.match(/^\/lumo\/api\/users\/([^/]+)\/roles\/([^/]+)$/u)
-  if (req.method === 'PUT' && userRole !== null) {
+  if ((req.method === 'PUT' || req.method === 'DELETE') && userRole !== null) {
+    if (req.method === 'DELETE' && !requireClusterReady(config, res)) return
     const userID = safeID(userRole[1]); const roleID = safeID(userRole[2])
     if (userID === undefined || roleID === undefined) { writeJson(res, 400, { error: 'invalid user or role id' }); return }
+    if (req.method === 'DELETE') { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/users/${encodeURIComponent(userID)}/roles/${encodeURIComponent(roleID)}`, req, 'DELETE')); return }
     try { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/users/${encodeURIComponent(userID)}/roles/${encodeURIComponent(roleID)}`, req, 'PUT', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
     return
   }
@@ -969,6 +1064,37 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     writeUpstream(res, await upstream(config, identity, 'flows', `/v1/flows/${encodeURIComponent(flowID)}/versions/${flowVersion[2]}`, req)); return
   }
 
+  const managedProjectFlows = pathname.match(/^\/lumo\/api\/projects\/([^/]+)\/flows\/management$/u)
+  if (managedProjectFlows !== null && req.method === 'GET') {
+    if (!requireClusterReady(config, res)) return
+    const projectID = safeID(managedProjectFlows[1])
+    if (projectID === undefined) { writeJson(res, 400, { error: 'invalid project id' }); return }
+    writeUpstream(res, await upstream(config, identity, 'flows', `/v1/projects/${encodeURIComponent(projectID)}/flows/management`, req)); return
+  }
+
+  const flowChange = pathname.match(/^\/lumo\/api\/flows\/([^/]+)\/management\/change$/u)
+  if (flowChange !== null && req.method === 'POST') {
+    if (!requireClusterReady(config, res)) return
+    const flowID = safeID(flowChange[1])
+    if (flowID === undefined) { writeJson(res, 400, { error: 'invalid flow id' }); return }
+    try { writeUpstream(res, await upstream(config, identity, 'flows', `/v1/flows/${encodeURIComponent(flowID)}/management/change`, req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  const managedFlow = pathname.match(/^\/lumo\/api\/flows\/([^/]+)\/management$/u)
+  if (managedFlow !== null) {
+    if (!requireClusterReady(config, res)) return
+    const flowID = safeID(managedFlow[1])
+    if (flowID === undefined) { writeJson(res, 400, { error: 'invalid flow id' }); return }
+    const path = `/v1/flows/${encodeURIComponent(flowID)}/management`
+    if (req.method === 'GET') { writeUpstream(res, await upstream(config, identity, 'flows', path, req)); return }
+    if (req.method === 'PATCH') {
+      try { writeUpstream(res, await upstream(config, identity, 'flows', path, req, 'PATCH', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+      return
+    }
+    writeJson(res, 405, { error: 'method not allowed' }); return
+  }
+
   const flowRunReplay = pathname.match(/^\/lumo\/api\/flows\/([^/]+)\/runs\/([1-9]\d*)\/replay$/u)
   if (req.method === 'POST' && flowRunReplay !== null) {
     const flowID = safeID(flowRunReplay[1])
@@ -1005,6 +1131,20 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     const projectID = safeID(projectLifecycle[1])
     if (projectID === undefined) { writeJson(res, 400, { error: 'invalid project id' }); return }
     writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/${encodeURIComponent(projectID)}/${projectLifecycle[2]}`, req, 'POST')); return
+  }
+
+  const projectMember = pathname.match(/^\/lumo\/api\/projects\/([^/]+)\/members(?:\/([^/]+))?$/u)
+  if (projectMember !== null && req.method !== 'GET') {
+    if (!requireClusterReady(config, res)) return
+    const projectID = safeID(projectMember[1]); const userID = projectMember[2] === undefined ? undefined : safeID(projectMember[2])
+    if (projectID === undefined || (projectMember[2] !== undefined && userID === undefined)) { writeJson(res, 400, { error: 'invalid project member id' }); return }
+    const path = `/v1/projects/${encodeURIComponent(projectID)}/members${userID ? `/${encodeURIComponent(userID)}` : ''}`
+    if (req.method === 'DELETE' && userID) { writeUpstream(res, await upstream(config, identity, 'projects', path, req, 'DELETE')); return }
+    if ((req.method === 'POST' && !userID) || (req.method === 'PATCH' && userID)) {
+      try { writeUpstream(res, await upstream(config, identity, 'projects', path, req, req.method, await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+      return
+    }
+    writeJson(res, 405, { error: 'method not allowed' }); return
   }
 
   const projectResource = pathname.match(/^\/lumo\/api\/projects\/([^/]+)\/(members|artifacts|spaces|automations|usage)$/u)
@@ -1067,7 +1207,34 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     writeUpstream(res, await upstream(config, identity, 'connector', `/approvals/${encodeURIComponent(approvalID)}/${connectorApprovalDecision[2]}`, req, 'POST')); return
   }
 
+  const connectorManifest = pathname.match(/^\/lumo\/api\/connectors\/([^/]+)\/manifest$/u)
+  const connectorOAuth = pathname.match(/^\/lumo\/api\/connectors\/([^/]+)\/oauth(\/refresh)?$/u)
+  if (connectorOAuth !== null && ((connectorOAuth[2] === undefined && (req.method === 'GET' || req.method === 'DELETE')) || (connectorOAuth[2] !== undefined && req.method === 'POST'))) {
+    if (!requireClusterReady(config, res)) return
+    const connectorID = safeID(connectorOAuth[1])
+    if (connectorID === undefined) { writeJson(res, 400, { error: 'invalid connector id' }); return }
+    const path = `/connectors/${encodeURIComponent(connectorID)}/oauth${connectorOAuth[2] ?? ''}`
+    writeUpstream(res, await upstream({ ...config, timeoutMs: Math.max(config.timeoutMs, 60_000) }, identity, 'connector', path, req, req.method)); return
+  }
+  if (pathname === '/lumo/api/connectors/capabilities' && req.method === 'GET') {
+    if (!requireClusterReady(config, res)) return
+    writeUpstream(res, await upstream(config, identity, 'connector', '/capabilities', req)); return
+  }
+  if (connectorManifest !== null && req.method === 'GET') {
+    if (!requireClusterReady(config, res)) return
+    const connectorID = safeID(connectorManifest[1])
+    if (connectorID === undefined) { writeJson(res, 400, { error: 'invalid connector id' }); return }
+    writeUpstream(res, await upstream(config, identity, 'connector', `/connectors/${encodeURIComponent(connectorID)}/manifest`, req)); return
+  }
+
   const connector = pathname.match(/^\/lumo\/api\/connectors\/([^/]+)$/u)
+  if (connector !== null && req.method === 'PUT') {
+    if (!requireClusterReady(config, res)) return
+    const connectorID = safeID(connector[1])
+    if (connectorID === undefined) { writeJson(res, 400, { error: 'invalid connector id' }); return }
+    try { writeUpstream(res, await upstream(config, identity, 'connector', `/connectors/${encodeURIComponent(connectorID)}`, req, 'PUT', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
   if (req.method === 'DELETE' && connector !== null) {
     const connectorID = safeID(connector[1])
     if (connectorID === undefined) { writeJson(res, 400, { error: 'invalid connector id' }); return }
@@ -1106,7 +1273,6 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       'Han-1413141/dsh-cost-meter',
       'scwlkq/dsh-task-board',
       'liustack/modlens',
-      'omdsh-dev/DSH-better-sidebar',
       'NanmiCoder/dsh-agent-teams',
       'dream-num/dsh-univer-office',
     ],
@@ -1116,7 +1282,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   // always goes to the network.
   if (req.method === 'GET' && (pathname === '/lumo/api/skillhub/catalog' || pathname === '/lumo/api/skillhub/refresh')) {
     const cachedOnly = pathname === '/lumo/api/skillhub/catalog' && skillhubUrl.searchParams.get('cached') === '1'
-    try { writeJson(res, 200, await loadCatalog(skillhubConfig(), cachedOnly)) } catch (error) { writeJson(res, 502, { error: error instanceof Error ? error.message : 'skillhub catalog unavailable' }) }
+    try { writeJson(res, 200, { ...await loadCatalog(skillhubConfig(), cachedOnly), canInstall: config.deploymentMode !== 'cluster' || isRealmAdmin(identity) }) } catch (error) { writeJson(res, 502, { error: error instanceof Error ? error.message : 'skillhub catalog unavailable' }) }
     return
   }
   // Live search against SkillHub: `?kind=skill|pack|plugin&q=...&category=...&page=n` (only plugins page server-side).
@@ -1131,6 +1297,9 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     return
   }
   if (req.method === 'POST' && pathname === '/lumo/api/skillhub/install') {
+    if (config.deploymentMode === 'cluster' && !isRealmAdmin(identity)) {
+      writeJson(res, 403, { error: 'forbidden', message: '共享运行时的技能、专家包和插件安装需要管理员权限' }); return
+    }
     let body: Record<string, unknown>
     try { body = await readJson(req) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }); return }
     const kind = body['kind']; const id = body['id']
@@ -1140,8 +1309,8 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     return
   }
 
-  res.setHeader('allow', 'GET, POST, PUT, DELETE')
-  if (!['GET', 'POST', 'PUT', 'DELETE'].includes(req.method ?? '')) { res.writeHead(405); res.end(); return }
+  res.setHeader('allow', 'GET, POST, PUT, PATCH, DELETE')
+  if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method ?? '')) { res.writeHead(405); res.end(); return }
   writeJson(res, 404, { error: 'unknown_lumo_endpoint' })
 }
 

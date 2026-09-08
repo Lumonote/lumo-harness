@@ -7,8 +7,9 @@ export function resolveLoginTheme(value: string | undefined): LoginTheme {
 }
 
 export interface LoginPageOptions {
-  state?: 'invalid' | 'locked' | 'expired' | 'unavailable' | 'password-changed'
+  state?: 'invalid' | 'locked' | 'expired' | 'unavailable' | 'password-changed' | 'oidc-failed'
   theme?: LoginTheme
+  oidcEnabled?: boolean
 }
 
 const messages: Record<NonNullable<LoginPageOptions['state']>, string> = {
@@ -17,6 +18,7 @@ const messages: Record<NonNullable<LoginPageOptions['state']>, string> = {
   expired: '登录状态已失效，请重新验证身份。',
   unavailable: '用户认证服务暂时不可用，请稍后刷新页面。',
   'password-changed': '密码已更新，全部旧会话均已撤销。请使用新密码登录。',
+  'oidc-failed': '企业登录未完成，或此账号尚未获准访问。请重试或联系管理员。',
 }
 
 /** A standalone, CSP-safe login surface served before the DSH client loads. */
@@ -61,6 +63,7 @@ export function loginPage(options: LoginPageOptions = {}): string {
     .submit{display:flex;align-items:center;justify-content:space-between;width:100%;height:50px;padding:0 17px;border:1px solid var(--mint);border-radius:10px;background:var(--mint);color:#0b0e11;cursor:pointer;font:800 12px "Avenir Next","Trebuchet MS",sans-serif;letter-spacing:.04em;transition:transform .18s,box-shadow .18s,filter .18s}.submit:hover{transform:translateY(-2px);box-shadow:0 12px 26px rgba(255,145,77,.18)}.submit:disabled{cursor:wait;filter:saturate(.45);transform:none}.submit span:last-child{font-size:18px;font-weight:400}.passkey-submit{width:100%;height:44px;margin-top:10px;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--ink);cursor:pointer;font:700 11px "Avenir Next","Trebuchet MS",sans-serif;letter-spacing:.03em}.passkey-submit:hover{border-color:var(--mint);color:var(--mint)}.passkey-submit:disabled{cursor:wait;opacity:.55}
     .alert{display:grid;grid-template-columns:24px 1fr;gap:10px;margin:0 0 14px;padding:12px 13px;border:1px solid rgba(241,153,136,.28);border-radius:10px;background:rgba(130,48,42,.12);color:#efb2a6}.alert span{display:grid;place-items:center;width:20px;height:20px;border:1px solid currentColor;border-radius:50%;font:700 11px Georgia,serif}.alert p{margin:1px 0 0;font-size:11px;line-height:1.55}
     .trust{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-top:18px;color:var(--dim);font:9px/1.5 "SFMono-Regular","Cascadia Mono",monospace}.trust b{color:var(--muted);font-weight:500}
+    .oidc-login{display:flex;align-items:center;justify-content:center;min-height:44px;padding:10px 16px;margin-top:14px;border:1px solid var(--line);border-radius:8px;color:var(--ink);font-size:13px;letter-spacing:0;text-align:center;text-decoration:none}.oidc-login:hover{border-color:var(--mint);color:var(--mint)}.oidc-login:focus-visible{outline:2px solid var(--mint);outline-offset:3px}
     @keyframes land{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
     @media(max-width:880px){.shell{grid-template-columns:1fr}.manifest{min-height:auto;padding:26px 24px;border-right:0;border-bottom:1px solid var(--line)}.copy{margin:70px 0 22px}.copy>p,.system-note{display:none}h1{max-width:350px;font-size:54px}.entry{min-height:auto;padding:42px 20px 60px}.card{max-width:500px}}
     @media(max-width:520px){.manifest{padding:22px 18px}.copy{margin:48px 0 10px}h1{font-size:44px}.entry{padding:32px 14px 48px}.card-head{padding:0 5px}form{padding:24px 18px}.trust{align-items:flex-start;flex-direction:column;gap:5px}}
@@ -87,6 +90,7 @@ export function loginPage(options: LoginPageOptions = {}): string {
           <button class="submit" id="submit" type="submit"><span>进入 Lumo</span><span>→</span></button>
           <button class="passkey-submit" id="passkey-submit" type="button">使用 Passkey 登录</button>
         </form>
+        ${options.oidcEnabled ? '<a class="oidc-login" href="/auth/oidc/start">使用企业账号登录</a>' : ''}
         <footer class="trust"><span>受保护的本地入口</span><b>HTTPONLY · SAMESITE · ONE-TIME CAPTCHA</b></footer>
       </div>
     </section>

@@ -4,6 +4,7 @@ import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
 import { GovernanceAuthClient } from './client.ts'
+import { ConnectorOAuthClient } from './connector-oauth.ts'
 import { closeAuthProxy, createAuthProxy, listenAuthProxy } from './proxy.ts'
 
 export const name = 'lumo-user-auth'
@@ -14,7 +15,10 @@ export interface Config {
   port: number
   publicBaseUrl?: string
   secureCookie?: boolean
+  clusterMode?: boolean
+  clusterReady?: boolean
   governanceUrl: string
+  connectorUrl?: string
   controlPlaneToken: string
   realm: string
   projectId?: string
@@ -27,7 +31,10 @@ export const Config: z<Config> = z.object({
   port: z.number().default(3080),
   publicBaseUrl: z.string(),
   secureCookie: z.boolean().default(false),
+  clusterMode: z.boolean().default(false),
+  clusterReady: z.boolean().default(false),
   governanceUrl: z.string(),
+  connectorUrl: z.string(),
   controlPlaneToken: z.string(),
   realm: z.string(),
   projectId: z.string(),
@@ -51,11 +58,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     port: config.port,
     ...(config.publicBaseUrl === undefined ? {} : { publicBaseUrl: config.publicBaseUrl }),
     secureCookie: config.secureCookie ?? false,
+    clusterMode: config.clusterMode ?? false,
     realm: config.realm,
     ...(config.projectId === undefined ? {} : { projectId: config.projectId }),
     identityAssertionSecret: config.identityAssertionSecret,
     upstreamPort: ctx.webServer.port,
     client,
+    ...(config.clusterMode && config.clusterReady && config.connectorUrl ? { connectorOAuth: new ConnectorOAuthClient(config.connectorUrl, config.controlPlaneToken) } : {}),
     logger: {
       info: (format, ...args) => ctx.logger.info(format, ...args),
       warn: (format, ...args) => ctx.logger.warn(format, ...args),

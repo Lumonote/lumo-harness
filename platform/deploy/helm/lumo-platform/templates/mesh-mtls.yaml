@@ -33,6 +33,78 @@ spec:
 ---
 {{- end }}
 {{- end }}
+{{- if .Values.deviceGateway.enabled }}
+# This Service carries the application's device mTLS session unchanged. Its
+# only target port is excluded from the Governance sidecar's inbound capture.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ include "lumo-platform.name" . }}-device-gateway-tls
+  labels: { lumo.dev/mesh: istio }
+spec:
+  host: {{ printf "%s-device-gateway.%s.svc.cluster.local" (include "lumo-platform.name" .) $namespace | quote }}
+  # The ingress controller may run outside the release namespace. This rule
+  # disables only mesh TLS origination for the dedicated device Service.
+  exportTo: ["*"]
+  trafficPolicy:
+    tls: { mode: DISABLE }
+---
+{{- if .Values.deviceGateway.istioIngress.enabled }}
+{{- $public := urlParse .Values.deviceGateway.publicUrl }}
+{{- $host := regexReplaceAll ":[0-9]+$" $public.host "" }}
+{{- if not (regexMatch "^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$" $host) }}
+{{- fail "deviceGateway.publicUrl must use a DNS hostname for Istio TLS SNI routing" }}
+{{- end }}
+{{- $port := int .Values.deviceGateway.istioIngress.port }}
+{{- if or (lt $port 1) (gt $port 65535) }}
+{{- fail "deviceGateway.istioIngress.port must be a valid TCP port" }}
+{{- end }}
+{{- $hasPublicPort := regexMatch ":[0-9]+$" $public.host }}
+{{- if or (and $hasPublicPort (ne $public.host (printf "%s:%d" $host $port))) (and (not $hasPublicPort) (ne $port 443)) }}
+{{- fail "deviceGateway.publicUrl must match deviceGateway.istioIngress.port" }}
+{{- end }}
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: {{ include "lumo-platform.name" . }}-device-gateway
+  labels: { lumo.dev/mesh: istio }
+spec:
+  selector:
+    {{- required "deviceGateway.istioIngress.selector is required" .Values.deviceGateway.istioIngress.selector | toYaml | nindent 4 }}
+  servers:
+    - port:
+        number: {{ $port }}
+        name: tls-device
+        protocol: TLS
+      tls:
+        mode: PASSTHROUGH
+      hosts:
+        - {{ $host | quote }}
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ include "lumo-platform.name" . }}-device-gateway
+  labels: { lumo.dev/mesh: istio }
+spec:
+  exportTo: ["*"]
+  hosts:
+    - {{ $host | quote }}
+  gateways:
+    - {{ include "lumo-platform.name" . }}-device-gateway
+  tls:
+    - match:
+        - port: {{ $port }}
+          sniHosts:
+            - {{ $host | quote }}
+      route:
+        - destination:
+            host: {{ printf "%s-device-gateway.%s.svc.cluster.local" (include "lumo-platform.name" .) $namespace | quote }}
+            port:
+              number: {{ .Values.deviceGateway.service.port }}
+---
+{{- end }}
+{{- end }}
 {{- if .Values.dshNode.enabled }}
 apiVersion: networking.istio.io/v1
 kind: DestinationRule

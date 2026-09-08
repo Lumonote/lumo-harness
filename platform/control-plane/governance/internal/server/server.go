@@ -21,6 +21,7 @@ import (
 
 	authcrypto "github.com/lumo-harness/platform/governance/internal/auth"
 	"github.com/lumo-harness/platform/governance/internal/domain"
+	"github.com/lumo-harness/platform/governance/internal/device"
 	"github.com/lumo-harness/platform/governance/internal/store"
 	"github.com/lumo-harness/platform/observability"
 )
@@ -41,6 +42,8 @@ type Config struct {
 	// WebAuthn holds an already validated RPID/origin allow-list.  Empty means
 	// passkeys are unavailable; partial configuration is rejected at startup.
 	WebAuthn authcrypto.WebAuthnConfig
+	OIDC     authcrypto.OIDCConfig
+	DeviceGateway *device.Gateway
 }
 
 type Server struct {
@@ -65,6 +68,12 @@ func New(st *store.Store, cfg Config, log *slog.Logger) *Server {
 	if cfg.AuthCaptchaTTL <= 0 {
 		cfg.AuthCaptchaTTL = 2 * time.Minute
 	}
+	if st != nil {
+		st.SetOIDCProvider("", "")
+		if cfg.OIDC.Enabled() && cfg.OIDC.Validate() == nil && domain.RequireCluster(cfg.DeploymentMode, cfg.ClusterStatus) == nil {
+			st.SetOIDCProvider(cfg.OIDC.Issuer, cfg.OIDC.Realm)
+		}
+	}
 	return &Server{store: st, cfg: cfg, log: log}
 }
 
@@ -73,6 +82,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /metrics", metrics)
 	mux.HandleFunc("POST /v1/auth/captcha", s.authCaptcha)
 	mux.HandleFunc("POST /v1/auth/login", s.authLogin)
+	mux.HandleFunc("GET /v1/auth/oidc", s.authOIDCStatus)
+	mux.HandleFunc("POST /v1/auth/oidc/start", s.authOIDCStart)
+	mux.HandleFunc("POST /v1/auth/oidc/callback", s.authOIDCCallback)
 	mux.HandleFunc("GET /v1/auth/session", s.authSession)
 	mux.HandleFunc("GET /v1/auth/sessions", s.authSessions)
 	mux.HandleFunc("GET /v1/auth/security-events", s.authSecurityEvents)
@@ -94,6 +106,11 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/effective-permissions", s.effectivePermissions)
 	mux.HandleFunc("POST /v1/permission-explain", s.explainPermission)
 	mux.HandleFunc("PUT /v1/users/{userID}", s.upsertUser)
+	mux.HandleFunc("POST /v1/users", s.createLocalUser)
+	mux.HandleFunc("GET /v1/users/{userID}/access", s.userAccess)
+	mux.HandleFunc("PUT /v1/users/{userID}/credentials", s.setUserCredentials)
+	mux.HandleFunc("PUT /v1/users/{userID}/oidc", s.authOIDCLink)
+	mux.HandleFunc("DELETE /v1/users/{userID}/oidc", s.authOIDCLink)
 	mux.HandleFunc("GET /v1/users/{userID}/effective-skills", s.effectiveSkills)
 	mux.HandleFunc("GET /v1/agent-presets", s.listAgentPresets)
 	mux.HandleFunc("POST /v1/agent-presets", s.createAgentPreset)
@@ -120,9 +137,12 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/tasks/{taskID}/outcome", s.recordOutcome)
 	mux.HandleFunc("GET /v1/departments/tree", s.listDepartments)
 	mux.HandleFunc("POST /v1/departments", s.createDepartment)
+	mux.HandleFunc("PUT /v1/departments/{departmentID}", s.updateDepartment)
 	mux.HandleFunc("GET /v1/roles", s.listRoles)
 	mux.HandleFunc("POST /v1/roles", s.createRole)
+	mux.HandleFunc("PUT /v1/roles/{roleID}", s.updateRole)
 	mux.HandleFunc("PUT /v1/users/{userID}/roles/{roleID}", s.assignRole)
+	mux.HandleFunc("DELETE /v1/users/{userID}/roles/{roleID}", s.revokeRole)
 	mux.HandleFunc("GET /v1/skills", s.listSkills)
 	mux.HandleFunc("POST /v1/skills", s.createSkill)
 	mux.HandleFunc("GET /v1/skills/runtime-snapshot", s.runtimeSkillSnapshot)
@@ -131,10 +151,18 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/skills/{skillID}/versions/{version}", s.getSkillVersion)
 	mux.HandleFunc("POST /v1/skills/{skillID}/versions/{version}/publish", s.publishSkillVersion)
 	mux.HandleFunc("POST /v1/skills/{skillID}/grants", s.grantSkill)
+	mux.HandleFunc("GET /v1/skills/{skillID}/access", s.skillAccess)
+	mux.HandleFunc("DELETE /v1/skills/{skillID}/{resource}/{accessID}", s.deleteSkillAccess)
 	mux.HandleFunc("POST /v1/skills/{skillID}/revocations", s.revokeSkill)
 	mux.HandleFunc("GET /v1/desktop-nodes", s.listDesktopNodes)
 	mux.HandleFunc("POST /v1/desktop-nodes", s.registerDesktopNode)
 	mux.HandleFunc("POST /v1/desktop-nodes/{nodeID}/heartbeat", s.heartbeatDesktopNode)
+	mux.HandleFunc("PUT /v1/desktop-nodes/{nodeID}/state", s.setDesktopNodeState)
+	mux.HandleFunc("GET /v1/desktop-nodes/{nodeID}/device", s.deviceStatus)
+	mux.HandleFunc("PUT /v1/desktop-nodes/{nodeID}/device/policy", s.devicePolicy)
+	mux.HandleFunc("POST /v1/desktop-nodes/{nodeID}/device/enrollment", s.deviceEnrollment)
+	mux.HandleFunc("GET /v1/desktop-nodes/{nodeID}/device/commands", s.deviceCommands)
+	mux.HandleFunc("POST /v1/desktop-nodes/{nodeID}/device/commands", s.deviceCommand)
 }
 
 type caller struct {
@@ -197,7 +225,7 @@ func (s *Server) upsertUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := r.PathValue("userID")
-	if userID != c.userID && !requireRealmAdmin(w, c) {
+	if !requireRealmAdmin(w, c) {
 		return
 	}
 	var req userRequest
@@ -207,7 +235,7 @@ func (s *Server) upsertUser(w http.ResponseWriter, r *http.Request) {
 	user, err := s.store.UpsertUser(r.Context(), domain.User{
 		ID: userID, Realm: c.realm, DisplayName: req.DisplayName, PrimaryDeptID: req.PrimaryDeptID,
 		Status: req.Status, Source: "gateway",
-	})
+	}, c.userID)
 	if err != nil {
 		s.respondStoreError(w, err)
 		return
@@ -2196,6 +2224,8 @@ func (s *Server) listDesktopNodes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) respondStoreError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, store.ErrLastAdmin):
+		writeError(w, http.StatusConflict, "last_admin", "必须保留可登录的管理员、长期管理员授权和已有的本地管理员恢复入口")
 	case errors.Is(err, store.ErrLegacyTask):
 		writeError(w, http.StatusConflict, "legacy_task", err.Error())
 	case errors.Is(err, store.ErrNotFound):

@@ -40,6 +40,11 @@ type Installer struct {
 	NodeID            string
 	ControlPlaneToken string
 	Client            *http.Client
+	// Independently provisioned publisher keys. Desktop agents require this;
+	// existing server installations may continue trusting their internal Registry.
+	TrustFile string
+	// Optional exact closure approved for this node, keyed by name@version.
+	PinnedDigests map[string]string
 }
 
 // ResolveRollout reads a channel's desired version for one root artifact. It
@@ -459,6 +464,9 @@ func (i *Installer) fetchPlan(ctx context.Context, name, version string, shape p
 	var p plan.Plan
 	if err := json.NewDecoder(io.LimitReader(res.Body, 4<<20)).Decode(&p); err != nil {
 		return nil, fmt.Errorf("provisioner: plan 解析失败: %w", err)
+	}
+	if i.TrustFile != "" {
+		return i.verifyPlan(ctx, &p, name, version, shape)
 	}
 	return &p, nil
 }

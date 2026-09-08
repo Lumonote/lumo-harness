@@ -91,6 +91,29 @@ CREATE TABLE IF NOT EXISTS governance_auth_credentials (
   UNIQUE (realm, username),
   FOREIGN KEY (realm, user_id) REFERENCES governance_users(realm, id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS governance_auth_oidc_identities (
+  realm             TEXT NOT NULL,
+  issuer            TEXT NOT NULL,
+  subject           TEXT NOT NULL,
+  user_id           TEXT NOT NULL,
+  username          TEXT NOT NULL,
+  enabled           BOOLEAN NOT NULL DEFAULT true,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_login_at     TIMESTAMPTZ,
+  PRIMARY KEY (realm, issuer, subject),
+  UNIQUE (realm, user_id),
+  FOREIGN KEY (realm, user_id) REFERENCES governance_users(realm, id) ON DELETE CASCADE
+);
+ALTER TABLE governance_auth_oidc_identities ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT true;
+CREATE TABLE IF NOT EXISTS governance_auth_oidc_flows (
+  state_hash        TEXT PRIMARY KEY,
+  browser_hash      TEXT NOT NULL,
+  config_hash       TEXT NOT NULL,
+  nonce             TEXT NOT NULL,
+  verifier          TEXT NOT NULL,
+  expires_at        TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS governance_auth_oidc_flows_expiry_idx ON governance_auth_oidc_flows (expires_at);
 CREATE TABLE IF NOT EXISTS governance_auth_sessions (
 	  session_id        TEXT NOT NULL DEFAULT gen_random_uuid()::text,
   token_hash        TEXT PRIMARY KEY,
@@ -103,6 +126,7 @@ CREATE TABLE IF NOT EXISTS governance_auth_sessions (
   FOREIGN KEY (realm, user_id) REFERENCES governance_users(realm, id) ON DELETE CASCADE
 );
 ALTER TABLE governance_auth_sessions ADD COLUMN IF NOT EXISTS session_id TEXT;
+ALTER TABLE governance_auth_sessions ADD COLUMN IF NOT EXISTS oidc_issuer TEXT NOT NULL DEFAULT '';
 UPDATE governance_auth_sessions SET session_id=gen_random_uuid()::text WHERE session_id IS NULL OR session_id='';
 ALTER TABLE governance_auth_sessions ALTER COLUMN session_id SET NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS governance_auth_sessions_id_idx ON governance_auth_sessions (session_id);
@@ -118,7 +142,7 @@ CREATE TABLE IF NOT EXISTS governance_auth_security_events (
 );
 ALTER TABLE governance_auth_security_events DROP CONSTRAINT IF EXISTS governance_auth_security_events_event_check;
 ALTER TABLE governance_auth_security_events ADD CONSTRAINT governance_auth_security_events_event_check
-  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected'));
+  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected','user_created','user_updated','credentials_reset','role_assigned','role_revoked','role_updated','department_updated','node_updated','skill_access_updated','oidc_login','oidc_linked','oidc_unlinked'));
 CREATE INDEX IF NOT EXISTS governance_auth_security_events_user_idx
   ON governance_auth_security_events (realm, user_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS governance_auth_totp (
@@ -455,7 +479,11 @@ var (
 	ErrLegacyTask = errors.New("legacy task has no business state; materialize a run before transition")
 )
 
-type Store struct{ pool *pgxpool.Pool }
+type Store struct {
+	pool       *pgxpool.Pool
+	oidcIssuer string
+	oidcRealm  string
+}
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
@@ -474,38 +502,58 @@ func (s *Store) Init(ctx context.Context) error {
 	if _, err := tx.Exec(ctx, DDL); err != nil {
 		return fmt.Errorf("initialize governance schema: %w", err)
 	}
+	if _, err := tx.Exec(ctx, deviceDDL); err != nil {
+		return fmt.Errorf("initialize device schema: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit governance schema initialization: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) UpsertUser(ctx context.Context, user domain.User) (domain.User, error) {
-	if user.ID == "" || user.Realm == "" || user.DisplayName == "" {
-		return domain.User{}, fmt.Errorf("%w: user id, realm, and display name are required", ErrBadRequest)
-	}
-	if user.Status == "" {
-		user.Status = "active"
-	}
-	if !validUserStatus(user.Status) {
-		return domain.User{}, fmt.Errorf("%w: invalid user status", ErrBadRequest)
+func (s *Store) UpsertUser(ctx context.Context, user domain.User, actor string) (domain.User, error) {
+	if err := validateManagedUser(&user); err != nil {
+		return domain.User{}, err
 	}
 	if user.Source == "" {
 		user.Source = "local"
 	}
-	err := s.pool.QueryRow(ctx, `
+	tx, err := s.beginOrganizationChange(ctx, user.Realm)
+	if err != nil {
+		return domain.User{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := checkUserDepartment(ctx, tx, user); err != nil {
+		return domain.User{}, err
+	}
+	before, err := s.activeAdminCount(ctx, tx, user.Realm)
+	if err != nil {
+		return domain.User{}, err
+	}
+	err = tx.QueryRow(ctx, `
 		INSERT INTO governance_users (realm, id, display_name, primary_dept_id, status, source)
 		VALUES ($1,$2,$3,$4,$5,$6)
 		ON CONFLICT (realm,id) DO UPDATE SET
 		  display_name = EXCLUDED.display_name, primary_dept_id = EXCLUDED.primary_dept_id,
-		  status = EXCLUDED.status, source = EXCLUDED.source, updated_at = now()
-		RETURNING created_at, updated_at`,
+		  status = EXCLUDED.status, updated_at = now()
+		RETURNING source, created_at, updated_at`,
 		user.Realm, user.ID, user.DisplayName, user.PrimaryDeptID, user.Status, user.Source,
-	).Scan(&user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.Source, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return domain.User{}, fmt.Errorf("upsert user: %w", err)
 	}
-	return user, nil
+	if err = s.preserveActiveAdmin(ctx, tx, user.Realm, before); err != nil {
+		return domain.User{}, err
+	}
+	if user.Status != "active" {
+		if _, err = tx.Exec(ctx, `DELETE FROM governance_auth_sessions WHERE realm=$1 AND user_id=$2`, user.Realm, user.ID); err != nil {
+			return domain.User{}, err
+		}
+	}
+	if err = recordUserAdminEvent(ctx, tx, user.Realm, user.ID, "user_updated", actor, map[string]any{"status": user.Status, "primary_dept_id": user.PrimaryDeptID}); err != nil {
+		return domain.User{}, err
+	}
+	return user, tx.Commit(ctx)
 }
 
 func (s *Store) ListUsers(ctx context.Context, realm, query string) ([]domain.User, error) {
@@ -901,7 +949,8 @@ func (s *Store) workerStats(ctx context.Context, realm, workerID string) (float6
 }
 
 func (s *Store) CreateDepartment(ctx context.Context, department domain.Department) (domain.Department, error) {
-	if department.ID == "" || department.Realm == "" || department.Name == "" {
+	department.Name = strings.TrimSpace(department.Name)
+	if !managedID.MatchString(department.ID) || department.Realm == "" || department.Name == "" || len([]rune(department.Name)) > 160 {
 		return domain.Department{}, fmt.Errorf("%w: department id, realm, and name are required", ErrBadRequest)
 	}
 	if department.Status == "" {
@@ -910,7 +959,7 @@ func (s *Store) CreateDepartment(ctx context.Context, department domain.Departme
 	if !validOrgStatus(department.Status) {
 		return domain.Department{}, fmt.Errorf("%w: invalid department status", ErrBadRequest)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginOrganizationChange(ctx, department.Realm)
 	if err != nil {
 		return domain.Department{}, err
 	}
@@ -920,7 +969,7 @@ func (s *Store) CreateDepartment(ctx context.Context, department domain.Departme
 	department.Level = 0
 	if department.ParentDeptID != "" {
 		var parentLevel int
-		err = tx.QueryRow(ctx, `SELECT path, level FROM governance_departments WHERE realm=$1 AND id=$2`, department.Realm, department.ParentDeptID).Scan(&parentPath, &parentLevel)
+		err = tx.QueryRow(ctx, `SELECT path, level FROM governance_departments WHERE realm=$1 AND id=$2 AND status='active'`, department.Realm, department.ParentDeptID).Scan(&parentPath, &parentLevel)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.Department{}, ErrNotFound
 		}
@@ -930,6 +979,15 @@ func (s *Store) CreateDepartment(ctx context.Context, department domain.Departme
 		department.Level = parentLevel + 1
 	}
 	department.Path = parentPath + department.ID + "/"
+	if department.ManagerUserID != "" {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM governance_users WHERE realm=$1 AND id=$2 AND status='active')`, department.Realm, department.ManagerUserID).Scan(&exists); err != nil {
+			return domain.Department{}, err
+		}
+		if !exists {
+			return domain.Department{}, fmt.Errorf("%w: manager must be active in this realm", ErrBadRequest)
+		}
+	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO governance_departments (realm,id,parent_dept_id,name,manager_user_id,path,level,status)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -967,6 +1025,10 @@ func (s *Store) ListDepartments(ctx context.Context, realm string) ([]domain.Dep
 }
 
 func (s *Store) CreateRole(ctx context.Context, role domain.Role) (domain.Role, error) {
+	role.Name = strings.TrimSpace(role.Name)
+	if !managedID.MatchString(role.ID) || len([]rune(role.Name)) > 160 || len([]rune(role.Description)) > 500 {
+		return domain.Role{}, fmt.Errorf("%w: invalid role", ErrBadRequest)
+	}
 	if role.ID == "" || role.Realm == "" || role.Name == "" {
 		return domain.Role{}, fmt.Errorf("%w: role id, realm, and name are required", ErrBadRequest)
 	}
@@ -1006,15 +1068,45 @@ func (s *Store) ListRoles(ctx context.Context, realm string) ([]domain.Role, err
 }
 
 func (s *Store) AssignRole(ctx context.Context, realm, userID, roleID, grantedBy string, expiresAt *time.Time) error {
-	if !s.userExists(ctx, realm, userID) || !s.roleExists(ctx, realm, roleID) {
+	if expiresAt != nil && !expiresAt.After(time.Now()) {
+		return fmt.Errorf("%w: role expiry must be in the future", ErrBadRequest)
+	}
+	tx, err := s.beginOrganizationChange(ctx, realm)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM governance_users u, governance_roles r
+		WHERE u.realm=$1 AND u.id=$2 AND r.realm=$1 AND r.id=$3 AND r.status='active')`, realm, userID, roleID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
 		return ErrNotFound
 	}
-	_, err := s.pool.Exec(ctx, `
+	// An expiring administrator grant must not replace the realm's only durable grant.
+	before, err := s.activeAdminCount(ctx, tx, realm)
+	if err != nil {
+		return err
+	}
+	if expiresAt != nil && (roleID == "realm_admin" || roleID == "platform_admin" || roleID == "admin") && before.durable == 0 {
+		return ErrLastAdmin
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO governance_user_roles (realm,user_id,role_id,expires_at,granted_by)
 		VALUES ($1,$2,$3,$4,$5)
 		ON CONFLICT (realm,user_id,role_id) DO UPDATE SET expires_at=EXCLUDED.expires_at, granted_by=EXCLUDED.granted_by`,
 		realm, userID, roleID, expiresAt, grantedBy)
-	return err
+	if err != nil {
+		return err
+	}
+	if err = recordUserAdminEvent(ctx, tx, realm, userID, "role_assigned", grantedBy, map[string]any{"role_id": roleID, "expires_at": expiresAt}); err != nil {
+		return err
+	}
+	if err = s.preserveActiveAdmin(ctx, tx, realm, before); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) CreateSkill(ctx context.Context, skill domain.Skill, initial domain.SkillVersion) (domain.Skill, error) {
@@ -1231,7 +1323,23 @@ func (s *Store) GrantSkill(ctx context.Context, grant domain.SkillGrant) error {
 	if !s.skillExists(ctx, grant.Realm, grant.SkillID) {
 		return ErrNotFound
 	}
-	_, err := s.pool.Exec(ctx, `
+	if grant.IncludeChildren && grant.SubjectType != domain.SubjectDepartment {
+		return fmt.Errorf("%w: only department grants can include children", ErrBadRequest)
+	}
+	if grant.VersionConstraint != "" {
+		if _, err := s.GetSkillVersion(ctx, grant.Realm, grant.SkillID, grant.VersionConstraint); err != nil {
+			return err
+		}
+	}
+	tx, err := s.beginOrganizationChange(ctx, grant.Realm)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := checkSkillSubject(ctx, tx, grant.Realm, grant.SubjectType, grant.SubjectID, grant.ExpiresAt); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO governance_skill_grants (id,realm,skill_id,version_constraint,subject_type,subject_id,include_children,expires_at,granted_by)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
 		grant.ID, grant.Realm, grant.SkillID, grant.VersionConstraint, grant.SubjectType, grant.SubjectID,
@@ -1239,7 +1347,13 @@ func (s *Store) GrantSkill(ctx context.Context, grant domain.SkillGrant) error {
 	if isUniqueViolation(err) {
 		return ErrConflict
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if err = recordUserAdminEvent(ctx, tx, grant.Realm, grant.GrantedBy, "skill_access_updated", grant.GrantedBy, map[string]any{"skill_id": grant.SkillID, "grant_id": grant.ID, "subject_type": grant.SubjectType, "subject_id": grant.SubjectID}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) RevokeSkill(ctx context.Context, revocation domain.SkillRevocation) error {
@@ -1249,7 +1363,15 @@ func (s *Store) RevokeSkill(ctx context.Context, revocation domain.SkillRevocati
 	if !s.skillExists(ctx, revocation.Realm, revocation.SkillID) {
 		return ErrNotFound
 	}
-	_, err := s.pool.Exec(ctx, `
+	if !managedID.MatchString(revocation.SubjectID) || (revocation.ExpiresAt != nil && !revocation.ExpiresAt.After(time.Now())) || len([]rune(revocation.Reason)) > 500 {
+		return fmt.Errorf("%w: invalid revocation subject, reason or expiry", ErrBadRequest)
+	}
+	tx, err := s.beginOrganizationChange(ctx, revocation.Realm)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `
 		INSERT INTO governance_skill_revocations (id,realm,skill_id,subject_type,subject_id,reason,expires_at,revoked_by)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
 		revocation.ID, revocation.Realm, revocation.SkillID, revocation.SubjectType, revocation.SubjectID,
@@ -1257,7 +1379,13 @@ func (s *Store) RevokeSkill(ctx context.Context, revocation domain.SkillRevocati
 	if isUniqueViolation(err) {
 		return ErrConflict
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if err = recordUserAdminEvent(ctx, tx, revocation.Realm, revocation.RevokedBy, "skill_access_updated", revocation.RevokedBy, map[string]any{"skill_id": revocation.SkillID, "revocation_id": revocation.ID, "subject_type": revocation.SubjectType, "subject_id": revocation.SubjectID}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // EffectiveSkills keeps the existing user-facing API while routing through the
@@ -1418,7 +1546,7 @@ func (s *Store) decorateProficiency(ctx context.Context, realm, workerID string,
 }
 
 func (s *Store) RegisterDesktopNode(ctx context.Context, node domain.DesktopNode) (domain.DesktopNode, error) {
-	if node.ID == "" || node.Realm == "" || node.ClusterID == "" || node.OwnerUserID == "" || node.DisplayName == "" || node.OS == "" || node.Arch == "" || node.Capacity < 1 {
+	if !managedID.MatchString(node.ID) || node.Realm == "" || !managedID.MatchString(node.ClusterID) || node.OwnerUserID == "" || strings.TrimSpace(node.DisplayName) == "" || node.OS == "" || node.Arch == "" || node.Capacity < 1 || node.Capacity > 1024 || len(node.Capabilities) > 100 {
 		return domain.DesktopNode{}, fmt.Errorf("%w: invalid desktop node", ErrBadRequest)
 	}
 	if !s.userExists(ctx, node.Realm, node.OwnerUserID) {
@@ -1432,26 +1560,35 @@ func (s *Store) RegisterDesktopNode(ctx context.Context, node domain.DesktopNode
 	// subsequent mTLS command channel and Provisioner digest report are the two
 	// missing proofs before Scheduler may use it.
 	node.SchedulingEligible = false
+	tx, err := s.beginOrganizationChange(ctx,node.Realm)
+	if err != nil { return domain.DesktopNode{},err }
+	defer tx.Rollback(ctx)
 	capabilities, err := json.Marshal(node.Capabilities)
 	if err != nil {
 		return domain.DesktopNode{}, err
 	}
-	err = s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO governance_desktop_nodes (realm,id,cluster_id,owner_user_id,display_name,os,arch,client_version,capacity,capabilities,residency,status,scheduling_eligible)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (realm,id) DO UPDATE SET
-		  cluster_id=EXCLUDED.cluster_id, owner_user_id=EXCLUDED.owner_user_id, display_name=EXCLUDED.display_name,
+		  cluster_id=EXCLUDED.cluster_id, display_name=EXCLUDED.display_name,
 		  os=EXCLUDED.os, arch=EXCLUDED.arch, client_version=EXCLUDED.client_version, capacity=EXCLUDED.capacity,
 		  capabilities=EXCLUDED.capabilities, residency=EXCLUDED.residency, status='PENDING_ACTIVATION',
 		  scheduling_eligible=false, last_seen_at=now()
+		WHERE governance_desktop_nodes.owner_user_id=EXCLUDED.owner_user_id AND governance_desktop_nodes.status NOT IN ('REVOKED','DRAINING')
 		RETURNING last_seen_at`,
 		node.Realm, node.ID, node.ClusterID, node.OwnerUserID, node.DisplayName, node.OS, node.Arch, node.ClientVersion,
 		node.Capacity, capabilities, node.Residency, node.Status, node.SchedulingEligible,
 	).Scan(&node.LastSeenAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.DesktopNode{}, ErrForbidden
+	}
 	if err != nil {
 		return domain.DesktopNode{}, err
 	}
-	return node, nil
+	if _,err = tx.Exec(ctx,`UPDATE governance_device_connections SET enrollment_hash='',enrollment_expires=NULL,public_key_hash='',certificate_serial='',certificate_expires=NULL,
+	 connection_id='',connection_expires=NULL,applied_revision=0,revision=revision+1,policy='{}'::jsonb WHERE realm=$1 AND node_id=$2`,node.Realm,node.ID);err!=nil{return domain.DesktopNode{},err}
+	return node, tx.Commit(ctx)
 }
 
 func (s *Store) HeartbeatDesktopNode(ctx context.Context, realm, nodeID, ownerUserID string) (domain.DesktopNode, error) {
@@ -1459,8 +1596,9 @@ func (s *Store) HeartbeatDesktopNode(ctx context.Context, realm, nodeID, ownerUs
 	var capabilities []byte
 	err := s.pool.QueryRow(ctx, `
 		UPDATE governance_desktop_nodes
-		SET last_seen_at=now(), status=CASE WHEN status IN ('REVOKED','PENDING_ACTIVATION') THEN status ELSE 'ONLINE' END
-		WHERE realm=$1 AND id=$2 AND owner_user_id=$3
+		SET last_seen_at=now(), status=CASE WHEN status IN ('DRAINING','PENDING_ACTIVATION') THEN status ELSE 'ONLINE' END
+			WHERE realm=$1 AND id=$2 AND owner_user_id=$3 AND status<>'REVOKED'
+			AND NOT EXISTS(SELECT 1 FROM governance_device_connections d WHERE d.realm=$1 AND d.node_id=$2 AND d.certificate_serial<>'')
 		RETURNING id,realm,cluster_id,owner_user_id,display_name,os,arch,client_version,capacity,capabilities,residency,status,scheduling_eligible,last_seen_at`,
 		realm, nodeID, ownerUserID).Scan(
 		&node.ID, &node.Realm, &node.ClusterID, &node.OwnerUserID, &node.DisplayName, &node.OS, &node.Arch,
@@ -1481,7 +1619,7 @@ func (s *Store) ListDesktopNodes(ctx context.Context, realm, ownerUserID string,
 	query := `
 		SELECT id,realm,cluster_id,owner_user_id,display_name,os,arch,client_version,capacity,capabilities,residency,
 		       CASE WHEN status='ONLINE' AND last_seen_at < now() - interval '30 seconds' THEN 'OFFLINE' ELSE status END,
-		       scheduling_eligible,last_seen_at
+		       (scheduling_eligible AND status='ONLINE' AND last_seen_at >= now() - interval '30 seconds'),last_seen_at
 		FROM governance_desktop_nodes WHERE realm=$1`
 	args := []any{realm}
 	if !all {
@@ -2166,8 +2304,9 @@ func (s *Store) skillExists(ctx context.Context, realm, id string) bool {
 
 func (s *Store) roleIDs(ctx context.Context, realm, userID string) (map[string]bool, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT role_id FROM governance_user_roles
-		WHERE realm=$1 AND user_id=$2 AND (expires_at IS NULL OR expires_at > now())`, realm, userID)
+		SELECT ur.role_id FROM governance_user_roles ur
+		JOIN governance_roles r ON r.realm=ur.realm AND r.id=ur.role_id AND r.status='active'
+		WHERE ur.realm=$1 AND ur.user_id=$2 AND (ur.expires_at IS NULL OR ur.expires_at > now())`, realm, userID)
 	if err != nil {
 		return nil, err
 	}
