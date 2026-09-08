@@ -29,6 +29,23 @@ const MENU_QUIT: &str = "quit";
 // 一个还在正常加载的 runtime 误判成失败。窗口已经不再被阻塞，这个上限只决定何时放弃。
 const BOOT_DEADLINE: Duration = Duration::from_secs(120);
 
+/// 把 WKWebView 的原生函数源码归一化成 V8 的单行形式。
+///
+/// WebKit 的 `Function.prototype.toString.call(Object)` 是
+/// `"function Object() {\n    [native code]\n}"`，V8 是 `"function Object() { [native code] }"`。
+/// dsh 的 @deepseek-ai/dsh-util-values 用后者做等值比较
+/// （packages/util/values/src/index.ts 的 hasIntrinsicConstructor），于是在 WebKit 里
+/// 该断言恒假：JSON 校验把合法载荷判为非法，`expandAssistantStream` 抛错并打断
+/// session-controller 的事件订阅，此后助手回复与工具卡片不再渲染（历史会话只剩注入行）。
+/// Safari 同样复现，Chrome 正常。上游修好后可移除本 shim。
+const INTRINSIC_TO_STRING_SHIM: &str = r#"(() => {
+  const original = Function.prototype.toString;
+  Function.prototype.toString = function () {
+    const source = original.call(this);
+    return source.includes('[native code]') ? source.replace(/\s+/g, ' ') : source;
+  };
+})();"#;
+
 struct LocalRuntime(Mutex<Option<Child>>);
 
 struct RuntimeLogPath(PathBuf);
@@ -569,6 +586,7 @@ fn main() {
                 .inner_size(1440.0, 920.0)
                 .min_inner_size(980.0, 680.0)
                 .resizable(true)
+                .initialization_script(INTRINSIC_TO_STRING_SHIM)
                 .build()?;
             log_stage(&handle, "主窗口已创建（启动页）");
             if let Err(error) = build_tray(&handle) {
