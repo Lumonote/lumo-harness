@@ -44,6 +44,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+# platform/deploy/lib 是部署脚本源码（dsh-source.sh），不是构建产物，需入库
+!platform/deploy/lib/
 parts/
 sdist/
 var/
@@ -179,7 +181,6 @@ activemq-data/
 *.sage.py
 
 # Environments
-.env
 .envrc
 .venv
 .venv-*
