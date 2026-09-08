@@ -90,12 +90,6 @@ export const BASE_PLUGIN_CATALOG: readonly BasePluginDescriptor[] = [
     capability: 'dsh web GUI 任务看板与 Host 调度', accent: '#65b9d8',
   },
   {
-    id: 'dsh-better-sidebar', packageName: 'dsh-better-sidebar', version: '0.18.0',
-    label: '侧边栏底座', summary: 'VSCode 式右侧工作台：资源管理器、编辑器、终端、Git 与子代理页面，并支持三方扩展注册新侧边栏页面。', category: '客户端',
-    tags: ['侧边栏', '编辑器', '终端'], repository: 'https://github.com/omdsh-dev/DSH-better-sidebar', license: 'MIT',
-    capability: 'VSCode 风格侧边栏底座与页面扩展', accent: '#7da9ed',
-  },
-  {
     id: 'dsh-agent-teams', packageName: '@nanmicoder/dsh-agent-teams', version: '0.1.15',
     label: '多智能体团队', summary: '用自然语言编排多智能体团队协作：船长、成员、带依赖任务与消息，并带 Web 树状监控。', category: '智能体协作',
     tags: ['多智能体', '任务依赖', '团队协作'], repository: 'https://github.com/NanmiCoder/dsh-agent-teams', license: 'MIT',

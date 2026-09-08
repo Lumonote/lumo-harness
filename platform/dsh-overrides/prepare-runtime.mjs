@@ -108,12 +108,24 @@ function copyBuildOutputs(sourceRoot, targetRoot) {
 // 只有 `tsc -b` 的产物可用。tsc 引用图 emit 是正常的（0 error），我们把它当作 tsdown
 // 的等价片段：按包 `type` 合成 `lib/<stem>.js` 再导出（见 synthesize-dsh-libs.mjs）。
 // 返回 false 表示产物已是现行形态（常见的增量重复构建），跳过重建。
+// 源树 lib/ 必须已含这些导出，否则视为停在旧构建：覆盖层包（LUMO_STREAM_RESILIENCE
+// 点名的 session-controller 等）消费的上游 API 比源树最后一次全量构建更新时，快照会
+// 拿旧 .d.ts 编译打过补丁的源码而当场失败（assistantStreamChunks / InboxState /
+// SessionProjectionMap 'inbox' 缺失）。与 brandString 同路：重跑上游 tsc 双面重建。
+const LIB_FRESHNESS_PROBES = [
+  ['packages/util/brand/lib/types/index.js', 'brandString'],
+  ['packages/llm/llm/lib/types/assistant-stream.d.ts', 'assistantStreamChunks'],
+  ['packages/core/agent/lib/types/types.d.ts', 'InboxState'],
+]
+
 function ensureLibEntriesReexport(sourceRoot) {
   const brandTypes = resolve(sourceRoot, 'packages', 'util', 'brand', 'lib', 'types', 'index.js')
   if (!existsSync(brandTypes)) return false
-  // brand 上游把 brandString 从纯类型升级为运行时导出（refactor(session)!）。
-  // types 里没有它 = 源树的 lib 停在重构之前的旧构建，需要先重跑 tsc 双面。
-  if (!readFileSync(brandTypes, 'utf8').includes('brandString')) {
+  const fresh = LIB_FRESHNESS_PROBES.every(([relativePath, marker]) => {
+    const probe = resolve(sourceRoot, relativePath)
+    return existsSync(probe) && readFileSync(probe, 'utf8').includes(marker)
+  })
+  if (!fresh) {
     const script = resolve(scriptRoot, 'synthesize-dsh-libs.mjs')
     const oldRoot = process.env['LUMO_DSH_SOURCE_ROOT']
     process.env['LUMO_DSH_SOURCE_ROOT'] = sourceRoot

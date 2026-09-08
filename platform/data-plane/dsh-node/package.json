@@ -24,6 +24,7 @@
     "@lumo/project": "link:../../dsh-plugins/project",
     "@lumo/recovery": "link:../../dsh-plugins/recovery",
     "@lumo/session-log": "link:../../dsh-plugins/session-log",
+    "@lumo/web-fetch-fakeip": "link:../../dsh-plugins/web-fetch-fakeip",
     "tsx": "4.22.4"
   }
 }

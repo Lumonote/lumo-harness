@@ -67,7 +67,7 @@ const stagingRoot = resolve(desktopRoot, 'target', 'lumo-runtime')
 const modulesRoot = resolve(stagingRoot, 'node_modules')
 const upstreamPluginRoot = resolve(desktopRoot, 'target', 'lumo-upstream-plugins')
 const upstreamPluginModulesRoot = resolve(upstreamPluginRoot, 'node_modules')
-const packagedTypeScriptPlugins = new Set(['@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration'])
+const packagedTypeScriptPlugins = new Set(['@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/web-fetch-fakeip'])
 // 裁剪规则见下方 pruneStagedRuntime；目录名单提前到常量区，避免顶层调用时撞上 TDZ。
 const PRUNE_DIRECTORY_NAMES = new Set(['test', 'tests', '__tests__', 'docs', 'doc', 'example', 'examples', '.github'])
 // 这两个名字不会出现在可 require 的路径里，任意深度都可裁；其余只裁包根一层（见 pruneDeadWeight）。
@@ -82,8 +82,6 @@ const upstreamPluginSpecs = [
   'dsh-dream-skin@8.30.1',
   // 任务看板：dsh web GUI 的 Host 权威任务台帐（替换 Lumo 左侧菜单「自动化」入口）。
   '@linxin666/dsh-client-ui-task-board@0.3.14',
-  // 侧边栏底座：VSCode 式右侧工作台 + 三方侧边栏页面扩展。
-  'dsh-better-sidebar@0.18.0',
   // @nanmicoder/dsh-agent-teams 不在桌面包基线（master 不兼容）；仍可通过 SkillHub 安装。
   // Univer 办公文档：DSH × Univer 协作网关与查看器——内联预览、浮动工作台与会话结束审阅（0.2.14）。
   'dsh-univer-office@0.2.14',
@@ -109,6 +107,7 @@ rebuildDshHostArtifacts()
 // 快照对被覆盖的客户端包不投影 lib/（其产物必须从打补丁后的
 // 快照源码重建），而它们的 tsdown 配置又消费 lib/types —— 全量 client pass 之前
 // 必须先 tsc 出这些包的类型，否则 UNRESOLVED_ENTRY lib/types/index.js。
+refreshDshClientTypePrerequisites()
 buildDshClientPackages()
 rebuildDshClientArtifacts()
 
@@ -137,7 +136,7 @@ const moduleSearchRoots = [
   dshNodeRoot,
   resolve(repoRoot, 'platform', 'dsh-plugins'),
   upstreamPluginRoot,
-  // Web 扩展插件把 react/react-dom 声明为必选 peer（dsh-better-sidebar、
+  // Web 扩展插件把 react/react-dom 声明为必选 peer（
   // @linxin666/dsh-client-ui-task-board；dsh-context/dsh-dream-skin 的 react 是可选的，
   // 不被遍历点名）。这两个包在 Web 壳里只出现在 devDependencies（Vite 就地编译进前端
   // bundle），闭包遍历不读 devDependencies，向上回溯也到不了 apps/web 的 node_modules
@@ -249,6 +248,7 @@ for (const root of [
   resolve(repoRoot, 'platform', 'dsh-plugins', 'archify'),
   resolve(repoRoot, 'platform', 'dsh-plugins', 'creative-skills'),
   resolve(repoRoot, 'platform', 'dsh-plugins', 'ruflo-orchestration'),
+  resolve(repoRoot, 'platform', 'dsh-plugins', 'web-fetch-fakeip'),
   knowledgeVaultRoot,
   ...upstreamPluginSpecs.map((spec) => packagePath(spec.slice(0, spec.lastIndexOf('@')), upstreamPluginRoot)),
 ]) {
@@ -607,6 +607,37 @@ function hasNonSystemDarwinDependency(output) {
   })
 }
 
+/** 递归列出 src/ 下的 .ts/.tsx 源文件（绝对路径）。 */
+function listTypeScriptSources(directory) {
+  const sources = []
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = resolve(directory, entry.name)
+    if (entry.isDirectory()) sources.push(...listTypeScriptSources(entryPath))
+    else if (/\.tsx?$/.test(entry.name) && !entry.name.endsWith('.d.ts')) sources.push(entryPath)
+  }
+  return sources
+}
+
+/**
+ * 构建期兜底：产物里每条相对说明符都必须指向已产出的文件。单文件转译不解析模块图，
+ * 漏转一个兄弟模块只会在用户机器上以「启动即 ERR_MODULE_NOT_FOUND」的形式暴露。
+ */
+function assertRelativeImportsEmitted(packageName, destination, emitted) {
+  for (const outputPath of emitted) {
+    const output = readFileSync(outputPath, 'utf8')
+    const specifiers = [
+      ...output.matchAll(/^(?:import|export)\b[^\n]*?["'](\.\.?\/[^"']+)["']/gm),
+      ...output.matchAll(/\bimport\s*\(\s*["'](\.\.?\/[^"']+)["']\s*\)/g),
+    ]
+    for (const [, specifier] of specifiers) {
+      const target = resolve(dirname(outputPath), specifier)
+      if (!emitted.has(target) && !existsSync(target)) {
+        throw new Error(`无法构建桌面 runtime：${packageName}/${relative(destination, outputPath)} 相对导入了 ${specifier}，但该文件未产出`)
+      }
+    }
+  }
+}
+
 function compilePackagedTypeScriptPlugins() {
   const requireFromDsh = createRequire(resolve(dshRoot, 'package.json'))
   const typescript = requireFromDsh('typescript')
@@ -615,21 +646,32 @@ function compilePackagedTypeScriptPlugins() {
     const packageInfo = packageSources.get(packageName)
     if (packageInfo === undefined) throw new Error(`无法构建桌面 runtime：${packageName} 未进入依赖闭包`)
 
-    const sourcePath = resolve(packageInfo.root, 'src', 'index.ts')
+    const sourceRoot = resolve(packageInfo.root, 'src')
     const destination = resolve(modulesRoot, ...packageName.split('/'))
-    const outputPath = resolve(destination, 'lib', 'index.js')
-    const source = readFileSync(sourcePath, 'utf8')
-    const result = typescript.transpileModule(source, {
-      compilerOptions: {
-        module: typescript.ModuleKind.ESNext,
-        target: typescript.ScriptTarget.ES2022,
-        verbatimModuleSyntax: true,
-      },
-      fileName: sourcePath,
-    })
+    // 转译整个 src/ 并保持目录形状，而不是只转入口 index.ts：transpileModule 是单文件
+    // 语义（不解析模块图），多文件插件（web-fetch-fakeip 的 src/index.ts 相对导入了同目录
+    // 的 ./resolver.ts）只转入口会把 `./resolver.ts` 原样留在产物里——Node 按导入方目录
+    // 解析成 lib/resolver.ts，而该文件从未产出，桌面 runtime 启动即 ERR_MODULE_NOT_FOUND。
+    // 相对说明符交给 rewriteRelativeImportExtensions 由 .ts 改写成 .js。
+    const emitted = new Set()
+    for (const sourcePath of listTypeScriptSources(sourceRoot)) {
+      const relativeSource = relative(sourceRoot, sourcePath)
+      const outputPath = resolve(destination, 'lib', relativeSource.replace(/\.tsx?$/, '.js'))
+      const result = typescript.transpileModule(readFileSync(sourcePath, 'utf8'), {
+        compilerOptions: {
+          module: typescript.ModuleKind.ESNext,
+          target: typescript.ScriptTarget.ES2022,
+          verbatimModuleSyntax: true,
+          rewriteRelativeImportExtensions: true,
+        },
+        fileName: sourcePath,
+      })
 
-    mkdirSync(dirname(outputPath), { recursive: true })
-    writeFileSync(outputPath, result.outputText)
+      mkdirSync(dirname(outputPath), { recursive: true })
+      writeFileSync(outputPath, result.outputText)
+      emitted.add(outputPath)
+    }
+    assertRelativeImportsEmitted(packageName, destination, emitted)
 
     const manifestPath = resolve(destination, 'package.json')
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
@@ -791,6 +833,92 @@ function buildDshClientPackages() {
     const packageDirectory = dirname(config)
     runWorkspaceBinary(packageDirectory, 'tsdown', ['--env.DSH_BUILD_FACE', 'client'], `${packageDirectory} 客户端包构建失败`)
   }
+}
+
+function refreshDshClientTypePrerequisites() {
+  const staleConfigs = dshClientTypeConfigs().filter((config) => !hasUsableDshClientTypes(config))
+  if (staleConfigs.length === 0) return
+  console.log(`刷新 DSH 客户端基础声明（隔离快照：${staleConfigs.length} 个 Client 项目）...`)
+  for (const config of staleConfigs) {
+    // tsc does not remove files that belonged to a deleted source module. Clear
+    // only the generated type tree in the snapshot, otherwise the sourcemap
+    // plugin can still discover an orphaned `.js.map` after a successful emit.
+    rmSync(resolve(dshRoot, dirname(config), 'lib', 'types'), { recursive: true, force: true })
+  }
+  runWorkspaceBinary('.', 'tsc', [
+    '-b', ...staleConfigs,
+    '--force',
+    '--pretty', 'false',
+  ], 'DSH 客户端基础声明刷新失败')
+}
+
+// The root Client tsdown workspace consumes each client package's emitted
+// `lib/types/index.js`. A package-local build can be absent, or its sourcemap
+// can still name a source file removed by a newer upstream checkout. Detect
+// both cases from the staged tree so the repair stays inside the snapshot.
+function dshClientTypeConfigs() {
+  const clientRoot = resolve(dshRoot, 'packages', 'client')
+  if (!existsSync(clientRoot)) return []
+  return readdirSync(clientRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .flatMap((entry) => {
+      const directory = join('packages', 'client', entry.name)
+      if (!existsSync(resolve(dshRoot, directory, 'tsdown.config.ts'))) return []
+      const config = ['tsconfig.json', 'tsconfig.client.json']
+        .find((name) => existsSync(resolve(dshRoot, directory, name)))
+      return config === undefined ? [] : [join(directory, config)]
+    })
+}
+
+function hasUsableDshClientTypes(config) {
+  const packageDirectory = resolve(dshRoot, dirname(config))
+  const entry = resolve(packageDirectory, 'lib', 'types', 'index.js')
+  if (!existsSync(entry)) return false
+  if (config === 'packages/client/ui-slots/tsconfig.json') {
+    const declaration = resolve(packageDirectory, 'lib', 'types', 'index.d.ts')
+    if (!existsSync(declaration) || !readFileSync(declaration, 'utf8').includes('ResourceProtocolMap')) return false
+  }
+  const typesDirectory = resolve(packageDirectory, 'lib', 'types')
+  if (!existsSync(typesDirectory)) return false
+  if (config === 'packages/client/web/tsconfig.json' && !hasFreshDshClientWebSeed(packageDirectory, typesDirectory)) return false
+  return dshClientMapsHaveSources(typesDirectory)
+}
+
+function hasFreshDshClientWebSeed(packageDirectory, typesDirectory) {
+  for (const [sourceName, outputName] of [['platform.ts', 'platform.js'], ['seed.ts', 'seed.js']]) {
+    const sourcePath = resolve(packageDirectory, 'src', sourceName)
+    const outputPath = resolve(typesDirectory, outputName)
+    if (!existsSync(sourcePath) || !existsSync(outputPath)) return false
+    const source = readFileSync(sourcePath, 'utf8')
+    const output = readFileSync(outputPath, 'utf8')
+    const specifiers = [...source.matchAll(/['"](@deepseek-ai\/[^'"]+)['"]/g)].map((match) => match[1])
+    if (specifiers.some((specifier) => !output.includes(specifier))) return false
+  }
+  return true
+}
+
+function dshClientMapsHaveSources(directory) {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = resolve(directory, entry.name)
+    if (entry.isDirectory()) {
+      if (!dshClientMapsHaveSources(path)) return false
+      continue
+    }
+    if (!entry.name.endsWith('.js.map')) continue
+    let map
+    try {
+      map = JSON.parse(readFileSync(path, 'utf8'))
+    } catch {
+      return false
+    }
+    if (!Array.isArray(map.sources) || map.sources.some((source) => typeof source !== 'string')) return false
+    if (Array.isArray(map.sourcesContent)
+      && map.sourcesContent.length === map.sources.length
+      && map.sourcesContent.every((source) => typeof source === 'string')) continue
+    const sourceRoot = typeof map.sourceRoot === 'string' ? map.sourceRoot : ''
+    if (map.sources.some((source) => !existsSync(resolve(dirname(path), sourceRoot, source)))) return false
+  }
+  return true
 }
 
 // 快照里的每个 node_modules 都是软链回源树的同一份目录，所以绝不能在快照里跑

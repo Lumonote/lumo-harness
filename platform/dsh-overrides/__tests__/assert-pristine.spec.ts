@@ -77,6 +77,13 @@ describe('assertPristineProductSource', () => {
     expect(() => { assertPristineProductSource(root) }).not.toThrow()
   })
 
+  it('apps 或 packages 内的 .omc 工具状态也放行', () => {
+    const root = repository('nested-omc')
+    write(root, 'packages/util/http-proxy/.omc/state/last-tool-error.json', '{}\n')
+    write(root, 'apps/web/.omc/state/checkpoint.json', '{}\n')
+    expect(() => { assertPristineProductSource(root) }).not.toThrow()
+  })
+
   it('被 .gitignore 排除的产物放行 —— node_modules 与 lib 是合法构建产物', () => {
     const root = repository('ignored')
     write(root, '.gitignore', 'node_modules/\nlib/\n')

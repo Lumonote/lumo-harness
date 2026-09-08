@@ -31,7 +31,6 @@ export const overriddenPackageDirectories = [
   'packages/client/ui-sidebar',
   'packages/client/ui-workspace',
   'packages/client/ui-model-selection',
-  'packages/session/session-format-v0-to-v1',
   // LUMO_STREAM_RESILIENCE: 聊天「内容消失 / 对话卡住」链路修复涉及的三个包
   // （服务端 WS mux 背压、客户端载波退避、Session 事件流自动重开）。
   'packages/api/gateway',
@@ -170,27 +169,6 @@ export function applyLumoDshOverrides(root) {
     ["  'groupBy.flat': '单列表',", "  'groupBy.flat': '全部对话',"],
     ["  'groupBy.flat': 'In one list',", "  'groupBy.flat': 'All conversations',"],
   ], "'All conversations'")
-
-  // A sequential next turn proves the preceding turn was abandoned, including
-  // a step whose closing event was not flushed. Keep all messages and sequence
-  // references; pending tools still require recorded results before migration.
-  patchFile(root, 'packages/session/session-format-v0-to-v1/src/relationships.ts', [[
-    "      case 'turn/start':\n"
-      + "        if (openTurn !== null || data['turn'] !== nextTurn) {\n"
-      + "          throw new SessionFormatError(`turn/start ${JSON.stringify(data['turn'])} does not open expected turn ${nextTurn}`)\n"
-      + "        }\n",
-    "      case 'turn/start':\n"
-      + "        if (openTurn !== null && data['turn'] === openTurn + 1) {\n"
-      + "          // LUMO_SESSION_RECOVERY: the sequential next turn abandons an interrupted prior step/turn.\n"
-      + "          assertNoUnresolvedTools(toolLifecycles, 'turn/start recovery')\n"
-      + "          openTurn = null\n"
-      + "          openStep = null\n"
-      + "          nextTurn += 1\n"
-      + "        }\n"
-      + "        if (openTurn !== null || data['turn'] !== nextTurn) {\n"
-      + "          throw new SessionFormatError(`turn/start ${JSON.stringify(data['turn'])} does not open expected turn ${nextTurn}`)\n"
-      + "        }\n",
-  ]], 'LUMO_SESSION_RECOVERY')
 
   patchFile(root, 'packages/client/ui-model-selection/src/client/directory.ts', [
     [

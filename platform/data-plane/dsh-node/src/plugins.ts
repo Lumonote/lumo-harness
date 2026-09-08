@@ -31,6 +31,7 @@ export const PLATFORM_PLUGIN_MODULES = {
   subagentRemote: '@lumo/subagent-remote',
   userAuth: '@lumo/user-auth',
   webGateway: '@lumo/web-gateway',
+  webFetchFakeIp: '@lumo/web-fetch-fakeip',
 } as const
 
 const PLATFORM_PLUGIN_DIRECTORIES: Record<keyof typeof PLATFORM_PLUGIN_MODULES, string> = {
@@ -61,6 +62,7 @@ const PLATFORM_PLUGIN_DIRECTORIES: Record<keyof typeof PLATFORM_PLUGIN_MODULES, 
   subagentRemote: 'subagent-remote',
   userAuth: 'user-auth',
   webGateway: 'web-gateway',
+  webFetchFakeIp: 'web-fetch-fakeip',
 }
 
 const WEB_COMMUNITY_PLUGINS = [
@@ -90,8 +92,6 @@ export const BASE_PROFILE_PLUGINS = [
   { name: 'dsh-dream-skin', spec: 'dsh-dream-skin@8.30.1' },
   // 任务看板：dsh web GUI 的 Host 权威任务台帐（0.3.14）。替换 Lumo 左侧菜单原「自动化」入口。
   { name: '@linxin666/dsh-client-ui-task-board', spec: '@linxin666/dsh-client-ui-task-board@0.3.14' },
-  // 侧边栏底座：VSCode 式右侧工作台 + 三方侧边栏页面扩展（0.18.0）。
-  { name: 'dsh-better-sidebar', spec: 'dsh-better-sidebar@0.18.0' },
   // @nanmicoder/dsh-agent-teams 不在桌面包基线：0.1.15 调用了 master 已移除的
   // ctx.subagents.registerContinuableSetup，Loader 会直接拒绝整树启动。仍可通过
   // SkillHub 手动安装；dsh-node 的插件隔离会在失败时自动 quarantine 并重试。
@@ -129,6 +129,10 @@ export function baselineBundlePackages(): string[] {
   return BASE_PROFILE_PLUGINS.map(({ name }) => name)
 }
 
+// 打包 runtime 下 dsh-node 把这份名单逐个 symlink 到 DSH_HOME/profiles/node_modules，
+// 让 patch 里的裸包名（name: '@lumo/...'）能从 profile 目录按 Node 的父级上溯解析到。
+// 新插件进了 PLATFORM_PLUGIN_MODULES、且 local/web profile 真的会挂载它，就必须同步加
+// 到这里——漏加时 Loader 报 Cannot find package，整个插件树挂载失败。
 const PACKAGED_PROFILE_MODULES = [
   '@deepseek-ai/dsh-storage-sqlite',
   '@lumo/dsh-platform-ui',
@@ -137,13 +141,13 @@ const PACKAGED_PROFILE_MODULES = [
   '@lumo/archify',
   '@lumo/creative-skills',
   '@lumo/ruflo-orchestration',
+  '@lumo/web-fetch-fakeip',
   'dshmarket',
   '@liustack/modlens',
   'dsh-context',
   'dsh-cost-meter',
   'dsh-dream-skin',
   '@linxin666/dsh-client-ui-task-board',
-  'dsh-better-sidebar',
   'dsh-univer-office',
 ] as const
 
@@ -160,7 +164,7 @@ export function profilePluginSpecs(profile: string, platformRoot: string, deploy
   }))
   if (deploymentMode === 'local') {
     // local 模式的知识源是 Vault（sqlite+FTS5），不是需要 PG 的 @lumo/knowledge 接缝。
-    const localOnly = new Set(['@lumo/dsh-platform-ui', '@lumo/knowledge-vault', '@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/skill-local'])
+    const localOnly = new Set(['@lumo/dsh-platform-ui', '@lumo/knowledge-vault', '@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/skill-local', '@lumo/web-fetch-fakeip'])
     return [
       ...local.filter(({ name }) => localOnly.has(name)),
       ...BASE_PROFILE_PLUGINS,

@@ -29,7 +29,10 @@ export function assertPristineProductSource(root) {
     throw new Error('DeepSeek Harness has tracked modifications. Move product changes to platform overlays before building.\n' + tracked)
   }
   const untracked = git(root, ['ls-files', '--others', '--exclude-standard'])
-    .split('\n').filter(path => path.startsWith('apps/') || path.startsWith('packages/'))
+    .split('\n').filter(path =>
+      (path.startsWith('apps/') || path.startsWith('packages/')) &&
+      !path.split('/').includes('.omc'),
+    )
   if (untracked.length > 0) {
     throw new Error('DeepSeek Harness contains generated/product files under apps or packages. Clean them before building.\n' + untracked.join('\n'))
   }

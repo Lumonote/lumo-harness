@@ -101,7 +101,6 @@ CLI 或设置 `LUMO_SKILLHUB_COMMAND`。构建从 [SkillHub 官方安装源](htt
 | 费用统计 | `dsh-cost-meter` | `1.6.7` | 会话、预算、价格和历史费用 |
 | 梦幻皮肤 | `dsh-dream-skin` | `8.30.1` | 8 套高质感主题、弥散光壁纸与每用户强调色（原生 `--dsw-*` 实现） |
 | 任务看板 | `@linxin666/dsh-client-ui-task-board` | `0.3.14` | Host 权威任务台帐：看板任务、真实 DSH 会话执行、定时调度与执行历史（替换左侧菜单原「自动化」入口） |
-| 侧边栏底座 | `dsh-better-sidebar` | `0.18.0` | VSCode 式右侧工作台：资源管理器、编辑器、终端、Git 与子代理页面，并支持三方扩展注册新侧边栏页面 |
 | 多智能体团队 | `@nanmicoder/dsh-agent-teams` | `0.1.15` | 自然语言编排多智能体团队：船长/成员、带依赖任务与消息，Web 树状监控 |
 | Univer 办公文档 | `dsh-univer-office` | `0.2.14` | DSH × Univer 协作网关与查看器：内联预览、浮动工作台与会话结束审阅 |
 

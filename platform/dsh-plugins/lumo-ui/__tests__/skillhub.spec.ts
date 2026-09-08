@@ -73,13 +73,12 @@ describe('SkillHub installation and native discovery', () => {
         'git@github.com:Han-1413141/dsh-cost-meter.git',
         'scwlkq/dsh-task-board',
         'https://github.com/liustack/modlens',
-        'omdsh-dev/DSH-better-sidebar',
         'NanmiCoder/dsh-agent-teams',
         'dream-num/dsh-univer-office.git',
       ],
     }
     expect(buildCatalog(config).installed.plugins.sort()).toEqual([
-      'dsh-agent-teams', 'dsh-better-sidebar', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
+      'dsh-agent-teams', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
       'dsh-market', 'dsh-task-board', 'dsh-univer-office', 'modlens',
     ])
   })
@@ -168,7 +167,7 @@ describe('SkillHub installation and native discovery', () => {
     expect((await ctx.skills.snapshot()).skills.map(skill => skill.name).sort()).toEqual(['docs-live', 'expert-entry', 'testing-live'])
   }, 15000)
 
-  it('passes the installation runtime through the HTTP handler', async () => {
+  it.each(['local', 'standalone'] as const)('preserves %s operator installation through the HTTP handler', async deploymentMode => {
     const { config } = await setup()
     const request = Object.assign(Readable.from([Buffer.from(JSON.stringify({ kind: 'skill', id: 'catalog-name' }))]), {
       method: 'POST', url: '/lumo/api/skillhub/install', headers: {},
@@ -182,7 +181,7 @@ describe('SkillHub installation and native discovery', () => {
     }
     const hostConfig = {
       realm: 'local', userId: 'local', roles: ['operator'], projectId: '', deptId: '',
-      identityAssertionSecret: '', deploymentMode: 'local',
+      identityAssertionSecret: '', deploymentMode,
       skillhubCatalogFile: config.catalogFile, skillhubInstallFile: config.installFile,
       skillhubRoot: config.root, skillhubSnapshotFile: config.snapshotFile, skillhubCommand: config.command,
     } as Config

@@ -50,8 +50,9 @@ describe('profile plugin installation', () => {
     expect(local.map(({ name }) => name)).toEqual([
       '@lumo/dsh-platform-ui', '@lumo/open-design', '@lumo/archify',
       '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/knowledge-vault', '@lumo/skill-local',
+      '@lumo/web-fetch-fakeip',
       'dshmarket', '@liustack/modlens', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
-      '@linxin666/dsh-client-ui-task-board', 'dsh-better-sidebar', 'dsh-univer-office',
+      '@linxin666/dsh-client-ui-task-board', 'dsh-univer-office',
     ])
     expect(local).toContainEqual({ name: 'dshmarket', spec: 'dshmarket@1.41.0' })
     expect(local).toContainEqual({ name: 'dsh-context', spec: 'dsh-context@0.41.3' })
@@ -190,7 +191,7 @@ describe('baseline bundle reconciliation', () => {
   it('carries the whole pinned baseline', () => {
     expect(baselineBundlePackages()).toEqual([
       'dshmarket', '@liustack/modlens', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
-      '@linxin666/dsh-client-ui-task-board', 'dsh-better-sidebar', 'dsh-univer-office',
+      '@linxin666/dsh-client-ui-task-board', 'dsh-univer-office',
     ])
   })
 

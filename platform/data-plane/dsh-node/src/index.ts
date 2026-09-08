@@ -29,6 +29,7 @@ import {
   PLATFORM_PLUGIN_MODULES,
 } from './plugins.ts'
 import { assertLocalStoragePath, resolveDeploymentProfile, withClusterStatus } from './deployment.ts'
+import { FAKE_IP_PROVIDER_ID } from '@lumo/web-fetch-fakeip'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const packagedRuntimeRoot = process.env['LUMO_RUNTIME_ROOT']
@@ -53,6 +54,7 @@ const {
   project: projectEntry,
   connector: connectorEntry,
   webGateway: webGatewayEntry,
+  webFetchFakeIp: webFetchFakeIpEntry,
   recovery: recoveryEntry,
   sessionLog: sessionLogEntry,
   jobControl: jobControlEntry,
@@ -206,7 +208,6 @@ const basePluginRows: PluginSummary[] = [
   { id: 'dsh-cost-meter', label: '费用统计', description: '会话、预算、模型价格与历史费用', surface: 'market', kind: 'runtime' },
   { id: 'dsh-dream-skin', label: '梦幻皮肤', description: '8 套高质感主题、弥散光壁纸与每用户强调色', surface: 'market', kind: 'runtime' },
   { id: 'dsh-task-board', label: '任务看板', description: 'Host 权威任务台帐：看板任务、真实 DSH 会话执行与定时调度', surface: 'market', kind: 'runtime' },
-  { id: 'dsh-better-sidebar', label: '侧边栏底座', description: 'VSCode 式右侧工作台与三方侧边栏页面扩展', surface: 'market', kind: 'runtime' },
   { id: 'dsh-agent-teams', label: '多智能体团队', description: '自然语言编排船长/成员、带依赖任务与消息，Web 树状监控', surface: 'operations', kind: 'runtime' },
   { id: 'dsh-univer-office', label: 'Univer 办公文档', description: 'DSH × Univer 协作网关与查看器：内联预览、浮动工作台与会话结束审阅', surface: 'market', kind: 'runtime' },
   { id: 'gpt-image-2-style-library', label: '图像风格库', description: 'GPT Image 2 模板、风格标签与工业级提示词', surface: 'skills', kind: 'runtime' },
@@ -284,6 +285,36 @@ const roleRows = localMode ? '' : role === 'node'
 `
 
 
+// fake-ip 代理（Surge 增强模式/Clash TUN/sing-box）下 web_fetch 的自动修复（见
+// docs/configuration.md）：挂 fake-ip 感知的 fetch 提供者,并把官方 `web` 条目的
+// fetchProvider 钉过去。只对打包桌面（local + web profile）生效——服务器形态保留
+// 官方严格公网预检,需要出站代理时走官方环境变量机制。放行段可用
+// LUMO_WEB_FETCH_FAKEIP_CIDRS（逗号分隔）覆盖,默认 198.18.0.0/15 + fd00::/8。
+const fakeIpCidrs = (process.env['LUMO_WEB_FETCH_FAKEIP_CIDRS'] ?? '')
+  .split(',').map(value => value.trim()).filter(Boolean)
+// insert 数组只放新条目。把 `- id: web` 写进 insert 会变成「追加同 id 条目」——官方
+// loader 的 EntryGroup.update 见到重名立刻抛 duplicate loader entry id: web，整棵
+// 插件树挂载失败，桌面壳起不来。
+const webFetchFakeIpRows = localMode && isWebProfile
+  ? `    - id: lumo-web-fetch-fakeip
+      name: ${JSON.stringify(webFetchFakeIpEntry)}
+      inject: [web]
+${fakeIpCidrs.length > 0 ? `      config:
+        fakeIpCidrs: ${JSON.stringify(fakeIpCidrs)}
+` : ''}`
+  : ''
+// 钉 fetchProvider 要走顶层 `- id: <已有条目>` 才算「按 id 打补丁」。官方 patch 的语义
+// 是整键替换而非深合并（app-boot 的 applyEntryPatches），所以官方 `web` 条目的 config
+// 必须整份重述：漏写 searchProvider 会静默抹掉官方检索提供者。上游给该条目新增配置键
+// 时，这里要同步补上。
+const webFetchFakeIpPatchRow = localMode && isWebProfile
+  ? `- id: web
+  config:
+    searchProvider: deepseek-official
+    fetchProvider: ${JSON.stringify(FAKE_IP_PROVIDER_ID)}
+`
+  : ''
+
 // 平台插件 patch（官方 patch 语法：insert 数组 = 追加条目）
 writeFileSync(
   patchPath,
@@ -307,13 +338,13 @@ ${isWebProfile ? `${localMode ? `# Local desktop serves the native DSH Web shell
     printUrl: false
     surfaceContext: false
     trustedHosts: []
-` : ''}${localMode ? '' : `- id: attachment-local
+${webFetchFakeIpPatchRow}` : ''}${localMode ? '' : `- id: attachment-local
   disabled: true
 - id: spill-local
   disabled: true
 `}
 - insert:
-${localMode ? localStorageRows(dshProfile, sqlitePath) + localVaultRows(sqlitePath, platformRealm) : `    - id: lumo-object-store
+${localMode ? localStorageRows(dshProfile, sqlitePath) + localVaultRows(sqlitePath, platformRealm) + webFetchFakeIpRows : `    - id: lumo-object-store
       name: ${JSON.stringify(objectStoreEntry)}
       inject: []
       config:
@@ -466,7 +497,10 @@ ${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
         port: ${authPort}
         publicBaseUrl: ${JSON.stringify(process.env['LUMO_AUTH_PUBLIC_URL'] ?? `http://127.0.0.1:${authPort}`)}
         secureCookie: ${process.env['LUMO_AUTH_SECURE_COOKIE'] === 'true'}
+        clusterMode: ${deployment.mode === 'cluster'}
+        clusterReady: ${deployment.clusterReady}
         governanceUrl: ${JSON.stringify(governanceURL)}
+        connectorUrl: ${JSON.stringify(process.env['LUMO_CONNECTOR_GATEWAY_URL'] ?? 'http://localhost:8082')}
         controlPlaneToken: ${JSON.stringify(controlPlaneToken)}
         realm: ${JSON.stringify(platformRealm)}
         projectId: ${JSON.stringify(projectID)}
