@@ -88,8 +88,10 @@ resolve_bootstrap_python() {
   local candidate minor
   local -a candidates=()
   if command -v uv >/dev/null 2>&1; then
-    # 3.12 优先：PPT Master 的 requirements 在 3.12 上 wheel 最全。
-    for minor in 3.12 3.11 3.10 3.13; do
+    # 3.13 优先：与 CI（uv python install 3.13）及开发环境的系统 python3 对齐。
+    # PPT Master 的 requirements 在 3.13 上已实测可全部装成 wheel（含 PyMuPDF /
+    # skia-pathops / uharfbuzz 等原生包），不再需要回退到 3.12。
+    for minor in 3.13 3.12 3.11 3.10; do
       candidate="$(uv python find "${minor}" 2>/dev/null || true)"
       [[ -n "${candidate}" ]] && candidates+=("${candidate}")
     done

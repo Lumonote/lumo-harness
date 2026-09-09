@@ -1,6 +1,7 @@
 {
   "name": "@lumo/dsh-node",
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "engines": {

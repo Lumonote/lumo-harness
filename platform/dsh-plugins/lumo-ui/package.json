@@ -2,6 +2,7 @@
   "name": "@lumo/dsh-platform-ui",
   "description": "Lumo platform surfaces mounted inside the native DeepSeek Harness Web shell",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "main": "lib/index.js",

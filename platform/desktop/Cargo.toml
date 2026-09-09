@@ -3,7 +3,7 @@ name = "lumo-desktop"
 version = "0.1.0"
 description = "Lumo local-first desktop workspace"
 authors = ["Lumo"]
-license = "Apache-2.0"
+license = "MIT"
 edition = "2021"
 build = "build.rs"
 

@@ -1,0 +1,205 @@
+# 打包与发布。与 platform/build.sh 共用同一份构建逻辑（见
+# docs/superpowers/specs/2026-09-09-readme-license-and-release-workflow-design.md）。
+#
+# 触发语义：
+#   - push 到 main：构建 12 个镜像（单架构，只验证）+ 桌面包，**不向任何外部仓库写入**；
+#   - push 到其他分支：只产桌面**测试包**（artifact 名带 -test），不构建镜像；
+#   - push tag v*：镜像多架构推 ghcr.io/lumonote，安装包附到 GitHub Release。
+#
+# 门禁（typecheck / test / vet / 第一铁律）仍由 ci.yml 负责，本 workflow 只产物。
+
+name: release
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # 12 个 Docker 镜像。tag 上多架构推送，main 上单架构只验证 Dockerfile 可构建。
+  # 非 main 分支不跑：每次 push 构建 12 个镜像代价过高，且没有可下载产物。
+  images:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout upstream dsh
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: master
+          fetch-depth: 0
+          path: deepseek-harness
+
+      - name: Setup buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build images (validate only, no push)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: ./platform/build.sh --targets images
+
+      - name: Build and push images
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          ./platform/build.sh --targets images \
+            --push \
+            --registry ghcr.io/lumonote \
+            --platform linux/amd64,linux/arm64 \
+            --version "${GITHUB_REF_NAME#v}"
+
+  # 桌面安装包。build.sh 的 build_desktop 要求 target == 宿主平台/架构
+  # （native wheel 与 Rust 壳都不可跨架构），所以每个 target 必须有自己的 runner。
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-14 起基线镜像为 arm64；Intel 走 macos-15-intel（GitHub 最后一个
+          # x86_64 镜像，2027-08 退役，届时 Intel 桌面包将无 CI 产出能力）。
+          - runner: macos-14
+            target: darwin-arm64
+          - runner: macos-15-intel
+            target: darwin-x64
+          - runner: windows-latest
+            target: win-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout upstream dsh
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: master
+          fetch-depth: 0
+          path: deepseek-harness
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 11.7.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+          cache-dependency-path: platform/pnpm-lock.yaml
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: platform/desktop
+
+      # cargo install 每次重编译 tauri-cli 约 5 分钟；按 runner 平台缓存已装好的二进制。
+      - name: Cache tauri CLI
+        id: tauri-cli-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: cargo-tauri-cli-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install tauri CLI
+        if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      # install-components.sh 要求 PPT 解释器可重定位（Homebrew 的 python 链接
+      # Cellar 绝对路径，会在打包阶段才失败）。uv 的 standalone Python 是官方推荐路径。
+      # 版本跟随开发环境的系统 python3（3.13）。
+      - name: Select relocatable Python for the PPT bundle
+        shell: bash
+        run: |
+          uv python install 3.13
+          echo "LUMO_PPT_BOOTSTRAP_PYTHON=$(uv python find 3.13)" >> "$GITHUB_ENV"
+
+      - name: Install upstream dsh dependencies
+        shell: bash
+        run: pnpm --dir deepseek-harness install --frozen-lockfile
+
+      - name: Build desktop package
+        shell: bash
+        run: ./platform/build.sh --targets ${{ matrix.target }}
+
+      # 非 main、非 tag 的分支产物是测试包，用 -test 后缀区分。
+      - name: Compute artifact suffix
+        id: suffix
+        shell: bash
+        run: |
+          case "${GITHUB_REF}" in
+            refs/heads/main|refs/tags/v*) echo "suffix=" >> "$GITHUB_OUTPUT" ;;
+            *) echo "suffix=-test" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Upload macOS dmg
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumo-desktop-${{ matrix.target }}${{ steps.suffix.outputs.suffix }}
+          path: platform/desktop/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+      - name: Upload Windows installers
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumo-desktop-${{ matrix.target }}${{ steps.suffix.outputs.suffix }}
+          path: |
+            platform/desktop/target/release/bundle/msi/*.msi
+            platform/desktop/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  # 只在 tag 上运行：镜像与桌面包都成功后才发布 Release（fail-closed）。
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [images, desktop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          files=()
+          while IFS= read -r f; do files+=("$f"); done < <(
+            find artifacts -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \) | sort
+          )
+          test "${#files[@]}" -gt 0 || { echo "没有可发布的安装包" >&2; exit 1; }
+          printf '发布 %s 个文件：\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
+          # 同一 tag 重跑时不因 release 已存在而失败，改为覆盖上传。
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              "${files[@]}"
+          fi

@@ -1,6 +1,7 @@
 {
   "name": "lumo-vault-source",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Obsidian plugin: sync this vault to the Lumo desktop knowledge base",
   "main": "main.js",
   "private": true,

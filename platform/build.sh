@@ -8,7 +8,7 @@
 #   ./platform/build.sh --targets darwin-arm64
 #   ./platform/build.sh --targets win-x64       # Windows MSI + NSIS 安装包
 #   ./platform/build.sh --targets all          # 镜像 + 本机架构桌面包
-#   ./platform/build.sh --targets images --push --registry ghcr.io/lumo-harness \
+#   ./platform/build.sh --targets images --push --registry ghcr.io/lumonote \
 #                       --platform linux/amd64,linux/arm64
 #   ./platform/build.sh --dry-run --targets all
 #

@@ -18,7 +18,7 @@
 |------|---------|------|
 | 12 个 Docker 镜像 | `up.sh <shape> -d --build`（compose 顺带构建） | 构建与启动耦合；没有单独构建、没有 push、没有多架构 |
 | macOS 桌面包 | `pnpm --dir platform desktop:dmg` | 只能产出**构建机架构**；Intel 与 M 无法分别产出 |
-| ghcr 上的发布镜像 | 无 | `helm/lumo-platform/values.yaml` 引用 `ghcr.io/lumo-harness/*:0.1.0`，**没有任何产线在生产这些 tag** |
+| ghcr 上的发布镜像 | 无 | `helm/lumo-platform/values.yaml` 引用 `ghcr.io/lumonote/*:0.1.0`，**没有任何产线在生产这些 tag** |
 
 第三行是最严重的：Helm chart 引用了一组不存在的镜像。要上 K8s 只能手工 build & push，而手工推
 就意味着没人能复现某个 tag 到底是从哪个 commit 出来的。
@@ -66,7 +66,7 @@
 ./platform/build.sh --targets darwin-arm64
 ./platform/build.sh --targets darwin-x64
 ./platform/build.sh --targets all          # 镜像 + 本机架构桌面包
-./platform/build.sh --targets images --push --registry ghcr.io/lumo-harness
+./platform/build.sh --targets images --push --registry ghcr.io/lumonote
 ./platform/build.sh --dry-run --targets all
 ```
 
@@ -161,7 +161,7 @@ Go 服务的 context 是 `platform/control-plane` 而非各服务目录，因为
 
 | job | runner | 命令 |
 |-----|--------|------|
-| `images` | `ubuntu-latest` | `--targets images --push --registry ghcr.io/lumo-harness --platform linux/amd64,linux/arm64` |
+| `images` | `ubuntu-latest` | `--targets images --push --registry ghcr.io/lumonote --platform linux/amd64,linux/arm64` |
 | `desktop` | matrix `macos-14`(arm64) / `macos-13`(x64) | `--targets darwin-<arch>`，dmg 走 `upload-artifact` |
 
 - 触发：tag `v*` 推正式版本，另加 `workflow_dispatch` 手动。

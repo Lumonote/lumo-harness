@@ -1,6 +1,7 @@
 {
   "name": "@lumo/user-auth",
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "exports": {

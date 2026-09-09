@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/lumo-harness
+  repository: ghcr.io/lumonote
   tag: "0.1.0"
   pullPolicy: IfNotPresent
 replicaCount: 1
@@ -118,7 +118,7 @@ productionControls:
 dshNode:
   # 承载 subagent 的可水平扩展节点池；生产必须替换为已发布的 DSH 镜像。
   enabled: false
-  image: ghcr.io/lumo-harness/dsh-node:0.1.0
+  image: ghcr.io/lumonote/dsh-node:0.1.0
   replicas: 2
   port: 8091
   seamPort: 8090
@@ -147,7 +147,7 @@ dshNode:
 dshWeb:
   # 官方 DeepSeek Harness Web shell；Lumo UI 以外置 dsh.client 包挂载。
   enabled: false
-  image: ghcr.io/lumo-harness/dsh-node:0.1.0
+  image: ghcr.io/lumonote/dsh-node:0.1.0
   replicas: 1
   port: 3080
   clusterId: default
@@ -178,7 +178,7 @@ provisioner:
   # 持续将节点制品目录收敛到 Registry 的已签名计划；按需启用。
   # rolloutChannel 非空时，每轮从该通道读取 artifactName 的期望版本；否则使用 artifactVersion。
   enabled: false
-  image: ghcr.io/lumo-harness/provisioner:0.1.0
+  image: ghcr.io/lumonote/provisioner:0.1.0
   artifactName: ""
   artifactVersion: ""
   rolloutChannel: ""

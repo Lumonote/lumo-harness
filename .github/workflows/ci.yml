@@ -136,4 +136,4 @@ jobs:
         run: |
           bash -n platform/deploy/acceptance-cluster.sh platform/build.sh
           test "$(sed -n 's/^  tag: *\"\?\([^\" ]*\).*/\1/p' platform/deploy/helm/lumo-platform/values.yaml | head -1)" != "latest"
-          platform/build.sh --dry-run --targets images --registry ghcr.io/lumo-harness --version "$(sed -n 's/^  \"version\": \"\([^\"]*\)\".*/\1/p' platform/package.json)" >/dev/null
+          platform/build.sh --dry-run --targets images --registry ghcr.io/lumonote --version "$(sed -n 's/^  \"version\": \"\([^\"]*\)\".*/\1/p' platform/package.json)" >/dev/null
