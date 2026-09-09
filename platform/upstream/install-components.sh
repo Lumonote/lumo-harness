@@ -336,13 +336,14 @@ run_pnpm_install --config.confirmModulesPurge=false install --frozen-lockfile
 # （release.yml「Install upstream dsh dependencies」），这里补的正是本地一键构建
 # 缺的那一步；依赖已装好的树零成本跳过。
 #
-# 先清 node_modules/.pnpm/lock.yaml 再装：pnpm 的「已是最新」只看这份虚拟存储锁，
-# 不校验文件是否还在磁盘上——被删掉或中断安装留下的空洞，`pnpm install
-# --frozen-lockfile`（连 `--force` 一起）都报 "Already up to date" 而不修复
-# （pnpm 11.7.0 实测）。清掉它，install 才会真正重建缺失的链接。
+# 先清状态文件再装：pnpm 的「已是最新」只看 node_modules 下的状态文件，不校验文件
+# 是否还在磁盘上——被删掉或中断安装留下的空洞，`pnpm install --frozen-lockfile`
+# （连 `--force` 一起）都报 "Already up to date" 而不修复（pnpm 11.7.0 实测）。
+# 工作区要同时清虚拟存储锁与工作区状态，少了后者照样走 fast path；.modules.yaml 保留，
+# 它记着 nodeLinker / hoist 等安装期设置。
 install_workspace_dependencies() {
   local root="$1"
-  rm -f -- "${root}/node_modules/.pnpm/lock.yaml"
+  rm -f -- "${root}/node_modules/.pnpm/lock.yaml" "${root}/node_modules/.pnpm-workspace-state-v1.json"
   (
     cd "${root}"
     run_pnpm_install install --frozen-lockfile

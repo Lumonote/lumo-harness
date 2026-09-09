@@ -260,11 +260,13 @@ for (const root of [
   queuePackage(realpathSync(root))
 }
 
-// pnpm 判定「已是最新」只看 node_modules/.pnpm/lock.yaml，不校验文件是否还在磁盘上：
+// pnpm 判定「已是最新」只看 node_modules 下的状态文件，不校验文件是否还在磁盘上：
 // 被删掉或中断安装留下的空洞，`pnpm install --frozen-lockfile`（连 `--force` 一起）
-// 都报 "Already up to date" 而不修复——pnpm 11.7.0 实测。清掉这份虚拟存储锁文件再装，
-// 才会真正重建缺失的链接。换台机器打包正是靠它自愈，因此只在闭包确实解析不到依赖时
-// 才付这份代价，健康机器上零成本。
+// 都报 "Already up to date" 而不修复——pnpm 11.7.0 实测。要让它重建，得同时清掉虚拟
+// 存储锁 .pnpm/lock.yaml 与工作区状态 .pnpm-workspace-state-v1.json（单包项目只需前者，
+// 工作区少了后者照样走 fast path）。.modules.yaml 保留：它记着 nodeLinker / hoist 等
+// 安装期设置，删掉会按默认值重新布局。换台机器打包正是靠它自愈，因此只在闭包确实
+// 解析不到依赖时才付这份代价，健康机器上零成本。
 const repairedWorkspaces = new Set()
 
 // 缺失的依赖归属哪个工作区。快照目录在 platform/ 之下，必须先于 platform 判定并映射回
@@ -281,7 +283,9 @@ function workspaceRootOwning(packageRoot) {
 
 function repairWorkspaceDependencies(root, missingName) {
   console.warn(`Lumo: [WARN] 缺少 ${missingName}，重装 ${relative(repoRoot, root)} 的依赖后重试...`)
-  rmSync(resolve(root, 'node_modules', '.pnpm', 'lock.yaml'), { force: true })
+  for (const stateFile of ['node_modules/.pnpm/lock.yaml', 'node_modules/.pnpm-workspace-state-v1.json']) {
+    rmSync(resolve(root, stateFile), { force: true })
+  }
   const result = spawnExecutable(process.platform === 'win32' ? 'corepack.cmd' : 'corepack', [
     'pnpm', 'install', '--frozen-lockfile', '--config.confirmModulesPurge=false',
   ], { cwd: root, stdio: 'inherit' })
