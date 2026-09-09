@@ -83,6 +83,10 @@ spec:
             - secretRef: { name: {{ $.Values.governance.authSecret | quote }}, optional: false }
             {{- end }}
           env:
+            {{- if eq $name "scheduler" }}
+            - name: LUMO_GOVERNANCE_URL
+              value: {{ printf "http://%s-governance:%v" (include "lumo-platform.name" $) $.Values.services.governance.port | quote }}
+            {{- end }}
             - name: LUMO_LISTEN
               value: {{ printf ":%v" $cfg.port | quote }}
             - name: LUMO_CONTROL_PLANE_TOKEN

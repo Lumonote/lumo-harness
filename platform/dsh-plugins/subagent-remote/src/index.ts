@@ -13,13 +13,16 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import pg from 'pg'
 
 import { assembleRemote } from './provider.ts'
 import type { RemoteConfig } from './provider.ts'
+import { PgSubagentReceipts } from '../../../shared/subagent-receipts.ts'
 
 /** Schemastery validation for {@link RemoteConfig}(仅加载器形态;程序化调用走 assembleRemote)。 */
 export const Config: z<RemoteConfig> = z.object({
   schedulerUrl: z.string().required(),
+  connectionString: z.string(),
   controlPlaneToken: z.string(),
   nodeUrls: z.dict(z.string()).required(),
   hostTokens: z.dict(z.string()).required(),
@@ -36,7 +39,12 @@ export const Config: z<RemoteConfig> = z.object({
 
 export async function registerSubagentRemote(ctx: Context, config: RemoteConfig): Promise<void> {
   // jobControl is a process-local seam service, not patch-file configuration.
-  const assembly = assembleRemote({ ...config, jobControl: ctx.jobControl })
+  const pool = config.connectionString ? new pg.Pool({ connectionString: config.connectionString,
+    max: 4, connectionTimeoutMillis: 5_000, query_timeout: 5_000, statement_timeout: 5_000 }) : undefined
+  pool?.on('error', () => ctx.logger.warn('subagent-remote: callback database connection lost'))
+  const receipts = pool ? new PgSubagentReceipts(pool) : undefined
+  try { await receipts?.init() } catch (error) { await pool?.end(); throw error }
+  const assembly = assembleRemote({ ...config, jobControl: ctx.jobControl }, receipts)
   const host = config.callbackBindHost ?? config.callbackHost ?? '127.0.0.1'
 
   // EADDRINUSE 等监听失败必须 fail-fast:apply 拒绝 = 节点装配失败。只 log 的形态
@@ -60,14 +68,15 @@ export async function registerSubagentRemote(ctx: Context, config: RemoteConfig)
     assembly.server.once('error', onError)
     assembly.server.once('listening', onListening)
     assembly.server.listen(config.callbackPort, host)
-  })
+  }).catch(async error => { await pool?.end(); throw error })
   ctx.logger.info('subagent-remote: 回调监听 %s:%d(realm=%s)', host, config.callbackPort, config.realm)
 
   ctx.effect(() => {
     // listen 已在 apply 内告成:effect 只负责归还(HMR 停机与插件移除共用)。
-    return () => {
+    return async () => {
       assembly.server.closeAllConnections?.()
       assembly.server.close()
+      await pool?.end()
     }
   })
 

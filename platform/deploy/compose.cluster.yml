@@ -16,6 +16,8 @@ volumes:
   registrydata:
   provisionerdata:
   dshwebdata:
+  teidata:
+  rerankdata:
 
 secrets:
   registry-trust:
@@ -23,7 +25,7 @@ secrets:
 
 services:
   postgres:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     environment: ["POSTGRES_USER=${LUMO_POSTGRES_USER:-lumo}", "POSTGRES_PASSWORD=${LUMO_POSTGRES_PASSWORD:-lumo}", "POSTGRES_DB=${LUMO_POSTGRES_DB:-lumo}"]
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -196,7 +198,23 @@ services:
       timeout: 5s
       retries: 30
       start_period: 60s
-  opa: { image: "openpolicyagent/opa:latest", command: ["run", "--server"] }
+  opa:
+    image: openpolicyagent/opa:latest
+    command: ["run", "--server", "/policies"]
+    volumes:
+      - ./policies:/policies:ro
+  tei:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+    command: ["--model-id", "${LUMO_EMBEDDING_MODEL:-BAAI/bge-m3}"]
+    volumes:
+      - teidata:/data
+    restart: unless-stopped
+  tei-rerank:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+    command: ["--model-id", "${LUMO_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}"]
+    volumes:
+      - rerankdata:/data
+    restart: unless-stopped
   vault: { image: "hashicorp/vault:latest", cap_add: ["IPC_LOCK"], environment: ["VAULT_DEV_ROOT_TOKEN_ID=${LUMO_VAULT_TOKEN:-dev-root-token}"], command: ["server", "-dev"] }
   prometheus:
     image: prom/prometheus:v2.54.1
@@ -259,7 +277,9 @@ services:
     # performs crash recovery, restart the plugin host after its connections
     # are terminated so it can rebuild the complete runtime graph.
     restart: unless-stopped
+    env_file: [./cluster-runtime.env]
     environment:
+      - LUMO_SEAM_MODE=host
       - LUMO_DSH_PROFILE=web
       - LUMO_DEPLOYMENT_MODE=cluster
       - LUMO_CLUSTER_STATUS=ready
@@ -317,7 +337,9 @@ services:
     build: { context: ../.., dockerfile: platform/data-plane/dsh-node/Dockerfile }
     image: "${LUMO_DSH_IMAGE:-lumo/dsh-node:dev}"
     restart: unless-stopped
+    env_file: [./cluster-runtime.env]
     environment:
+      - LUMO_SEAM_ENDPOINTS=http://cluster-a-dsh-1:8090
       - LUMO_NODE_ID=cluster-a-dsh-0
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       - LUMO_CLUSTER_ID=cluster-a
@@ -349,6 +371,7 @@ services:
     build: { context: ../.., dockerfile: platform/data-plane/dsh-node/Dockerfile }
     image: "${LUMO_DSH_IMAGE:-lumo/dsh-node:dev}"
     restart: unless-stopped
+    env_file: [./cluster-runtime.env]
     environment:
       - LUMO_NODE_ID=cluster-a-dsh-1
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -371,6 +394,14 @@ services:
       - LUMO_NODE_CAPACITY=8
       - LUMO_NODE_CAPABILITIES=subagent
       - LUMO_NODE_RESIDENCY=cn-east
+      # Optional exact Agent runtime binding. Leaving the revision empty keeps
+      # this node as an ordinary subagent host and publishes no Worker identity.
+      - "LUMO_USER_ID=${LUMO_CLUSTER_A_AGENT_OWNER:-}"
+      - "LUMO_PROJECT_ID=${LUMO_CLUSTER_A_AGENT_PROJECT:-}"
+      - "LUMO_AGENT_ID=${LUMO_CLUSTER_A_AGENT_ID:-}"
+      - "LUMO_AGENT_PRESET_REVISION=${LUMO_CLUSTER_A_AGENT_PRESET_REVISION:-}"
+      - "LUMO_AGENT_PROVIDER=${LUMO_CLUSTER_A_AGENT_PROVIDER:-}"
+      - "LUMO_AGENT_MODEL=${LUMO_CLUSTER_A_AGENT_MODEL:-}"
       - "PROVISIONER_ARTIFACT_NAME=${PROVISIONER_ARTIFACT_NAME:-}"
     volumes:
       - provisionerdata:/var/lib/lumo/artifacts:ro
@@ -380,7 +411,9 @@ services:
     build: { context: ../.., dockerfile: platform/data-plane/dsh-node/Dockerfile }
     image: "${LUMO_DSH_IMAGE:-lumo/dsh-node:dev}"
     restart: unless-stopped
+    env_file: [./cluster-runtime.env]
     environment:
+      - LUMO_SEAM_ENDPOINTS=http://cluster-b-dsh-1:8090
       - LUMO_NODE_ID=cluster-b-dsh-0
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       - LUMO_CLUSTER_ID=cluster-b
@@ -412,6 +445,7 @@ services:
     build: { context: ../.., dockerfile: platform/data-plane/dsh-node/Dockerfile }
     image: "${LUMO_DSH_IMAGE:-lumo/dsh-node:dev}"
     restart: unless-stopped
+    env_file: [./cluster-runtime.env]
     environment:
       - LUMO_NODE_ID=cluster-b-dsh-1
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -434,6 +468,12 @@ services:
       - LUMO_NODE_CAPACITY=8
       - LUMO_NODE_CAPABILITIES=subagent
       - LUMO_NODE_RESIDENCY=cn-north
+      - "LUMO_USER_ID=${LUMO_CLUSTER_B_AGENT_OWNER:-}"
+      - "LUMO_PROJECT_ID=${LUMO_CLUSTER_B_AGENT_PROJECT:-}"
+      - "LUMO_AGENT_ID=${LUMO_CLUSTER_B_AGENT_ID:-}"
+      - "LUMO_AGENT_PRESET_REVISION=${LUMO_CLUSTER_B_AGENT_PRESET_REVISION:-}"
+      - "LUMO_AGENT_PROVIDER=${LUMO_CLUSTER_B_AGENT_PROVIDER:-}"
+      - "LUMO_AGENT_MODEL=${LUMO_CLUSTER_B_AGENT_MODEL:-}"
       - "PROVISIONER_ARTIFACT_NAME=${PROVISIONER_ARTIFACT_NAME:-}"
     volumes:
       - provisionerdata:/var/lib/lumo/artifacts:ro
@@ -443,7 +483,7 @@ services:
   scheduler-0:
     build: { context: ../control-plane, dockerfile: scheduler/Dockerfile }
     image: lumo/scheduler:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-0", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-0", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
       nacos: { condition: service_healthy }
@@ -451,7 +491,7 @@ services:
   scheduler-1:
     build: { context: ../control-plane, dockerfile: scheduler/Dockerfile }
     image: lumo/scheduler:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-1", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-1", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
       nacos: { condition: service_healthy }

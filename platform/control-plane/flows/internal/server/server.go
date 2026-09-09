@@ -25,11 +25,15 @@ type Server struct {
 	engine *engine.Engine
 }
 
-func New(st *store.Store, log *slog.Logger) *Server {
+func New(st *store.Store, log *slog.Logger, engines ...*engine.Engine) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{store: st, log: log, engine: engine.New()}
+	runtime := engine.New()
+	if len(engines) > 0 && engines[0] != nil {
+		runtime = engines[0]
+	}
+	return &Server{store: st, log: log, engine: runtime}
 }
 
 type caller struct {
@@ -114,6 +118,12 @@ func canSee(f *domain.Flow, c caller) bool {
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
+	mux.HandleFunc("GET /v1/operators", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := s.authenticate(w, r); !ok {
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"operators": s.engine.Catalog()})
+	})
 	mux.HandleFunc("POST /v1/projects/{pid}/flows", s.create)
 	mux.HandleFunc("GET /v1/projects/{pid}/flows", s.listProject)
 	mux.HandleFunc("GET /v1/projects/{pid}/flows/management", s.listManaged)
@@ -176,8 +186,12 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !c.hasRole("admin") && !c.hasRole("manager") && !c.hasRole("editor") && !c.hasRole("owner") {
-		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+	f, err := s.store.GetFlow(r.Context(), r.PathValue("id"), c.realm)
+	if err != nil {
+		http.Error(w, `{"error":"flow not found"}`, http.StatusNotFound)
+		return
+	}
+	if _, ok := s.requireProjectMember(w, r, f.ProjectID, c); !ok {
 		return
 	}
 	definition, err := s.store.Definition(r.Context(), r.PathValue("id"), c.realm)
@@ -197,21 +211,27 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"stored definition invalid"}`, http.StatusInternalServerError)
 		return
 	}
-	result, err := s.engine.Run(r.Context(), &def, req.Input)
+	dept := ""
+	if len(c.depts) > 0 {
+		dept = c.depts[0]
+	}
+	result, err := s.engine.Run(engine.WithIdentity(r.Context(), observability.Identity{
+		Realm: c.realm, UserID: c.user, Roles: c.roles, ProjectID: f.ProjectID, DeptID: dept,
+	}), &def, req.Input)
 	if err != nil {
-		http.Error(w, `{"error":"flow execution failed: `+err.Error()+`"}`, http.StatusUnprocessableEntity)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
 }
 
 // parseDefinition 入库护栏（防环在两处跑：TS 前端提示 + Go 入库强制——Go 是执法位）。
-func parseDefinition(body []byte) (json.RawMessage, *domain.Definition, error) {
+func (s *Server) parseDefinition(body []byte) (json.RawMessage, *domain.Definition, error) {
 	var def domain.Definition
 	if err := json.Unmarshal(body, &def); err != nil {
 		return nil, nil, err
 	}
-	if err := domain.ValidateDefinition(&def); err != nil {
+	if err := s.engine.Validate(&def); err != nil {
 		return nil, nil, err
 	}
 	// 重新序列化为规范 JSON 入库（RawMessage 保形状，规范字节利于快照比对）
@@ -239,7 +259,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"name and definition required"}`, http.StatusBadRequest)
 		return
 	}
-	norm, _, err := parseDefinition(req.Definition)
+	norm, _, err := s.parseDefinition(req.Definition)
 	if err != nil {
 		http.Error(w, `{"error":"invalid definition: `+err.Error()+`"}`, http.StatusBadRequest)
 		return
@@ -468,7 +488,7 @@ func (s *Server) updateDefinition(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"definition required"}`, http.StatusBadRequest)
 		return
 	}
-	norm, _, err := parseDefinition(req.Definition)
+	norm, _, err := s.parseDefinition(req.Definition)
 	if err != nil {
 		http.Error(w, `{"error":"invalid definition: `+err.Error()+`"}`, http.StatusBadRequest)
 		return

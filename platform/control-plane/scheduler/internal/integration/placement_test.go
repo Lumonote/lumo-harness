@@ -17,7 +17,7 @@ import (
 func nodeN1(t *testing.T, st *store.Store) {
 	t.Helper()
 	if err := (&catalog.Pg{Pool: st.Pool()}).Upsert(context.Background(),
-		domain.Node{NodeID: "N1", ClusterID: "c1", Capacity: 4, Capabilities: []string{"llm"}}); err != nil {
+		domain.Node{NodeID: "N1", Realm: "r1", ClusterID: "c1", Capacity: 4, Capabilities: []string{"llm"}}); err != nil {
 		t.Fatalf("登记节点失败: %v", err)
 	}
 }

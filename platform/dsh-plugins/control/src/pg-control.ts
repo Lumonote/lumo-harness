@@ -92,7 +92,7 @@ export class PgControlSeam implements ControlSeam {
       }
 
       // 策略评估（OPA 单点；实现由装配层注入）
-      let decision = this.policy.evaluate({
+      let decision = await this.policy.evaluate({
         command: request.command,
         actor: request.actor,
         role: request.role,

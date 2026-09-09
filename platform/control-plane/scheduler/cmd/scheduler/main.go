@@ -61,6 +61,7 @@ func main() {
 		log.Info("使用 Nacos 节点目录", "addr", nacosAddr)
 	}
 	elec := &election.State{}
+	workers := catalog.WorkerDirectory{URL: os.Getenv("LUMO_GOVERNANCE_URL"), Token: os.Getenv("LUMO_CONTROL_PLANE_TOKEN")}
 
 	// 选主循环：acquire + 续租（TTL/3）
 	electionCtx, cancelElection := context.WithCancel(ctx)
@@ -84,14 +85,16 @@ func main() {
 				if _, err := st.RequeueStaleDispatch(ctx, *ttlMs*2); err != nil {
 					log.Warn("回收过期派发失败", "err", err)
 				}
-				drainOnce(ctx, st, cat, elec.Current(), log)
+				drainOnce(ctx, st, cat, elec.Current(), log, workers)
 			}
 		}
 	}()
 
+	api := server.New(st, elec, cat, log, os.Getenv("LUMO_SUBAGENT_HOST_TOKEN"))
+	api.SetWorkerDirectory(workers)
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(server.New(st, elec, cat, log, os.Getenv("LUMO_SUBAGENT_HOST_TOKEN")).Routes())),
+		Handler:           observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(api.Routes())),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -126,7 +129,11 @@ func main() {
 }
 
 // drainOnce 一轮接续：取 PENDING → 规划 → 放置。任何一处失败仅记录并等下一轮。
-func drainOnce(ctx context.Context, st *store.Store, cat catalog.Catalog, lease *domain.Lease, log *slog.Logger) {
+func drainOnce(ctx context.Context, st *store.Store, cat catalog.Catalog, lease *domain.Lease, log *slog.Logger, directories ...catalog.WorkerDirectory) {
+	var workers catalog.WorkerDirectory
+	if len(directories) > 0 {
+		workers = directories[0]
+	}
 	pending, err := st.PendingTasks(ctx, 32)
 	if err != nil {
 		log.Error("取排队任务失败", "err", err)
@@ -146,9 +153,14 @@ func drainOnce(ctx context.Context, st *store.Store, cat catalog.Catalog, lease 
 		return
 	}
 	for _, task := range planner.OrderPending(pending, time.Now()) {
-		n := planner.Pick(task, nodes, active)
+		eligible, err := workers.Filter(ctx, task, nodes)
+		if err != nil {
+			log.Warn("Worker 设备目录不可用，保留排队任务", "task_id", task.TaskID, "err", err)
+			continue
+		}
+		n := planner.Pick(task, eligible, active)
 		if n == nil {
-			break // 剩余任务同样无候选，等下一轮
+			continue // Other employees/Agents can still have eligible idle devices.
 		}
 		if err := st.SyncNodeSnapshot(ctx, *n); err != nil {
 			log.Error("同步节点快照失败", "node_id", n.NodeID, "err", err)
@@ -157,7 +169,7 @@ func drainOnce(ctx context.Context, st *store.Store, cat catalog.Catalog, lease 
 		if _, err := st.PlaceTask(ctx, lease, task, n.NodeID); err != nil {
 			var ncap *domain.NoCapacityError
 			if errors.As(err, &ncap) {
-				break
+				continue
 			}
 			log.Error("drain 放置失败", "task_id", task.TaskID, "err", err)
 			continue

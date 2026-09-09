@@ -19,6 +19,8 @@ type Envelope struct {
 	Attempt    int                  `json:"attempt"`
 	NodeID     string               `json:"node_id"`
 	Realm      string               `json:"realm"`
+	WorkerID   string               `json:"worker_id,omitempty"`
+	ProjectID  string               `json:"project_id,omitempty"`
 	ClusterID  string               `json:"cluster_id"`
 	Priority   int                  `json:"priority"`
 	Requires   []domain.Requirement `json:"requires"`

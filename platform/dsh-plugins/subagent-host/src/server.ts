@@ -50,6 +50,8 @@ export interface SubagentHostOptions {
   tokens: ReadonlyMap<string, string>
   /** 归一化后的回调 origin 白名单；请求载荷不能扩张承载节点的出站面。 */
   callbackOrigins: ReadonlySet<string>
+  /** A pinned Worker accepts tasks only through the durable governed inbox. */
+  governedOnly?: boolean
   /** 承载侧运行表:`key = runKeyOf(realm, childId)`。host 读,run.ts 写。 */
   runs: RunRegistry
   /**
@@ -88,6 +90,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: Subage
   try {
     // 身份先行:被禁的调用不该先让我们吃掉一兆字节的 body(seam-host 同训)
     const caller = authenticate(req, options)
+    if (options.governedOnly && endpoint === 'start') throw forbidden('this Worker accepts only governed dispatch')
     const body = await readBody(req, options.maxBodyBytes)
     const payload = parseObject(body)
 

@@ -120,7 +120,7 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
       read: async (sessionRef, fromSeq = 0) => {
         try {
           const fromHot = await hot.read(sessionRef, fromSeq)
-          if (fromHot !== undefined) return fromHot
+          if (fromHot !== undefined && (fromHot.at(-1)?.seq ?? fromSeq) >= await log.head(sessionRef)) return fromHot
         } catch (error) {
           // fail-open：热层故障绝不放大为读失败——回退 PG 真相源
           ctx.logger.warn('session-log: 会话 %s 热层读取失败，回退 PG：%s',
@@ -151,18 +151,14 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
   // 最大 seq——PG 是真相源、读面与 resume 同源；热层窗口是加速器，不作判别基准。
   ctx.provide('sessionLogQuery', {
     async queryWithStaleness(sessionRef, opts = {}) {
+      if (opts.liveHead !== undefined) stalenessOf(opts.liveHead, 0, opts.maxLag ?? DEFAULT_QUERY_MAX_LAG)
       const records = await log.read(sessionRef)
       const replicaHead = records.length > 0 ? records[records.length - 1]!.seq : 0
-      if (opts.liveHead === undefined) {
-        // v1 诚实边界：standalone 共库时本地读恒一致；liveHead 未供 ⇒ 无判别基准，
-        // 恒 fresh 全量返回。绝不发明新的滞后探测基础设施——跨节点的下界探测归
-        // 「投影库」后续切片，liveHead 由调用方显式供给。
-        return { kind: 'fresh', records }
-      }
-      const verdict = stalenessOf(opts.liveHead, replicaHead, opts.maxLag ?? DEFAULT_QUERY_MAX_LAG)
+      const liveHead = Math.max(opts.liveHead ?? 0, await log.head(sessionRef))
+      const verdict = stalenessOf(liveHead, replicaHead, opts.maxLag ?? DEFAULT_QUERY_MAX_LAG)
       return verdict.fresh
         ? { kind: 'fresh', records }
-        : { kind: 'stale', reason: 'replication-lag', replicaHead, liveHead: opts.liveHead, lag: verdict.lag }
+        : { kind: 'stale', reason: 'replication-lag', replicaHead, liveHead, lag: verdict.lag }
     },
   })
 
@@ -185,6 +181,7 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
   const tokens = new Map<string, number>()
   /** 已被 fence 掉的会话——本节点对它们只剩一件事可做：停手 */
   const fenced = new Map<string, string>()
+  const observedHeads = new Map<string, number>()
 
   /**
    * 取得可写令牌。首次调用抢租；已持有则直接复用。
@@ -211,11 +208,16 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
    * snapshot 由调用方先取(created 时刻 / 首 sight 时刻的 events 快照)。
    */
   const backfill = (sessionRef: string, snapshot: readonly SessionEvent[]): void => {
+    const head = snapshot.at(-1)?.seq
+    if (head !== undefined) observedHeads.set(sessionRef, Math.max(head, observedHeads.get(sessionRef) ?? 0))
     queueBackfill(sessionRef, snapshot, {
       tails,
       isFenced: (ref) => fenced.has(ref),
       ensureToken,
-      append: (record, token) => log.append(record, token),
+      append: async (record, token) => {
+        await log.publishHead(sessionRef, observedHeads.get(sessionRef) ?? record.seq, token)
+        return log.append(record, token)
+      },
       onMirror: hot === undefined ? undefined : (record) => {
         // 复用 firehose 写路径的镜像形态:PG 提交后 fire-and-forget,失败只 warn
         // ——绝不 fence、绝不阻塞队列尾(单连接命令有序 ⇒ 镜像序 == append 序)。
@@ -234,6 +236,7 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
   ctx.on('session/event', (session, event) => {
     const sessionRef = String(session.id)
     if (fenced.has(sessionRef)) return
+    observedHeads.set(sessionRef, Math.max(event.seq, observedHeads.get(sessionRef) ?? 0))
 
     // 首 sight 补缺兜底(终审 I1 竞态收敛):created 时刻与构造/发布窗口存在时序
     // 双向竞态(承载 child 实测 seq 覆盖三形态 13/14/20 行)。firehose 首个发布
@@ -244,8 +247,9 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
       sightSeen.add(sessionRef)
       // 真实会话必然带 events;对外部 emit 的极简形状(如测试直发)防御——无
       // events 即无构造期可补,跳过。
-      const live = session as { events?: readonly SessionEvent[] }
-      if (live.events !== undefined) backfill(sessionRef, live.events.slice())
+      const live = session as { snapshotEvents?: () => readonly SessionEvent[]; events?: readonly SessionEvent[] }
+      const snapshot = live.snapshotEvents?.() ?? live.events
+      if (snapshot !== undefined) backfill(sessionRef, snapshot)
     }
 
     // 串到本会话队列尾：dsh 的 seq 已定序，但 append 是异步的，
@@ -259,6 +263,7 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
         return
       }
       try {
+        await log.publishHead(sessionRef, observedHeads.get(sessionRef) ?? event.seq, token)
         const record: LogRecord = {
           sessionRef,
           seq: event.seq,
@@ -307,11 +312,15 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
       const sessionRef = String(session.id)
       if (fenced.has(sessionRef)) return
       // 快照与依赖组复用 backfill()(与首 sight 兜底同一实现,无漂移面)。
-      backfill(sessionRef, session.events.slice())
+      backfill(sessionRef, session.snapshotEvents())
     } catch (error) {
       ctx.logger.error('session-log: 会话 %s created 回填入队失败:%s',
         String(session.id), error instanceof Error ? error.message : String(error))
     }
+  })
+
+  ctx.on('session/flush', async session => {
+    await tails.get(String(session.id))
   })
 
   ctx.on('session/disposed', (session) => {
@@ -323,6 +332,7 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
       tokens.delete(sessionRef)
       fenced.delete(sessionRef)
       sightSeen.delete(sessionRef)
+      observedHeads.delete(sessionRef)
     })
   })
 

@@ -23,7 +23,7 @@ class MemoryControlSeam implements ControlSeam {
       const first = this.seen.get(request.correlationId)!
       return { allowed: first.allowed }
     }
-    const decision = this.policy.evaluate(request)
+    const decision = await this.policy.evaluate(request)
     this.seen.set(request.correlationId, {
       requestId: request.correlationId,
       command: request.command,

@@ -195,6 +195,10 @@ func main() {
 	}, log)
 	mux := http.NewServeMux()
 	srv.Register(mux)
+	schedulingCtx, cancelScheduling := context.WithCancel(ctx)
+	schedulingDone := make(chan struct{})
+	go func() { defer close(schedulingDone); srv.RunScheduling(schedulingCtx) }()
+	defer func() { cancelScheduling(); <-schedulingDone }()
 	log.Info("governance started", "addr", *listen, "deployment_mode", mode, "cluster_status", *clusterStatus)
 	httpSrv := &http.Server{Addr: *listen, Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)), ReadHeaderTimeout: 10 * time.Second}
 	go func() {

@@ -39,7 +39,7 @@ export function toStopReason(reason: TurnEndReason | undefined): SubagentResultS
 
 /** 读一个已 settle 的 child:全量事件(切片 1 无 seed,boundary = 0)+ 规范选择规则。 */
 export function readChildResult(child: Agent, runId: string): ChildResultBody {
-  const own = child.session.events
+  const own = child.session.snapshotEvents()
   const lastEnd = foldConsumedWork(own).end
   const output = finalAssistantOutput(own) ?? []
   return {

@@ -38,6 +38,12 @@ CREATE INDEX IF NOT EXISTS governance_device_commands_pending ON governance_devi
 ALTER TABLE governance_device_connections ADD COLUMN IF NOT EXISTS certificate_pem TEXT NOT NULL DEFAULT '';
 ALTER TABLE governance_device_connections ADD COLUMN IF NOT EXISTS previous_certificate_serial TEXT NOT NULL DEFAULT '';
 ALTER TABLE governance_device_connections ADD COLUMN IF NOT EXISTS renewal_replay_expires TIMESTAMPTZ;
+ALTER TABLE governance_device_commands ADD COLUMN IF NOT EXISTS run_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE governance_device_commands ADD COLUMN IF NOT EXISTS attempt INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE governance_device_commands ADD COLUMN IF NOT EXISTS session_ref TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS governance_device_commands_active_run
+ ON governance_device_commands(realm,run_id)
+ WHERE action='execute_task' AND run_id<>'' AND state IN ('queued','delivered');
 `
 
 type DeviceArtifact struct {
@@ -174,7 +180,7 @@ func (s *Store) SetDevicePolicy(ctx context.Context, realm, id, actor string, ex
 	if err != nil {
 		return d, err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE governance_device_commands SET state='interrupted',updated_at=now() WHERE realm=$1 AND node_id=$2 AND state IN ('queued','delivered')`, realm, id); err != nil {
+	if err = interruptDeviceCommands(ctx, tx, realm, id, ""); err != nil {
 		return d, err
 	}
 	if err = recordUserAdminEvent(ctx, tx, realm, d.Owner, "node_updated", actor, map[string]any{"node_id": id, "action": "device_policy", "revision": expected + 1}); err != nil {
@@ -314,10 +320,9 @@ func (s *Store) ConnectDevice(ctx context.Context, realm, id, keyHash, serial st
 	if err != nil {
 		return "", err
 	}
-	// Delivery is at most once across reconnects. An interrupted command is not
-	// a completed task and may require a separate, explicit retry by its owner.
-	_, err = tx.Exec(ctx, `UPDATE governance_device_commands SET state='interrupted',updated_at=now() WHERE realm=$1 AND node_id=$2 AND state IN ('queued','delivered')`, realm, id)
-	if err != nil {
+	// A reconnect fences the old lease. Execution assignments are reopened by
+	// the gateway dispatcher; management commands remain explicitly at-most-once.
+	if err = interruptDeviceCommands(ctx, tx, realm, id, ""); err != nil {
 		return "", err
 	}
 	return connection, tx.Commit(ctx)
@@ -376,9 +381,11 @@ func (s *Store) DeviceHeartbeat(ctx context.Context, realm, id, keyHash, serial,
 	if err != nil {
 		return d, err
 	}
-	// A live management channel does not grant generic Agent execution. Desktop
-	// execution is admitted separately by its command policy and local consent.
-	_, err = tx.Exec(ctx, `UPDATE governance_desktop_nodes SET last_seen_at=now(),scheduling_eligible=false,
+	// A converged mTLS channel makes the employee's node eligible for task
+	// delivery only. The desktop command still requires a durable local accept;
+	// this does not grant an Agent runtime or a control-plane credential.
+	_, err = tx.Exec(ctx, `UPDATE governance_desktop_nodes SET last_seen_at=now(),
+ scheduling_eligible=CASE WHEN status IN ('DRAINING','REVOKED') THEN false ELSE $3 END,
  status=CASE WHEN status='DRAINING' THEN status WHEN $3 THEN 'ONLINE' ELSE 'PENDING_ACTIVATION' END WHERE realm=$1 AND id=$2`, realm, id, converged)
 	if err != nil {
 		return d, err
@@ -405,10 +412,36 @@ func (s *Store) DisconnectDevice(ctx context.Context, realm, id, connection stri
 			return err
 		}
 	}
-	if _, err = tx.Exec(ctx, `UPDATE governance_device_commands SET state='interrupted',updated_at=now() WHERE realm=$1 AND node_id=$2 AND connection_id=$3 AND state IN ('queued','delivered')`, realm, id, connection); err != nil {
+	if err = interruptDeviceCommands(ctx, tx, realm, id, connection); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// interruptDeviceCommands fences every command issued to the old connection.
+// Only execute_task commands reopen Scheduler delivery; start/stop/reconcile
+// preserve their existing explicit at-most-once management semantics.
+func interruptDeviceCommands(ctx context.Context, tx pgx.Tx, realm, id, connection string) error {
+	query := `UPDATE governance_device_commands SET state='interrupted',updated_at=now()
+	 WHERE realm=$1 AND node_id=$2 AND state IN ('queued','delivered')`
+	args := []any{realm, id}
+	if connection != "" {
+		query += ` AND connection_id=$3`
+		args = append(args, connection)
+	}
+	if _, err := tx.Exec(ctx, query, args...); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `UPDATE scheduler_dispatch_outbox o
+	 SET delivered_at=NULL,claimed_by=NULL,claimed_at=NULL
+	 FROM governance_device_commands q,scheduler_tasks s
+	 WHERE q.realm=$1 AND q.node_id=$2 AND q.action='execute_task' AND q.state='interrupted'
+	   AND o.task_id=q.run_id AND o.attempt=q.attempt AND o.node_id=q.node_id
+	   AND s.task_id=o.task_id AND s.attempt=o.attempt AND s.node_id=o.node_id AND s.state='PLACED'
+	   AND NOT EXISTS (SELECT 1 FROM governance_device_commands active
+	     WHERE active.realm=q.realm AND active.run_id=q.run_id AND active.action='execute_task'
+	       AND active.state IN ('queued','delivered') AND active.expires_at>now())`, realm, id)
+	return err
 }
 
 func (s *Store) QueueDeviceCommand(ctx context.Context, realm, id, actor, action string, revision int64, body json.RawMessage) (DeviceCommand, error) {
@@ -489,6 +522,140 @@ func (s *Store) DeviceCommands(ctx context.Context, realm, id string) ([]DeviceC
 	return out, rows.Err()
 }
 
+// DispatchDeviceTasks bridges Scheduler's durable outbox to the current mTLS
+// device lease. The outbox is considered delivered only after an immutable
+// device command exists; Scheduler remains PLACED until the desktop confirms
+// that the assignment was persisted in its local task inbox.
+func (s *Store) DispatchDeviceTasks(ctx context.Context, limit int) (int, error) {
+	if limit < 1 {
+		return 0, nil
+	}
+	if limit > 64 {
+		limit = 64
+	}
+	dispatched := 0
+	for dispatched < limit {
+		ok, err := s.dispatchDeviceTask(ctx)
+		if err != nil || !ok {
+			return dispatched, err
+		}
+		dispatched++
+	}
+	return dispatched, nil
+}
+
+func (s *Store) dispatchDeviceTask(ctx context.Context) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Expiry or a reconnect never loses an accepted Scheduler placement. Once
+	// no live command remains, reopen its original outbox row for a new lease.
+	if _, err = tx.Exec(ctx, `UPDATE governance_device_commands SET state='interrupted',updated_at=now()
+	  WHERE action='execute_task' AND state IN ('queued','delivered') AND expires_at<=now()`); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE scheduler_dispatch_outbox o
+	  SET delivered_at=NULL,claimed_by=NULL,claimed_at=NULL
+	  FROM governance_device_commands q,scheduler_tasks s
+	  WHERE q.action='execute_task' AND q.state='interrupted'
+	    AND o.task_id=q.run_id AND o.attempt=q.attempt AND o.node_id=q.node_id
+	    AND s.task_id=o.task_id AND s.attempt=o.attempt AND s.node_id=o.node_id AND s.state='PLACED'
+	    AND NOT EXISTS (SELECT 1 FROM governance_device_commands active
+	      WHERE active.realm=q.realm AND active.run_id=q.run_id AND active.action='execute_task'
+	        AND active.state IN ('queued','delivered') AND active.expires_at>now())`); err != nil {
+		return false, err
+	}
+
+	var realm, runID, taskID, nodeID, owner string
+	var attempt int
+	var revision, deadlineMS int64
+	var connectionID string
+	var body json.RawMessage
+	err = tx.QueryRow(ctx, `SELECT r.realm,r.id,r.task_id,s.attempt,s.deadline_ms,n.id,n.owner_user_id,d.revision,d.connection_id,
+	  jsonb_build_object(
+	    'task_id',t.id,'run_id',r.id,'attempt',s.attempt,'worker_id',s.worker_id,
+	    'project_id',t.project_id,'title',t.title,'intent',t.intent,
+	    'intent_contract',t.intent_contract,'deadline_ms',s.deadline_ms)
+	  FROM scheduler_dispatch_outbox o
+	  JOIN scheduler_tasks s ON s.task_id=o.task_id AND s.attempt=o.attempt AND s.node_id=o.node_id
+	  JOIN governance_task_runs r ON r.realm=s.realm AND r.id=s.task_id AND r.attempt=s.attempt
+	  JOIN governance_delegation_tasks t ON t.realm=r.realm AND t.id=r.task_id AND t.scheduler_task_id=r.id
+	  JOIN governance_desktop_nodes n ON n.realm=s.realm AND n.id=s.node_id AND s.worker_id='user:'||n.owner_user_id
+	  JOIN governance_users u ON u.realm=n.realm AND u.id=n.owner_user_id
+	  JOIN governance_device_connections d ON d.realm=n.realm AND d.node_id=n.id
+	  WHERE o.delivered_at IS NULL AND o.claimed_by IS NULL AND s.state='PLACED'
+	    AND t.state IN ('QUEUED','ASSIGNED') AND t.business_state='ASSIGNED'
+	    AND r.state IN ('QUEUED','ASSIGNED') AND r.scheduler_task_id=r.id
+	    AND r.attempt=(SELECT max(latest.attempt) FROM governance_task_runs latest WHERE latest.realm=r.realm AND latest.task_id=r.task_id)
+	    AND (r.assigned_node_id='' OR r.assigned_node_id=n.id) AND r.session_ref=''
+	    AND u.status='active' AND n.status='ONLINE' AND n.scheduling_eligible
+	    AND n.last_seen_at>=now()-interval '30 seconds'
+	    AND d.revision>0 AND d.applied_revision=d.revision AND d.report_error=''
+	    AND d.connection_id<>'' AND d.connection_expires>now() AND d.certificate_expires>now()
+	    AND (s.deadline_ms=0 OR s.deadline_ms>(EXTRACT(EPOCH FROM now())*1000)::bigint)
+	    AND NOT EXISTS (SELECT 1 FROM governance_device_commands active
+	      WHERE active.realm=r.realm AND active.run_id=r.id AND active.action='execute_task'
+	        AND active.state IN ('queued','delivered') AND active.expires_at>now())
+	    AND (SELECT count(*) FROM governance_device_commands active
+	      WHERE active.realm=r.realm AND active.node_id=n.id AND active.state IN ('queued','delivered') AND active.expires_at>now())<16
+	  ORDER BY o.id LIMIT 1 FOR UPDATE OF o,s,r,t,n,d SKIP LOCKED FOR SHARE OF u`).
+		Scan(&realm, &runID, &taskID, &attempt, &deadlineMS, &nodeID, &owner, &revision, &connectionID, &body)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, tx.Commit(ctx)
+	}
+	if err != nil {
+		return false, err
+	}
+	sessionRef := "device-" + deviceHash(realm+"\x00"+runID)
+	var envelope map[string]any
+	if json.Unmarshal(body, &envelope) != nil {
+		return false, ErrBadRequest
+	}
+	envelope["session_ref"] = sessionRef
+	body, err = json.Marshal(envelope)
+	if err != nil {
+		return false, err
+	}
+	expiresAt := time.Now().Add(5 * time.Minute)
+	if deadlineMS > 0 {
+		deadline := time.UnixMilli(deadlineMS)
+		if deadline.Before(expiresAt) {
+			expiresAt = deadline
+		}
+	}
+	commandID, err := deviceRandom()
+	if err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO governance_device_commands
+	  (id,realm,node_id,actor_id,revision,connection_id,action,body,expires_at,run_id,attempt,session_ref)
+	  VALUES($1,$2,$3,'device-gateway',$4,$5,'execute_task',$6,$7,$8,$9,$10)`,
+		commandID, realm, nodeID, revision, connectionID, body, expiresAt, runID, attempt, sessionRef); err != nil {
+		return false, err
+	}
+	if tag, updateErr := tx.Exec(ctx, `UPDATE scheduler_dispatch_outbox SET delivered_at=(EXTRACT(EPOCH FROM now())*1000)::bigint,
+	  claimed_by=NULL,claimed_at=NULL WHERE task_id=$1 AND attempt=$2 AND node_id=$3 AND delivered_at IS NULL`, runID, attempt, nodeID); updateErr != nil {
+		return false, updateErr
+	} else if tag.RowsAffected() != 1 {
+		return false, fmt.Errorf("%w: scheduler dispatch changed", ErrConflict)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE governance_task_runs SET assigned_node_id=$3,session_ref=$4
+	  WHERE realm=$1 AND id=$2 AND state IN ('QUEUED','ASSIGNED')`, realm, runID, nodeID, sessionRef); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE governance_delegation_tasks SET assigned_node_id=$3,updated_at=now()
+	  WHERE realm=$1 AND id=$2`, realm, taskID, nodeID); err != nil {
+		return false, err
+	}
+	detail, _ := json.Marshal(map[string]any{"run_id": runID, "attempt": attempt, "node_id": nodeID, "command_id": commandID, "owner_user_id": owner})
+	if err = insertTaskAudit(ctx, tx, taskID, "device_execution_dispatched", "device-gateway", detail); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}
+
 func (s *Store) ClaimDeviceCommands(ctx context.Context, realm, id, connection string) ([]DeviceCommand, error) {
 	rows, err := s.pool.Query(ctx, `UPDATE governance_device_commands SET state='delivered',updated_at=now() WHERE id IN (
  SELECT q.id FROM governance_device_commands q JOIN governance_device_connections d ON d.realm=q.realm AND d.node_id=q.node_id
@@ -523,16 +690,134 @@ func (s *Store) CompleteDeviceCommand(ctx context.Context, realm, id, connection
 	if len(result) == 0 {
 		result = json.RawMessage(`{}`)
 	}
-	tag, err := s.pool.Exec(ctx, `UPDATE governance_device_commands q SET state=$5,result=$6,updated_at=now() FROM governance_device_connections d
- WHERE q.realm=$1 AND q.node_id=$2 AND q.connection_id=$3 AND q.id=$4 AND q.state='delivered' AND q.expires_at>now()
- AND d.realm=q.realm AND d.node_id=q.node_id AND d.connection_id=$3 AND d.connection_expires>now() AND q.revision=d.revision
- AND d.certificate_expires>now() AND EXISTS (SELECT 1 FROM governance_desktop_nodes n JOIN governance_users u ON u.realm=n.realm AND u.id=n.owner_user_id
- WHERE n.realm=q.realm AND n.id=q.node_id AND n.status<>'REVOKED' AND u.status='active')`, realm, id, connection, commandID, state, result)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() != 1 {
+	defer func() { _ = tx.Rollback(ctx) }()
+	var action, currentState, runID, sessionRef, owner string
+	var attempt int
+	var revision int64
+	var previous json.RawMessage
+	err = tx.QueryRow(ctx, `SELECT q.action,q.state,q.result,q.run_id,q.attempt,q.session_ref,q.revision,n.owner_user_id
+	  FROM governance_device_commands q
+	  JOIN governance_device_connections d ON d.realm=q.realm AND d.node_id=q.node_id
+	  JOIN governance_desktop_nodes n ON n.realm=q.realm AND n.id=q.node_id
+	  JOIN governance_users u ON u.realm=n.realm AND u.id=n.owner_user_id
+	  WHERE q.realm=$1 AND q.node_id=$2 AND q.connection_id=$3 AND q.id=$4
+	    AND d.connection_id=$3 AND d.connection_expires>now() AND d.certificate_expires>now()
+	    AND q.revision=d.revision AND n.status<>'REVOKED' AND u.status='active'
+	  FOR UPDATE OF q,d,n`, realm, id, connection, commandID).
+		Scan(&action, &currentState, &previous, &runID, &attempt, &sessionRef, &revision, &owner)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: command lease changed", ErrConflict)
 	}
-	return nil
+	if err != nil {
+		return err
+	}
+	if currentState == "completed" || currentState == "failed" {
+		var same bool
+		if err = tx.QueryRow(ctx, `SELECT $1::text=$2 AND $3::jsonb=$4::jsonb`, currentState, state, previous, result).Scan(&same); err != nil {
+			return err
+		}
+		if !same {
+			return fmt.Errorf("%w: command result is immutable", ErrConflict)
+		}
+		return tx.Commit(ctx)
+	}
+	var live bool
+	if err = tx.QueryRow(ctx, `SELECT state='delivered' AND expires_at>now() FROM governance_device_commands WHERE id=$1`, commandID).Scan(&live); err != nil || !live {
+		return fmt.Errorf("%w: command lease changed", ErrConflict)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE governance_device_commands SET state=$2,result=$3,updated_at=now() WHERE id=$1`, commandID, state, result); err != nil {
+		return err
+	}
+	if action != "execute_task" {
+		return tx.Commit(ctx)
+	}
+	if runID == "" || attempt < 1 || sessionRef == "" || revision < 1 {
+		return fmt.Errorf("%w: invalid task command identity", ErrConflict)
+	}
+	var taskID string
+	if state == "completed" {
+		tag, updateErr := tx.Exec(ctx, `UPDATE governance_task_runs SET state='RUNNING',assigned_node_id=$3,session_ref=$4,
+		  started_at=COALESCE(started_at,now()) WHERE realm=$1 AND id=$2 AND attempt=$5 AND worker_id=$6
+		  AND state IN ('QUEUED','ASSIGNED') AND assigned_node_id=$3 AND session_ref=$4`,
+			realm, runID, id, sessionRef, attempt, "user:"+owner)
+		if updateErr != nil {
+			return updateErr
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("%w: task run changed before device acceptance", ErrConflict)
+		}
+		if err = tx.QueryRow(ctx, `UPDATE governance_delegation_tasks t SET state='RUNNING',business_state='EXECUTING',
+		  assigned_node_id=$3,updated_at=now() FROM governance_task_runs r
+		  WHERE r.realm=$1 AND r.id=$2 AND t.realm=r.realm AND t.id=r.task_id
+		    AND t.state IN ('QUEUED','ASSIGNED') AND t.business_state='ASSIGNED' RETURNING t.id`, realm, runID, id).Scan(&taskID); err != nil {
+			return fmt.Errorf("%w: task changed before device acceptance", ErrConflict)
+		}
+		if tag, updateErr = tx.Exec(ctx, `UPDATE scheduler_tasks SET state='RUNNING',updated_at=(EXTRACT(EPOCH FROM now())*1000)::bigint
+		  WHERE task_id=$1 AND realm=$2 AND node_id=$3 AND attempt=$4 AND worker_id=$5 AND state='PLACED'`,
+			runID, realm, id, attempt, "user:"+owner); updateErr != nil {
+			return updateErr
+		} else if tag.RowsAffected() != 1 {
+			return fmt.Errorf("%w: scheduler task changed before device acceptance", ErrConflict)
+		}
+		if tag, updateErr = tx.Exec(ctx, `UPDATE scheduler_task_attempts SET state='RUNNING',updated_at=(EXTRACT(EPOCH FROM now())*1000)::bigint
+		  WHERE task_id=$1 AND attempt=$2 AND node_id=$3 AND state='PLACED'`, runID, attempt, id); updateErr != nil {
+			return updateErr
+		} else if tag.RowsAffected() != 1 {
+			return fmt.Errorf("%w: scheduler attempt changed before device acceptance", ErrConflict)
+		}
+		detail, _ := json.Marshal(map[string]any{"run_id": runID, "attempt": attempt, "node_id": id, "command_id": commandID, "session_ref": sessionRef})
+		if err = insertTaskAudit(ctx, tx, taskID, "device_execution_accepted", owner, detail); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	// A local rejection is a terminal receipt for this immutable attempt. It
+	// remains visible to the requester and can be retried through the ordinary
+	// Task retry path without pretending that execution ever started.
+	summary := "Device did not accept the task assignment"
+	payload, _ := json.Marshal(map[string]any{"task_id": "", "run_id": runID, "state": "FAILED", "session_ref": sessionRef, "node_id": id, "summary": summary})
+	if err = tx.QueryRow(ctx, `SELECT task_id FROM governance_task_runs WHERE realm=$1 AND id=$2 AND attempt=$3
+	  AND worker_id=$4 AND state IN ('QUEUED','ASSIGNED') FOR UPDATE`, realm, runID, attempt, "user:"+owner).Scan(&taskID); err != nil {
+		return fmt.Errorf("%w: task run changed before device rejection", ErrConflict)
+	}
+	var receipt map[string]any
+	_ = json.Unmarshal(payload, &receipt)
+	receipt["task_id"] = taskID
+	payload, _ = json.Marshal(receipt)
+	if _, err = tx.Exec(ctx, `INSERT INTO governance_task_results(run_id,realm,task_id,payload) VALUES($1,$2,$3,$4)`, runID, realm, taskID, payload); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE governance_task_runs SET state='FAILED',session_ref=$3,ended_at=COALESCE(ended_at,now()),last_error=$4
+	  WHERE realm=$1 AND id=$2`, realm, runID, sessionRef, summary); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE governance_delegation_tasks SET state='FAILED',last_error=$3,updated_at=now()
+	  WHERE realm=$1 AND id=$2`, realm, taskID, summary); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE scheduler_tasks SET state='FAILED',updated_at=(EXTRACT(EPOCH FROM now())*1000)::bigint
+	  WHERE task_id=$1 AND realm=$2 AND node_id=$3 AND attempt=$4 AND state='PLACED'`, runID, realm, id, attempt); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE scheduler_task_attempts SET state='FAILED',updated_at=(EXTRACT(EPOCH FROM now())*1000)::bigint
+	  WHERE task_id=$1 AND attempt=$2 AND node_id=$3 AND state='PLACED'`, runID, attempt, id); err != nil {
+		return err
+	}
+	detail, _ := json.Marshal(map[string]any{"run_id": runID, "attempt": attempt, "node_id": id, "command_id": commandID, "session_ref": sessionRef, "state": "FAILED"})
+	if err = insertTaskAudit(ctx, tx, taskID, "device_execution_rejected", owner, detail); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO governance_task_audit(id,realm,task_id,event,actor,detail)
+	  SELECT gen_random_uuid()::text,t.realm,t.intent_contract->>'parent_task_id','child_result',$3,
+	    $4::jsonb || jsonb_build_object('child_task_id',t.id)
+	  FROM governance_delegation_tasks t
+	  WHERE t.realm=$1 AND t.id=$2 AND COALESCE(t.intent_contract->>'parent_task_id','')<>''`, realm, taskID, owner, detail); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

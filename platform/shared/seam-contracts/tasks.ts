@@ -13,6 +13,37 @@ export const TASK_EVENTS = [
 ] as const
 export type TaskEvent = (typeof TASK_EVENTS)[number]
 
+/** Root objective and depth are assigned by Governance, never trusted from a caller. */
+export interface IntentContract {
+  parent_task_id?: string
+  objective: string
+  constraints: string[]
+  acceptance_criteria: string[]
+  root_objective: string
+  depth: number
+}
+
+export interface TaskExecutionResult {
+  task_id: string
+  run_id: string
+  state: 'COMPLETED' | 'FAILED' | 'CANCELLED'
+  session_ref: string
+  node_id?: string
+  summary: string
+  output?: unknown
+  created_at: string
+}
+
+/** Counts cover all children, including ones beyond the current page. */
+export interface TaskCollaborationSummary {
+  total: number
+  active: number
+  awaiting_review: number
+  accepted: number
+  needs_attention: number
+  unresolved: number
+}
+
 /** 同一事件重放幂等；未知状态/事件与非法边一律抛错。 */
 export function transitionTask(state: BusinessState, event: TaskEvent): BusinessState {
   if (!(BUSINESS_STATES as readonly string[]).includes(state)) throw new Error(`未知业务任务状态 ${state}`)

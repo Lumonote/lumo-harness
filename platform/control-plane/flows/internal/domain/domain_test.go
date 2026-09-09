@@ -49,10 +49,7 @@ func TestValidateDefinition(t *testing.T) {
 	}, edges ...[2]string) *Definition {
 		d := &Definition{}
 		for _, n := range nodes {
-			d.Nodes = append(d.Nodes, struct {
-				ID       string `json:"id"`
-				Operator string `json:"operator"`
-			}{n.ID, n.Operator})
+			d.Nodes = append(d.Nodes, FlowNode{ID: n.ID, Operator: n.Operator})
 		}
 		for _, e := range edges {
 			d.Edges = append(d.Edges, struct {
@@ -84,10 +81,7 @@ func TestValidateDefinition(t *testing.T) {
 	}
 	// 缺算子
 	d := &Definition{}
-	d.Nodes = append(d.Nodes, struct {
-		ID       string `json:"id"`
-		Operator string `json:"operator"`
-	}{"a", ""})
+	d.Nodes = append(d.Nodes, FlowNode{ID: "a"})
 	if err := ValidateDefinition(d); err == nil {
 		t.Fatalf("缺算子应拒")
 	}

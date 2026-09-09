@@ -65,3 +65,33 @@ export class RbacControlPolicy implements ControlPolicy {
     return { allowed: true }
   }
 }
+
+/** Central policy can narrow local grants; a missing decision never grants access. */
+export class OpaControlPolicy implements ControlPolicy {
+  private readonly endpoint: string
+
+  constructor(baseUrl: string, private readonly local: ControlPolicy, private readonly token = '') {
+    const url = new URL(baseUrl)
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      throw new Error('control: invalid OPA URL')
+    }
+    this.endpoint = `${url.href.replace(/\/+$/, '')}/v1/data/lumo/session_control/allow`
+  }
+
+  async evaluate(request: Parameters<ControlPolicy['evaluate']>[0]): Promise<ControlDecision> {
+    const local = await this.local.evaluate(request)
+    if (!local.allowed) return local
+    try {
+      const response = await fetch(this.endpoint, {
+        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(3_000),
+        headers: { 'content-type': 'application/json', ...(this.token ? { authorization: `Bearer ${this.token}` } : {}) },
+        body: JSON.stringify({ input: request }),
+      })
+      if (!response.ok) return { allowed: false, reason: 'policy-denied' }
+      const body = await response.json() as { result?: unknown }
+      return body.result === true ? { allowed: true } : { allowed: false, reason: 'policy-denied' }
+    } catch {
+      return { allowed: false, reason: 'policy-denied' }
+    }
+  }
+}

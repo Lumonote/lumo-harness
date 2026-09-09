@@ -29,7 +29,10 @@ type Server struct {
 	catalog      catalog.Catalog
 	log          *slog.Logger
 	controlToken string
+	workers      catalog.WorkerDirectory
 }
+
+func (s *Server) SetWorkerDirectory(directory catalog.WorkerDirectory) { s.workers = directory }
 
 // New 装配 HTTP 层。
 // controlTokens is intentionally optional so existing in-process callers stay
@@ -105,6 +108,8 @@ func (s *Server) handleLeader(w http.ResponseWriter, _ *http.Request) {
 // placeRequest 放置请求体。
 type placeRequest struct {
 	TaskID     string               `json:"task_id"`
+	WorkerID   string               `json:"worker_id"`
+	ProjectID  string               `json:"project_id"`
 	ClusterID  string               `json:"cluster_id"`
 	Requires   []domain.Requirement `json:"requires"`
 	Priority   int                  `json:"priority"`
@@ -125,16 +130,24 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad-request", "请求体非法或缺少 task_id")
 		return
 	}
-	// 降级语义（spec §6）：无 leader 快速失败，绝不挂起等待。
+	task := domain.Task{
+		TaskID: req.TaskID, Realm: realm, ClusterID: req.ClusterID,
+		WorkerID: req.WorkerID, ProjectID: req.ProjectID,
+		Requires: req.Requires, Priority: req.Priority, Residency: req.Residency,
+		DeadlineMS: req.DeadlineMS, Queue: req.Queue, Weight: req.Weight, AvoidNodes: req.AvoidNodes,
+	}
+	if prior, err := s.store.ExistingPlacement(r.Context(), task); err != nil {
+		s.respondStoreError(w, err)
+		return
+	} else if prior != nil {
+		writeJSON(w, http.StatusCreated, prior)
+		return
+	}
+	// New placement still requires the elected leader and a current directory.
 	lease := s.elec.Current()
 	if lease == nil {
 		writeError(w, http.StatusServiceUnavailable, "no-leader", "当前无 leader，请稍后重试")
 		return
-	}
-	task := domain.Task{
-		TaskID: req.TaskID, Realm: realm, ClusterID: req.ClusterID,
-		Requires: req.Requires, Priority: req.Priority, Residency: req.Residency,
-		DeadlineMS: req.DeadlineMS, Queue: req.Queue, Weight: req.Weight, AvoidNodes: req.AvoidNodes,
 	}
 
 	nodes, err := s.catalog.List(r.Context())
@@ -150,6 +163,12 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	nodes, err = s.workers.Filter(r.Context(), task, nodes)
+	if err != nil {
+		s.log.Warn("Worker 设备目录不可用", "worker_id", task.WorkerID, "err", err)
+		writeError(w, http.StatusServiceUnavailable, "worker-directory-unavailable", "无法确认执行者设备范围")
+		return
+	}
 	n := planner.Pick(task, nodes, active)
 	if n == nil {
 		s.queueAndMaybePreempt(w, r, lease, task, nodes)
@@ -183,6 +202,15 @@ func (s *Server) queueAndMaybePreempt(w http.ResponseWriter, r *http.Request, le
 	state, err := s.store.QueueTask(r.Context(), lease, task)
 	if err != nil {
 		s.respondStoreError(w, err)
+		return
+	}
+	if state != domain.StatePending {
+		placement, err := s.store.GetPlacement(r.Context(), task.TaskID)
+		if err != nil {
+			s.respondStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, placement)
 		return
 	}
 	response := map[string]any{"task_id": task.TaskID, "state": state}
@@ -487,6 +515,10 @@ func requestRealm(w http.ResponseWriter, r *http.Request) (string, bool) {
 
 // respondStoreError 领域错误 → HTTP 状态映射（spec §6 表）。
 func (s *Server) respondStoreError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrTaskIdentityConflict) {
+		writeError(w, http.StatusConflict, "task-identity-conflict", "任务标识已绑定到其他执行身份")
+		return
+	}
 	var fo *domain.FencedOutError
 	if errors.As(err, &fo) {
 		writeError(w, http.StatusServiceUnavailable, "fenced-out", "本节点已失去领导权，请向新 leader 重交")

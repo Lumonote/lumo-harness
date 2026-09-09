@@ -13,7 +13,7 @@ export type ControlCommand =
 
 export interface ControlPolicy {
   /** 返回 allowed=false + 具体失败原因（策略点由装配层注入，区别于实现细节） */
-  evaluate(req: { command: ControlCommand; actor: string; role: string; realm: string; sessionRef: string }): ControlDecision
+  evaluate(req: { command: ControlCommand; actor: string; role: string; realm: string; sessionRef: string }): ControlDecision | Promise<ControlDecision>
 }
 
 export interface ControlRequest {

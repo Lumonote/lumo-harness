@@ -10,18 +10,9 @@ import (
 func TestRunUsesDeterministicTopologicalOrder(t *testing.T) {
 	var def domain.Definition
 	def.Nodes = append(def.Nodes,
-		struct {
-			ID       string `json:"id"`
-			Operator string `json:"operator"`
-		}{ID: "a", Operator: "identity"},
-		struct {
-			ID       string `json:"id"`
-			Operator string `json:"operator"`
-		}{ID: "b", Operator: "identity"},
-		struct {
-			ID       string `json:"id"`
-			Operator string `json:"operator"`
-		}{ID: "c", Operator: "identity"})
+		domain.FlowNode{ID: "a", Operator: "identity"},
+		domain.FlowNode{ID: "b", Operator: "identity"},
+		domain.FlowNode{ID: "c", Operator: "identity"})
 	def.Edges = append(def.Edges,
 		struct {
 			From string `json:"from"`

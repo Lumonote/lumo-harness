@@ -64,6 +64,23 @@ async function seed(ctx: Context, sessionRef: string, seqs: number[]): Promise<L
 }
 
 describe(`读面 staleness 信封 —— 对真 PG（需 SESSION_LOG_TEST_DSN，当前${suffix}）`, () => {
+  t('uses the fenced writer head when callers omit or understate liveHead', async () => {
+    await withBoot(async (ctx, pg) => {
+      await seed(ctx, 'head-report', [1, 2])
+      const lease = await pg.lease('head-report')
+      await pg.publishHead('head-report', 20, lease!.fencingToken)
+      for (const options of [{}, { liveHead: 1 }]) {
+        expect(await ctx.sessionLogQuery.queryWithStaleness('head-report', options)).toEqual({
+          kind: 'stale', reason: 'replication-lag', replicaHead: 2, liveHead: 20, lag: 18,
+        })
+      }
+      await pg.release('head-report', 'query-seeder')
+      const next = await pg.acquire('head-report', 'replacement', 60_000)
+      await expect(pg.publishHead('head-report', 30, lease!.fencingToken)).rejects.toThrow()
+      await pg.publishHead('head-report', 21, next!.fencingToken)
+      expect(await pg.head('head-report')).toBe(21)
+    })
+  })
   t('records 回返 —— 未给 liveHead 恒 fresh 全量；空日志是诚实空集', async () => {
     await withBoot(async (ctx) => {
       const seeded = await seed(ctx, 'sess-a', [1, 2, 3])

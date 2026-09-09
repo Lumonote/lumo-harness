@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS knowledge_sources (
   chunks          JSONB NOT NULL,
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS knowledge_vector_outbox (
+  realm TEXT NOT NULL,
+  doc_id TEXT NOT NULL,
+  revision BIGINT NOT NULL DEFAULT 1,
+  PRIMARY KEY (realm, doc_id)
+);
 ${OUTBOX_DDL}`
 }
 
@@ -71,6 +78,7 @@ export interface PgProviderConfig {
   embedding: EmbeddingClient
   /** 用于向量–模型一致的校验 token（§5.4.4） */
   embeddingModel: string
+  vectorProjection?: KnowledgeSeam & { init?: () => Promise<void>; close?: () => Promise<void> }
 }
 
 /** 供宿主 API 映射成 409，避免管理员在并发编辑时静默覆盖来源。 */
@@ -103,16 +111,29 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
   private readonly allowedRoles: ReadonlySet<string>
   private readonly embedding: EmbeddingClient
   private readonly embeddingModel: string
+  private readonly vectorProjection?: PgProviderConfig['vectorProjection']
+  private projecting = false
 
   constructor(config: PgProviderConfig) {
     this.pool = new pg.Pool({ connectionString: config.connectionString })
     this.allowedRoles = new Set(config.allowedRoles)
     this.embedding = config.embedding
     this.embeddingModel = config.embeddingModel
+    this.vectorProjection = config.vectorProjection
   }
 
   async init(): Promise<void> {
-    await this.pool.query(ddl(this.embedding.dimension))
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query('SELECT pg_advisory_xact_lock(823054)')
+      await client.query(ddl(this.embedding.dimension))
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
+    await this.vectorProjection?.init?.()
   }
 
   private embed(text: string): Promise<number[]> {
@@ -177,6 +198,7 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
       `INSERT INTO knowledge_graph_outbox (doc_id, realm, op, payload) VALUES ($1,$2,'upsert',$3)`,
       [doc.docId, doc.realm, JSON.stringify(collectProjection(doc, chunks))],
     )
+    await this.enqueueVector(client, doc.docId, doc.realm)
     const row = written.rows[0]!
     return {
       docId: row.doc_id, realm: row.realm, space: row.space, title: row.title,
@@ -211,6 +233,22 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
     // 角色越权 → 显式拒绝（§6.3 OPA 下沉；不静默返回空）
     if (!request.roles.some((r) => this.allowedRoles.has(r))) {
       throw forbidden(`PgKnowledgeProvider: 角色 ${request.roles.join(',')} 无知识库检索权限`)
+    }
+    if (request.scope !== 'published') throw forbidden('knowledge: only published sources are searchable')
+    if (this.vectorProjection) {
+      const hits = await this.vectorProjection.query(request)
+      if (hits.length === 0) return []
+      const sources = await this.pool.query<StoredSource>(
+        `SELECT doc_id, realm, space, title, source_version, embedding_model, chunks
+         FROM knowledge_sources WHERE realm=$1 AND doc_id=ANY($2::text[])`,
+        [request.realm, hits.map(hit => hit.docId)],
+      )
+      const current = new Map(sources.rows.map(source => [source.doc_id, source]))
+      return hits.filter(hit => {
+        const source = current.get(hit.docId)
+        return source?.source_version === hit.sourceVersion && source.embedding_model === this.embeddingModel
+          && readChunks(source.chunks).some(chunk => chunk.text === hit.text)
+      })
     }
     const vector = await this.embed(request.text)
     const rows = await this.pool.query<{
@@ -252,6 +290,7 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
         `INSERT INTO knowledge_graph_outbox (doc_id, realm, op) VALUES ($1,$2,'remove')`,
         [docId, realm],
       )
+      await this.enqueueVector(client, docId, realm)
       await client.query('COMMIT')
     } catch (e) {
       await client.query('ROLLBACK')
@@ -369,6 +408,7 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
         `INSERT INTO knowledge_graph_outbox (doc_id, realm, op) VALUES ($1,$2,'remove')`,
         [docId, realm],
       )
+      await this.enqueueVector(client, docId, realm)
       await client.query('COMMIT')
     } catch (error) {
       await client.query('ROLLBACK')
@@ -380,6 +420,51 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
 
   async close(): Promise<void> {
     await this.pool.end()
+    await this.vectorProjection?.close?.()
+  }
+
+  private async enqueueVector(client: pg.PoolClient, docId: string, realm: string): Promise<void> {
+    await client.query(`INSERT INTO knowledge_vector_outbox (realm,doc_id) VALUES ($1,$2)
+      ON CONFLICT (realm,doc_id) DO UPDATE SET revision=knowledge_vector_outbox.revision+1`, [realm, docId])
+  }
+
+  /** Row locks serialize each document's remote replacement across all replicas. */
+  async drainVectorProjection(batchSize = 25): Promise<number> {
+    if (!this.vectorProjection || this.projecting) return 0
+    this.projecting = true
+    let client: pg.PoolClient | undefined
+    try {
+      client = await this.pool.connect()
+      await client.query('BEGIN')
+      const pending = await client.query<{ realm: string; doc_id: string }>(
+        `SELECT realm,doc_id FROM knowledge_vector_outbox ORDER BY realm,doc_id LIMIT $1 FOR UPDATE SKIP LOCKED`,
+        [Math.min(Math.max(batchSize, 1), 100)],
+      )
+      for (const row of pending.rows) {
+        const result = await client.query<StoredSource>(
+          `SELECT doc_id,realm,space,title,source_version,embedding_model,chunks
+           FROM knowledge_sources WHERE realm=$1 AND doc_id=$2`, [row.realm, row.doc_id],
+        )
+        const source = result.rows[0]
+        await this.vectorProjection.remove(row.doc_id, row.realm)
+        if (source) {
+          await this.vectorProjection.ingest({
+            doc: { docId: source.doc_id, realm: source.realm, space: source.space, title: source.title,
+              sourceVersion: source.source_version, embeddingModel: source.embedding_model },
+            chunks: readChunks(source.chunks),
+          })
+        }
+        await client.query('DELETE FROM knowledge_vector_outbox WHERE realm=$1 AND doc_id=$2', [row.realm, row.doc_id])
+      }
+      await client.query('COMMIT')
+      return pending.rows.length
+    } catch (error) {
+      await client?.query('ROLLBACK')
+      throw error
+    } finally {
+      client?.release()
+      this.projecting = false
+    }
   }
 }
 

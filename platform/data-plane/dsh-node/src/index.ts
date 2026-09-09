@@ -21,6 +21,7 @@ import { spawn } from 'node:child_process'
 import { localStorageRows, localVaultRows, profileLifetimeOverlay, profileStorageRows, workflowEngineOverlay } from './workflow.ts'
 import { localSkillSnapshotAssembly, skillSnapshotSource, waitForSkillSnapshotFile } from './skills.ts'
 import { startNacosRegistration } from './nacos.ts'
+import { clusterWiring, workerBindingFromEnv } from './cluster.ts'
 import {
   ensureProfilePlugins,
   failedProfilePluginNames,
@@ -61,6 +62,8 @@ const {
   mailbox: mailboxEntry,
   subagentHost: subagentHostEntry,
   subagentRemote: subagentRemoteEntry,
+  seamHost: seamHostEntry,
+  seamProxy: seamProxyEntry,
   skillLocal: skillLocalEntry,
   objectStore: objectStoreEntry,
   attachments: attachmentsEntry,
@@ -140,6 +143,20 @@ const webPort = integerEnv('LUMO_WEB_PORT', 3080)
 const authPort = integerEnv('LUMO_AUTH_PORT', webPort)
 const controlPlaneToken = process.env['LUMO_CONTROL_PLANE_TOKEN'] ?? ''
 const identityAssertionSecret = process.env['LUMO_IDENTITY_ASSERTION_SECRET'] || controlPlaneToken
+const cluster = clusterWiring(process.env, deployment.mode, role)
+const workerBinding = deployment.mode === 'cluster' && role === 'node'
+  ? workerBindingFromEnv(process.env, { agentId: agentID, userId: userID, projectId: projectID }) : undefined
+const seamToken = process.env['LUMO_SEAM_TOKEN'] || controlPlaneToken
+const seamRows = cluster.seamMode === 'disabled' ? '' : `    - id: lumo-seam-${cluster.seamMode}
+      name: ${JSON.stringify(cluster.seamMode === 'proxy' ? seamProxyEntry : seamHostEntry)}
+      config: ${JSON.stringify(cluster.seamMode === 'proxy' ? {
+        mode: 'remote', endpoints: cluster.endpoints, realm: platformRealm, userId: userID,
+        roles: [userRole], token: seamToken, identityAssertionSecret, tls: cluster.tls,
+      } : {
+        host: cluster.seamHost, port: cluster.port, tokens: { [platformRealm]: seamToken },
+        identityAssertionSecret, tls: cluster.tls,
+      })}
+`
 // `pnpm --filter ... start -- <args>` keeps the separator in argv. The DSH
 // launcher must see only the app arguments that follow it.
 const extraArgs = process.argv.slice(2).filter((arg) => arg !== '--')
@@ -264,12 +281,19 @@ const roleRows = localMode ? '' : role === 'node'
         tokens:
           ${JSON.stringify(subagentRealm)}: ${JSON.stringify(hostToken)}
         callbackOrigins: ${JSON.stringify(callbackOrigins)}
+        connectionString: ${JSON.stringify(pgDSN)}
+${workerBinding ? `        runtimeReport: ${JSON.stringify({
+  governanceUrl: governanceURL, token: controlPlaneToken, realm: platformRealm, nodeId: jobControlNodeId,
+  binding: workerBinding,
+  capacity: integerEnv('LUMO_NODE_CAPACITY', 1),
+})}\n` : ''}
 `
   : `    - id: lumo-subagent-remote
       name: ${JSON.stringify(subagentRemoteEntry)}
       inject: [subagents, jobControl]
       config:
         schedulerUrl: ${JSON.stringify(process.env['LUMO_SCHEDULER_URL'] ?? 'http://localhost:8083')}
+        connectionString: ${JSON.stringify(pgDSN)}
         controlPlaneToken: ${JSON.stringify(process.env['LUMO_CONTROL_PLANE_TOKEN'] ?? '')}
         clusterId: ${JSON.stringify(process.env['LUMO_CLUSTER_ID'] ?? '')}
         nodeUrls: ${JSON.stringify(JSON.parse(process.env['LUMO_SUBAGENT_NODE_URLS'] ?? (process.env['LUMO_NACOS_ADDR'] === undefined ? '{"N1":"http://localhost:8091"}' : '{}')))}
@@ -377,10 +401,17 @@ ${profileStorageRows(dshProfile)}
           - prefix: web_
             provenance: external
             effect: read
-    - id: lumo-knowledge
+${seamRows}    - id: lumo-knowledge
       name: ${JSON.stringify(knowledgeEntry)}
-      inject: [tools]
+      inject: ${JSON.stringify(cluster.seamMode === 'proxy' ? ['tools', 'knowledge', 'knowledgeGraph'] : ['tools'])}
       config:
+        providerMode: ${JSON.stringify(cluster.knowledge.providerMode)}
+        milvusUrl: ${JSON.stringify(cluster.knowledge.milvusUrl ?? '')}
+        milvusCollection: ${JSON.stringify(cluster.knowledge.milvusCollection)}
+        milvusRebuildUrl: ${JSON.stringify(cluster.knowledge.milvusRebuildUrl ?? '')}
+        nebulaUrl: ${JSON.stringify(cluster.knowledge.nebulaUrl ?? '')}
+        remoteApiKey: ${JSON.stringify(cluster.knowledge.remoteApiKey ?? '')}
+${cluster.knowledge.rerank ? `        rerank: ${JSON.stringify(cluster.knowledge.rerank)}\n` : ''}
         connectionString: ${JSON.stringify(pgDSN)}
         realm: ${JSON.stringify(platformRealm)}
         roles: [viewer, operator]
@@ -396,6 +427,7 @@ ${profileStorageRows(dshProfile)}
       name: ${JSON.stringify(meteringEntry)}
       inject: [llm]
       config:
+        ledgerTransport: ${JSON.stringify(cluster.ledgerTransport)}
         connectionString: ${JSON.stringify(pgDSN)}
         userId: ${JSON.stringify(userID)}
         deptId: ${JSON.stringify(deptID)}
@@ -410,6 +442,8 @@ ${profileStorageRows(dshProfile)}
       inject: [tools]
       config:
         connectionString: ${JSON.stringify(pgDSN)}
+        opaUrl: ${JSON.stringify(cluster.opaUrl)}
+        opaToken: ${JSON.stringify(cluster.opaToken)}
     - id: lumo-project
       name: ${JSON.stringify(projectEntry)}
       inject: [tools]

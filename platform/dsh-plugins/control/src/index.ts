@@ -15,7 +15,7 @@ import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
 
 import { PgControlSeam, type SessionControlState } from './pg-control.ts'
-import { RbacControlPolicy, DEFAULT_ROLE_GRANTS, type RoleGrants } from './policy.ts'
+import { OpaControlPolicy, RbacControlPolicy, DEFAULT_ROLE_GRANTS, type RoleGrants } from './policy.ts'
 import type { ControlSeam } from '../../../shared/seam-contracts/control.ts'
 
 export interface ControlConfig {
@@ -24,6 +24,8 @@ export interface ControlConfig {
   roleGrants?: RoleGrants
   /** 项目层角色授权表（只能收窄 realm 授权 —— 评审 N4） */
   projectGrants?: RoleGrants
+  opaUrl?: string
+  opaToken?: string
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -37,6 +39,8 @@ export const Config: z<ControlConfig> = z.object({
   connectionString: z.string(),
   roleGrants: z.dict(z.array(z.string())),
   projectGrants: z.dict(z.array(z.string())),
+  opaUrl: z.string(),
+  opaToken: z.string(),
 }) as unknown as z<ControlConfig>
 
 /** 暂停态下一律拒绝的工具前缀（外部写副作用；与 R2 幂等要求同源） */
@@ -47,7 +51,8 @@ export function apply(ctx: Context, config: ControlConfig): void {
     roleGrants: config.roleGrants ?? DEFAULT_ROLE_GRANTS,
     projectGrants: config.projectGrants,
   })
-  const seam = new PgControlSeam(config.connectionString, policy)
+  const seam = new PgControlSeam(config.connectionString,
+    config.opaUrl ? new OpaControlPolicy(config.opaUrl, policy, config.opaToken) : policy)
 
   ctx.effect(() => () => {
     void seam.close()

@@ -18,6 +18,15 @@ nacos:
   group: DEFAULT_GROUP
 opa:
   address: http://opa:8181
+knowledge:
+  milvusUrl: http://milvus:19530
+  milvusCollection: lumo_knowledge
+  nebulaUrl: ""
+  embeddingUrl: http://tei:80
+  embeddingModel: BAAI/bge-m3
+  embeddingDimension: 1024
+  rerankUrl: http://tei-rerank:80
+  rerankModel: BAAI/bge-reranker-v2-m3
 vault:
   address: http://vault:8200
   tokenSecret: lumo-vault-token
@@ -112,6 +121,7 @@ dshNode:
   image: ghcr.io/lumo-harness/dsh-node:0.1.0
   replicas: 2
   port: 8091
+  seamPort: 8090
   clusterId: default
   realm: dev
   capacity: 8
@@ -119,6 +129,16 @@ dshNode:
   residency: ""
   hostTokenSecret: lumo-subagent-host-token
   hostTokenKey: token
+  # Opt-in, one-preset-per-pod Worker identity. All fields are required when
+  # enabled; the runtime verifies them against Governance before advertising.
+  governedWorker:
+    enabled: false
+    ownerUserId: ""
+    projectId: ""
+    agentId: ""
+    presetRevision: 0
+    provider: ""
+    model: ""
   hpa:
     enabled: true
     minReplicas: 2

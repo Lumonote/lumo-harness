@@ -60,8 +60,18 @@ spec:
         - name: dsh-node
           image: {{ .Values.dshNode.image | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          ports: [{ name: subagent, containerPort: {{ .Values.dshNode.port }} }]
+          ports:
+            - { name: subagent, containerPort: {{ .Values.dshNode.port }} }
+            - { name: seam, containerPort: {{ .Values.dshNode.seamPort }} }
+          envFrom:
+            - configMapRef: { name: {{ include "lumo-platform.name" . }}-config }
           env:
+            - name: LUMO_SEAM_MODE
+              value: host
+            - name: LUMO_SEAM_BIND
+              value: 0.0.0.0
+            - name: LUMO_SEAM_PORT
+              value: {{ .Values.dshNode.seamPort | quote }}
             - name: LUMO_NODE_ID
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - name: LUMO_NODE_ADVERTISE_HOST
@@ -78,6 +88,20 @@ spec:
               value: {{ .Values.dshNode.realm | quote }}
             - name: LUMO_ROLE
               value: node
+            {{- if .Values.dshNode.governedWorker.enabled }}
+            - name: LUMO_USER_ID
+              value: {{ required "dshNode.governedWorker.ownerUserId is required" .Values.dshNode.governedWorker.ownerUserId | quote }}
+            - name: LUMO_PROJECT_ID
+              value: {{ required "dshNode.governedWorker.projectId is required" .Values.dshNode.governedWorker.projectId | quote }}
+            - name: LUMO_AGENT_ID
+              value: {{ required "dshNode.governedWorker.agentId is required" .Values.dshNode.governedWorker.agentId | quote }}
+            - name: LUMO_AGENT_PRESET_REVISION
+              value: {{ required "dshNode.governedWorker.presetRevision is required" .Values.dshNode.governedWorker.presetRevision | quote }}
+            - name: LUMO_AGENT_PROVIDER
+              value: {{ required "dshNode.governedWorker.provider is required" .Values.dshNode.governedWorker.provider | quote }}
+            - name: LUMO_AGENT_MODEL
+              value: {{ required "dshNode.governedWorker.model is required" .Values.dshNode.governedWorker.model | quote }}
+            {{- end }}
             - name: LUMO_SUBAGENT_HOST_BIND
               value: 0.0.0.0
             - name: LUMO_SUBAGENT_HOST_PORT
@@ -178,7 +202,9 @@ metadata:
 spec:
   clusterIP: None
   selector: { lumo.dev/service: dsh-node }
-  ports: [{ name: subagent, port: {{ .Values.dshNode.port }}, targetPort: subagent }]
+  ports:
+    - { name: subagent, port: {{ .Values.dshNode.port }}, targetPort: subagent }
+    - { name: seam, port: {{ .Values.dshNode.seamPort }}, targetPort: seam }
 {{- if .Values.dshNode.hpa.enabled }}
 ---
 apiVersion: autoscaling/v2
@@ -237,10 +263,14 @@ spec:
         - name: dsh-web
           image: {{ .Values.dshWeb.image | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef: { name: {{ include "lumo-platform.name" . }}-config }
           ports:
             - { name: web, containerPort: {{ .Values.dshWeb.port }} }
             - { name: subagent-callback, containerPort: {{ .Values.dshWeb.callbackPort }} }
           env:
+            - name: LUMO_SEAM_MODE
+              value: host
             - name: LUMO_DSH_PROFILE
               value: web
             - name: LUMO_DEPLOYMENT_MODE

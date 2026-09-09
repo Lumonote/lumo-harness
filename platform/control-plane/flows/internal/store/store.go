@@ -81,8 +81,7 @@ CREATE TABLE IF NOT EXISTS flow_trigger_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_flow_trigger_pending
   ON flow_trigger_outbox (id) WHERE delivered_at IS NULL;
--- 每个 (trigger, automation) 只允许一个成功运行；失败重投可复用同一行，
--- 避免 outbox 至少一次语义把幂等问题推给每个流程作者。
+-- Each (trigger, automation) has one business attempt. Explicit replay uses a new trigger.
 CREATE TABLE IF NOT EXISTS flow_runs (
   id            BIGSERIAL PRIMARY KEY,
   trigger_id    BIGINT NOT NULL REFERENCES flow_trigger_outbox(id) ON DELETE CASCADE,
@@ -121,6 +120,15 @@ END $$;
 -- follows the ALTERs so an existing deployment gains the column before index.
 CREATE UNIQUE INDEX IF NOT EXISTS flow_trigger_replay_once
   ON flow_trigger_outbox (replay_of_run_id) WHERE replay_of_run_id IS NOT NULL;
+ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS claim_token BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS bindings_prepared BOOLEAN NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS flow_trigger_bindings (
+  trigger_id BIGINT NOT NULL REFERENCES flow_trigger_outbox(id) ON DELETE CASCADE,
+  automation_id TEXT NOT NULL,
+  flow_id TEXT NOT NULL,
+  flow_version INT NOT NULL CHECK (flow_version > 0),
+  PRIMARY KEY (trigger_id, automation_id)
+);
 `
 
 var (
@@ -132,6 +140,9 @@ var (
 	ErrNotReviewer      = errors.New("审核须 manager/admin 角色")
 	ErrVersionGone      = errors.New("回滚目标版本不存在")
 	ErrRunNotReplayable = errors.New("仅失败的运行可以重放")
+	ErrRunInProgress    = errors.New("flow attempt is still running")
+	ErrRunFinalized     = errors.New("flow attempt is already final or expired")
+	ErrClaimLost        = errors.New("flow trigger claim was lost")
 )
 
 type Store struct {
@@ -140,6 +151,7 @@ type Store struct {
 
 type TriggerRecord struct {
 	ID                 uint64          `json:"id"`
+	ClaimToken         int64           `json:"-"`
 	Realm              string          `json:"realm"`
 	Name               string          `json:"name"`
 	Payload            json.RawMessage `json:"payload"`
@@ -208,13 +220,14 @@ func (s *Store) ClaimTriggers(ctx context.Context, worker string, limit int) ([]
 			WHERE delivered_at IS NULL AND claimed_by IS NULL
 			ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED
 		), claimed AS (
-			UPDATE flow_trigger_outbox o SET claimed_by = $1, claimed_at = (EXTRACT(EPOCH FROM now()) * 1000)::bigint
+			UPDATE flow_trigger_outbox o SET claimed_by = $1, claim_token = o.claim_token + 1,
+				claimed_at = (EXTRACT(EPOCH FROM now()) * 1000)::bigint
 			FROM picked WHERE o.id = picked.id
-		RETURNING o.id, o.realm, o.event_name, o.payload,
+			RETURNING o.id, o.claim_token, o.realm, o.event_name, o.payload,
 			COALESCE(o.replay_automation_id, ''), COALESCE(o.replay_flow_id, ''),
 			COALESCE(o.replay_flow_version, 0), COALESCE(o.replay_of_run_id, 0)
 	)
-	SELECT id, realm, event_name, payload, replay_automation_id, replay_flow_id,
+		SELECT id, claim_token, realm, event_name, payload, replay_automation_id, replay_flow_id,
 		replay_flow_version, replay_of_run_id FROM claimed ORDER BY id`, worker, limit)
 	if err != nil {
 		return nil, err
@@ -223,7 +236,7 @@ func (s *Store) ClaimTriggers(ctx context.Context, worker string, limit int) ([]
 	out := []TriggerRecord{}
 	for rows.Next() {
 		var record TriggerRecord
-		if err := rows.Scan(&record.ID, &record.Realm, &record.Name, &record.Payload,
+		if err := rows.Scan(&record.ID, &record.ClaimToken, &record.Realm, &record.Name, &record.Payload,
 			&record.ReplayAutomationID, &record.ReplayFlowID, &record.ReplayFlowVersion, &record.ReplayOfRunID); err != nil {
 			return nil, err
 		}
@@ -292,8 +305,23 @@ func (s *Store) EnqueueReplay(ctx context.Context, flowID, realm string, runID i
 	return queued, nil
 }
 
-func (s *Store) AckTrigger(ctx context.Context, id uint64) error {
-	_, err := s.pool.Exec(ctx, `UPDATE flow_trigger_outbox SET delivered_at = (EXTRACT(EPOCH FROM now()) * 1000)::bigint, claimed_by = NULL WHERE id = $1 AND delivered_at IS NULL`, id)
+func (s *Store) AckTrigger(ctx context.Context, id uint64, token int64) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE flow_trigger_outbox
+	  SET delivered_at = (EXTRACT(EPOCH FROM now()) * 1000)::bigint, claimed_by = NULL
+	  WHERE id = $1 AND claim_token = $2 AND claimed_by IS NOT NULL AND delivered_at IS NULL`, id, token)
+	if err == nil && tag.RowsAffected() != 1 {
+		return ErrClaimLost
+	}
+	return err
+}
+
+func (s *Store) RenewTrigger(ctx context.Context, id uint64, token int64) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE flow_trigger_outbox
+	  SET claimed_at = (EXTRACT(EPOCH FROM now()) * 1000)::bigint
+	  WHERE id = $1 AND claim_token = $2 AND claimed_by IS NOT NULL AND delivered_at IS NULL`, id, token)
+	if err == nil && tag.RowsAffected() != 1 {
+		return ErrClaimLost
+	}
 	return err
 }
 
@@ -311,7 +339,8 @@ func (s *Store) ListEventBindings(ctx context.Context, realm, name string) ([]Ev
 	rows, err := s.pool.Query(ctx, `
 		SELECT a.automation_id, a.flow_ref, f.version
 		FROM project_automations a
-		JOIN flows f ON f.id = a.flow_ref
+			JOIN flows f ON f.id = a.flow_ref AND f.project_id = a.project_id
+			JOIN projects p ON p.id = a.project_id AND p.realm = f.realm AND p.status = 'active'
 		WHERE f.realm = $1 AND a.trigger_kind IN ('event','webhook')
 		  AND a.trigger_spec = $2 AND a.enabled
 		  AND f.status IN ('published','targeted')
@@ -331,31 +360,39 @@ func (s *Store) ListEventBindings(ctx context.Context, realm, name string) ([]Ev
 	return bindings, rows.Err()
 }
 
-// StartTriggerRun 以 trigger+automation 为幂等键开启运行。成功与业务失败均是最终记录；
-// 只有超时 running 行可被 stale outbox 接管，避免投递确认失败时自动重复业务副作用。
-// 一个失败运行的人工重放总是使用新的 trigger id（见 EnqueueReplay）。
+// StartTriggerRun never restarts a business attempt, including interrupted ones.
+// A live duplicate must remain unacknowledged until its original attempt ends.
 func (s *Store) StartTriggerRun(ctx context.Context, triggerID uint64, automationID, flowID string, version int) (bool, error) {
 	if triggerID == 0 || automationID == "" || flowID == "" || version < 1 {
 		return false, fmt.Errorf("非法 flow run 标识")
 	}
-	var claimed int
-	err := s.pool.QueryRow(ctx, `
-		WITH claimed AS (
-			INSERT INTO flow_runs (trigger_id, automation_id, flow_id, flow_version, status, claimed_at)
-			VALUES ($1,$2,$3,$4,'running',(EXTRACT(EPOCH FROM now()) * 1000)::bigint)
-			ON CONFLICT (trigger_id, automation_id) DO UPDATE SET
-				flow_id = EXCLUDED.flow_id, flow_version = EXCLUDED.flow_version,
-				status = 'running', claimed_at = EXCLUDED.claimed_at,
-				error = NULL, output = NULL, started_at = now(), finished_at = NULL
-			WHERE flow_runs.status = 'running'
-			  AND (flow_runs.claimed_at IS NULL OR flow_runs.claimed_at < (EXTRACT(EPOCH FROM now()) * 1000)::bigint - 300000)
-			RETURNING 1
-		)
-		SELECT count(*) FROM claimed`, triggerID, automationID, flowID, version).Scan(&claimed)
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO flow_runs (trigger_id, automation_id, flow_id, flow_version, status, claimed_at)
+		VALUES ($1,$2,$3,$4,'running',(EXTRACT(EPOCH FROM now()) * 1000)::bigint)
+		ON CONFLICT (trigger_id, automation_id) DO NOTHING`, triggerID, automationID, flowID, version)
 	if err != nil {
 		return false, err
 	}
-	return claimed == 1, nil
+	if tag.RowsAffected() == 1 {
+		return true, nil
+	}
+	_, err = s.pool.Exec(ctx, `UPDATE flow_runs
+	  SET status = 'failed', error = 'execution interrupted; explicit replay required', finished_at = now()
+	  WHERE trigger_id = $1 AND automation_id = $2 AND status = 'running'
+	    AND COALESCE(claimed_at, (EXTRACT(EPOCH FROM started_at) * 1000)::bigint)
+	      <= (EXTRACT(EPOCH FROM now()) * 1000)::bigint - $3`, triggerID, automationID, RunExpiry.Milliseconds())
+	if err != nil {
+		return false, err
+	}
+	var status string
+	if err := s.pool.QueryRow(ctx, `SELECT status FROM flow_runs WHERE trigger_id = $1 AND automation_id = $2`,
+		triggerID, automationID).Scan(&status); err != nil {
+		return false, err
+	}
+	if status == "running" {
+		return false, ErrRunInProgress
+	}
+	return false, nil
 }
 
 func (s *Store) FinishTriggerRun(ctx context.Context, triggerID uint64, automationID, status string, output json.RawMessage, runErr error) error {
@@ -367,9 +404,14 @@ func (s *Store) FinishTriggerRun(ctx context.Context, triggerID uint64, automati
 		value := runErr.Error()
 		errText = &value
 	}
-	_, err := s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		UPDATE flow_runs SET status = $3, output = $4, error = $5, finished_at = now()
-		WHERE trigger_id = $1 AND automation_id = $2`, triggerID, automationID, status, output, errText)
+		WHERE trigger_id = $1 AND automation_id = $2 AND status = 'running'
+		  AND claimed_at > (EXTRACT(EPOCH FROM now()) * 1000)::bigint - $6`,
+		triggerID, automationID, status, output, errText, RunExpiry.Milliseconds())
+	if err == nil && tag.RowsAffected() != 1 {
+		return ErrRunFinalized
+	}
 	return err
 }
 

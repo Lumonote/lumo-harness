@@ -116,6 +116,10 @@ const LIB_FRESHNESS_PROBES = [
   ['packages/util/brand/lib/types/index.js', 'brandString'],
   ['packages/llm/llm/lib/types/assistant-stream.d.ts', 'assistantStreamChunks'],
   ['packages/core/agent/lib/types/types.d.ts', 'InboxState'],
+  // 0.1.5-alpha.1 的 agent 显式化重构把 AgentSetup 收敛为 (agentCtx, agent) 双参；
+  // 旧 lib 仍是单参（"Expected 2 or more, but got 1" 此形状）。session-controller
+  // 的 host 类型编译依赖该签名，探针必须盯住 index.d.ts 这一行而不能只看 types.d.ts。
+  ['packages/core/agent/lib/types/index.d.ts', '(agentCtx: Context, agent: Agent)'],
 ]
 
 function ensureLibEntriesReexport(sourceRoot) {
@@ -133,7 +137,16 @@ function ensureLibEntriesReexport(sourceRoot) {
     for (const [config, label] of [['tsconfig.host.json', 'host'], ['tsconfig.client.json', 'client']]) {
       const result = spawnSync(process.execPath, [tsc, '-b', config], { cwd: sourceRoot, stdio: 'inherit' })
       if (result.error !== undefined) throw result.error
-      if (result.status !== 0) throw new Error(`Lumo DSH staging: 重建 dsh ${label} 类型产物失败（${String(result.status ?? result.signal)}）`)
+      if (result.status !== 0) {
+        if (label === 'host') throw new Error(`Lumo DSH staging: 重建 dsh ${label} 类型产物失败（${String(result.status ?? result.signal)}）`)
+        // client 面失败可容忍：typert/generator 产出的 lib/typert.remote-client.* 是一
+        // 种「来自 Host FaceModel」的 tsdown 主机面产物，tsc -b 无法再生。源树该文件
+        // 停留在旧 master 形态时 client 面 tsc 必然报旧形状 API 缺失（如 ui-goal 的
+        // goals.get / TypertRemoteNamespace），且本机根本无法自愈——它由 build-runtime.mjs
+        // 的 rebuildDshHostArtifacts() 在快照主机面 tsdown 序重产出并回拷源树。此处
+        // 放行，真正的 client 类型刷新在快照侧由 refreshDshClientTypePrerequisites 承担。
+        console.warn(`Lumo DSH staging: [WARN] 重建 dsh ${label} 类型产物失败（${String(result.status ?? result.signal)}），先放行 —— typert 投影将在快照主机面 tsdown 序重产出（rebuildDshHostArtifacts）`)
+      }
     }
     const synth = spawnSync(process.execPath, [script], { cwd: sourceRoot, stdio: 'inherit' })
     if (synth.error !== undefined) throw synth.error

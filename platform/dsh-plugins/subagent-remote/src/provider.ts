@@ -29,7 +29,7 @@ import type {
   SubagentResult,
   SubagentRun,
 } from '@deepseek-ai/dsh-subagent'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { Server } from 'node:http'
 
 import { createCallbackServer } from './callback.ts'
@@ -44,8 +44,10 @@ import {
 } from './client.ts'
 import type { ChildParentDescriptor, StartChildRequest } from '../../../shared/seam-contracts/subagent-host.ts'
 import type { JobControlSeam } from '../../../shared/seam-contracts/job-virtualization.ts'
+import type { CallbackInbox } from '../../../shared/subagent-receipts.ts'
 
 export interface RemoteConfig {
+  readonly connectionString?: string
   /** Scheduler base(经 X-Lumo-Realm 头信任注入;生产经边缘网关,§6.3 转 mTLS)。 */
 	readonly schedulerUrl: string
 	readonly controlPlaneToken?: string
@@ -94,7 +96,7 @@ export class RemoteSubagentProvider implements SubagentProvider {
    * (listen(0) 内核分配 → 回填,消除 freePort TOCTOU)—— 所以每次 start 现读,不复制。 */
   private readonly config: RemoteConfig
 
-  constructor(config: RemoteConfig, pending: Map<string, PendingEntry>, name = 'lumo-remote') {
+  constructor(config: RemoteConfig, pending: Map<string, PendingEntry>, name = 'lumo-remote', private readonly receipts?: CallbackInbox) {
     this.name = name
     this.pending = pending
     this.config = config
@@ -155,10 +157,13 @@ export class RemoteSubagentProvider implements SubagentProvider {
       if (nodeUrl === undefined) {
 	        throw new SubagentError(`未找到节点 ${nodeId} 的登记地址`, 'NODE_URL_UNKNOWN')
       }
-	  const token = this.hostTokens[nodeId] ?? this.defaultHostToken
-	  if (token === undefined || token === '') {
-	    throw new SubagentError(`节点 ${nodeId} 未配置承载令牌`, 'HOST_TOKEN_UNKNOWN')
-	  }
+      const token = this.hostTokens[nodeId] ?? this.defaultHostToken
+      if (token === undefined || token === '') {
+        throw new SubagentError(`节点 ${nodeId} 未配置承载令牌`, 'HOST_TOKEN_UNKNOWN')
+      }
+      await this.receipts?.register(this.realm, childId, {
+        secretHash: createHash('sha256').update(secret).digest('hex'), attempt: placement.attempt,
+      })
       await postChildStart({ base: nodeUrl.replace(/\/+$/, ''), realm: this.realm, token, request: body })
       const directStop = () => postChildStop({ base: nodeUrl.replace(/\/+$/, ''), realm: this.realm, token, childId })
       const stop = this.config.jobControl === undefined
@@ -274,22 +279,20 @@ export interface RemoteAssembly {
   readonly server: Server
 }
 
-export function assembleRemote(config: RemoteConfig): RemoteAssembly {
+export function assembleRemote(config: RemoteConfig, receipts?: CallbackInbox): RemoteAssembly {
   const pending = new Map<string, PendingEntry>()
   const server = createCallbackServer({
     pending,
-		reportTerminal: (body, attempt) => {
-		void postTerminalState({
-		base: config.schedulerUrl.replace(/\/+$/, ''),
-		controlPlaneToken: config.controlPlaneToken,
-        realm: config.realm,
-        childId: body.runId,
-			state: terminalStateOf(body),
-			attempt,
-      }).catch(() => {
-        // best-effort:终态上报失败不阻塞回执结集(审计在承载侧会话日志)
-      })
-    },
+    realm: config.realm,
+    receipts,
+    reportTerminal: (body, attempt) => postTerminalState({
+      base: config.schedulerUrl.replace(/\/+$/, ''),
+      controlPlaneToken: config.controlPlaneToken,
+      realm: config.realm,
+      childId: body.runId,
+      state: terminalStateOf(body),
+      attempt,
+    }),
   })
-  return { provider: new RemoteSubagentProvider(config, pending), server }
+  return { provider: new RemoteSubagentProvider(config, pending, 'lumo-remote', receipts), server }
 }

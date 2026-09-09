@@ -316,13 +316,14 @@ func normalizedReferences(values []string) []string {
 }
 
 type DelegationSpec struct {
-	Title              string   `json:"title"`
-	Intent             string   `json:"intent"`
-	ProjectID          string   `json:"project_id"`
-	RequiredTags       []string `json:"required_tags"`
-	RequiredSkills     []string `json:"required_skills"`
-	Residency          string   `json:"residency,omitempty"`
-	RequiredTrustLevel string   `json:"required_trust_level,omitempty"`
+	IntentContract     *IntentContract `json:"intent_contract,omitempty"`
+	Title              string          `json:"title"`
+	Intent             string          `json:"intent"`
+	ProjectID          string          `json:"project_id"`
+	RequiredTags       []string        `json:"required_tags"`
+	RequiredSkills     []string        `json:"required_skills"`
+	Residency          string          `json:"residency,omitempty"`
+	RequiredTrustLevel string          `json:"required_trust_level,omitempty"`
 }
 
 type DelegationCandidate struct {
@@ -348,6 +349,7 @@ type DelegationCandidate struct {
 }
 
 type DelegatedTask struct {
+	IntentContract   *IntentContract        `json:"intent_contract,omitempty"`
 	ID               string                 `json:"id"`
 	Realm            string                 `json:"realm"`
 	Title            string                 `json:"title"`
@@ -747,8 +749,8 @@ func RankDelegationCandidates(spec DelegationSpec, profiles []UserProfile) (infe
 		}
 		for _, wanted := range spec.RequiredSkills {
 			found := false
-			for _, skill := range candidate.MatchedSkills {
-				if equalFold(skill, wanted) {
+			for _, skill := range profile.Skills {
+				if equalFold(skill.SkillID, wanted) || equalFold(skill.Name, wanted) {
 					found = true
 					break
 				}
@@ -1136,6 +1138,14 @@ func ResolveEffectiveSkills(candidates []Candidate, revoked map[string]bool) ([]
 }
 
 type DesktopNodeStatus string
+
+type WorkerRuntimeReport struct {
+	NodeID         string `json:"node_id"`
+	InstanceID     string `json:"instance_id"`
+	PresetRevision int    `json:"preset_revision"`
+	MaxConcurrency int    `json:"max_concurrency"`
+	Status         string `json:"status"`
+}
 
 const (
 	NodePendingActivation DesktopNodeStatus = "PENDING_ACTIVATION"

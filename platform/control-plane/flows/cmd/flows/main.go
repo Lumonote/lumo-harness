@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -60,24 +59,15 @@ func main() {
 	}
 
 	bus := trigger.New()
-	flowEngine := engine.New()
+	flowEngine := engine.New(engine.RuntimeConfig{
+		LLMURL: os.Getenv("LUMO_LLM_GATEWAY_URL"), ConnectorURL: os.Getenv("LUMO_CONNECTOR_GATEWAY_URL"),
+		KnowledgeURL: os.Getenv("LUMO_KNOWLEDGE_SEAM_URL"), ControlToken: os.Getenv("LUMO_CONTROL_PLANE_TOKEN"),
+		IdentitySecret: envOr("LUMO_IDENTITY_ASSERTION_SECRET", os.Getenv("LUMO_CONTROL_PLANE_TOKEN")),
+	})
 	bus.Subscribe("*", func(runCtx context.Context, event trigger.Event) error {
-		var bindings []store.EventBinding
-		if event.IsReplay() {
-			if event.ReplayAutomationID == "" || event.ReplayFlowID == "" || event.ReplayFlowVersion < 1 {
-				return fmt.Errorf("replay trigger %d has incomplete pinned binding", event.ID)
-			}
-			bindings = []store.EventBinding{{
-				AutomationID: event.ReplayAutomationID,
-				FlowID:       event.ReplayFlowID,
-				FlowVersion:  event.ReplayFlowVersion,
-			}}
-		} else {
-			var err error
-			bindings, err = st.ListEventBindings(runCtx, event.Realm, event.Name)
-			if err != nil {
-				return err
-			}
+		bindings, err := st.PrepareTriggerBindings(runCtx, event.ID, event.Realm)
+		if err != nil {
+			return err
 		}
 		for _, binding := range bindings {
 			// Run the binding snapshot selected at delivery time. In particular, a
@@ -97,7 +87,15 @@ func main() {
 			if !shouldRun {
 				continue
 			}
-			result, err := flowEngine.Run(runCtx, &def, event.Payload)
+			identity, identityErr := st.AutomationIdentity(runCtx, event.Realm, binding.FlowID)
+			var result *engine.Result
+			if identityErr != nil {
+				err = identityErr
+			} else {
+				executionCtx, cancel := context.WithTimeout(runCtx, store.RunTimeout)
+				result, err = flowEngine.Run(engine.WithIdentity(executionCtx, identity), &def, event.Payload)
+				cancel()
+			}
 			if err != nil {
 				if finishErr := st.FinishTriggerRun(runCtx, event.ID, binding.AutomationID, "failed", nil, err); finishErr != nil {
 					return finishErr
@@ -126,7 +124,7 @@ func main() {
 	go worker.Run(ctx)
 
 	mux := http.NewServeMux()
-	server.New(st, log).Register(mux)
+	server.New(st, log, flowEngine).Register(mux)
 
 	log.Info("flows 启动", "addr", *listen)
 	httpSrv := &http.Server{Addr: *listen, Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)), ReadHeaderTimeout: 10 * time.Second}

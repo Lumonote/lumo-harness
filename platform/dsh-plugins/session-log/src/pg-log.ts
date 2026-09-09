@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS session_writer_lease (
   expires_at    BIGINT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_log_heads (
+  session_ref TEXT PRIMARY KEY,
+  seq BIGINT NOT NULL,
+  fencing_token BIGINT NOT NULL
+);
+
 -- 从早期 JSONB 版本迁移：JSONB 会拒收含 \\u0000 的事件（见 payload 列注释），
 -- 那会在日志中打出静默空洞。已建库的实例在此就地转换。
 DO $$
@@ -79,6 +85,26 @@ export class PgSessionLog implements SessionLogSeam {
 
   constructor(connectionString: string) {
     this.pool = new pg.Pool({ connectionString })
+  }
+
+  async publishHead(sessionRef: string, seq: number, token: number): Promise<void> {
+    if (!Number.isSafeInteger(seq) || seq < 0) throw new Error('session-log: invalid live head')
+    const result = await this.pool.query(`WITH lease AS (
+      SELECT session_ref,fencing_token FROM session_writer_lease
+      WHERE session_ref=$1 AND fencing_token=$3 AND expires_at > ${NOW_MS} FOR SHARE
+    ) INSERT INTO session_log_heads (session_ref,seq,fencing_token)
+      SELECT session_ref,$2,fencing_token FROM lease
+      ON CONFLICT (session_ref) DO UPDATE SET seq=GREATEST(session_log_heads.seq,EXCLUDED.seq),
+        fencing_token=EXCLUDED.fencing_token
+      WHERE session_log_heads.fencing_token <= EXCLUDED.fencing_token`, [sessionRef, seq, token])
+    if (result.rowCount !== 1) throw new FencedOutError(sessionRef, token, (await this.lease(sessionRef))?.fencingToken ?? 0)
+  }
+
+  async head(sessionRef: string): Promise<number> {
+    const result = await this.pool.query<{ head: string }>(`SELECT GREATEST(
+      COALESCE((SELECT seq FROM session_log_heads WHERE session_ref=$1),0),
+      COALESCE((SELECT max(seq) FROM session_log WHERE session_ref=$1),0))::text AS head`, [sessionRef])
+    return Number(result.rows[0]!.head)
   }
 
   async init(): Promise<void> {

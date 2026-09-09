@@ -7,4 +7,4 @@ scrape_configs:
   - job_name: lumo-control-plane
     metrics_path: /metrics
     static_configs:
-      - targets: [collaborator:8081, scheduler-0:8083, registry:8084, connector-gateway:8082, llm-gateway:8088, flows:8087, projects:8086, usage-ledger:8085]
+      - targets: [collaborator:8081, scheduler-0:8083, registry:8084, connector-gateway:8082, llm-gateway:8088, flows:8087, projects:8086, usage-ledger:8085, governance:8089]

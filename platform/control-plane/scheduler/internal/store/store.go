@@ -88,6 +88,8 @@ ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS deadline_ms BIGINT NOT NULL
 ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS queue TEXT NOT NULL DEFAULT 'default';
 ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS weight INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS avoid_nodes TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS worker_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS project_id TEXT NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS idx_outbox_pending
   ON scheduler_dispatch_outbox (node_id, id) WHERE claimed_by IS NULL AND delivered_at IS NULL;
@@ -280,39 +282,24 @@ func (s *Store) PlaceTask(ctx context.Context, lease *domain.Lease, task domain.
 		return domain.Placement{}, err
 	}
 
-	// 槽位闸：事务内计数。租约行 FOR UPDATE 已把并发放置串行化，计数无竞态。
-	var capacity int
-	if err := tx.QueryRow(ctx,
-		`SELECT capacity FROM scheduler_nodes WHERE node_id = $1 AND realm = $2`, nodeID, task.Realm).Scan(&capacity); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return domain.Placement{}, &domain.NoCapacityError{}
-		}
-		return domain.Placement{}, fmt.Errorf("scheduler: 查询节点容量失败: %w", err)
-	}
-	var active int
-	if err := tx.QueryRow(ctx, `
-		SELECT count(*) FROM scheduler_tasks
-		WHERE node_id = $1 AND state IN ('PLACED', 'RUNNING', 'CANCELLING')`, nodeID).Scan(&active); err != nil {
-		return domain.Placement{}, fmt.Errorf("scheduler: 槽位计数失败: %w", err)
-	}
-	if active >= capacity {
-		return domain.Placement{}, &domain.NoCapacityError{}
-	}
-
 	// attempt 单飞判定
 	var prevState string
 	var prevNode *string
 	var prevAttempt int
 	var prevRealm string
+	var prevWorker string
+	var prevProject string
 	var prevToken int64
 	err = tx.QueryRow(ctx, `
-		SELECT state, realm, node_id, attempt, fencing_token FROM scheduler_tasks
+		SELECT state, realm, node_id, attempt, fencing_token, worker_id, project_id FROM scheduler_tasks
 		WHERE task_id = $1 FOR UPDATE`, task.TaskID).
-		Scan(&prevState, &prevRealm, &prevNode, &prevAttempt, &prevToken)
-	if err == nil && prevRealm != task.Realm {
-		return domain.Placement{}, fmt.Errorf("scheduler: task_id 已由另一 realm 使用")
+		Scan(&prevState, &prevRealm, &prevNode, &prevAttempt, &prevToken, &prevWorker, &prevProject)
+	if err == nil && (prevRealm != task.Realm || prevWorker != task.WorkerID || prevProject != task.ProjectID) {
+		return domain.Placement{}, ErrTaskIdentityConflict
 	}
-	if err == nil && domain.TaskState(prevState).Active() {
+	// Governed tasks use a fresh task_id for each immutable business Run.
+	// Re-delivering its outbox must not start a new execution after completion.
+	if err == nil && (domain.TaskState(prevState).Active() || (task.WorkerID != "" && domain.TaskState(prevState).Terminal())) {
 		if err := tx.Commit(ctx); err != nil {
 			return domain.Placement{}, fmt.Errorf("scheduler: 提交幂等返回失败: %w", err)
 		}
@@ -325,6 +312,20 @@ func (s *Store) PlaceTask(ctx context.Context, lease *domain.Lease, task domain.
 	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return domain.Placement{}, fmt.Errorf("scheduler: 查询任务失败: %w", err)
+	}
+	var capacity int
+	if err := tx.QueryRow(ctx, `SELECT capacity FROM scheduler_nodes WHERE node_id=$1 AND realm=$2`, nodeID, task.Realm).Scan(&capacity); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Placement{}, &domain.NoCapacityError{}
+		}
+		return domain.Placement{}, err
+	}
+	var active int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM scheduler_tasks WHERE node_id=$1 AND state IN ('PLACED','RUNNING','CANCELLING')`, nodeID).Scan(&active); err != nil {
+		return domain.Placement{}, err
+	}
+	if active >= capacity {
+		return domain.Placement{}, &domain.NoCapacityError{}
 	}
 	attempt := 1
 	if err == nil {
@@ -342,14 +343,15 @@ func (s *Store) PlaceTask(ctx context.Context, lease *domain.Lease, task domain.
 	queue, weight := normalizedQueue(task)
 	if _, err := tx.Exec(ctx, `
 			INSERT INTO scheduler_tasks
-				(task_id, realm, cluster_id, requires, priority, residency, deadline_ms, queue, weight, avoid_nodes, state, attempt, node_id, fencing_token, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PLACED', $11, $12, $13, `+nowMS+`, `+nowMS+`)
+				(task_id, realm, cluster_id, requires, priority, residency, deadline_ms, queue, weight, avoid_nodes, state, attempt, node_id, fencing_token, created_at, updated_at, worker_id, project_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PLACED', $11, $12, $13, `+nowMS+`, `+nowMS+`, $14, $15)
 			ON CONFLICT (task_id) DO UPDATE SET
 				state = 'PLACED', attempt = $11, node_id = $12,
 				fencing_token = $13, requires = $4, residency = $6, deadline_ms = $7,
-				queue = $8, weight = $9, avoid_nodes = $10, updated_at = `+nowMS+``,
+				queue = $8, weight = $9, avoid_nodes = $10, worker_id = $14, project_id = $15,
+				cluster_id = $3, priority = $5, updated_at = `+nowMS+``,
 		task.TaskID, task.Realm, task.ClusterID, string(requiresJSON), task.Priority,
-		task.Residency, task.DeadlineMS, queue, weight, string(avoidNodesJSON), attempt, nodeID, lease.FencingToken); err != nil {
+		task.Residency, task.DeadlineMS, queue, weight, string(avoidNodesJSON), attempt, nodeID, lease.FencingToken, task.WorkerID, task.ProjectID); err != nil {
 		return domain.Placement{}, fmt.Errorf("scheduler: 写任务失败: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -367,6 +369,8 @@ func (s *Store) PlaceTask(ctx context.Context, lease *domain.Lease, task domain.
 		Attempt:    attempt,
 		NodeID:     nodeID,
 		Realm:      task.Realm,
+		WorkerID:   task.WorkerID,
+		ProjectID:  task.ProjectID,
 		ClusterID:  task.ClusterID,
 		Priority:   task.Priority,
 		Requires:   task.Requires,
@@ -409,18 +413,21 @@ func (s *Store) QueueTask(ctx context.Context, lease *domain.Lease, task domain.
 
 	var state string
 	var existingRealm string
-	err = tx.QueryRow(ctx, `SELECT state, realm FROM scheduler_tasks WHERE task_id = $1 FOR UPDATE`, task.TaskID).Scan(&state, &existingRealm)
-	if err == nil && existingRealm != task.Realm {
-		return "", fmt.Errorf("scheduler: task_id 已由另一 realm 使用")
+	var existingWorker string
+	var existingProject string
+	err = tx.QueryRow(ctx, `SELECT state, realm, worker_id, project_id FROM scheduler_tasks WHERE task_id = $1 FOR UPDATE`, task.TaskID).Scan(&state, &existingRealm, &existingWorker, &existingProject)
+	if err == nil && (existingRealm != task.Realm || existingWorker != task.WorkerID || existingProject != task.ProjectID) {
+		return "", ErrTaskIdentityConflict
 	}
 	if err == nil {
-		if domain.TaskState(state).Terminal() {
+		if domain.TaskState(state).Terminal() && task.WorkerID == "" {
 			if _, err := tx.Exec(ctx, `
 				UPDATE scheduler_tasks SET state = 'PENDING', requires = $2, priority = $3,
 					residency = $4, deadline_ms = $5, queue = $6, weight = $7, avoid_nodes = $8,
+					worker_id = $9, project_id = $10, cluster_id = $11, node_id = NULL,
 					updated_at = `+nowMS+`
 				WHERE task_id = $1`, task.TaskID, string(requiresJSON), task.Priority,
-				task.Residency, task.DeadlineMS, queue, weight, string(avoidNodesJSON)); err != nil {
+				task.Residency, task.DeadlineMS, queue, weight, string(avoidNodesJSON), task.WorkerID, task.ProjectID, task.ClusterID); err != nil {
 				return "", fmt.Errorf("scheduler: 重置排队失败: %w", err)
 			}
 			state = string(domain.StatePending)
@@ -436,9 +443,9 @@ func (s *Store) QueueTask(ctx context.Context, lease *domain.Lease, task domain.
 
 	if _, err := tx.Exec(ctx, `
 			INSERT INTO scheduler_tasks
-			(task_id, realm, cluster_id, requires, priority, residency, deadline_ms, queue, weight, avoid_nodes, state, attempt, fencing_token, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING', 0, $11, `+nowMS+`, `+nowMS+`)`,
-		task.TaskID, task.Realm, task.ClusterID, string(requiresJSON), task.Priority, task.Residency, task.DeadlineMS, queue, weight, string(avoidNodesJSON), lease.FencingToken); err != nil {
+			(task_id, realm, cluster_id, requires, priority, residency, deadline_ms, queue, weight, avoid_nodes, state, attempt, fencing_token, created_at, updated_at, worker_id, project_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING', 0, $11, `+nowMS+`, `+nowMS+`, $12, $13)`,
+		task.TaskID, task.Realm, task.ClusterID, string(requiresJSON), task.Priority, task.Residency, task.DeadlineMS, queue, weight, string(avoidNodesJSON), lease.FencingToken, task.WorkerID, task.ProjectID); err != nil {
 		return "", fmt.Errorf("scheduler: 写排队任务失败: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -656,19 +663,32 @@ func (s *Store) CompleteTaskAttempt(ctx context.Context, taskID string, attempt 
 		query += ` AND attempt = $3`
 		args = append(args, attempt)
 	}
-	tag, err := s.pool.Exec(ctx, query, args...)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Placement{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var p domain.Placement
+	p.TaskID = taskID
+	err = tx.QueryRow(ctx, query+` RETURNING realm,state,node_id,attempt,fencing_token`, args...).
+		Scan(&p.Realm, &p.State, &p.NodeID, &p.Attempt, &p.FencingToken)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.Rollback(ctx); err != nil {
+			return domain.Placement{}, err
+		}
+		return s.GetPlacement(ctx, taskID)
+	}
 	if err != nil {
 		return domain.Placement{}, fmt.Errorf("scheduler: 回报终态失败: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return s.GetPlacement(ctx, taskID) // 已终态 → 幂等返回现有；不存在 → TaskNotFound
-	}
-	if _, err := s.pool.Exec(ctx, `
+	// Keep the attempt ledger in the same transaction. A retry can allocate a
+	// new attempt only after both records have reached this terminal state.
+	if _, err := tx.Exec(ctx, `
 			UPDATE scheduler_task_attempts SET state = $2, updated_at = `+nowMS+`
-			WHERE task_id = $1 AND attempt = (SELECT attempt FROM scheduler_tasks WHERE task_id = $1)`, taskID, string(final)); err != nil {
+			WHERE task_id = $1 AND attempt = $3`, taskID, string(final), p.Attempt); err != nil {
 		return domain.Placement{}, fmt.Errorf("scheduler: 更新 attempt 终态失败: %w", err)
 	}
-	return s.GetPlacement(ctx, taskID)
+	return p, tx.Commit(ctx)
 }
 
 // GetPlacement 查询任务当前状态（API 观测用）。
@@ -695,7 +715,7 @@ func (s *Store) GetPlacement(ctx context.Context, taskID string) (domain.Placeme
 // PendingTasks 供 drain loop 取排队任务（priority 高者先，同优先级先到先得）。
 func (s *Store) PendingTasks(ctx context.Context, limit int) ([]domain.Task, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT task_id, realm, cluster_id, requires, priority, residency, deadline_ms, queue, weight, avoid_nodes, created_at FROM scheduler_tasks
+		SELECT task_id, realm, cluster_id, requires, priority, residency, deadline_ms, queue, weight, avoid_nodes, created_at, worker_id, project_id FROM scheduler_tasks
 		WHERE state = 'PENDING' ORDER BY CASE WHEN deadline_ms = 0 THEN 1 ELSE 0 END, deadline_ms, priority DESC, created_at LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("scheduler: 取排队任务失败: %w", err)
@@ -707,7 +727,7 @@ func (s *Store) PendingTasks(ctx context.Context, limit int) ([]domain.Task, err
 		var requires string
 		var avoidNodes string
 		var enqueuedAtMS int64
-		if err := rows.Scan(&t.TaskID, &t.Realm, &t.ClusterID, &requires, &t.Priority, &t.Residency, &t.DeadlineMS, &t.Queue, &t.Weight, &avoidNodes, &enqueuedAtMS); err != nil {
+		if err := rows.Scan(&t.TaskID, &t.Realm, &t.ClusterID, &requires, &t.Priority, &t.Residency, &t.DeadlineMS, &t.Queue, &t.Weight, &avoidNodes, &enqueuedAtMS, &t.WorkerID, &t.ProjectID); err != nil {
 			return nil, fmt.Errorf("scheduler: 扫描排队任务失败: %w", err)
 		}
 		t.EnqueuedAt = time.UnixMilli(enqueuedAtMS)

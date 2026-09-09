@@ -340,6 +340,9 @@ ALTER TABLE governance_delegation_tasks ADD COLUMN IF NOT EXISTS assignee_worker
 ALTER TABLE governance_delegation_tasks ADD COLUMN IF NOT EXISTS score_breakdown JSONB;
 ALTER TABLE governance_delegation_tasks ADD COLUMN IF NOT EXISTS score_weights JSONB;
 ALTER TABLE governance_delegation_tasks ADD COLUMN IF NOT EXISTS schedule JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE governance_delegation_tasks ADD COLUMN IF NOT EXISTS intent_contract JSONB;
+CREATE INDEX IF NOT EXISTS governance_delegation_parent_idx
+  ON governance_delegation_tasks (realm, (intent_contract->>'parent_task_id'));
 ALTER TABLE governance_delegation_tasks DROP CONSTRAINT IF EXISTS governance_delegation_tasks_state_check;
 ALTER TABLE governance_delegation_tasks ADD CONSTRAINT governance_delegation_tasks_state_check
   CHECK (state IN ('ASSIGNED','QUEUED','RUNNING','CANCELLING','COMPLETED','FAILED','CANCELLED','BLOCKED'));
@@ -392,6 +395,18 @@ CREATE TABLE IF NOT EXISTS governance_worker_runtime (
   status           TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','draining','disabled')),
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (realm, worker_id)
+);
+
+CREATE TABLE IF NOT EXISTS governance_worker_heartbeats (
+  realm TEXT NOT NULL,
+  worker_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  instance_id TEXT NOT NULL,
+  preset_revision INTEGER NOT NULL,
+  max_concurrency INTEGER NOT NULL CHECK (max_concurrency BETWEEN 1 AND 1024),
+  status TEXT NOT NULL CHECK (status IN ('active','draining','disabled')),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (realm,worker_id,node_id)
 );
 
 -- Agent presets are managed assets, not a second registry of live workers.
@@ -501,6 +516,12 @@ func (s *Store) Init(ctx context.Context) error {
 	}
 	if _, err := tx.Exec(ctx, DDL); err != nil {
 		return fmt.Errorf("initialize governance schema: %w", err)
+	}
+	if _, err := tx.Exec(ctx, taskResultsDDL); err != nil {
+		return fmt.Errorf("initialize task results: %w", err)
+	}
+	if _, err := tx.Exec(ctx, taskSchedulingDDL); err != nil {
+		return fmt.Errorf("initialize task scheduling: %w", err)
 	}
 	if _, err := tx.Exec(ctx, deviceDDL); err != nil {
 		return fmt.Errorf("initialize device schema: %w", err)
@@ -834,13 +855,33 @@ func (s *Store) ListWorkerProfiles(ctx context.Context, realm, projectID, query 
 		var runtimeTrustLevel, runtimeResidency, runtimeStatus string
 		var runtimeUpdatedAt time.Time
 		runtimeReported := true
-		if err := s.pool.QueryRow(ctx, `SELECT max_concurrency,trust_level,residency,status,updated_at FROM governance_worker_runtime WHERE realm=$1 AND worker_id=$2`, realm, workerID).Scan(&runtimeMaxConcurrency, &runtimeTrustLevel, &runtimeResidency, &runtimeStatus, &runtimeUpdatedAt); errors.Is(err, pgx.ErrNoRows) {
+		if err := s.pool.QueryRow(ctx, `SELECT max_concurrency,trust_level,residency,
+			  CASE WHEN status='active' AND updated_at < now()-interval '30 seconds' THEN 'offline' ELSE status END,updated_at
+			  FROM governance_worker_runtime WHERE realm=$1 AND worker_id=$2`, realm, workerID).Scan(&runtimeMaxConcurrency, &runtimeTrustLevel, &runtimeResidency, &runtimeStatus, &runtimeUpdatedAt); errors.Is(err, pgx.ErrNoRows) {
 			runtimeMaxConcurrency, runtimeTrustLevel, runtimeStatus, runtimeReported = 1, "unknown", "not_reported", false
 		} else if err != nil {
 			return nil, err
 		}
 		workerRef := strings.TrimPrefix(workerID, "agent:")
 		preset, managed := presetByID[workerRef]
+		if managed {
+			var total, active int
+			var latest *time.Time
+			if err := s.pool.QueryRow(ctx, `SELECT count(*),
+				  count(*) FILTER (WHERE status='active' AND updated_at >= now()-interval '30 seconds' AND preset_revision=$3),
+				  max(updated_at) FROM governance_worker_heartbeats WHERE realm=$1 AND worker_id=$2`, realm, workerID, preset.Revision).Scan(&total, &active, &latest); err != nil {
+				return nil, err
+			}
+			if total > 0 {
+				runtimeReported, runtimeStatus = true, "offline"
+				if active > 0 {
+					runtimeStatus = "active"
+				}
+				if latest != nil {
+					runtimeUpdatedAt = *latest
+				}
+			}
+		}
 		displayName, maxConcurrency, trustLevel, residency, status := workerRef, runtimeMaxConcurrency, runtimeTrustLevel, runtimeResidency, runtimeStatus
 		projectScopeID, presetVersion := "", ""
 		if managed {
@@ -1560,8 +1601,10 @@ func (s *Store) RegisterDesktopNode(ctx context.Context, node domain.DesktopNode
 	// subsequent mTLS command channel and Provisioner digest report are the two
 	// missing proofs before Scheduler may use it.
 	node.SchedulingEligible = false
-	tx, err := s.beginOrganizationChange(ctx,node.Realm)
-	if err != nil { return domain.DesktopNode{},err }
+	tx, err := s.beginOrganizationChange(ctx, node.Realm)
+	if err != nil {
+		return domain.DesktopNode{}, err
+	}
 	defer tx.Rollback(ctx)
 	capabilities, err := json.Marshal(node.Capabilities)
 	if err != nil {
@@ -1586,8 +1629,10 @@ func (s *Store) RegisterDesktopNode(ctx context.Context, node domain.DesktopNode
 	if err != nil {
 		return domain.DesktopNode{}, err
 	}
-	if _,err = tx.Exec(ctx,`UPDATE governance_device_connections SET enrollment_hash='',enrollment_expires=NULL,public_key_hash='',certificate_serial='',certificate_expires=NULL,
-	 connection_id='',connection_expires=NULL,applied_revision=0,revision=revision+1,policy='{}'::jsonb WHERE realm=$1 AND node_id=$2`,node.Realm,node.ID);err!=nil{return domain.DesktopNode{},err}
+	if _, err = tx.Exec(ctx, `UPDATE governance_device_connections SET enrollment_hash='',enrollment_expires=NULL,public_key_hash='',certificate_serial='',certificate_expires=NULL,
+	 connection_id='',connection_expires=NULL,applied_revision=0,revision=revision+1,policy='{}'::jsonb WHERE realm=$1 AND node_id=$2`, node.Realm, node.ID); err != nil {
+		return domain.DesktopNode{}, err
+	}
 	return node, tx.Commit(ctx)
 }
 
@@ -1735,14 +1780,21 @@ func (s *Store) createDelegatedTask(ctx context.Context, task domain.DelegatedTa
 		return domain.DelegatedTask{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := prepareTaskIntent(ctx, tx, &task); err != nil {
+		return domain.DelegatedTask{}, err
+	}
+	intentContract, err := json.Marshal(task.IntentContract)
+	if err != nil {
+		return domain.DelegatedTask{}, err
+	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO governance_delegation_tasks
-		  (id,realm,title,intent,project_id,requester_user_id,assignee_user_id,required_tags,required_skills,inferred_tags,inferred_skills,selected_skills,state,match_score,rationale,scheduler_task_id,assigned_node_id,schedule,last_error,business_state,confidence_band,assignee_worker_id,score_breakdown,score_weights)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+		  (id,realm,title,intent,project_id,requester_user_id,assignee_user_id,required_tags,required_skills,inferred_tags,inferred_skills,selected_skills,state,match_score,rationale,scheduler_task_id,assigned_node_id,schedule,last_error,business_state,confidence_band,assignee_worker_id,score_breakdown,score_weights,intent_contract)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
 		RETURNING created_at, updated_at`,
 		task.ID, task.Realm, task.Title, task.Intent, task.ProjectID, task.RequesterUserID, task.AssigneeUserID,
 		requiredTags, requiredSkills, inferredTags, inferredSkills, selectedSkills, task.State, task.MatchScore, rationale,
-		task.SchedulerTaskID, task.AssignedNodeID, schedule, task.LastError, nullableText(task.BusinessState), nullableText(task.ConfidenceBand), nullableText(task.AssigneeWorkerID), scoreBreakdown, scoreWeights).Scan(&task.CreatedAt, &task.UpdatedAt)
+		task.SchedulerTaskID, task.AssignedNodeID, schedule, task.LastError, nullableText(task.BusinessState), nullableText(task.ConfidenceBand), nullableText(task.AssigneeWorkerID), scoreBreakdown, scoreWeights, intentContract).Scan(&task.CreatedAt, &task.UpdatedAt)
 	if isUniqueViolation(err) {
 		return domain.DelegatedTask{}, ErrConflict
 	}
@@ -1755,6 +1807,9 @@ func (s *Store) createDelegatedTask(ctx context.Context, task domain.DelegatedTa
 		}
 		if run.TaskID == "" {
 			run.TaskID = task.ID
+		}
+		if run.Realm != task.Realm || run.TaskID != task.ID {
+			return domain.DelegatedTask{}, fmt.Errorf("%w: run must belong to its task and realm", ErrBadRequest)
 		}
 		if run.Attempt == 0 {
 			run.Attempt = 1
@@ -1792,6 +1847,9 @@ func insertTaskRun(ctx context.Context, tx pgx.Tx, run domain.TaskRun) error {
 	if isUniqueViolation(err) {
 		return ErrConflict
 	}
+	if err == nil && run.SchedulerTaskID == run.ID && run.State == domain.DelegationQueued {
+		_, err = tx.Exec(ctx, `INSERT INTO governance_task_scheduling(run_id,realm) VALUES($1,$2)`, run.ID, run.Realm)
+	}
 	return err
 }
 
@@ -1799,17 +1857,22 @@ type rowScanner interface{ Scan(dest ...any) error }
 
 func scanDelegatedTask(row rowScanner, task *domain.DelegatedTask) error {
 	var requiredTags, requiredSkills, inferredTags, inferredSkills, selectedSkills, rationale []byte
-	var schedule []byte
+	var schedule, intentContract []byte
 	var businessState, confidenceBand, assigneeWorkerID *string
 	var scoreBreakdown, scoreWeights []byte
 	if err := row.Scan(&task.ID, &task.Realm, &task.Title, &task.Intent, &task.ProjectID, &task.RequesterUserID, &task.AssigneeUserID, &task.AssigneeName,
 		&requiredTags, &requiredSkills, &inferredTags, &inferredSkills, &selectedSkills, &task.State, &task.MatchScore, &rationale,
 		&task.SchedulerTaskID, &task.AssignedNodeID, &schedule, &task.LastError, &businessState, &confidenceBand, &assigneeWorkerID,
-		&scoreBreakdown, &scoreWeights, &task.CreatedAt, &task.UpdatedAt); err != nil {
+		&scoreBreakdown, &scoreWeights, &task.CreatedAt, &task.UpdatedAt, &intentContract); err != nil {
 		return err
 	}
 	if len(schedule) > 0 {
 		task.Schedule = append(json.RawMessage(nil), schedule...)
+	}
+	if len(intentContract) > 0 {
+		if err := json.Unmarshal(intentContract, &task.IntentContract); err != nil {
+			return err
+		}
 	}
 	if businessState != nil {
 		task.BusinessState = *businessState
@@ -1853,7 +1916,7 @@ const delegationSelect = `
 	       COALESCE(u.display_name,NULLIF(t.assignee_worker_id,''),''),t.required_tags,t.required_skills,t.inferred_tags,t.inferred_skills,
 	       t.selected_skills,t.state,t.match_score,t.rationale,t.scheduler_task_id,t.assigned_node_id,
 	       t.schedule,t.last_error,t.business_state,t.confidence_band,t.assignee_worker_id,t.score_breakdown,t.score_weights,
-	       t.created_at,t.updated_at
+	       t.created_at,t.updated_at,t.intent_contract
 	FROM governance_delegation_tasks t
 	LEFT JOIN governance_users u ON u.realm=t.realm AND u.id=t.assignee_user_id`
 
@@ -1922,21 +1985,25 @@ func (s *Store) UpdateDelegationTask(ctx context.Context, realm, taskID, state, 
 	if err != nil {
 		return domain.DelegatedTask{}, err
 	}
-	// The read above is intentionally performed before the write so a missing
-	// task is reported as not_found rather than silently creating a new record.
+	if !domain.DelegationStateActive(task.State) {
+		if task.State != state {
+			return domain.DelegatedTask{}, fmt.Errorf("%w: terminal execution requires a new run", ErrConflict)
+		}
+		return task, nil
+	}
 	err = scanDelegatedTask(s.pool.QueryRow(ctx, `
 		UPDATE governance_delegation_tasks
 		SET state=$3,
 		    scheduler_task_id=CASE WHEN $4='' THEN scheduler_task_id ELSE $4 END,
 		    assigned_node_id=CASE WHEN $5='' THEN assigned_node_id ELSE $5 END,
 		    last_error=$6, updated_at=now()
-		WHERE id=$1 AND realm=$2
+		WHERE id=$1 AND realm=$2 AND state=$7
 		RETURNING id,realm,title,intent,project_id,requester_user_id,assignee_user_id,
 		          COALESCE((SELECT display_name FROM governance_users WHERE realm=$2 AND id=assignee_user_id),NULLIF(assignee_worker_id,''),''),
 		  required_tags,required_skills,inferred_tags,inferred_skills,selected_skills,state,match_score,rationale,
-		  scheduler_task_id,assigned_node_id,schedule,last_error,business_state,confidence_band,assignee_worker_id,score_breakdown,score_weights,created_at,updated_at`, taskID, realm, state, schedulerTaskID, nodeID, lastError), &task)
+		  scheduler_task_id,assigned_node_id,schedule,last_error,business_state,confidence_band,assignee_worker_id,score_breakdown,score_weights,created_at,updated_at,intent_contract`, taskID, realm, state, schedulerTaskID, nodeID, lastError, task.State), &task)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.DelegatedTask{}, ErrNotFound
+		return domain.DelegatedTask{}, ErrConflict
 	}
 	if err != nil {
 		return domain.DelegatedTask{}, err
@@ -2054,30 +2121,33 @@ func (s *Store) createNextTaskRun(ctx context.Context, realm, taskID string, run
 		return domain.TaskRun{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var assignee, schedulerID, nodeID, lastError, state string
-	if err := tx.QueryRow(ctx, `
-		SELECT assignee_user_id,scheduler_task_id,assigned_node_id,last_error,state
-		FROM governance_delegation_tasks WHERE realm=$1 AND id=$2 FOR UPDATE`, realm, taskID).
-		Scan(&assignee, &schedulerID, &nodeID, &lastError, &state); errors.Is(err, pgx.ErrNoRows) {
+	var task domain.DelegatedTask
+	if err := scanDelegatedTask(tx.QueryRow(ctx, delegationSelect+` WHERE t.realm=$1 AND t.id=$2 FOR UPDATE OF t`, realm, taskID), &task); errors.Is(err, pgx.ErrNoRows) {
 		return domain.TaskRun{}, ErrNotFound
 	} else if err != nil {
 		return domain.TaskRun{}, err
 	}
-	if domain.DelegationStateActive(state) {
+	if domain.DelegationStateActive(task.State) {
 		return domain.TaskRun{}, fmt.Errorf("%w: current run is still active", ErrConflict)
+	}
+	if task.BusinessState == domain.BusinessDone || task.BusinessState == domain.BusinessRejected || task.BusinessState == domain.BusinessArchived {
+		return domain.TaskRun{}, fmt.Errorf("%w: reroute the business task before creating another run", ErrConflict)
+	}
+	if err := parentAcceptsWork(ctx, tx, task); err != nil {
+		return domain.TaskRun{}, err
 	}
 	var attempt int
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(attempt),0) FROM governance_task_runs WHERE realm=$1 AND task_id=$2`, realm, taskID).Scan(&attempt); err != nil {
 		return domain.TaskRun{}, err
 	}
-	if attempt == 0 && schedulerID != "" {
-		legacyWorker := "user:" + assignee
+	if attempt == 0 && task.SchedulerTaskID != "" {
+		legacyWorker := "user:" + task.AssigneeUserID
 		legacyID := taskID + ":attempt:1"
-		legacy := domain.TaskRun{ID: legacyID, Realm: realm, TaskID: taskID, Attempt: 1, WorkerID: legacyWorker, SchedulerTaskID: schedulerID, AssignedNodeID: nodeID, State: state, LastError: lastError}
+		legacy := domain.TaskRun{ID: legacyID, Realm: realm, TaskID: taskID, Attempt: 1, WorkerID: legacyWorker, SchedulerTaskID: task.SchedulerTaskID, AssignedNodeID: task.AssignedNodeID, State: task.State, LastError: task.LastError}
 		if err := insertTaskRun(ctx, tx, legacy); err != nil {
 			return domain.TaskRun{}, err
 		}
-		detail, _ := json.Marshal(map[string]any{"legacy_scheduler_task_id": schedulerID, "attempt": 1})
+		detail, _ := json.Marshal(map[string]any{"legacy_scheduler_task_id": task.SchedulerTaskID, "attempt": 1})
 		if err := insertTaskAudit(ctx, tx, taskID, "legacy_run_materialized", "system", detail); err != nil {
 			return domain.TaskRun{}, err
 		}
@@ -2088,6 +2158,9 @@ func (s *Store) createNextTaskRun(ctx context.Context, realm, taskID string, run
 	}
 	if run.TaskID == "" {
 		run.TaskID = taskID
+	}
+	if run.Realm != realm || run.TaskID != taskID {
+		return domain.TaskRun{}, fmt.Errorf("%w: run must belong to its task and realm", ErrBadRequest)
 	}
 	if run.Attempt == 0 {
 		run.Attempt = attempt + 1
@@ -2108,8 +2181,8 @@ func (s *Store) createNextTaskRun(ctx context.Context, realm, taskID string, run
 		if _, err := tx.Exec(ctx, `
 			UPDATE governance_delegation_tasks
 			SET state=$3,
-			    scheduler_task_id=CASE WHEN $4='' THEN scheduler_task_id ELSE $4 END,
-			    assigned_node_id=CASE WHEN $5='' THEN assigned_node_id ELSE $5 END,
+			    scheduler_task_id=$4, assigned_node_id=$5,
+			    business_state=CASE WHEN business_state IS NOT NULL THEN 'ASSIGNED' ELSE NULL END,
 			    last_error=$6, updated_at=now()
 			WHERE realm=$1 AND id=$2`, realm, taskID, run.State, run.SchedulerTaskID, run.AssignedNodeID, run.LastError); err != nil {
 			return domain.TaskRun{}, err
@@ -2136,8 +2209,8 @@ func (s *Store) createNextTaskRun(ctx context.Context, realm, taskID string, run
 			SET assignee_user_id=$3, assignee_worker_id=$4, selected_skills=$5,
 			    match_score=$6, rationale=$7, confidence_band=$8,
 			    score_breakdown=$9, score_weights=$10, state=$11,
-			    scheduler_task_id=CASE WHEN $12='' THEN scheduler_task_id ELSE $12 END,
-			    assigned_node_id=CASE WHEN $13='' THEN assigned_node_id ELSE $13 END,
+			    scheduler_task_id=$12, assigned_node_id=$13,
+			    business_state=CASE WHEN business_state IS NOT NULL THEN 'ASSIGNED' ELSE NULL END,
 			    last_error=$14, updated_at=now()
 			WHERE realm=$1 AND id=$2`,
 			realm, taskID, assignment.UserID, assignment.WorkerID, selectedSkills,
@@ -2164,6 +2237,12 @@ func (s *Store) UpdateTaskRun(ctx context.Context, realm, taskID, runID, state, 
 	if err != nil {
 		return domain.TaskRun{}, err
 	}
+	if !domain.DelegationStateActive(run.State) {
+		if run.State != state {
+			return domain.TaskRun{}, fmt.Errorf("%w: run result is terminal", ErrConflict)
+		}
+		return run, nil
+	}
 	err = scanTaskRun(s.pool.QueryRow(ctx, `
 		UPDATE governance_task_runs SET state=$4,
 		  scheduler_task_id=CASE WHEN $5='' THEN scheduler_task_id ELSE $5 END,
@@ -2172,9 +2251,13 @@ func (s *Store) UpdateTaskRun(ctx context.Context, realm, taskID, runID, state, 
 		  last_error=$8,
 		  started_at=CASE WHEN $4='RUNNING' AND started_at IS NULL THEN now() ELSE started_at END,
 		  ended_at=CASE WHEN $4 IN ('COMPLETED','FAILED','CANCELLED','BLOCKED') THEN COALESCE(ended_at,now()) ELSE ended_at END
-		WHERE realm=$1 AND task_id=$2 AND id=$3
+		WHERE realm=$1 AND task_id=$2 AND id=$3 AND state=$9
+		  AND attempt=(SELECT max(attempt) FROM governance_task_runs WHERE realm=$1 AND task_id=$2)
 		RETURNING id,realm,task_id,attempt,worker_id,session_ref,scheduler_task_id,assigned_node_id,state,failure_kind,last_error,started_at,ended_at,created_at`,
-		realm, taskID, runID, state, schedulerTaskID, nodeID, nullableText(failureKind), lastError), &run)
+		realm, taskID, runID, state, schedulerTaskID, nodeID, failureKind, lastError, run.State), &run)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.TaskRun{}, ErrConflict
+	}
 	return run, err
 }
 
@@ -2208,12 +2291,18 @@ func (s *Store) RecordTaskAudit(ctx context.Context, realm, taskID, event, actor
 }
 
 func (s *Store) TransitionBusinessTask(ctx context.Context, realm, taskID, event, actor string) (domain.DelegatedTask, error) {
-	var current string
-	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(business_state,'' ) FROM governance_delegation_tasks WHERE realm=$1 AND id=$2`, realm, taskID).Scan(&current); errors.Is(err, pgx.ErrNoRows) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.DelegatedTask{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var task domain.DelegatedTask
+	if err := scanDelegatedTask(tx.QueryRow(ctx, delegationSelect+` WHERE t.realm=$1 AND t.id=$2 FOR UPDATE OF t`, realm, taskID), &task); errors.Is(err, pgx.ErrNoRows) {
 		return domain.DelegatedTask{}, ErrNotFound
 	} else if err != nil {
 		return domain.DelegatedTask{}, err
 	}
+	current := task.BusinessState
 	if current == "" {
 		return domain.DelegatedTask{}, ErrLegacyTask
 	}
@@ -2221,16 +2310,53 @@ func (s *Store) TransitionBusinessTask(ctx context.Context, realm, taskID, event
 	if err != nil {
 		return domain.DelegatedTask{}, fmt.Errorf("%w: %v", ErrBadRequest, err)
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return domain.DelegatedTask{}, err
+	if current == next {
+		return task, tx.Commit(ctx)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	if event == "reject" || event == "archive" {
+		summary, err := collaborationSummary(ctx, tx, realm, taskID)
+		if err != nil {
+			return domain.DelegatedTask{}, err
+		}
+		if domain.DelegationStateActive(task.State) || summary.Active > 0 {
+			return domain.DelegatedTask{}, fmt.Errorf("%w: stop active executions before closing a task", ErrConflict)
+		}
+	}
+	if event == "complete" {
+		summary, err := collaborationSummary(ctx, tx, realm, taskID)
+		if err != nil {
+			return domain.DelegatedTask{}, err
+		}
+		if summary.Unresolved > 0 {
+			return domain.DelegatedTask{}, fmt.Errorf("%w: %d child tasks still require acceptance", ErrConflict, summary.Unresolved)
+		}
+		var completed bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM governance_task_runs r
+		  JOIN governance_task_results e ON e.run_id=r.id AND e.realm=r.realm
+		  WHERE r.realm=$1 AND r.task_id=$2 AND r.state='COMPLETED' AND e.payload->>'state'='COMPLETED'
+		    AND r.attempt=(SELECT max(attempt) FROM governance_task_runs WHERE realm=$1 AND task_id=$2))`, realm, taskID).Scan(&completed); err != nil {
+			return domain.DelegatedTask{}, err
+		}
+		if !completed {
+			return domain.DelegatedTask{}, fmt.Errorf("%w: the current run has no completed execution result", ErrConflict)
+		}
+	}
+	if event == "reroute" {
+		if domain.DelegationStateActive(task.State) {
+			return domain.DelegatedTask{}, fmt.Errorf("%w: stop the active run before rerouting", ErrConflict)
+		}
+		if err := parentAcceptsWork(ctx, tx, task); err != nil {
+			return domain.DelegatedTask{}, err
+		}
+	}
 	if _, err := tx.Exec(ctx, `UPDATE governance_delegation_tasks SET business_state=$3,updated_at=now() WHERE realm=$1 AND id=$2`, realm, taskID, next); err != nil {
 		return domain.DelegatedTask{}, err
 	}
 	detail, _ := json.Marshal(map[string]any{"from": current, "to": next, "event": event})
 	if err := insertTaskAudit(ctx, tx, taskID, event, actor, detail); err != nil {
+		return domain.DelegatedTask{}, err
+	}
+	if err := notifyParentTask(ctx, tx, task, "child_transition", actor, detail); err != nil {
 		return domain.DelegatedTask{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -2248,6 +2374,28 @@ func (s *Store) RecordDispatchOutcome(ctx context.Context, outcome domain.Dispat
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var taskID string
+	if err := tx.QueryRow(ctx, `SELECT id FROM governance_delegation_tasks WHERE realm=$1 AND id=$2 FOR UPDATE`, outcome.Realm, outcome.TaskID).Scan(&taskID); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	var workerID string
+	if err := tx.QueryRow(ctx, `SELECT worker_id FROM governance_task_runs WHERE realm=$1 AND task_id=$2 AND id=$3`, outcome.Realm, outcome.TaskID, outcome.RunID).Scan(&workerID); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if workerID != outcome.WorkerID {
+		return fmt.Errorf("%w: outcome worker must match the run", ErrBadRequest)
+	}
+	var duplicate bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM governance_dispatch_outcomes WHERE realm=$1 AND run_id=$2 AND outcome=$3)`, outcome.Realm, outcome.RunID, outcome.Outcome).Scan(&duplicate); err != nil {
+		return err
+	}
+	if duplicate {
+		return fmt.Errorf("%w: this run already has that outcome", ErrConflict)
+	}
 	_, err = tx.Exec(ctx, `INSERT INTO governance_dispatch_outcomes (id,realm,task_id,run_id,worker_id,outcome,reason,notes,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, outcome.ID, outcome.Realm, outcome.TaskID, outcome.RunID, outcome.WorkerID, outcome.Outcome, nullableText(outcome.Reason), outcome.Notes, outcome.CreatedBy)
 	if isUniqueViolation(err) {
 		return ErrConflict
@@ -2263,15 +2411,15 @@ func (s *Store) RecordDispatchOutcome(ctx context.Context, outcome domain.Dispat
 	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO governance_skill_proficiency (realm,worker_id,skill_id,level,confidence,source,evidence_n)
-		SELECT $1,$2,sk.id,CASE WHEN $5 > 0 THEN 1 ELSE 0 END,CASE WHEN $5 > 0 THEN 0.2 ELSE 0.1 END,'outcome',1
+		SELECT $1,$2,sk.id,CASE WHEN $4::integer > 0 THEN 1 ELSE 0 END,CASE WHEN $4 > 0 THEN 0.2 ELSE 0.1 END,'outcome',1
 		FROM governance_delegation_tasks t
 		CROSS JOIN LATERAL jsonb_array_elements_text(t.selected_skills) selected(name)
 		JOIN governance_skills sk ON sk.realm=$1 AND lower(sk.name)=lower(selected.name)
 		WHERE t.realm=$1 AND t.id=$3
 		ON CONFLICT (realm,worker_id,skill_id,source) DO UPDATE SET
-			level=LEAST(5,GREATEST(0,governance_skill_proficiency.level + $5)),
-			confidence=LEAST(1,GREATEST(0,governance_skill_proficiency.confidence + CASE WHEN $5 > 0 THEN 0.1 ELSE -0.1 END)),
-			evidence_n=governance_skill_proficiency.evidence_n+1,updated_at=now()`, outcome.Realm, outcome.WorkerID, outcome.TaskID, outcome.RunID, delta)
+			level=LEAST(5,GREATEST(0,governance_skill_proficiency.level + $4)),
+			confidence=LEAST(1,GREATEST(0,governance_skill_proficiency.confidence + CASE WHEN $4 > 0 THEN 0.1 ELSE -0.1 END)),
+			evidence_n=governance_skill_proficiency.evidence_n+1,updated_at=now()`, outcome.Realm, outcome.WorkerID, outcome.TaskID, delta)
 	if err != nil {
 		return err
 	}

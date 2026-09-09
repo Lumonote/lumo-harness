@@ -55,10 +55,7 @@ func def(t *testing.T, operators ...string) json.RawMessage {
 	d := domain.Definition{}
 	for i, op := range operators {
 		id := fmt.Sprintf("n%d", i)
-		d.Nodes = append(d.Nodes, struct {
-			ID       string `json:"id"`
-			Operator string `json:"operator"`
-		}{id, op})
+		d.Nodes = append(d.Nodes, domain.FlowNode{ID: id, Operator: op})
 		if i > 0 {
 			d.Edges = append(d.Edges, struct {
 				From string `json:"from"`

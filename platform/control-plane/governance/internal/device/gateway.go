@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -109,6 +110,7 @@ func (g *Gateway) Serve(ctx context.Context) error {
 	mux.HandleFunc("POST /device/registry/v1/plan", g.plan)
 	mux.HandleFunc("GET /device/registry/v1/blobs/{digest}", g.blob)
 	server := &http.Server{Addr: g.options.Listen, Handler: mux, TLSConfig: g.tls, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 45 * time.Second, MaxHeaderBytes: 16 << 10}
+	go g.dispatchTasks(ctx)
 	go func() {
 		<-ctx.Done()
 		g.connections.Range(func(key, value any) bool { _ = key.(*websocket.Conn).Close(); return true })
@@ -121,6 +123,29 @@ func (g *Gateway) Serve(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+func (g *Gateway) dispatchTasks(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	lastError := ""
+	for {
+		_, err := g.options.Store.DispatchDeviceTasks(ctx, 32)
+		if err != nil && ctx.Err() == nil {
+			message := err.Error()
+			if message != lastError {
+				log.Printf("device gateway task dispatch unavailable: %s", message)
+				lastError = message
+			}
+		} else if err == nil {
+			lastError = ""
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request, value any) error {

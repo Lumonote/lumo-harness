@@ -10,7 +10,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { KnowledgeSeam } from './seam-contracts.ts'
+import type { KnowledgeHit, KnowledgeQuery } from './seam-contracts.ts'
 import { DEFAULT_OVERFETCH_FACTOR, rerankHits, type RerankClient } from './rerank.ts'
 
 export interface KnowledgeToolConfig {
@@ -27,7 +27,7 @@ export interface KnowledgeToolConfig {
 
 export function defineKnowledgeTool(
   ctx: Context,
-  seam: KnowledgeSeam,
+  seam: { query(request: KnowledgeQuery): KnowledgeHit[] | Promise<KnowledgeHit[]> },
   config: KnowledgeToolConfig,
 ): () => void {
   const definition: ToolDefinition = {

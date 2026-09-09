@@ -39,8 +39,12 @@ type Requirement struct {
 
 // Task 待调度任务。
 type Task struct {
-	TaskID    string        `json:"task_id"`
-	Realm     string        `json:"realm"`
+	TaskID string `json:"task_id"`
+	Realm  string `json:"realm"`
+	// WorkerID binds placement to the live devices of a governed employee or
+	// Agent preset. Empty retains the infrastructure-task scheduling contract.
+	WorkerID  string        `json:"worker_id,omitempty"`
+	ProjectID string        `json:"project_id,omitempty"`
 	ClusterID string        `json:"cluster_id"`
 	Requires  []Requirement `json:"requires"`
 	Priority  int           `json:"priority"`
@@ -78,7 +82,7 @@ func (n Node) Satisfies(reqs []Requirement) bool {
 	for _, r := range reqs {
 		found := false
 		for _, c := range n.Capabilities {
-			if c == r.Key || (r.Value != "" && c == r.Key+"="+r.Value) {
+			if (r.Value == "" && c == r.Key) || (r.Value != "" && c == r.Key+"="+r.Value) {
 				found = true
 				break
 			}

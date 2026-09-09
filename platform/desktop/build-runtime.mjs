@@ -21,6 +21,7 @@ import { overriddenPackageDirectories } from '../dsh-overrides/apply.mjs'
 import { resolveWorkspaceNodeTool } from './node-tools.mjs'
 import { prepareSkillHubArchive, stageSkillHub } from './skillhub-tooling.mjs'
 import { acquireBuildLock } from './build-lock.mjs'
+import { findCrossTreeImports } from './dsh-node-self-contained.mjs'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(desktopRoot, '..', '..')
@@ -317,6 +318,7 @@ stageNodeTooling(nodeSource, resolve(stagingRoot, 'bin'), resolve(stagingRoot, '
 const skillhub = stageSkillHub(stagingRoot, skillhubArchive, targetPlatform)
 
 const runtimeNodeSource = resolve(dshNodeRoot)
+assertDshNodeSelfContained()
 cpSync(runtimeNodeSource, resolve(stagingRoot, 'dsh-node'), {
   recursive: true,
   dereference: true,
@@ -577,6 +579,19 @@ function assertOverridesCameFromSnapshot() {
 
 // 与上面同类的护栏：任何 @deepseek-ai/* 包若取自上游插件的 pnpm 安装目录，就是 registry
 // 上的陈旧副本混进了闭包。这种回归同样不会在构建期报错，只会发出一个启动到一半就崩的 app。
+// dsh-node 在打包 runtime 里以 .ts 源码被 tsx 加载，值导入只能落在包内或
+// runtime/node_modules 能解析的包名上。跨树相对路径（../../../shared/…、
+// ../../../dsh-plugins/…）在源码布局成立、打包态必然 ERR_MODULE_NOT_FOUND ——
+// cluster.ts 的 worker-binding 导入曾让桌面包启动即崩。语句级 `import type …`
+// 由 tsx 擦除，不算违规。判定逻辑见 dsh-node-self-contained.mjs。
+function assertDshNodeSelfContained() {
+  const offenders = findCrossTreeImports(dshNodeRoot)
+  if (offenders.length === 0) return
+  const listed = offenders.map(({ file, line, specifier }) => `${file}:${line} → ${specifier}`).join('\n  ')
+  throw new Error('无法构建桌面 runtime：dsh-node 存在逃出包根的值导入，打包后会 ERR_MODULE_NOT_FOUND：\n  '
+    + `${listed}\n  仅类型导入请写成语句级 \`import type …\`；运行时需要的契约在 dsh-node/src 下留本地镜像（见 worker-binding.ts / mtls.ts）`)
+}
+
 function assertDshPackagesCameFromSnapshot() {
   const strayPackages = [...packageSources]
     .filter(([name, info]) => name.startsWith(DSH_PACKAGE_SCOPE) && isUnder(info.root, upstreamPluginRoot))

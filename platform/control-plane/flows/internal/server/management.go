@@ -99,7 +99,7 @@ func (s *Server) managedFlow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.Name = strings.TrimSpace(req.Name)
-		definition, _, err := parseDefinition(req.Definition)
+		definition, _, err := s.parseDefinition(req.Definition)
 		if err != nil || req.Name == "" || len([]rune(req.Name)) > 160 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid flow name or definition"})
 			return

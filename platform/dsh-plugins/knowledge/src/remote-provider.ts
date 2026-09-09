@@ -32,7 +32,9 @@ class JSONClient {
       const res = await fetch(`${this.baseUrl}${path}`, { ...init, headers: { ...this.headers, ...(init.headers ?? {}) }, signal: controller.signal })
       const text = await res.text()
       if (!res.ok) throw new Error(`remote provider: ${path} 返回 ${res.status}: ${text.slice(0, 300)}`)
-      return (text ? JSON.parse(text) : undefined) as T
+      const body = text ? JSON.parse(text) : undefined
+      if (typeof body?.code === 'number' && body.code !== 0) throw new Error(`remote provider: ${path} code=${body.code}`)
+      return body as T
     } finally { clearTimeout(timer) }
   }
 }
@@ -63,10 +65,10 @@ export class MilvusKnowledgeProvider implements KnowledgeSeam {
     this.allowedRoles = new Set(config.allowedRoles)
   }
   async init(): Promise<void> {
-    try {
-      await this.client.request('/v2/vectordb/collections/describe', { method: 'POST', body: JSON.stringify({ collectionName: this.collection }) })
-    } catch (error) {
-      if (!String(error).includes('返回 404')) throw error
+    const exists = await this.client.request<{ data: { has: boolean } }>('/v2/vectordb/collections/has', {
+      method: 'POST', body: JSON.stringify({ collectionName: this.collection }),
+    })
+    if (!exists.data?.has) {
       await this.client.request('/v2/vectordb/collections/create', { method: 'POST', body: JSON.stringify({
         collectionName: this.collection, dimension: this.dimension, metricType: 'COSINE',
         idType: 'VarChar', autoID: false, primaryFieldName: 'id', vectorFieldName: 'vector',
@@ -74,8 +76,9 @@ export class MilvusKnowledgeProvider implements KnowledgeSeam {
     }
   }
   async ingest(entry: KnowledgeIngest): Promise<void> {
+    if (entry.chunks.length === 0) return
     const vectors = await this.embedding.embed(entry.chunks.map((c) => c.text))
-    await this.client.request('/v2/vectordb/entities/insert', { method: 'POST', body: JSON.stringify({
+    await this.client.request('/v2/vectordb/entities/upsert', { method: 'POST', body: JSON.stringify({
       collectionName: this.collection,
       data: entry.chunks.map((chunk, index) => ({ id: `${entry.doc.docId}:${index}`, doc_id: entry.doc.docId,
         realm: entry.doc.realm, space: entry.doc.space, title: entry.doc.title, source_version: entry.doc.sourceVersion,
@@ -84,13 +87,14 @@ export class MilvusKnowledgeProvider implements KnowledgeSeam {
   }
   async query(request: KnowledgeQuery): Promise<KnowledgeHit[]> {
     this.authorize(request.roles)
+    if (request.scope !== 'published') throw forbidden('MilvusKnowledgeProvider: only published sources are searchable')
     const [vector] = await this.embedding.embed([request.text])
     const result = await this.client.request<MilvusResult>('/v2/vectordb/entities/search', { method: 'POST', body: JSON.stringify({
       collectionName: this.collection, data: [vector], annsField: 'vector', limit: request.topK,
       filter: `realm == "${escapeFilter(request.realm)}" && embedding_model == "${escapeFilter(this.embeddingModel)}"`,
       outputFields: ['doc_id', 'source_version', 'text'],
     }) })
-    return (result.data ?? []).map((hit) => ({ docId: hit.doc_id, sourceVersion: hit.source_version, text: hit.text, score: hit.score ?? (hit.distance === undefined ? 0 : 1 - hit.distance) }))
+    return (result.data ?? []).map((hit) => ({ docId: hit.doc_id, sourceVersion: hit.source_version, text: hit.text, score: hit.score ?? hit.distance ?? 0 }))
   }
   async remove(docId: string, realm: string): Promise<void> {
     await this.client.request('/v2/vectordb/entities/delete', { method: 'POST', body: JSON.stringify({

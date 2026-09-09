@@ -15,7 +15,7 @@ func TestSlotGateAndDrain(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
 	cat := &catalog.Pg{Pool: st.Pool()}
-	if err := cat.Upsert(ctx, domain.Node{NodeID: "N1", ClusterID: "c1", Capacity: 1, Capabilities: []string{"llm"}}); err != nil {
+	if err := cat.Upsert(ctx, domain.Node{NodeID: "N1", Realm: "r1", ClusterID: "c1", Capacity: 1, Capabilities: []string{"llm"}}); err != nil {
 		t.Fatalf("登记节点失败: %v", err)
 	}
 	l, err := st.Acquire(ctx, "node-a", 5000)

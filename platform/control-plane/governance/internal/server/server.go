@@ -20,8 +20,8 @@ import (
 	"time"
 
 	authcrypto "github.com/lumo-harness/platform/governance/internal/auth"
-	"github.com/lumo-harness/platform/governance/internal/domain"
 	"github.com/lumo-harness/platform/governance/internal/device"
+	"github.com/lumo-harness/platform/governance/internal/domain"
 	"github.com/lumo-harness/platform/governance/internal/store"
 	"github.com/lumo-harness/platform/observability"
 )
@@ -41,8 +41,8 @@ type Config struct {
 	AuthMFAKey string
 	// WebAuthn holds an already validated RPID/origin allow-list.  Empty means
 	// passkeys are unavailable; partial configuration is rejected at startup.
-	WebAuthn authcrypto.WebAuthnConfig
-	OIDC     authcrypto.OIDCConfig
+	WebAuthn      authcrypto.WebAuthnConfig
+	OIDC          authcrypto.OIDCConfig
 	DeviceGateway *device.Gateway
 }
 
@@ -118,6 +118,10 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v1/agent-presets/{presetID}", s.updateAgentPreset)
 	mux.HandleFunc("GET /v1/workers", s.listWorkers)
 	mux.HandleFunc("GET /v1/workers/{workerID}/profile", s.workerProfile)
+	mux.Handle("PUT /v1/workers/{workerID}/runtime", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.reportWorkerRuntime)))
+	mux.Handle("GET /v1/runtime/agent-presets/{presetID}", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.runtimeAgentPreset)))
+	mux.Handle("PUT /v1/runtime/task-runs/{runID}/result", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.runtimeTaskResult)))
+	mux.Handle("GET /v1/runtime/workers/{workerID}/nodes", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.workerNodes)))
 	mux.HandleFunc("GET /v1/users", s.listUsers)
 	mux.HandleFunc("GET /v1/users/{userID}/tags", s.userTags)
 	mux.HandleFunc("PUT /v1/users/{userID}/tags", s.userTags)
@@ -132,6 +136,10 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/tasks/{taskID}/transition", s.transitionTask)
 	mux.HandleFunc("GET /v1/tasks/{taskID}/runs", s.listTaskRuns)
 	mux.HandleFunc("GET /v1/tasks/{taskID}/audit", s.listTaskAudit)
+	mux.HandleFunc("GET /v1/tasks/{taskID}/children", s.listChildTasks)
+	mux.HandleFunc("GET /v1/tasks/{taskID}/collaboration", s.collaborationProgress)
+	mux.HandleFunc("GET /v1/tasks/{taskID}/runs/{runID}/result", s.taskResult)
+	mux.HandleFunc("PUT /v1/tasks/{taskID}/runs/{runID}/result", s.taskResult)
 	mux.HandleFunc("POST /v1/tasks/{taskID}/runs", s.createTaskRun)
 	mux.HandleFunc("PATCH /v1/tasks/{taskID}/runs/{runID}", s.updateTaskRun)
 	mux.HandleFunc("POST /v1/tasks/{taskID}/outcome", s.recordOutcome)
@@ -541,6 +549,7 @@ type schedulerRequirement struct {
 
 type delegationPreview struct {
 	domain.DelegationSpec
+	IntentAnalysis domain.IntentAnalysis        `json:"intent_analysis"`
 	IntentTerms    []string                     `json:"intent_terms"`
 	InferredTags   []string                     `json:"inferred_tags"`
 	InferredSkills []string                     `json:"inferred_skills"`
@@ -548,12 +557,21 @@ type delegationPreview struct {
 }
 
 func (s *Server) matchDelegation(ctx context.Context, realm string, req domain.DelegationSpec) (delegationPreview, error) {
+	contract, err := domain.NormalizeIntent(req.Intent, req.IntentContract)
+	if err != nil {
+		return delegationPreview{}, fmt.Errorf("%w: %v", store.ErrBadRequest, err)
+	}
+	if req.IntentContract != nil {
+		contract = *req.IntentContract
+	}
 	profiles, err := s.store.ListWorkerProfiles(ctx, realm, req.ProjectID, "")
 	if err != nil {
 		return delegationPreview{}, err
 	}
-	inferredTags, inferredSkills, candidates := domain.RankDelegationCandidates(req, profiles)
-	return delegationPreview{DelegationSpec: req, IntentTerms: domain.IntentTerms(req.Intent), InferredTags: inferredTags, InferredSkills: inferredSkills, Candidates: candidates}, nil
+	matching := req
+	matching.Intent = contract.Objective
+	inferredTags, inferredSkills, candidates := domain.RankDelegationCandidates(matching, profiles)
+	return delegationPreview{DelegationSpec: req, IntentAnalysis: domain.AnalyzeIntent(contract), IntentTerms: domain.IntentTerms(contract.Objective), InferredTags: inferredTags, InferredSkills: inferredSkills, Candidates: candidates}, nil
 }
 
 type schedulerPlacement struct {
@@ -565,7 +583,7 @@ type schedulerPlacement struct {
 // placeRun delegates node selection to the existing Scheduler. Governance
 // never starts a second execution mechanism: a successful placement only
 // mirrors scheduler_task_id/node_id onto the business Run.
-func (s *Server) placeRun(ctx context.Context, realm, taskID string, schedule *delegationSchedule) (schedulerPlacement, error) {
+func (s *Server) placeRun(ctx context.Context, realm, taskID string, schedule *delegationSchedule, workers ...domain.DelegatedTask) (schedulerPlacement, error) {
 	if strings.TrimSpace(s.cfg.SchedulerURL) == "" {
 		return schedulerPlacement{}, nil
 	}
@@ -582,8 +600,19 @@ func (s *Server) placeRun(ctx context.Context, realm, taskID string, schedule *d
 		}
 		priority, residency, deadlineMS, queue, weight, avoidNodes = schedule.Priority, schedule.Residency, schedule.DeadlineMS, schedule.Queue, schedule.Weight, schedule.AvoidNodes
 	}
+	workerID, projectID := "", ""
+	if len(workers) > 0 {
+		workerID, projectID = workers[0].AssigneeWorkerID, workers[0].ProjectID
+		if workerID == "" && workers[0].AssigneeUserID != "" {
+			workerID = "user:" + workers[0].AssigneeUserID
+		}
+		if workerID == "" {
+			return schedulerPlacement{}, errors.New("task has no governed execution worker")
+		}
+	}
 	payload, err := json.Marshal(map[string]any{
 		"task_id": taskID, "cluster_id": clusterID, "requires": requires,
+		"worker_id": workerID, "project_id": projectID,
 		"priority": priority, "residency": residency, "deadline_ms": deadlineMS,
 		"queue": queue, "weight": weight, "avoid_nodes": avoidNodes,
 	})
@@ -611,14 +640,22 @@ func (s *Server) placeRun(ctx context.Context, realm, taskID string, schedule *d
 	if res.StatusCode != http.StatusCreated && res.StatusCode != http.StatusAccepted {
 		return schedulerPlacement{}, fmt.Errorf("scheduler placement failed with HTTP %d", res.StatusCode)
 	}
-	if res.StatusCode == http.StatusCreated {
-		if placement.NodeID == "" || placement.Attempt < 1 {
-			return schedulerPlacement{}, errors.New("scheduler placement missing node_id/attempt")
+	if res.StatusCode == http.StatusAccepted && placement.State != "PENDING" {
+		// Queue admission may return an existing placement after a concurrent
+		// delivery. Read its complete, authoritative attempt/node description.
+		placement, err = s.schedulerPlacement(ctx, realm, taskID)
+		if err != nil {
+			return schedulerPlacement{}, err
 		}
-		placement.State = domain.DelegationAssigned
-	} else {
-		placement.State = domain.DelegationQueued
 	}
+	state, known := delegationStateFromScheduler(placement.State)
+	if !known {
+		return schedulerPlacement{}, errors.New("scheduler returned unknown placement state")
+	}
+	if state != domain.DelegationQueued && (placement.NodeID == "" || placement.Attempt < 1) {
+		return schedulerPlacement{}, errors.New("scheduler placement missing node_id/attempt")
+	}
+	placement.State = state
 	return placement, nil
 }
 
@@ -778,6 +815,10 @@ func (s *Server) previewDelegation(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(r.Context(), w, c, actionDelegate, domain.PermissionResource{ProjectID: req.ProjectID, Kind: "delegation-preview"}) {
 		return
 	}
+	if err := s.prepareDelegationIntent(r.Context(), c, &req, nil); err != nil {
+		s.respondStoreError(w, err)
+		return
+	}
 	preview, err := s.matchDelegation(r.Context(), c.realm, req)
 	if err != nil {
 		s.respondStoreError(w, err)
@@ -818,6 +859,10 @@ func (s *Server) createDelegation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.requirePermission(r.Context(), w, c, actionDelegate, domain.PermissionResource{ProjectID: req.ProjectID, Kind: "delegation"}) {
+		return
+	}
+	if err := s.prepareDelegationIntent(r.Context(), c, &req.DelegationSpec, &req.Schedule); err != nil {
+		s.respondStoreError(w, err)
 		return
 	}
 	autoAssign := req.AutoAssign == nil || *req.AutoAssign
@@ -864,7 +909,8 @@ func (s *Server) createDelegation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	task := domain.DelegatedTask{
-		ID: newID("task"), Realm: c.realm, Title: req.Title, Intent: req.Intent, ProjectID: req.ProjectID,
+		IntentContract: req.IntentContract,
+		ID:             newID("task"), Realm: c.realm, Title: req.Title, Intent: req.Intent, ProjectID: req.ProjectID,
 		RequesterUserID: c.userID, AssigneeUserID: chosen.UserID, AssigneeName: chosen.DisplayName,
 		RequiredTags: req.RequiredTags, RequiredSkills: req.RequiredSkills, InferredTags: preview.InferredTags,
 		InferredSkills: preview.InferredSkills, SelectedSkills: chosen.MatchedSkills, State: domain.DelegationAssigned,
@@ -872,29 +918,14 @@ func (s *Server) createDelegation(w http.ResponseWriter, r *http.Request) {
 		ScoreBreakdown: chosen.ScoreBreakdown, ScoreWeights: chosen.ScoreWeights, MatchScore: chosen.Score, Rationale: chosen.Rationale, Schedule: scheduleSnapshot,
 	}
 	run := domain.TaskRun{ID: newID("run"), Realm: c.realm, TaskID: task.ID, Attempt: 1, WorkerID: chosen.WorkerID, State: domain.DelegationAssigned}
+	if strings.TrimSpace(s.cfg.SchedulerURL) != "" {
+		run.State, run.SchedulerTaskID = domain.DelegationQueued, run.ID
+		task.State, task.SchedulerTaskID = domain.DelegationQueued, run.ID
+	}
 	createdTask, createdRun, err := s.store.CreateDelegatedTaskWithRun(r.Context(), task, run)
 	if err != nil {
 		s.respondStoreError(w, err)
 		return
-	}
-	if strings.TrimSpace(s.cfg.SchedulerURL) != "" {
-		placement, placeErr := s.placeRun(r.Context(), c.realm, createdTask.ID, req.Schedule)
-		if placeErr != nil {
-			failedRun, _ := s.store.UpdateTaskRun(r.Context(), c.realm, createdTask.ID, createdRun.ID, domain.DelegationBlocked, "", "", "SCHEDULER_UNAVAILABLE", placeErr.Error())
-			_, _ = s.store.UpdateDelegationTask(r.Context(), c.realm, createdTask.ID, domain.DelegationBlocked, "", "", placeErr.Error())
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "scheduler_unavailable", "message": placeErr.Error(), "task": createdTask, "run": failedRun})
-			return
-		}
-		createdRun, err = s.store.UpdateTaskRun(r.Context(), c.realm, createdTask.ID, createdRun.ID, placement.State, createdTask.ID, placement.NodeID, "", "")
-		if err != nil {
-			s.respondStoreError(w, err)
-			return
-		}
-		createdTask, err = s.store.UpdateDelegationTask(r.Context(), c.realm, createdTask.ID, placement.State, createdTask.ID, placement.NodeID, "")
-		if err != nil {
-			s.respondStoreError(w, err)
-			return
-		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"task": createdTask, "run": createdRun})
 }
@@ -1243,11 +1274,16 @@ func (s *Server) transitionTask(w http.ResponseWriter, r *http.Request) {
 	if !ok || !requireDelegationAuthority(w, c) {
 		return
 	}
-	if _, ok := s.taskParticipant(w, r, c); !ok {
+	task, ok := s.taskParticipant(w, r, c)
+	if !ok {
 		return
 	}
 	var req taskTransitionRequest
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if requiresRequesterReview(strings.TrimSpace(req.Event)) && task.RequesterUserID != c.userID && !isRealmAdmin(c) {
+		writeError(w, http.StatusForbidden, "forbidden", "requester review is required")
 		return
 	}
 	task, err := s.store.TransitionBusinessTask(r.Context(), c.realm, r.PathValue("taskID"), strings.TrimSpace(req.Event), c.userID)
@@ -1328,6 +1364,10 @@ func (s *Server) createTaskRun(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if !executionBusinessEvent(strings.TrimSpace(req.BusinessEvent)) {
+		writeError(w, http.StatusBadRequest, "bad_request", "execution reports cannot accept or reroute business tasks")
+		return
+	}
 	workerID := strings.TrimSpace(req.WorkerID)
 	if workerID == "" {
 		workerID = task.AssigneeWorkerID
@@ -1377,6 +1417,10 @@ func (s *Server) updateTaskRun(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if !executionBusinessEvent(strings.TrimSpace(req.BusinessEvent)) {
+		writeError(w, http.StatusBadRequest, "bad_request", "execution reports cannot accept or reroute business tasks")
+		return
+	}
 	if strings.TrimSpace(req.State) == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "state is required")
 		return
@@ -1411,17 +1455,28 @@ func (s *Server) recordOutcome(w http.ResponseWriter, r *http.Request) {
 	if !ok || !requireDelegationAuthority(w, c) {
 		return
 	}
-	if _, ok := s.taskParticipant(w, r, c); !ok {
+	task, ok := s.taskParticipant(w, r, c)
+	if !ok {
+		return
+	}
+	if task.RequesterUserID != c.userID && !isRealmAdmin(c) {
+		writeError(w, http.StatusForbidden, "forbidden", "requester review is required")
 		return
 	}
 	var req dispatchOutcomeRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	workerID := strings.TrimSpace(req.WorkerID)
-	if workerID == "" {
-		workerID = "user:" + c.userID
+	run, err := s.store.GetTaskRun(r.Context(), c.realm, strings.TrimSpace(req.RunID))
+	if err != nil {
+		s.respondStoreError(w, err)
+		return
 	}
+	if run.TaskID != task.ID || (req.WorkerID != "" && strings.TrimSpace(req.WorkerID) != run.WorkerID) {
+		writeError(w, http.StatusBadRequest, "bad_request", "outcome must reference this task's execution worker")
+		return
+	}
+	workerID := run.WorkerID
 	reason := strings.TrimSpace(req.Reason)
 	outcomeValue := strings.TrimSpace(req.Outcome)
 	if outcomeValue == domain.OutcomeReassigned && reason == "" {
@@ -1516,9 +1571,8 @@ type retryDelegationRequest struct {
 	Reason string `json:"reason"`
 }
 
-// retryDelegation creates a fresh immutable Run only after Scheduler accepts
-// a new attempt for a terminal task. It reuses the original, stored placement
-// constraints rather than reconstructing a weaker default schedule.
+// retryDelegation persists a new Run and its scheduling request together.
+// The worker delivers the stored constraints under this run's stable id.
 func (s *Server) retryDelegation(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCluster(w) {
 		return
@@ -1539,23 +1593,12 @@ func (s *Server) retryDelegation(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	schedule, err := scheduleFromTask(task)
-	if err != nil {
+	if _, err := scheduleFromTask(task); err != nil {
 		writeError(w, http.StatusConflict, "invalid_schedule_snapshot", "任务的调度约束快照无效，拒绝弱化后重试")
 		return
 	}
 	if strings.TrimSpace(s.cfg.SchedulerURL) == "" {
 		writeError(w, http.StatusServiceUnavailable, "scheduler_unavailable", "调度器未配置，无法创建新的执行尝试")
-		return
-	}
-	schedulerTaskID := task.SchedulerTaskID
-	if schedulerTaskID == "" {
-		schedulerTaskID = task.ID
-	}
-	placement, err := s.placeRun(r.Context(), c.realm, schedulerTaskID, schedule)
-	if err != nil {
-		s.log.Warn("重试放置失败", "task_id", task.ID, "scheduler_task_id", schedulerTaskID, "err", err)
-		writeError(w, http.StatusServiceUnavailable, "retry_failed", "调度器未接受新的执行尝试；原任务保持终态")
 		return
 	}
 	workerID := task.AssigneeWorkerID
@@ -1566,9 +1609,9 @@ func (s *Server) retryDelegation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "missing_assignee", "任务缺少可重试的执行者")
 		return
 	}
+	runID := newID("run")
 	run, err := s.store.CreateNextTaskRun(r.Context(), c.realm, task.ID, domain.TaskRun{
-		ID: newID("run"), WorkerID: workerID, SchedulerTaskID: schedulerTaskID,
-		AssignedNodeID: placement.NodeID, State: placement.State,
+		ID: runID, WorkerID: workerID, SchedulerTaskID: runID, State: domain.DelegationQueued,
 	})
 	if err != nil {
 		s.respondStoreError(w, err)
@@ -1581,11 +1624,11 @@ func (s *Server) retryDelegation(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.RecordTaskAudit(r.Context(), c.realm, task.ID, "retry_requested", c.userID, map[string]any{
 		"from_state": task.State, "run_id": run.ID, "attempt": run.Attempt, "reason": strings.TrimSpace(req.Reason),
-		"scheduler_task_id": schedulerTaskID, "assigned_node_id": placement.NodeID,
+		"scheduler_task_id": runID,
 	}); err != nil {
 		s.log.Warn("写入重试审计失败", "task_id", task.ID, "err", err)
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"task": updated, "run": run, "scheduler": placement})
+	writeJSON(w, http.StatusCreated, map[string]any{"task": updated, "run": run})
 }
 
 type reassignDelegationRequest struct {
@@ -1645,7 +1688,8 @@ func (s *Server) reassignDelegation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec := domain.DelegationSpec{
-		Title: task.Title, Intent: task.Intent, ProjectID: task.ProjectID,
+		IntentContract: task.IntentContract,
+		Title:          task.Title, Intent: task.Intent, ProjectID: task.ProjectID,
 		RequiredTags: task.RequiredTags, RequiredSkills: task.RequiredSkills,
 	}
 	if schedule != nil {
@@ -1676,19 +1720,9 @@ func (s *Server) reassignDelegation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "scheduler_unavailable", "调度器未配置，无法创建新的执行尝试")
 		return
 	}
-	schedulerTaskID := task.SchedulerTaskID
-	if schedulerTaskID == "" {
-		schedulerTaskID = task.ID
-	}
-	placement, err := s.placeRun(r.Context(), c.realm, schedulerTaskID, schedule)
-	if err != nil {
-		s.log.Warn("改派放置失败", "task_id", task.ID, "scheduler_task_id", schedulerTaskID, "err", err)
-		writeError(w, http.StatusServiceUnavailable, "reassignment_failed", "调度器未接受新的执行尝试；原任务保持终态")
-		return
-	}
+	runID := newID("run")
 	run, err := s.store.CreateNextAssignedTaskRun(r.Context(), c.realm, task.ID, domain.TaskRun{
-		ID: newID("run"), WorkerID: chosen.WorkerID, SchedulerTaskID: schedulerTaskID,
-		AssignedNodeID: placement.NodeID, State: placement.State,
+		ID: runID, WorkerID: chosen.WorkerID, SchedulerTaskID: runID, State: domain.DelegationQueued,
 	}, store.TaskRunAssignment{
 		UserID: chosen.UserID, WorkerID: chosen.WorkerID, SelectedSkills: chosen.MatchedSkills,
 		MatchScore: chosen.Score, Rationale: chosen.Rationale, ConfidenceBand: chosen.ConfidenceBand,
@@ -1706,11 +1740,11 @@ func (s *Server) reassignDelegation(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.RecordTaskAudit(r.Context(), c.realm, task.ID, "reassigned", c.userID, map[string]any{
 		"from_worker_id": previousWorker, "to_worker_id": chosen.WorkerID,
 		"run_id": run.ID, "attempt": run.Attempt, "reason": reason,
-		"scheduler_task_id": schedulerTaskID, "assigned_node_id": placement.NodeID,
+		"scheduler_task_id": runID,
 	}); err != nil {
 		s.log.Warn("写入改派审计失败", "task_id", task.ID, "err", err)
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"task": updated, "run": run, "scheduler": placement})
+	writeJSON(w, http.StatusCreated, map[string]any{"task": updated, "run": run})
 }
 
 func (s *Server) updateDelegationStatus(w http.ResponseWriter, r *http.Request) {

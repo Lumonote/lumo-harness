@@ -152,8 +152,8 @@ export interface SessionQueryOptions {
   /**
    * 调用方显式供给的 live 会话已知上界（跨节点投影场景）。
    *
-   * **v1 诚实边界**：缺省（undefined）⇒ 无判别基准 ⇒ 恒 fresh 全量返回；
-   * 不发明新的滞后探测基础设施——跨节点的下界探测归「投影库」后续切片。
+   * 缺省时读取持有写租约的节点发布的 PG head；显式提供时取两者较大值，
+   * 调用方不能通过提供旧 head 隐藏已知的复制滞后。
    */
   readonly liveHead?: number
   /** 落后阈值（事件条数）：lag > maxLag 判 stale；缺省用装配侧常量（8 个事件）。 */

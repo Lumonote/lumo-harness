@@ -75,10 +75,10 @@ type Caller struct {
 
 // transitions 合法转移表（与 TS TRANSITIONS 逐格一致）。
 var transitions = map[string]map[string]string{
-	StatusDraft:     {EventSubmit: StatusSubmitted, EventDeprecate: StatusDeprecated},
-	StatusSubmitted: {EventApprove: StatusPublished, EventReject: StatusDraft},
-	StatusPublished: {EventTarget: StatusTargeted, EventDeprecate: StatusDeprecated},
-	StatusTargeted:  {EventTarget: StatusTargeted, EventDeprecate: StatusDeprecated},
+	StatusDraft:      {EventSubmit: StatusSubmitted, EventDeprecate: StatusDeprecated},
+	StatusSubmitted:  {EventApprove: StatusPublished, EventReject: StatusDraft},
+	StatusPublished:  {EventTarget: StatusTargeted, EventDeprecate: StatusDeprecated},
+	StatusTargeted:   {EventTarget: StatusTargeted, EventDeprecate: StatusDeprecated},
 	StatusDeprecated: {},
 }
 
@@ -101,11 +101,14 @@ func TransitionFlow(status, event string) (string, error) {
 }
 
 // Definition DAG 形状（入库护栏的输入）。
+type FlowNode struct {
+	ID       string         `json:"id"`
+	Operator string         `json:"operator"`
+	Config   map[string]any `json:"config,omitempty"`
+}
+
 type Definition struct {
-	Nodes []struct {
-		ID       string `json:"id"`
-		Operator string `json:"operator"`
-	} `json:"nodes"`
+	Nodes []FlowNode `json:"nodes"`
 	Edges []struct {
 		From string `json:"from"`
 		To   string `json:"to"`

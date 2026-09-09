@@ -13,9 +13,7 @@
  * 4. 驱动方法照 driver:`followup` + `whenIdle`,取消经运行表 entry.cancel →
  *    `child.cancel({ kind: 'parent' })`(register 之后等价的 in-process 语义);
  * 5. 结果读取在 tturn.ts(闭集词表 + `finalAssistantOutput` 规范选择);
- * 6. 回执 `deliverCallback`:2s 超时封顶(AbortSignal.timeout)+ 200ms 退避重试 1 次;
- *    两次都失败不重投 —— child 事件流已在会话日志,运行表照常结集(审计在日志,
- *    不赌网络;挂起的回执不再滞留运行表)。
+ * 6. 集群回执先写持久 outbox，再由投递器重试；未装配数据库的独立调用保留短重试。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -57,7 +55,9 @@ export interface RunCanceller {
 export type RunRegistry = Map<string, RunCanceller>
 
 /** 运行一个校验通过的远端子代理(childId 由父侧 mint,是幂等键)。 */
-export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunRegistry): Promise<void> {
+export type ResultDelivery = (request: StartChildRequest, body: ChildResultBody) => Promise<void>
+
+export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunRegistry, delivery?: ResultDelivery): Promise<void> {
   const key = runKeyOf(req.realm, req.childId)
   let cancelRequested = false
   const entry: RunCanceller = {
@@ -70,18 +70,15 @@ export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunR
   const jobLabel = req.label ?? 'remote subagent'
   const jobRuntime = (ctx as Context & { jobControlRuntime?: JobControlRuntime }).jobControlRuntime
   let jobRef: JobRef | undefined
-  if (jobRuntime) {
-    jobRef = await jobRuntime.register(
-      { sessionRef: req.parent.sessionId, jobId: req.childId },
-      { kind: 'subagent', label: jobLabel, status: 'running', startedAt: jobStartedAt },
-      (reason) => entry.cancel(reason),
-    )
-  }
-  // 每个 run 恰好一次回执(成功 completed / 失败 ok:false):成功回执一经寄出(或
-  // 经投递决策)即置位,失败路径只覆盖「create 及之后尚未出回执」的失败 ——
-  // 两者互斥,不会双发。
-  let receiptSettled = false
+  let body: ChildResultBody
   try {
+    if (jobRuntime) {
+      jobRef = await jobRuntime.register(
+        { sessionRef: req.parent.sessionId, jobId: req.childId },
+        { kind: 'subagent', label: jobLabel, status: 'running', startedAt: jobStartedAt },
+        (reason) => entry.cancel(reason),
+      )
+    }
     const depth = childDepthOf(req.parent)
     // 远程形态无 cap(行 5 明示);公开件仍校验字面值(undefined = 无上限)。
     assertSubagentMaxDepth(undefined)
@@ -124,31 +121,26 @@ export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunR
     child.followup(createUserMessage({ content: req.prompt as ContentBlock[], source: { kind: 'user' } }))
     await child.whenIdle()
 
-    const body = readChildResult(child, req.childId)
-    await settleJob(jobRuntime, jobRef, jobLabel, jobStartedAt, childStateOf(body.stopReason), body.diagnostic)
-    receiptSettled = true
-    if (!await deliverCallback(req.callbackUrl, body)) {
-      // 两次尝试都没送到:事件流已在 child 会话日志,不重投 —— 父侧审计以日志为准。
-      ctx.logger.warn('subagent-host: 子代理 %s 回执失败(两次尝试),运行结束但回调未达', req.childId)
-    }
+    body = readChildResult(child, req.childId)
   } catch (e) {
     ctx.logger.error('subagent-host: 子代理 %s 运行失败: %s', req.childId, e instanceof Error ? e.message : String(e))
-    await settleJob(jobRuntime, jobRef, jobLabel, jobStartedAt, 'failed', 'subagent host failure')
-    if (!receiptSettled) {
-      // 200 StartChildOk 已寄出:create/驱动失败若只 log,父侧 result 永久挂起
-      // (pending 条目无终态信号,永不结集)。寄一封 ok:false 把契约闭掉 ——
-      // code 'internal' 是基础设施词表(不是 child 结局,stopReason 承载不了它)。
-      const delivered = await deliverCallback(req.callbackUrl, {
-        runId: req.childId,
-        ok: false,
-        code: 'internal',
-        message: `子代理运行失败于承载节点(runId=${req.childId})`,
-      })
-      if (!delivered) {
-        ctx.logger.warn('subagent-host: 子代理 %s 失败回执未送达(两次尝试),运行结束但回调未达', req.childId)
-      }
+    body = { runId: req.childId, ok: false, code: 'internal', message: `子代理运行失败于承载节点(runId=${req.childId})` }
+  }
+
+  try {
+    // Persistence/delivery failure must never rewrite a successful execution
+    // as a failed result. Its owner can retry the same immutable receipt.
+    if (delivery) {
+      await delivery(req, body)
+    } else if (!await deliverCallback(req.callbackUrl, body)) {
+      ctx.logger.warn('subagent-host: 子代理 %s 回执未送达', req.childId)
     }
   } finally {
+    try {
+      await settleJob(jobRuntime, jobRef, jobLabel, jobStartedAt, childStateOf(body.stopReason), body.diagnostic ?? body.message)
+    } catch {
+      ctx.logger.warn('subagent-host: job settlement failed for %s', req.childId)
+    }
     runs?.delete(key)
   }
 }
@@ -196,18 +188,19 @@ const CALLBACK_TIMEOUT_MS = 2000
 
 /**
  * 回执:每次尝试 2s 超时封顶(AbortSignal.timeout)+ 200ms 退避重试 1 次;
- * 两次都失败返回 false(调用方记 unsettled,不重投)。挂起不回执没有正确性损失
- * —— 只是运行表条目滞留,2s 封顶让最坏滞留 ≈4.2s(评审 Minor ⑦ 钉死)。
+ * 仅供未装配持久 outbox 的独立调用使用；集群启动器总是装配持久回执。
  */
 async function deliverCallback(url: string, body: ChildResultBody): Promise<boolean> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await fetch(url, {
         method: 'POST',
+        redirect: 'error',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(CALLBACK_TIMEOUT_MS),
       })
+      await res.body?.cancel()
       if (res.ok) return true
     } catch {
       /* 网络错/超时 —— 落在退避重试 */

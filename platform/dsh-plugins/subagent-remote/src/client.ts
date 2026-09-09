@@ -112,8 +112,8 @@ function codeOf(wireCode: string | undefined, status: number): SeamErrorCode {
 }
 
 /**
- * Scheduler 终态上报:`POST {schedulerUrl}/v1/tasks/{childId}/result`(best-effort:
- * 失败不阻塞回执结集,失败吞掉由调用方负责 —— callback.ts 的 reportTerminal)。
+ * Scheduler 终态上报:`POST {schedulerUrl}/v1/tasks/{childId}/result`。
+ * 回调接收器必须等待确认；失败交由承载侧持久回执重试。
  */
 export async function postTerminalState(opts: {
   base: string

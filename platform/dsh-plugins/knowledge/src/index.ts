@@ -49,6 +49,8 @@ export interface GraphConfig {
 }
 
 export interface KnowledgeConfig {
+  /** Remote mode registers consumers against the seams supplied by seam-proxy. */
+  providerMode?: 'local' | 'remote'
   /** pgvector 连接串。standalone/cluster 形态应切换 milvus provider（同契约） */
   connectionString: string
   /** 本节点/本 agent 的 realm —— 检索隔离边界（§5.4.1） */
@@ -86,6 +88,7 @@ export interface RerankConfig {
 
 /** Schemastery validation for {@link KnowledgeConfig}（可选性由 interface 的 `?` 表达） */
 export const Config: z<KnowledgeConfig> = z.object({
+  providerMode: z.union(['local', 'remote'] as const),
   connectionString: z.string(),
   realm: z.string(),
   roles: z.array(z.string()),
@@ -129,6 +132,7 @@ export const inject = ['tools']
 export function apply(ctx: Context, config: KnowledgeConfig): void {
   const roles = config.roles ?? ['viewer']
   const defaultTopK = config.defaultTopK ?? 5
+  const remote = config.providerMode === 'remote'
 
   const embedding = new TeiClient({
     baseUrl: config.embedding.baseUrl,
@@ -136,30 +140,36 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     dimension: config.embedding.dimension,
     timeoutMs: config.embedding.timeoutMs,
   })
-  const provider: KnowledgeSeam = config.milvusUrl
+  const vectorProjection = !remote && config.milvusUrl
     ? new MilvusKnowledgeProvider({ baseUrl: config.milvusUrl, apiKey: config.remoteApiKey,
       allowedRoles: roles, collection: config.milvusCollection ?? `knowledge_${config.embedding.model}`, embedding, embeddingModel: config.embedding.model,
       dimension: config.embedding.dimension, rebuildUrl: config.milvusRebuildUrl })
-    : new PgKnowledgeProvider({ connectionString: config.connectionString, allowedRoles: roles, embedding, embeddingModel: config.embedding.model })
+    : undefined
+  const provider: KnowledgeSeam = remote ? ctx.knowledge
+    : new PgKnowledgeProvider({ connectionString: config.connectionString, allowedRoles: roles, embedding, embeddingModel: config.embedding.model, vectorProjection })
   // 图 Provider 自持连接池：两个 seam 生命周期独立，换 Nebula 时不牵动向量侧
-  const graph: GraphSeam = config.nebulaUrl
+  const graph: GraphSeam = remote ? ctx.knowledgeGraph : config.nebulaUrl
     ? new NebulaGraphProvider({ baseUrl: config.nebulaUrl, apiKey: config.remoteApiKey, allowedRoles: roles })
     : new PgGraphProvider({ connectionString: config.connectionString, allowedRoles: roles })
   // outbox 投影器：把 ingest 写下的图投影意图异步搬进图（最终一致，见 graph-projector.ts）
-  const projector = new GraphProjector(
+  if (!provider || !graph) throw new Error('knowledge: remote mode requires knowledge and knowledgeGraph seams')
+  const projector = remote ? undefined : new GraphProjector(
     { connectionString: config.connectionString, batchSize: config.graph?.projectBatchSize },
     graph,
   )
 
   ctx.effect(() => () => {
+    if (remote) return
     if ('close' in provider && typeof provider.close === 'function') void provider.close()
     if ('close' in graph && typeof graph.close === 'function') void graph.close()
-    void projector.close()
+    void projector?.close()
   })
 
   // seam 注册：一 ctx 一 provider（重复注册抛错是 Cordis 标准行为）
-  ctx.provide('knowledge', provider)
-  ctx.provide('knowledgeGraph', graph)
+  if (!remote) {
+    ctx.provide('knowledge', provider)
+    ctx.provide('knowledgeGraph', graph)
+  }
 
   // 交叉编码器重排（§5.4.5）。未配置 → undefined → 两个 Consumer 完全不重排、不过量召回。
   const rerank = config.rerank
@@ -193,6 +203,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     unregister()
     unregisterGraph()
   })
+  if (remote || !projector) return
 
   // 幂等初始化（建表/索引）；失败即加载失败（响亮失败，§15）
   // 投影轮询必须等建表完成再起，否则前几轮全是「表不存在」噪音。
@@ -212,6 +223,11 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
         projector.drain().catch((e: unknown) => {
           ctx.logger.warn('knowledge: 图投影失败（将在下一轮重放）: %s', e)
         })
+        if (provider instanceof PgKnowledgeProvider) {
+          void provider.drainVectorProjection().catch((error: unknown) => {
+            ctx.logger.warn('knowledge: vector projection failed; retrying from outbox: %s', error)
+          })
+        }
       }, intervalMs)
       timer.unref?.()
     }).catch((e: unknown) => {

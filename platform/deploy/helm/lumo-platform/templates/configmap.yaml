@@ -13,6 +13,15 @@ data:
   LUMO_NACOS_SERVICE: {{ .Values.nacos.service | quote }}
   LUMO_NACOS_GROUP: {{ .Values.nacos.group | quote }}
   LUMO_OPA_ADDR: {{ .Values.opa.address | quote }}
+  LUMO_LEDGER_TRANSPORT: rmq
+  LUMO_MILVUS_URL: {{ .Values.knowledge.milvusUrl | quote }}
+  LUMO_MILVUS_COLLECTION: {{ .Values.knowledge.milvusCollection | quote }}
+  LUMO_NEBULA_URL: {{ .Values.knowledge.nebulaUrl | quote }}
+  LUMO_EMBEDDING_BASE_URL: {{ .Values.knowledge.embeddingUrl | quote }}
+  LUMO_EMBEDDING_MODEL: {{ .Values.knowledge.embeddingModel | quote }}
+  LUMO_EMBEDDING_DIMENSION: {{ .Values.knowledge.embeddingDimension | quote }}
+  LUMO_RERANK_BASE_URL: {{ .Values.knowledge.rerankUrl | quote }}
+  LUMO_RERANK_MODEL: {{ .Values.knowledge.rerankModel | quote }}
   LUMO_VAULT_ADDR: {{ .Values.vault.address | quote }}
   LUMO_CORS_ORIGIN: {{ .Values.console.corsOrigin | quote }}
   LUMO_OTEL_COLLECTOR_URL: {{ .Values.productionControls.observability.collectorUrl | quote }}

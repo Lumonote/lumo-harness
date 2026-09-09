@@ -61,7 +61,7 @@ export function transitionFlow(status: FlowStatus, event: FlowEvent): FlowStatus
 
 /** 流程定义（DAG）形状。operator 引用 §9.2 算子目录的算子 id——执行接线是 FlowEngine（P2）。 */
 export interface FlowDefinition {
-  nodes: Array<{ id: string; operator: string }>
+  nodes: Array<{ id: string; operator: string; config?: Record<string, unknown> }>
   edges: Array<{ from: string; to: string }>
 }
 
