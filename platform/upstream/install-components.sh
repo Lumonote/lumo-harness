@@ -328,6 +328,21 @@ if [[ "${LUMO_FORCE_NATIVE_INSTALL:-0}" == "1" ]] || ! native_target_ready "${ho
 fi
 run_pnpm_install --config.confirmModulesPurge=false install --frozen-lockfile
 
+# 桌面构建链全程直调 deepseek-harness 工作区里的二进制：prepare-runtime.mjs 的 host
+# tsc 走 node_modules/typescript/bin/tsc，两序 tsdown 走 .bin。build.sh 的
+# ensure_dsh_source 只负责「缺失时浅克隆」，从不装依赖——全新机器因此死在
+# `Cannot find module .../deepseek-harness/node_modules/typescript/bin/tsc`。
+# CI 的 release job 在 build.sh 之前显式 `pnpm --dir deepseek-harness install`
+# （release.yml「Install upstream dsh dependencies」），这里补的正是本地一键构建
+# 缺的那一步；依赖已装好的树零成本跳过。
+if [[ ! -d "${dsh_root}/node_modules/typescript" ]]; then
+  echo "Lumo: deepseek-harness 依赖未安装，先安装（corepack pnpm install --frozen-lockfile）..." >&2
+  (
+    cd "${dsh_root}"
+    run_pnpm_install install --frozen-lockfile
+  )
+fi
+
 if [[ ${refresh_native} -eq 1 ]]; then
   # node-pty belongs to the upstream DSH workspace, not the platform workspace.
   # `rebuild` alone reuses the already-installed store: a scoped

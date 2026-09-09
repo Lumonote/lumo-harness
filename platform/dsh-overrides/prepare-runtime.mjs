@@ -185,6 +185,12 @@ export function ensureLibEntriesReexport(sourceRoot) {
     const oldRoot = process.env['LUMO_DSH_SOURCE_ROOT']
     process.env['LUMO_DSH_SOURCE_ROOT'] = sourceRoot
     const tsc = resolve(sourceRoot, 'node_modules', 'typescript', 'bin', 'tsc')
+    if (!existsSync(tsc)) {
+      // 全新机器上 build.sh 只会浅克隆 dsh（ensure_dsh_source），依赖没装时这里
+      // 原本抛裸的 MODULE_NOT_FOUND，看不出该做什么。install-components.sh 已补
+      // 自动安装；直接 `cargo tauri build` 绕过它的人在这里拿到可执行的指引。
+      throw new Error(`Lumo DSH staging: ${sourceRoot} 缺少 node_modules/typescript——桌面构建要求 deepseek-harness 工作区依赖已安装。请先执行 \`CI=true corepack pnpm install\`（在该目录下）。`)
+    }
     // client 面依赖 host tsdown 稍后生成的 typert.remote-client.*；此处提前执行
     // 会在全新 clone 上产生一批必然的“找不到 remote”错误。client 类型由
     // refreshDshClientTypePrerequisites() 在 host 投影完成后刷新。
