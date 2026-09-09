@@ -19,6 +19,7 @@ import { arch as hostArch, platform as hostPlatform } from 'node:os'
 import { createHash } from 'node:crypto'
 import { overriddenPackageDirectories } from '../dsh-overrides/apply.mjs'
 import { resolveWorkspaceNodeTool } from './node-tools.mjs'
+import { dshClientTypeConfigs, hasUsableDshClientTypes } from './dsh-client-types.mjs'
 import { prepareSkillHubArchive, stageSkillHub } from './skillhub-tooling.mjs'
 import { acquireBuildLock } from './build-lock.mjs'
 import { findCrossTreeImports } from './dsh-node-self-contained.mjs'
@@ -851,7 +852,7 @@ function buildDshClientPackages() {
 }
 
 function refreshDshClientTypePrerequisites() {
-  const staleConfigs = dshClientTypeConfigs().filter((config) => !hasUsableDshClientTypes(config))
+  const staleConfigs = dshClientTypeConfigs(dshRoot).filter((config) => !hasUsableDshClientTypes(dshRoot, config))
   if (staleConfigs.length === 0) return
   console.log(`刷新 DSH 客户端基础声明（隔离快照：${staleConfigs.length} 个 Client 项目）...`)
   for (const config of staleConfigs) {
@@ -865,75 +866,6 @@ function refreshDshClientTypePrerequisites() {
     '--force',
     '--pretty', 'false',
   ], 'DSH 客户端基础声明刷新失败')
-}
-
-// The root Client tsdown workspace consumes each client package's emitted
-// `lib/types/index.js`. A package-local build can be absent, or its sourcemap
-// can still name a source file removed by a newer upstream checkout. Detect
-// both cases from the staged tree so the repair stays inside the snapshot.
-function dshClientTypeConfigs() {
-  const clientRoot = resolve(dshRoot, 'packages', 'client')
-  if (!existsSync(clientRoot)) return []
-  return readdirSync(clientRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .flatMap((entry) => {
-      const directory = join('packages', 'client', entry.name)
-      if (!existsSync(resolve(dshRoot, directory, 'tsdown.config.ts'))) return []
-      const config = ['tsconfig.json', 'tsconfig.client.json']
-        .find((name) => existsSync(resolve(dshRoot, directory, name)))
-      return config === undefined ? [] : [join(directory, config)]
-    })
-}
-
-function hasUsableDshClientTypes(config) {
-  const packageDirectory = resolve(dshRoot, dirname(config))
-  const entry = resolve(packageDirectory, 'lib', 'types', 'index.js')
-  if (!existsSync(entry)) return false
-  if (config === 'packages/client/ui-slots/tsconfig.json') {
-    const declaration = resolve(packageDirectory, 'lib', 'types', 'index.d.ts')
-    if (!existsSync(declaration) || !readFileSync(declaration, 'utf8').includes('ResourceProtocolMap')) return false
-  }
-  const typesDirectory = resolve(packageDirectory, 'lib', 'types')
-  if (!existsSync(typesDirectory)) return false
-  if (config === 'packages/client/web/tsconfig.json' && !hasFreshDshClientWebSeed(packageDirectory, typesDirectory)) return false
-  return dshClientMapsHaveSources(typesDirectory)
-}
-
-function hasFreshDshClientWebSeed(packageDirectory, typesDirectory) {
-  for (const [sourceName, outputName] of [['platform.ts', 'platform.js'], ['seed.ts', 'seed.js']]) {
-    const sourcePath = resolve(packageDirectory, 'src', sourceName)
-    const outputPath = resolve(typesDirectory, outputName)
-    if (!existsSync(sourcePath) || !existsSync(outputPath)) return false
-    const source = readFileSync(sourcePath, 'utf8')
-    const output = readFileSync(outputPath, 'utf8')
-    const specifiers = [...source.matchAll(/['"](@deepseek-ai\/[^'"]+)['"]/g)].map((match) => match[1])
-    if (specifiers.some((specifier) => !output.includes(specifier))) return false
-  }
-  return true
-}
-
-function dshClientMapsHaveSources(directory) {
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = resolve(directory, entry.name)
-    if (entry.isDirectory()) {
-      if (!dshClientMapsHaveSources(path)) return false
-      continue
-    }
-    if (!entry.name.endsWith('.js.map')) continue
-    let map
-    try {
-      map = JSON.parse(readFileSync(path, 'utf8'))
-    } catch {
-      return false
-    }
-    if (!Array.isArray(map.sources) || map.sources.some((source) => typeof source !== 'string')) return false
-    if (Array.isArray(map.sourcesContent)
-      && map.sourcesContent.length === map.sources.length
-      && map.sourcesContent.every((source) => typeof source === 'string')) continue
-    const sourceRoot = typeof map.sourceRoot === 'string' ? map.sourceRoot : ''
-    if (map.sources.some((source) => !existsSync(resolve(dirname(path), sourceRoot, source)))) return false
-  }
-  return true
 }
 
 // 快照里的每个 node_modules 都是软链回源树的同一份目录，所以绝不能在快照里跑
