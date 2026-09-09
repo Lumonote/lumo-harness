@@ -140,7 +140,13 @@ export function ensureLibEntriesReexport(sourceRoot) {
     process.env['LUMO_DSH_SOURCE_ROOT'] = sourceRoot
     const tsc = resolve(sourceRoot, 'node_modules', 'typescript', 'bin', 'tsc')
     for (const [config, label] of [['tsconfig.host.json', 'host'], ['tsconfig.client.json', 'client']]) {
-      const result = spawnSync(process.execPath, [tsc, '-b', config], { cwd: sourceRoot, stdio: 'inherit' })
+      // dsh-root 的 host 构建本身也使用 4 GiB heap（见 package.json 的
+      // build:lib:host）。全新 CI clone 会在这里首次编译整个引用图；Node
+      // 默认堆在 macOS arm64 runner 上会耗尽并以 SIGABRT 退出。
+      const result = spawnSync(process.execPath, ['--max-old-space-size=4096', tsc, '-b', config], {
+        cwd: sourceRoot,
+        stdio: 'inherit',
+      })
       if (result.error !== undefined) throw result.error
       if (result.status !== 0) {
         if (label === 'host') throw new Error(`Lumo DSH staging: 重建 dsh ${label} 类型产物失败（${String(result.status ?? result.signal)}）`)
