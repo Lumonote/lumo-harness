@@ -260,6 +260,37 @@ for (const root of [
   queuePackage(realpathSync(root))
 }
 
+// pnpm 判定「已是最新」只看 node_modules/.pnpm/lock.yaml，不校验文件是否还在磁盘上：
+// 被删掉或中断安装留下的空洞，`pnpm install --frozen-lockfile`（连 `--force` 一起）
+// 都报 "Already up to date" 而不修复——pnpm 11.7.0 实测。清掉这份虚拟存储锁文件再装，
+// 才会真正重建缺失的链接。换台机器打包正是靠它自愈，因此只在闭包确实解析不到依赖时
+// 才付这份代价，健康机器上零成本。
+const repairedWorkspaces = new Set()
+
+// 缺失的依赖归属哪个工作区。快照目录在 platform/ 之下，必须先于 platform 判定并映射回
+// 源树：往快照里跑 pnpm 会把源树的 workspace 链接重写成指向快照（见 runWorkspaceBinary
+// 的说明）。上游插件目录有自己的 prepareUpstreamPlugins（--ignore-workspace --prod），
+// 不走这条通用修复。
+function workspaceRootOwning(packageRoot) {
+  if (isUnder(packageRoot, upstreamPluginRoot)) return undefined
+  if (isUnder(packageRoot, dshRoot)) return sourceDshRoot
+  if (isUnder(packageRoot, sourceDshRoot)) return sourceDshRoot
+  if (isUnder(packageRoot, resolve(repoRoot, 'platform'))) return resolve(repoRoot, 'platform')
+  return undefined
+}
+
+function repairWorkspaceDependencies(root, missingName) {
+  console.warn(`Lumo: [WARN] 缺少 ${missingName}，重装 ${relative(repoRoot, root)} 的依赖后重试...`)
+  rmSync(resolve(root, 'node_modules', '.pnpm', 'lock.yaml'), { force: true })
+  const result = spawnExecutable(process.platform === 'win32' ? 'corepack.cmd' : 'corepack', [
+    'pnpm', 'install', '--frozen-lockfile', '--config.confirmModulesPurge=false',
+  ], { cwd: root, stdio: 'inherit' })
+  if (result.error !== undefined) throw result.error
+  if (result.status !== 0) {
+    throw new Error(`无法构建桌面 runtime：重装 ${root} 依赖失败（${String(result.status ?? result.signal)}）`)
+  }
+}
+
 for (let index = 0; index < packageQueue.length; index += 1) {
   const current = packageQueue[index]
   const dependencies = {
@@ -281,6 +312,17 @@ for (let index = 0; index < packageQueue.length; index += 1) {
       || current.manifest.peerDependenciesMeta?.[name]?.optional === true
     if (root === undefined) {
       if (optional) continue
+      // 换台机器（或依赖被裁过）时闭包会撞上缺包：先按工作区自愈一次，再判失败。
+      const owner = workspaceRootOwning(current.root)
+      if (owner !== undefined && !repairedWorkspaces.has(owner)) {
+        repairedWorkspaces.add(owner)
+        repairWorkspaceDependencies(owner, name)
+        const repaired = packagePath(name, current.root)
+        if (repaired !== undefined) {
+          queuePackage(repaired)
+          continue
+        }
+      }
       throw new Error(`无法构建桌面 runtime：${current.manifest.name} 缺少依赖 ${name}`)
     }
     queuePackage(root)

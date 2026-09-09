@@ -335,12 +335,23 @@ run_pnpm_install --config.confirmModulesPurge=false install --frozen-lockfile
 # CI 的 release job 在 build.sh 之前显式 `pnpm --dir deepseek-harness install`
 # （release.yml「Install upstream dsh dependencies」），这里补的正是本地一键构建
 # 缺的那一步；依赖已装好的树零成本跳过。
-if [[ ! -d "${dsh_root}/node_modules/typescript" ]]; then
-  echo "Lumo: deepseek-harness 依赖未安装，先安装（corepack pnpm install --frozen-lockfile）..." >&2
+#
+# 先清 node_modules/.pnpm/lock.yaml 再装：pnpm 的「已是最新」只看这份虚拟存储锁，
+# 不校验文件是否还在磁盘上——被删掉或中断安装留下的空洞，`pnpm install
+# --frozen-lockfile`（连 `--force` 一起）都报 "Already up to date" 而不修复
+# （pnpm 11.7.0 实测）。清掉它，install 才会真正重建缺失的链接。
+install_workspace_dependencies() {
+  local root="$1"
+  rm -f -- "${root}/node_modules/.pnpm/lock.yaml"
   (
-    cd "${dsh_root}"
+    cd "${root}"
     run_pnpm_install install --frozen-lockfile
   )
+}
+
+if [[ ! -d "${dsh_root}/node_modules/typescript" ]]; then
+  echo "Lumo: deepseek-harness 依赖缺失或不完整，安装..." >&2
+  install_workspace_dependencies "${dsh_root}"
 fi
 
 if [[ ${refresh_native} -eq 1 ]]; then
