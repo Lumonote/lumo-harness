@@ -11,9 +11,10 @@ import { ensureLibEntriesReexport } from '../prepare-runtime.mjs'
  * CI 桌面 job 拿到的是 dsh 的全新克隆：gitignored 的 lib/ 一个都没有，而
  * copyBuildOutputs 在没有 lib/ 时直接抛错（该报错原本宣称「run pnpm run build
  * there first」—— 但当前 master 上 `pnpm run build` 的 tsdown 主机面是坏的，
- * 平台自己的等价管线 = tsc 双面 + synthesize-dsh-libs.mjs）。本用例钉住
- * ensureLibEntriesReexport 在「一个 lib 都没有」时也必须把 tsc 双面 + 合成
- * 跑起来，而不是返回跳过。
+ * 平台自己的等价管线 = host tsc + synthesize-dsh-libs.mjs）。本用例钉住
+ * ensureLibEntriesReexport 在「一个 lib 都没有」时也必须把 host tsc + 合成
+ * 跑起来，而不是返回跳过。client tsc 依赖后续 host tsdown 生成的 remote 投影，
+ * 由桌面构建链的后续阶段刷新。
  *
  * 用假源树 + 假 tsc 测，不碰真正的 deepseek-harness：断言不能取决于构建机此刻
  * 是否装好了上游依赖（与 assert-pristine.spec.ts 同一纪律）。
@@ -65,13 +66,13 @@ fs.appendFileSync(path.join(root, 'tsc-runs'), 'x')
 }
 
 describe('ensureLibEntriesReexport', () => {
-  it('全新源树（无任何 lib/）自动执行 tsc 双面 + 合成，而不是跳过', () => {
+  it('全新源树（无任何 lib/）自动执行 host tsc + 合成，而不是跳过', () => {
     const { root, counter } = fakeDsh('fresh')
 
     expect(ensureLibEntriesReexport(root)).toBe(true)
 
-    // tsc 双面各跑了一次；探针文件与合成包装都就位。
-    expect(readFileSync(counter, 'utf8')).toHaveLength(2)
+    // host tsc 跑了一次；探针文件与合成包装都就位。
+    expect(readFileSync(counter, 'utf8')).toHaveLength(1)
     expect(readFileSync(resolve(root, 'packages/util/brand/lib/types/index.js'), 'utf8'))
       .toContain('brandString')
     expect(readFileSync(resolve(root, 'packages/util/brand/lib/index.js'), 'utf8'))
@@ -104,7 +105,7 @@ describe('ensureLibEntriesReexport', () => {
 
     expect(readFileSync(resolve(root, 'packages/util/brand/lib/types/index.js'), 'utf8'))
       .toContain('brandString')
-    // 三处探针不新鲜只应触发一次双面重建（host + client），count 从 0 计。
-    expect(readFileSync(counter, 'utf8')).toHaveLength(2)
+    // 三处探针不新鲜只应触发一次 host 重建，count 从 0 计。
+    expect(readFileSync(counter, 'utf8')).toHaveLength(1)
   })
 })

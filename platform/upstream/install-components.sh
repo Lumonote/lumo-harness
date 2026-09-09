@@ -224,6 +224,10 @@ ensure_skill_snapshots() {
   }
   local name repository subpath commit skipped=1
   while IFS=$'\t' read -r name repository subpath commit; do
+    # Windows 上 Python 文本模式 stdout 输出 CRLF，read -r 会把 \r 留在末字段
+    # commit 里，导致 `git checkout --detach <sha>\r` 解析失败（报 "does not
+    # take a path argument '<sha>?'"）。这里统一剥掉行尾 \r。
+    commit="${commit%$'\r'}"
     [[ -n "${name}" ]] || continue
     if snapshot_usable "${name}"; then
       continue

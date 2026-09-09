@@ -111,10 +111,11 @@ function copyBuildOutputs(sourceRoot, targetRoot) {
 // 源树 lib/ 必须已含这些导出，否则视为停在旧构建：覆盖层包（LUMO_STREAM_RESILIENCE
 // 点名的 session-controller 等）消费的上游 API 比源树最后一次全量构建更新时，快照会
 // 拿旧 .d.ts 编译打过补丁的源码而当场失败（assistantStreamChunks / InboxState /
-// SessionProjectionMap 'inbox' 缺失）。与 brandString 同路：重跑上游 tsc 双面重建。
-// 全新克隆（CI 桌面 job 的第一棒）—— 源树一个 lib/ 都没有：走同一套 tsc 双面 +
+// SessionProjectionMap 'inbox' 缺失）。与 brandString 同路：重跑上游 host tsc 重建。
+// 全新克隆（CI 桌面 job 的第一棒）—— 源树一个 lib/ 都没有：先走 host tsc +
 // 合成重建，而不是让 copyBuildOutputs 报「没有构建产物」死掉。本地增量构建的
-// lib/ 存在且探针新鲜，仍然跳过，零行为变化。
+// lib/ 存在且探针新鲜，仍然跳过，零行为变化。client tsc 依赖 host tsdown
+// 稍后生成的 typert remote 投影，由 build-runtime.mjs 的后续阶段负责。
 const LIB_FRESHNESS_PROBES = [
   ['packages/util/brand/lib/types/index.js', 'brandString'],
   ['packages/llm/llm/lib/types/assistant-stream.d.ts', 'assistantStreamChunks'],
@@ -139,7 +140,10 @@ export function ensureLibEntriesReexport(sourceRoot) {
     const oldRoot = process.env['LUMO_DSH_SOURCE_ROOT']
     process.env['LUMO_DSH_SOURCE_ROOT'] = sourceRoot
     const tsc = resolve(sourceRoot, 'node_modules', 'typescript', 'bin', 'tsc')
-    for (const [config, label] of [['tsconfig.host.json', 'host'], ['tsconfig.client.json', 'client']]) {
+    // client 面依赖 host tsdown 稍后生成的 typert.remote-client.*；此处提前执行
+    // 会在全新 clone 上产生一批必然的“找不到 remote”错误。client 类型由
+    // refreshDshClientTypePrerequisites() 在 host 投影完成后刷新。
+    for (const config of ['tsconfig.host.json']) {
       // dsh-root 的 host 构建本身也使用 4 GiB heap（见 package.json 的
       // build:lib:host）。全新 CI clone 会在这里首次编译整个引用图；Node
       // 默认堆在 macOS arm64 runner 上会耗尽并以 SIGABRT 退出。
@@ -149,14 +153,7 @@ export function ensureLibEntriesReexport(sourceRoot) {
       })
       if (result.error !== undefined) throw result.error
       if (result.status !== 0) {
-        if (label === 'host') throw new Error(`Lumo DSH staging: 重建 dsh ${label} 类型产物失败（${String(result.status ?? result.signal)}）`)
-        // client 面失败可容忍：typert/generator 产出的 lib/typert.remote-client.* 是一
-        // 种「来自 Host FaceModel」的 tsdown 主机面产物，tsc -b 无法再生。源树该文件
-        // 停留在旧 master 形态时 client 面 tsc 必然报旧形状 API 缺失（如 ui-goal 的
-        // goals.get / TypertRemoteNamespace），且本机根本无法自愈——它由 build-runtime.mjs
-        // 的 rebuildDshHostArtifacts() 在快照主机面 tsdown 序重产出并回拷源树。此处
-        // 放行，真正的 client 类型刷新在快照侧由 refreshDshClientTypePrerequisites 承担。
-        console.warn(`Lumo DSH staging: [WARN] 重建 dsh ${label} 类型产物失败（${String(result.status ?? result.signal)}），先放行 —— typert 投影将在快照主机面 tsdown 序重产出（rebuildDshHostArtifacts）`)
+        throw new Error(`Lumo DSH staging: 重建 dsh host 类型产物失败（${String(result.status ?? result.signal)}）`)
       }
     }
     const synth = spawnSync(process.execPath, [script], { cwd: sourceRoot, stdio: 'inherit' })
