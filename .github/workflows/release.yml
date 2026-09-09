@@ -19,6 +19,7 @@ on:
 permissions:
   contents: read
 
+jobs:
   # 桌面安装包。build.sh 的 build_desktop 要求 target == 宿主平台/架构
   # （native wheel 与 Rust 壳都不可跨架构），所以每个 target 必须有自己的 runner。
   desktop:
