@@ -112,6 +112,9 @@ function copyBuildOutputs(sourceRoot, targetRoot) {
 // 点名的 session-controller 等）消费的上游 API 比源树最后一次全量构建更新时，快照会
 // 拿旧 .d.ts 编译打过补丁的源码而当场失败（assistantStreamChunks / InboxState /
 // SessionProjectionMap 'inbox' 缺失）。与 brandString 同路：重跑上游 tsc 双面重建。
+// 全新克隆（CI 桌面 job 的第一棒）—— 源树一个 lib/ 都没有：走同一套 tsc 双面 +
+// 合成重建，而不是让 copyBuildOutputs 报「没有构建产物」死掉。本地增量构建的
+// lib/ 存在且探针新鲜，仍然跳过，零行为变化。
 const LIB_FRESHNESS_PROBES = [
   ['packages/util/brand/lib/types/index.js', 'brandString'],
   ['packages/llm/llm/lib/types/assistant-stream.d.ts', 'assistantStreamChunks'],
@@ -122,15 +125,17 @@ const LIB_FRESHNESS_PROBES = [
   ['packages/core/agent/lib/types/index.d.ts', '(agentCtx: Context, agent: Agent)'],
 ]
 
-function ensureLibEntriesReexport(sourceRoot) {
+export function ensureLibEntriesReexport(sourceRoot) {
   const brandTypes = resolve(sourceRoot, 'packages', 'util', 'brand', 'lib', 'types', 'index.js')
-  if (!existsSync(brandTypes)) return false
   const fresh = LIB_FRESHNESS_PROBES.every(([relativePath, marker]) => {
     const probe = resolve(sourceRoot, relativePath)
     return existsSync(probe) && readFileSync(probe, 'utf8').includes(marker)
   })
   if (!fresh) {
-    const script = resolve(scriptRoot, 'synthesize-dsh-libs.mjs')
+    // 合成脚本在 desktop/ 下（桌面打包链的共用脚本），不在 dsh-overrides/：
+    // 之前写错的相对路径从未在本地触发——本地 lib 探针新鲜，唯有全新克隆
+    //（CI 桌面 job）才会走进这条分支，也正是本次修复的目标路径。
+    const script = resolve(scriptRoot, '..', 'desktop', 'synthesize-dsh-libs.mjs')
     const oldRoot = process.env['LUMO_DSH_SOURCE_ROOT']
     process.env['LUMO_DSH_SOURCE_ROOT'] = sourceRoot
     const tsc = resolve(sourceRoot, 'node_modules', 'typescript', 'bin', 'tsc')
