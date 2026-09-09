@@ -25,12 +25,53 @@ const scriptRoot = dirname(fileURLToPath(import.meta.url))
 // 继续用——上一轮 ui-sidebar 插槽缺失正是这么安静地漏出去的。把投影口径内的 lib/
 // 内容一并哈希（与 copyBuildOutputs 走同一份目录清单，口径不会漂移），产物一变
 // 快照自动重建。
+// native/system 的 flock binding（packages/*/bin/*.node）也是 gitignored 构建产物，
+// 且不在 lib/ 投影口径内：copyTrackedTree 只拷 git-tracked 文件，快照里平台包只剩
+// package.json + prebuilds.json。运行期 flock 懒加载才 require 该文件，表现为打包
+// app 平时正常、发消息（会话加锁）即报 "Cannot find module .../bin/system.node"。
+// 与上游 AGENTS.md 的口径一致（仓库测试只编 host addon）：宿主平台包缺 bin 时先编
+// 一次；全部已存在的 bin/ 再投影进快照并纳入指纹，重编后二进制一变快照自动重建。
+function hostNativeAddonPackageName() {
+  // flock 仅支持 darwin/linux；win32 无平台包，build.ts --host-addon-only 也会空转。
+  if (process.platform !== 'darwin' && process.platform !== 'linux') return null
+  return `node-addon-system-${process.platform}-${process.arch}`
+}
+
+function ensureNativeAddonsBuilt(sourceRoot) {
+  const packageName = hostNativeAddonPackageName()
+  if (packageName === null) return
+  const hostPackage = resolve(sourceRoot, 'native', 'system', 'packages', packageName)
+  if (!existsSync(hostPackage)) return // 源树没有该工作区（旧上游），无需处理
+  if (existsSync(resolve(hostPackage, 'bin'))) return
+  const tsx = resolve(sourceRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'tsx.cmd' : 'tsx')
+  if (!existsSync(tsx)) {
+    throw new Error('Lumo DSH staging: native/system 平台包缺 bin/ 且源树无 tsx，请先在 deepseek-harness 执行 pnpm build:native-system')
+  }
+  const result = spawnSync(tsx, ['native/system/scripts/build.ts', '--host-addon-only'], { cwd: sourceRoot, stdio: 'inherit' })
+  if (result.error !== undefined) throw result.error
+  if (result.status !== 0) {
+    throw new Error(`Lumo DSH staging: 构建宿主 native addon 失败（${String(result.status ?? result.signal)}）`)
+  }
+}
+
+function projectedNativeBinDirectories(sourceRoot) {
+  const packagesRoot = resolve(sourceRoot, 'native', 'system', 'packages')
+  if (!existsSync(packagesRoot)) return []
+  return readdirSync(packagesRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => resolve(packagesRoot, entry.name, 'bin'))
+    .filter((bin) => existsSync(bin))
+}
+
 function fingerprint(root) {
   const commit = git(root, ['rev-parse', 'HEAD']).trim()
   const hash = createHash('sha256')
   hash.update(readFileSync(resolve(scriptRoot, 'apply.mjs')))
   for (const libDirectory of projectedLibDirectories(root)) {
     hashTree(libDirectory, libDirectory, hash)
+  }
+  for (const binDirectory of projectedNativeBinDirectories(root)) {
+    hashTree(binDirectory, binDirectory, hash)
   }
   return `${commit}:${hash.digest('hex')}`
 }
@@ -99,6 +140,10 @@ function copyBuildOutputs(sourceRoot, targetRoot) {
   }
   if (libDirectories.length === 0) {
     throw new Error(`Lumo DSH staging: ${sourceRoot} has no build outputs to project; run \`pnpm run build\` there first`)
+  }
+  // native/system 平台包的 bin/（flock binding）：gitignored，见文件头部说明。
+  for (const sourceBin of projectedNativeBinDirectories(sourceRoot)) {
+    cpSync(sourceBin, resolve(targetRoot, relative(sourceRoot, sourceBin)), { recursive: true, dereference: true })
   }
   return libDirectories.length
 }
@@ -186,6 +231,9 @@ function setTimeoutSync(ms) {
 
 export function prepareRuntime(sourceRoot, targetRoot) {
   assertPristineProductSource(sourceRoot)
+  // 宿主 native addon 缺 bin 时先编（fingerprint() 会把 bin 内容哈希进指纹，
+  // 必须在算指纹之前完成，见文件头部说明）。
+  ensureNativeAddonsBuilt(sourceRoot)
   // 源树 lib 若停留在重构前的旧构建（brand 缺 brandString），这里先重建再算指纹——
   // fingerprint() 对 lib/ 内容取哈希，产物一变快照自动重建。
   ensureLibEntriesReexport(sourceRoot)
