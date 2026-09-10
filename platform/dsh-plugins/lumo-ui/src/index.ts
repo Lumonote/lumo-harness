@@ -1,6 +1,6 @@
 /** Host half: keep DSH's native Web shell and add a same-origin Lumo control API. */
 import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -13,6 +13,7 @@ import { discoverSkillDemos, resolveSkillDemoAsset, type SkillDemo } from './ski
 import { allowedAssetUrl, createUpstreamDemoService, type GallerySkill, type UpstreamDemoService } from './upstream-demos.ts'
 import { loadCatalog, installItem, searchCatalog, type SkillHubConfig, type SkillHubKind } from './skillhub.ts'
 import { registerSkillHubRuntime, type SkillHubRuntime } from './skillhub-runtime.ts'
+import { LocalAssetError, LocalAssetStore } from './local-assets.ts'
 
 /** Read-only structural projection of the session-query seam. Keeping the
  * host plugin's build boundary local avoids pulling the platform contract
@@ -373,6 +374,13 @@ function writeUpstream(res: ServerResponse, result: UpstreamResult): void {
   writeJson(res, result.status || 502, upstreamError ?? { error: result.error || 'upstream unavailable' })
 }
 
+function writeLocalAssetError(res: ServerResponse, error: unknown): void {
+  const status = error instanceof LocalAssetError ? error.status
+    : error instanceof RangeError ? 413
+      : error instanceof SyntaxError ? 400 : 500
+  writeJson(res, status, { error: error instanceof Error ? error.message : '本地资产操作失败。' })
+}
+
 function upstreamErrorMessage(body: unknown, fallback: string): string {
   if (typeof body === 'object' && body !== null) {
     const value = (body as { message?: unknown; error?: unknown }).message ?? (body as { error?: unknown }).error
@@ -431,6 +439,9 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     writeJson(res, 401, { error: 'unauthorized' })
     return
   }
+  const localAssets = config.deploymentMode === 'local'
+    ? new LocalAssetStore(join(dirname(resolve(config.skillhubInstallFile ?? '.lumo/skillhub-installs.json')), 'local-assets.json'), resolve(config.skillhubRoot ?? '.lumo/skills'))
+    : undefined
   if (req.method === 'GET' && pathname === '/lumo/api/overview') { writeJson(res, 200, await overview(config, identity, req)); return }
 
   if (req.method === 'GET' && pathname === '/lumo/api/capabilities') {
@@ -725,9 +736,12 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   if (req.method === 'GET' && pathname === '/lumo/api/governance') {
     if (config.deploymentMode === 'local') {
       const unavailable = (capability: string): UpstreamResult => ({ ok: false, status: 501, data: { error: `本地单机不提供${capability}；请连接服务器形态。` }, error: 'local_capability_unavailable' })
+      const localSkills = localAssets?.listSkills(identity) ?? []
       writeJson(res, 200, {
+        local: true,
         features: unavailable('治理策略'), departments: unavailable('组织目录'), roles: unavailable('角色目录'),
-        catalog: unavailable('治理技能目录'), effective: unavailable('跨用户技能分发'), permissions: unavailable('权限判定'),
+        catalog: { ok: true, status: 200, data: { skills: localSkills } },
+        effective: { ok: true, status: 200, data: { skills: localSkills } }, permissions: unavailable('权限判定'),
       })
       return
     }
@@ -746,7 +760,34 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   }
 
   if (req.method === 'POST' && pathname === '/lumo/api/governance/skills') {
+    if (localAssets !== undefined) {
+      try {
+        const created = localAssets.createSkill(identity, await readJson(req))
+        await skillhubRuntime?.refresh()
+        writeJson(res, 201, created)
+      } catch (error) { writeLocalAssetError(res, error) }
+      return
+    }
     try { writeUpstream(res, await upstream(config, identity, 'governance', '/v1/skills', req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  const governedSkill = pathname.match(/^\/lumo\/api\/governance\/skills\/([^/]+)$/u)
+  if (governedSkill !== null && (req.method === 'PATCH' || req.method === 'DELETE')) {
+    const skillID = safeID(governedSkill[1])
+    if (skillID === undefined) { writeJson(res, 400, { error: 'invalid skill id' }); return }
+    if (localAssets === undefined) { writeJson(res, 405, { error: 'method not allowed' }); return }
+    try {
+      if (req.method === 'DELETE') {
+        localAssets.deleteSkill(identity, skillID)
+        await skillhubRuntime?.refresh()
+        res.writeHead(204, { 'cache-control': 'no-store' }); res.end()
+      } else {
+        const updated = localAssets.updateSkill(identity, skillID, await readJson(req))
+        await skillhubRuntime?.refresh()
+        writeJson(res, 200, updated)
+      }
+    } catch (error) { writeLocalAssetError(res, error) }
     return
   }
 
@@ -779,6 +820,17 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     const skillID = safeID(governedSkillVersions[1]); const version = safeID(governedSkillVersions[2])
     if (skillID === undefined || (governedSkillVersions[2] !== undefined && version === undefined)) { writeJson(res, 400, { error: 'invalid skill id or version' }); return }
     const upstreamPath = `/v1/skills/${encodeURIComponent(skillID)}/versions${version === undefined ? '' : `/${encodeURIComponent(version)}`}`
+    if (localAssets !== undefined) {
+      try {
+        if (req.method === 'GET' && version !== undefined) writeJson(res, 200, localAssets.getSkillVersion(identity, skillID, version))
+        else if (req.method === 'POST' && version === undefined) {
+          const created = localAssets.createSkillVersion(identity, skillID, await readJson(req))
+          await skillhubRuntime?.refresh()
+          writeJson(res, 201, created)
+        } else writeJson(res, 405, { error: 'method not allowed' })
+      } catch (error) { writeLocalAssetError(res, error) }
+      return
+    }
     if (req.method === 'GET') { writeUpstream(res, await upstream(config, identity, 'governance', upstreamPath, req)); return }
     if (req.method === 'POST' && version === undefined) {
       try { writeUpstream(res, await upstream(config, identity, 'governance', upstreamPath, req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
@@ -787,16 +839,35 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   }
 
   if (pathname === '/lumo/api/agent-presets' && (req.method === 'GET' || req.method === 'POST')) {
+    if (localAssets !== undefined) {
+      try {
+        if (req.method === 'GET') writeJson(res, 200, { agent_presets: localAssets.listAgentPresets(identity), local: true })
+        else writeJson(res, 201, localAssets.createAgentPreset(identity, await readJson(req)))
+      } catch (error) { writeLocalAssetError(res, error) }
+      return
+    }
     if (req.method === 'GET') { writeUpstream(res, await upstream(config, identity, 'governance', '/v1/agent-presets', req)); return }
     try { writeUpstream(res, await upstream(config, identity, 'governance', '/v1/agent-presets', req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
     return
   }
 
   const agentPreset = pathname.match(/^\/lumo\/api\/agent-presets\/([^/]+)$/u)
-  if (agentPreset !== null && (req.method === 'GET' || req.method === 'PATCH')) {
+  if (agentPreset !== null && (req.method === 'GET' || req.method === 'PATCH' || req.method === 'DELETE')) {
     const presetID = safeID(agentPreset[1])
     if (presetID === undefined) { writeJson(res, 400, { error: 'invalid agent preset id' }); return }
+    if (localAssets !== undefined) {
+      try {
+        if (req.method === 'GET') {
+          const preset = localAssets.listAgentPresets(identity).find(item => item.id === presetID)
+          if (preset === undefined) throw new LocalAssetError(404, '找不到该专家。')
+          writeJson(res, 200, preset)
+        } else if (req.method === 'PATCH') writeJson(res, 200, localAssets.updateAgentPreset(identity, presetID, await readJson(req)))
+        else { localAssets.deleteAgentPreset(identity, presetID); res.writeHead(204, { 'cache-control': 'no-store' }); res.end() }
+      } catch (error) { writeLocalAssetError(res, error) }
+      return
+    }
     if (req.method === 'GET') { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/agent-presets/${encodeURIComponent(presetID)}`, req)); return }
+    if (req.method === 'DELETE') { writeJson(res, 405, { error: 'method not allowed' }); return }
     try { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/agent-presets/${encodeURIComponent(presetID)}`, req, 'PATCH', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
     return
   }
@@ -1321,6 +1392,10 @@ export function apply(ctx: Context, config: Config): void {
   let skillhubRuntime: SkillHubRuntime | undefined
   if (config.deploymentMode === 'local') {
     ctx.inject(['skills'], (skillsCtx) => {
+      // Programmatic hosts and early desktop boot may invoke the dependency
+      // callback before the concrete registry is attached. The API remains
+      // usable; the runtime bridge will be installed once Cordis supplies it.
+      if (skillsCtx.get('skills') === undefined) return
       const runtime = registerSkillHubRuntime(skillsCtx, resolve(config.skillhubRoot ?? '.lumo/skills'))
       skillsCtx.effect(() => {
         skillhubRuntime = runtime

@@ -176,7 +176,7 @@ interface UpstreamResult { ok: boolean; status: number; data?: unknown; error?: 
 interface StudioSpace { id: string; label: string; description: string; accent: string }
 interface StudioProject { id: string; label: string; summary: string; spaces: StudioSpace[] }
 interface StudioScope { projectId: string; spaceId: string }
-interface GovernanceSnapshot { features: UpstreamResult; departments: UpstreamResult; roles: UpstreamResult; catalog: UpstreamResult; effective: UpstreamResult; permissions: UpstreamResult }
+interface GovernanceSnapshot { local?: boolean; features: UpstreamResult; departments: UpstreamResult; roles: UpstreamResult; catalog: UpstreamResult; effective: UpstreamResult; permissions: UpstreamResult }
 type AuthAccount = {
   mode: 'session'; provider: 'lumo-governance'; username: string; displayName: string; userId: string
   realm: string; roles: string[]; department: string; clientIp: string; captchaMode: 'always' | 'identity-provider'
@@ -1159,6 +1159,7 @@ function SkillsSurface() {
   const [versionLoading, setVersionLoading] = useState(false)
   const [publishingVersion, setPublishingVersion] = useState(false)
   const [promotingVersion, setPromotingVersion] = useState(false)
+  const [deletingSkill, setDeletingSkill] = useState('')
   const load = useCallback(async () => {
     setLoading(true); setError('')
     try {
@@ -1183,7 +1184,7 @@ function SkillsSurface() {
     setCreating(true)
     try {
       await api<GovernedSkill>('/lumo/api/governance/skills', { method: 'POST', body: JSON.stringify({ name, kind, description, current_version: version, content, visibility: 'private' }) })
-      form.reset(); setNotice(`私有${kind === 'workflow' ? '工作流' : '提示词'}技能「${name}」的 ${version} 内容已进入治理目录。`); await load()
+      form.reset(); setNotice(governance?.local ? `本地技能「${name}」已创建并载入运行时。` : `私有${kind === 'workflow' ? '工作流' : '提示词'}技能「${name}」的 ${version} 内容已进入治理目录。`); await load()
     } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
     finally { setCreating(false) }
   }
@@ -1199,16 +1200,35 @@ function SkillsSurface() {
     const form = event.currentTarget
     if (selectedGoverned === null) return
     const fields = new FormData(event.currentTarget)
-    const version = String(fields.get('version') ?? '').trim()
+    const version = governance?.local ? selectedGoverned.current_version : String(fields.get('version') ?? '').trim()
     const content = String(fields.get('content') ?? '').trim()
     if (!version || !content) { setNotice('新版本号和内容均为必填。'); return }
     setPublishingVersion(true)
     try {
-      const next = await api<GovernedSkillVersion>(`/lumo/api/governance/skills/${encodeURIComponent(selectedGoverned.id)}/versions`, { method: 'POST', body: JSON.stringify({ version, content }) })
-      setSelectedVersion(next); setSelectedGoverned({ ...selectedGoverned, current_version: next.version }); form.reset()
-      setNotice(`已保存不可覆盖的治理版本 ${next.version}；它尚未自动发布到运行时。`); await load()
+      if (governance?.local) {
+        await api<GovernedSkill>(`/lumo/api/governance/skills/${encodeURIComponent(selectedGoverned.id)}`, { method: 'PATCH', body: JSON.stringify({ description: String(fields.get('description') ?? '').trim(), content }) })
+        const next = await api<GovernedSkillVersion>(`/lumo/api/governance/skills/${encodeURIComponent(selectedGoverned.id)}/versions/${encodeURIComponent(version)}`)
+        setSelectedVersion(next)
+        setNotice(`本地技能「${selectedGoverned.name}」已修改并重新载入运行时。`)
+      } else {
+        const next = await api<GovernedSkillVersion>(`/lumo/api/governance/skills/${encodeURIComponent(selectedGoverned.id)}/versions`, { method: 'POST', body: JSON.stringify({ version, content }) })
+        setSelectedVersion(next); setSelectedGoverned({ ...selectedGoverned, current_version: next.version }); form.reset()
+        setNotice(`已保存不可覆盖的治理版本 ${next.version}；它尚未自动发布到运行时。`)
+      }
+      await load()
     } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
     finally { setPublishingVersion(false) }
+  }
+  const deleteGoverned = async (skill: GovernedSkill) => {
+    if (!window.confirm(`确定删除本地技能「${skill.name}」？此操作会同时移除它的本地运行时文件。`)) return
+    setDeletingSkill(skill.id)
+    try {
+      await api(`/lumo/api/governance/skills/${encodeURIComponent(skill.id)}`, { method: 'DELETE' })
+      if (selectedGoverned?.id === skill.id) { setSelectedGoverned(null); setSelectedVersion(null) }
+      setNotice(`本地技能「${skill.name}」已删除。`)
+      await load()
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setDeletingSkill('') }
   }
   const publishVersion = async () => {
     if (selectedGoverned === null || selectedVersion === null) return
@@ -1229,16 +1249,16 @@ function SkillsSurface() {
   return <div className="lumo-surface">
     <SurfaceIntro surface="skills" trailing={<span className="lumo-surface-actions"><button type="button" className="lumo-button lumo-secondary" onClick={() => openSurface('connectors')}>连接器管理</button><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>重新同步</BusyButton></span>} />
     {error ? <Notice error>{error}</Notice> : null}{notice ? <Notice close={() => setNotice('')}>{notice}</Notice> : null}
-    <div className="lumo-metric-grid"><Metric label="运行时可见" value={String(skills.length)} note={runtime?.complete === false ? '目录仍在收敛' : '目录已完整'} tone="mint" /><Metric label="治理目录" value={String(governed.length)} note={governance?.catalog.ok ? '集群目录' : '当前模式不可用'} /><Metric label="模型可调用" value={String(skills.filter(skill => skill.invocation.modelInvocable).length)} note="调用策略" /><Metric label="当前生效" value={String(effective.length)} note="生效策略" /></div>
+    <div className="lumo-metric-grid"><Metric label="运行时可见" value={String(skills.length)} note={runtime?.complete === false ? '目录仍在收敛' : '目录已完整'} tone="mint" /><Metric label={governance?.local ? '本地自建' : '治理目录'} value={String(governed.length)} note={governance?.local ? '保存在桌面数据目录' : governance?.catalog.ok ? '集群目录' : '当前模式不可用'} /><Metric label="模型可调用" value={String(skills.filter(skill => skill.invocation.modelInvocable).length)} note="调用策略" /><Metric label="当前生效" value={String(effective.length)} note="生效策略" /></div>
     <Section title="运行时技能" meta={loading ? '正在读取技能目录' : '当前运行时快照'} actions={<label className="lumo-filter"><span>筛选</span><input value={filter} onChange={event => setFilter(event.target.value)} placeholder="技能名或提供方" /></label>}>
       {loading ? <div className="lumo-skill-grid">{[0, 1, 2, 3].map(index => <div className="lumo-skeleton-skill" key={index}><span /><div><b /><i /><i /></div></div>)}</div> : filteredSkills.length ? <div className="lumo-skill-layout"><div className="lumo-skill-grid">{filteredSkills.map((skill, index) => <SpotlightCard className={`lumo-skill-card ${selected?.name === skill.name ? 'selected' : ''}`} index={index} key={skill.name} onClick={() => setSelectedName(skill.name)}><span className="lumo-skill-mark">{localizedSkillName(skill.name).slice(0, 1)}</span><div><b>{localizedSkillName(skill.name)}</b><p>{localizedSkillDescription(skill)}</p><small>{localizedSkillWhenToUse(skill)}</small><footer><i>{localizedProvider(skill.provider)}</i><span>{skill.invocation.modelInvocable ? '模型可调用' : '仅用户可调用'}</span></footer></div></SpotlightCard>)}</div><aside className="lumo-inspector lumo-skill-inspector">{selected ? <><span className="lumo-inspector-label">技能检查</span><h3>技能详情 · {localizedSkillName(selected.name)}</h3><p>{localizedSkillDescription(selected)}</p><div className="lumo-detail-stack"><div><span>技能状态</span><b>运行时目录</b></div><div><span>来源</span><b>{localizedSource(selected.source)}</b></div><div><span>提供方</span><b>{localizedProvider(selected.provider)}</b></div><div><span>用户可调用</span><b>{selected.invocation.userInvocable ? '允许' : '关闭'}</b></div><div><span>模型可调用</span><b>{selected.invocation.modelInvocable ? '允许' : '关闭'}</b></div></div></> : <Empty>选择技能查看详细策略。</Empty>}</aside></div> : <Empty>当前技能目录没有匹配项。</Empty>}
     </Section>
-    <Section title="创建治理技能" meta="创建首个不可覆盖版本；初始为未发布草稿"><form className="lumo-governance-form lumo-governance-skill-form" onSubmit={create}><label><span>技能名称</span><input name="name" maxLength={120} placeholder="例如：campaign-review" /></label><label><span>技能类型</span><select name="kind" defaultValue="prompt"><option value="prompt">提示词技能</option><option value="workflow">工作流技能</option></select></label><label><span>首个版本</span><input name="version" defaultValue="1.0.0" maxLength={64} /></label><label className="wide"><span>用途说明</span><input name="description" maxLength={500} placeholder="说明它解决什么问题，以及何时使用" /></label><label className="wide"><span>版本内容</span><textarea name="content" aria-label="技能版本内容" maxLength={131072} rows={7} placeholder={'---\nname: campaign-review\ndescription: 审核营销活动内容\n---\n\n写入提示词、工作流约定或 Markdown 技能说明。'} /></label><BusyButton type="submit" busy={creating} className="lumo-primary">保存技能草稿</BusyButton></form><p className="lumo-form-hint">保存只创建治理草稿。发布要求内容含有效 SKILL.md frontmatter（名称须与技能名称一致、必须有 description）；realm_admin 选择的发布源仍须在受保护发布环境中签名为 Registry 制品，之后 Provisioner 才会验签、对账并安装到节点。</p></Section>
-    <Section title="治理技能目录" meta={governance?.catalog.ok ? `${governed.length} 条` : `HTTP ${governance?.catalog.status ?? '未连接'}`}>
-      {governed.length ? <div className="lumo-table-list">{governed.map(skill => <div key={skill.id} className={selectedGoverned?.id === skill.id ? 'selected' : ''}><span><b>{localizedSkillName(skill.name)}</b><small>{skill.description || '未填写用途说明'} · 创建者 {skill.created_by}</small></span><i>{localizedSkillKind(skill.kind)}</i><em>{localizedVisibility(skill.visibility)} · 草稿 {skill.current_version}{skill.published_version ? ` · 已发布 ${skill.published_version}` : ' · 未发布'}</em><button type="button" className="lumo-button lumo-secondary lumo-version-open" onClick={() => void viewGoverned(skill)}>查看内容</button></div>)}</div> : <Empty>{governance?.catalog.error || '当前部署模式没有治理技能目录，运行时技能目录仍可独立使用。'}</Empty>}
+    <Section title={governance?.local ? '创建本地技能' : '创建治理技能'} meta={governance?.local ? '保存后立即进入本机运行时' : '创建首个不可覆盖版本；初始为未发布草稿'}><form className="lumo-governance-form lumo-governance-skill-form" onSubmit={create}><label><span>技能名称</span><input name="name" maxLength={120} placeholder="例如：campaign-review" /></label><label><span>技能类型</span><select name="kind" defaultValue="prompt"><option value="prompt">提示词技能</option><option value="workflow">工作流技能</option></select></label><label><span>首个版本</span><input name="version" defaultValue="1.0.0" maxLength={64} /></label><label className="wide"><span>用途说明</span><input name="description" maxLength={500} placeholder="说明它解决什么问题，以及何时使用" /></label><label className="wide"><span>版本内容</span><textarea name="content" aria-label="技能版本内容" maxLength={131072} rows={7} placeholder={'---\nname: campaign-review\ndescription: 审核营销活动内容\n---\n\n写入提示词、工作流约定或 Markdown 技能说明。'} /></label><BusyButton type="submit" busy={creating} className="lumo-primary">{governance?.local ? '创建技能' : '保存技能草稿'}</BusyButton></form><p className="lumo-form-hint">{governance?.local ? '技能保存在桌面应用数据目录，创建或修改后会立即刷新本机技能列表。' : '保存只创建治理草稿。发布要求内容含有效 SKILL.md frontmatter（名称须与技能名称一致、必须有 description）；realm_admin 选择的发布源仍须在受保护发布环境中签名为 Registry 制品，之后 Provisioner 才会验签、对账并安装到节点。'}</p></Section>
+    <Section title={governance?.local ? '本地技能目录' : '治理技能目录'} meta={governance?.catalog.ok ? `${governed.length} 条` : `HTTP ${governance?.catalog.status ?? '未连接'}`}>
+      {governed.length ? <div className="lumo-table-list">{governed.map(skill => <div key={skill.id} className={selectedGoverned?.id === skill.id ? 'selected' : ''}><span><b>{localizedSkillName(skill.name)}</b><small>{skill.description || '未填写用途说明'} · 创建者 {skill.created_by}</small></span><i>{localizedSkillKind(skill.kind)}</i><em>{localizedVisibility(skill.visibility)} · 版本 {skill.current_version}</em><button type="button" className="lumo-button lumo-secondary lumo-version-open" onClick={() => void viewGoverned(skill)}>{governance?.local ? '编辑' : '查看内容'}</button>{governance?.local ? <BusyButton type="button" busy={deletingSkill === skill.id} className="lumo-danger lumo-small" onClick={() => void deleteGoverned(skill)}>删除</BusyButton> : null}</div>)}</div> : <Empty>{governance?.catalog.error || (governance?.local ? '尚未创建本地技能。' : '当前部署模式没有治理技能目录，运行时技能目录仍可独立使用。')}</Empty>}
     </Section>
-    {selectedGoverned ? <Section title={`治理版本 · ${localizedSkillName(selectedGoverned.name)}`} meta={versionLoading ? '正在读取不可变来源内容' : `当前草稿 ${selectedGoverned.current_version}${selectedGoverned.published_version ? ` · 已发布治理源 ${selectedGoverned.published_version}` : ' · 尚未发布治理源'}`}><div className="lumo-governed-version-layout"><div className="lumo-governed-source"><p>{selectedVersion ? `来源摘要 ${selectedVersion.digest} · 创建者 ${selectedVersion.created_by}` : '版本内容会显示在这里。'}</p><pre>{selectedVersion?.content ?? (versionLoading ? '正在读取…' : '未能读取该版本内容。')}</pre><small>{selectedGoverned.published_version === selectedVersion?.version ? `此版本已选为治理运行时源${selectedGoverned.published_digest ? ` · ${selectedGoverned.published_digest}` : ''}；还需由受信任发布器签名为 Registry Bundle，节点安装事实以 Provisioner 回报为准。` : '这是治理草稿内容，尚未成为可构建的运行时源。'}</small></div><form className="lumo-stacked-form lumo-version-form" onSubmit={createVersion}><b>保存新草稿版本</b><label><span>新版本号</span><input name="version" maxLength={64} placeholder="例如：1.1.0" /></label><label><span>新版本内容</span><textarea name="content" aria-label="新技能版本内容" maxLength={131072} rows={7} placeholder={'---\nname: campaign-review\ndescription: 审核营销活动内容\n---\n\n版本一经保存不能覆盖。'} /></label><div className="lumo-form-actions"><BusyButton type="submit" busy={publishingVersion} className="lumo-primary">保存新版本</BusyButton><BusyButton type="button" busy={promotingVersion} disabled={selectedVersion === null || selectedVersion.version === selectedGoverned.published_version} className="lumo-secondary" onClick={() => void publishVersion()}>发布为运行时源</BusyButton></div><small>仅创建者或 realm_admin 可以读取和写入来源；发布运行时源仅限 realm_admin。签名制品构建与节点实际安装分别由受保护发布器和 Provisioner 完成。</small></form></div></Section> : null}
-    {selectedGoverned ? <SkillAccessPanel key={selectedGoverned.id} request={api} skillID={selectedGoverned.id} version={selectedVersion?.version ?? selectedGoverned.current_version} /> : null}
+    {selectedGoverned ? <Section title={`${governance?.local ? '编辑本地技能' : '治理版本'} · ${localizedSkillName(selectedGoverned.name)}`} meta={versionLoading ? '正在读取来源内容' : `当前版本 ${selectedGoverned.current_version}`}><div className="lumo-governed-version-layout"><div className="lumo-governed-source"><p>{selectedVersion ? `来源摘要 ${selectedVersion.digest} · 创建者 ${selectedVersion.created_by}` : '版本内容会显示在这里。'}</p><pre>{selectedVersion?.content ?? (versionLoading ? '正在读取…' : '未能读取该版本内容。')}</pre><small>{governance?.local ? '保存修改后，本机技能运行时会立即刷新。' : selectedGoverned.published_version === selectedVersion?.version ? `此版本已选为治理运行时源${selectedGoverned.published_digest ? ` · ${selectedGoverned.published_digest}` : ''}；还需由受信任发布器签名为 Registry Bundle，节点安装事实以 Provisioner 回报为准。` : '这是治理草稿内容，尚未成为可构建的运行时源。'}</small></div><form className="lumo-stacked-form lumo-version-form" onSubmit={createVersion}><b>{governance?.local ? '修改当前技能' : '保存新草稿版本'}</b>{governance?.local ? <label><span>用途说明</span><input name="description" maxLength={500} defaultValue={selectedGoverned.description ?? ''} /></label> : <label><span>新版本号</span><input name="version" maxLength={64} placeholder="例如：1.1.0" /></label>}<label><span>{governance?.local ? '技能内容' : '新版本内容'}</span><textarea key={selectedVersion?.digest ?? selectedGoverned.id} name="content" aria-label={governance?.local ? '编辑技能内容' : '新技能版本内容'} maxLength={131072} rows={7} defaultValue={governance?.local ? selectedVersion?.content ?? '' : undefined} placeholder={'---\nname: campaign-review\ndescription: 审核营销活动内容\n---\n\n写入技能说明。'} /></label><div className="lumo-form-actions"><BusyButton type="submit" busy={publishingVersion} className="lumo-primary">{governance?.local ? '保存修改' : '保存新版本'}</BusyButton>{governance?.local ? null : <BusyButton type="button" busy={promotingVersion} disabled={selectedVersion === null || selectedVersion.version === selectedGoverned.published_version} className="lumo-secondary" onClick={() => void publishVersion()}>发布为运行时源</BusyButton>}</div><small>{governance?.local ? '名称用于命令调用，创建后不可修改；用途说明和技能内容可以随时编辑。' : '仅创建者或 realm_admin 可以读取和写入来源；发布运行时源仅限 realm_admin。签名制品构建与节点实际安装分别由受保护发布器和 Provisioner 完成。'}</small></form></div></Section> : null}
+    {selectedGoverned && !governance?.local ? <SkillAccessPanel key={selectedGoverned.id} request={api} skillID={selectedGoverned.id} version={selectedVersion?.version ?? selectedGoverned.current_version} /> : null}
   </div>
 }
 
@@ -1307,8 +1327,12 @@ function SkillHubSurface() {
   const [experts, setExperts] = useState<AgentPreset[]>([])
   const [expertDirectoryState, setExpertDirectoryState] = useState<OptionalApiResult<{ agent_presets: AgentPreset[] }>['state']>('unavailable')
   const [expertDirectoryError, setExpertDirectoryError] = useState('')
+  const [expertDirectoryLocal, setExpertDirectoryLocal] = useState(false)
   const [createExpertOpen, setCreateExpertOpen] = useState(false)
   const [creatingExpert, setCreatingExpert] = useState(false)
+  const [editingExpert, setEditingExpert] = useState<AgentPreset | null>(null)
+  const [savingExpert, setSavingExpert] = useState(false)
+  const [deletingExpert, setDeletingExpert] = useState('')
   const bridge = useNativeConversationBridge()
   const allLabel = '全部'
   const listEndRef = useRef<HTMLDivElement>(null)
@@ -1322,11 +1346,12 @@ function SkillHubSurface() {
     try {
       const [next, expertDirectory] = await Promise.all([
         api<SkillHubCatalog>('/lumo/api/skillhub/catalog'),
-        optionalApi<{ agent_presets: AgentPreset[] }>('/lumo/api/agent-presets', { agent_presets: [] }),
+        optionalApi<{ agent_presets: AgentPreset[]; local?: boolean }>('/lumo/api/agent-presets', { agent_presets: [], local: false }),
       ])
       setCatalog(next)
       setNotice(next.notice ?? '')
       setExperts(expertDirectory.data.agent_presets ?? [])
+      setExpertDirectoryLocal(expertDirectory.data.local === true)
       setExpertDirectoryState(expertDirectory.state)
       setExpertDirectoryError(expertDirectory.error ?? '')
     }
@@ -1402,6 +1427,41 @@ function SkillHubSurface() {
     } finally { setCreatingExpert(false) }
   }
 
+  const updateExpert = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (editingExpert === null || savingExpert) return
+    const fields = new FormData(event.currentTarget)
+    setSavingExpert(true); setNotice('')
+    try {
+      const updated = await api<AgentPreset>(`/lumo/api/agent-presets/${encodeURIComponent(editingExpert.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          revision: editingExpert.revision,
+          name: String(fields.get('name') ?? '').trim(), description: String(fields.get('description') ?? '').trim(),
+          provider: String(fields.get('provider') ?? '').trim(), model_ref: String(fields.get('model_ref') ?? '').trim(),
+          project_id: String(fields.get('project_id') ?? '').trim(), system_prompt_ref: String(fields.get('system_prompt_ref') ?? '').trim(),
+          max_concurrency: Number(fields.get('max_concurrency') ?? 1),
+        }),
+      })
+      setExperts(current => current.map(item => item.id === updated.id ? updated : item))
+      setEditingExpert(null)
+      setNotice(`专家「${updated.name}」已更新。`)
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setSavingExpert(false) }
+  }
+
+  const deleteExpert = async (expert: AgentPreset) => {
+    if (!window.confirm(`确定删除专家「${expert.name}」？`)) return
+    setDeletingExpert(expert.id); setNotice('')
+    try {
+      await api(`/lumo/api/agent-presets/${encodeURIComponent(expert.id)}`, { method: 'DELETE' })
+      setExperts(current => current.filter(item => item.id !== expert.id))
+      if (editingExpert?.id === expert.id) setEditingExpert(null)
+      setNotice(`专家「${expert.name}」已删除。`)
+    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setDeletingExpert('') }
+  }
+
   const installedSkills = new Set(catalog?.installed.skills ?? [])
   const installedPacks = new Set(catalog?.installed.packs ?? [])
   const installedPlugins = new Set(catalog?.installed.plugins ?? [])
@@ -1463,7 +1523,7 @@ function SkillHubSurface() {
   const source = result?.source ?? catalog?.source
   const sourceLabel = source === 'skillhub' ? 'SkillHub 实时' : source === 'cache' ? '本地缓存' : source === 'seed' ? '内置示例' : '同步中'
   const syncedAt = catalog ? new Date(catalog.generatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''
-  const switchTab = (next: SkillHubTab) => { setTab(next); setCreateExpertOpen(false); setQuery(''); setFilter('全部'); setCommittedQuery(''); setSkills([]); setPacks([]); setTotal(0); setPage(1); setResult(null) }
+  const switchTab = (next: SkillHubTab) => { setTab(next); setCreateExpertOpen(false); setEditingExpert(null); setQuery(''); setFilter('全部'); setCommittedQuery(''); setSkills([]); setPacks([]); setTotal(0); setPage(1); setResult(null) }
   const visibleExperts = experts.filter(expert => filter === allLabel && `${expert.name} ${expert.description ?? ''} ${expert.provider} ${expert.model_ref}`.toLowerCase().includes(query.trim().toLowerCase()))
 
   const actions = (kind: SkillHubKind, id: string, name: string, installed: boolean, label = '安装') => {
@@ -1475,7 +1535,7 @@ function SkillHubSurface() {
   }
 
   return <div className="lumo-surface lumo-skillhub-surface">
-    <SurfaceIntro surface="skillhub" trailing={<span className="lumo-surface-actions">{tab === '专家' ? <button type="button" className="lumo-button lumo-primary lumo-new-expert-button" onClick={() => setCreateExpertOpen(open => !open)}>{createExpertOpen ? '收起创建' : '＋ 新建专家'}</button> : <button type="button" className="lumo-button lumo-secondary" onClick={() => openSurface('skills')}>管理已安装技能</button>}<BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>刷新</BusyButton></span>} />
+    <SurfaceIntro surface="skillhub" trailing={<span className="lumo-surface-actions">{tab === '专家' ? <button type="button" className="lumo-button lumo-primary lumo-new-expert-button" onClick={() => { setEditingExpert(null); setCreateExpertOpen(open => !open) }}>{createExpertOpen ? '收起创建' : '＋ 新建专家'}</button> : <button type="button" className="lumo-button lumo-secondary" onClick={() => openSurface('skills')}>管理已安装技能</button>}<BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>刷新</BusyButton></span>} />
     {error ? <Notice error>{error}</Notice> : null}
     {notice ? <Notice close={() => setNotice('')}>{notice}</Notice> : null}
 
@@ -1497,6 +1557,20 @@ function SkillHubSurface() {
       <footer><small>{expertDirectoryState === 'ok' ? '专家会保存为可管理的 Agent 资产。' : '当前部署尚未连接专家资产目录，提交时会保留明确错误。'}</small><span><button type="button" className="lumo-button lumo-secondary" onClick={() => setCreateExpertOpen(false)}>取消</button><BusyButton type="submit" busy={creatingExpert} className="lumo-primary">创建专家</BusyButton></span></footer>
     </form> : null}
 
+    {tab === '专家' && editingExpert ? <form className="lumo-expert-create" onSubmit={updateExpert}>
+      <header><div><span>EDIT EXPERT</span><h2>编辑专家</h2><p>修改会保存到专家目录，并立即反映在当前列表中。</p></div><button type="button" className="lumo-quiet" onClick={() => setEditingExpert(null)} aria-label="关闭编辑专家">×</button></header>
+      <div className="lumo-expert-create-grid">
+        <label><span>专家名称</span><input name="name" required maxLength={160} defaultValue={editingExpert.name} /></label>
+        <label><span>Provider</span><input name="provider" required maxLength={128} defaultValue={editingExpert.provider} /></label>
+        <label><span>模型</span><input name="model_ref" required maxLength={256} defaultValue={editingExpert.model_ref} /></label>
+        <label><span>最大并发</span><input name="max_concurrency" required type="number" min={1} max={1000} defaultValue={editingExpert.max_concurrency} /></label>
+        <label><span>项目范围</span><input name="project_id" maxLength={128} defaultValue={editingExpert.project_id ?? ''} placeholder="留空则对整个 Realm 生效" /></label>
+        <label><span>系统提示引用</span><input name="system_prompt_ref" maxLength={256} defaultValue={editingExpert.system_prompt_ref ?? ''} /></label>
+        <label className="wide"><span>职责说明</span><textarea name="description" required maxLength={500} rows={3} defaultValue={editingExpert.description ?? ''} /></label>
+      </div>
+      <footer><small>当前修订 {editingExpert.revision}；若数据已被更新，会提示刷新后重试。</small><span><button type="button" className="lumo-button lumo-secondary" onClick={() => setEditingExpert(null)}>取消</button><BusyButton type="submit" busy={savingExpert} className="lumo-primary">保存修改</BusyButton></span></footer>
+    </form> : null}
+
     <div className="lumo-skillhub-toolbar">
       <label className="lumo-skillhub-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m20 20-4.2-4.2" /></svg><input value={query} onChange={event => setQuery(event.target.value)} placeholder={skillhubTabMeta[tab].placeholder} aria-label={'搜索' + skillhubTabMeta[tab].label} />{query ? <button type="button" aria-label="清空搜索" onClick={() => setQuery('')}>×</button> : null}{searching ? <i className="lumo-skillhub-spinner" aria-hidden="true" /> : null}</label>
       <span className="lumo-skillhub-count">{searching && loadedCount === 0 ? '正在查询目录…' : tab === '专家' ? `我的专家 ${visibleExperts.length} · 模板 ${metricValue(total)}` : `共 ${metricValue(total)} 个技能${hasMore ? ` · 已加载 ${loadedCount}` : ''}`}</span>
@@ -1515,7 +1589,7 @@ function SkillHubSurface() {
           <header><span className="lumo-skillhub-mark lumo-expert-mark" data-tone="mint">{expert.name.slice(0, 1)}</span><div className="lumo-skillhub-title"><b title={expert.name}>{expert.name}</b><small>{expert.provider} · {expert.model_ref}</small></div><span className={`lumo-expert-status ${expert.status}`}>{expert.status === 'active' ? '已启用' : '已停用'}</span></header>
           <p>{expert.description || '尚未填写职责说明。'}</p>
           <div className="lumo-skillhub-chips"><span className="lumo-skillhub-tag" data-tone="mint">专属专家</span>{expert.project_id ? <span className="lumo-skillhub-tag">项目 · {expert.project_id}</span> : <span className="lumo-skillhub-tag">全 Realm</span>}</div>
-          <footer><span className="lumo-skillhub-stats"><span>并发 {expert.max_concurrency}</span><span>版本 {expert.version}</span></span><button type="button" className="lumo-button lumo-secondary" onClick={() => openSurface('operations')}>管理配置</button></footer>
+          <footer><span className="lumo-skillhub-stats"><span>并发 {expert.max_concurrency}</span><span>版本 {expert.version}</span></span><span className="lumo-skillhub-actions"><button type="button" className="lumo-button lumo-secondary" onClick={() => { setCreateExpertOpen(false); setEditingExpert(expert) }}>编辑</button>{expertDirectoryLocal ? <BusyButton type="button" busy={deletingExpert === expert.id} className="lumo-danger lumo-small" onClick={() => void deleteExpert(expert)}>删除</BusyButton> : null}</span></footer>
         </SkillHubCard>)}</div></section> : expertDirectoryState !== 'ok' ? <div className="lumo-expert-directory-note"><b>专属专家目录未连接</b><p>{expertDirectoryError || '当前部署只提供 SkillHub 专家模板；连接治理服务后可创建和管理专属专家。'}</p></div> : null}
         <section className="lumo-expert-block"><header><div><b>专家模板</b><span>按场景预装的一组技能，可直接加入工作区</span></div><em>{metricValue(total)}</em></header>{packs.length ? <div className="lumo-skillhub-grid">{packs.map((pack, index) => <SkillHubCard key={pack.id} index={index} tone={toneFor(pack.category)}>
           <header><SkillHubMark icon={pack.icon} name={pack.name} tone={toneFor(pack.category)} /><div className="lumo-skillhub-title"><b title={pack.name}>{pack.name}</b><small>{pack.role || '通用专家'} · {pack.source}</small></div></header>
