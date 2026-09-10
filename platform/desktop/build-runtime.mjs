@@ -70,6 +70,13 @@ const modulesRoot = resolve(stagingRoot, 'node_modules')
 const upstreamPluginRoot = resolve(desktopRoot, 'target', 'lumo-upstream-plugins')
 const upstreamPluginModulesRoot = resolve(upstreamPluginRoot, 'node_modules')
 const packagedTypeScriptPlugins = new Set(['@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/web-fetch-fakeip'])
+// RuVector's current published manifest still lists MetaHarness packages in
+// `dependencies`, although the integration is intentionally removable and all
+// call sites degrade when the packages are absent. pnpm may therefore omit
+// these packages after an optional dependency branch fails on a clean host.
+// Keep them when present, but do not make the desktop bundle depend on them.
+const gracefullyOptionalDependencyPrefixes = ['@metaharness/']
+const gracefullyOptionalDependencyNames = new Set(['metaharness'])
 // 裁剪规则见下方 pruneStagedRuntime；目录名单提前到常量区，避免顶层调用时撞上 TDZ。
 const PRUNE_DIRECTORY_NAMES = new Set(['test', 'tests', '__tests__', 'docs', 'doc', 'example', 'examples', '.github'])
 // 这两个名字不会出现在可 require 的路径里，任意深度都可裁；其余只裁包根一层（见 pruneDeadWeight）。
@@ -242,6 +249,11 @@ function packagePath(name, fromRoot) {
   return undefined
 }
 
+function isGracefullyOptionalDependency(name) {
+  return gracefullyOptionalDependencyNames.has(name)
+    || gracefullyOptionalDependencyPrefixes.some((prefix) => name.startsWith(prefix))
+}
+
 function queuePackage(packageRoot) {
   const manifest = readManifest(packageRoot)
   if (typeof manifest.name !== 'string' || packageSources.has(manifest.name)) return
@@ -342,6 +354,7 @@ for (let index = 0; index < packageQueue.length; index += 1) {
     const root = packagePath(name, current.root)
     const optional = current.manifest.optionalDependencies?.[name] !== undefined
       || current.manifest.peerDependenciesMeta?.[name]?.optional === true
+      || isGracefullyOptionalDependency(name)
     if (root === undefined) {
       if (optional) continue
       // 换台机器（或依赖被裁过）时闭包会撞上缺包：先按工作区自愈一次，再判失败。
@@ -1057,7 +1070,10 @@ function downloadOfficialNode(version, target) {
   const extractedRoot = resolve(cacheDirectory, `node-v${version}-${target}`)
   rmSync(extractedRoot, { recursive: true, force: true })
   const extract = windows
-    ? spawnSync('tar', ['-xf', archive, '-C', cacheDirectory], { encoding: 'utf8' })
+    // Git/MSYS GNU tar treats the colon in a Windows drive path as the
+    // remote-archive separator (for example, `E:\\...`). Force local file
+    // handling so portable builds work regardless of the drive letter.
+    ? spawnSync('tar', ['--force-local', '-xf', archive, '-C', cacheDirectory], { encoding: 'utf8' })
     : spawnSync('tar', ['-xzf', archive, '-C', cacheDirectory, '--strip-components', '2',
       `node-v${version}-${target}/bin/node`,
       `node-v${version}-${target}/lib/node_modules/corepack`,

@@ -253,7 +253,67 @@ fi
 if [[ ! -x "${venv_python}" ]]; then
   "${bootstrap_python}" -m venv "${ppt_venv}"
 fi
-"${venv_python}" -m pip install -r "${ppt_root}/requirements.txt"
+
+# pip leaves temporary metadata directories named `~ip*` when an install is
+# interrupted (for example while probing a broken rustup shim).  They are
+# harmless, but make every subsequent pip invocation print
+# "Ignoring invalid distribution ~ip" and can hide the real failure.
+remove_pip_interrupted_state() {
+  local site_packages="$1" entry
+  [[ -d "${site_packages}" ]] || return 0
+  for entry in "${site_packages}"/~ip*; do
+    [[ -e "${entry}" ]] || continue
+    echo "Lumo: 清理 pip 中断残留：${entry}" >&2
+    rm -rf -- "${entry}"
+  done
+}
+
+cleanup_pip_interrupted_state() {
+  local site_packages
+  if [[ "${host_os}" == "Windows" ]]; then
+    remove_pip_interrupted_state "${ppt_venv}/Lib/site-packages"
+    return
+  fi
+  for site_packages in "${ppt_venv}"/lib/python*/site-packages; do
+    [[ -d "${site_packages}" ]] || continue
+    remove_pip_interrupted_state "${site_packages}"
+  done
+}
+
+# pip's User-Agent probe runs `rustc --version`. On Windows a rustup proxy can
+# block while repairing/downloading a toolchain; pip's timeout does not always
+# release inherited console handles cleanly, so the build appears frozen in
+# `subprocess.communicate()`. PPT Master's declared requirements are expected to
+# resolve to wheels, so hide only the rustc directory for this one pip child.
+# The original PATH is retained for pnpm and the later Cargo/Tauri build.
+path_without_entry() {
+  local path_value="$1" dropped="$2" entry filtered="" old_ifs="${IFS}"
+  IFS=':'
+  for entry in ${path_value}; do
+    [[ "${entry}" == "${dropped}" ]] && continue
+    filtered="${filtered:+${filtered}:}${entry}"
+  done
+  IFS="${old_ifs}"
+  printf '%s' "${filtered}"
+}
+
+install_ppt_requirements() {
+  local pip_path="${PATH}" rustc_bin rustc_dir
+  if [[ "${host_os}" == "Windows" && "${LUMO_PIP_ALLOW_RUSTC:-0}" != "1" ]]; then
+    rustc_bin="$(command -v rustc 2>/dev/null || true)"
+    if [[ -n "${rustc_bin}" && "${rustc_bin}" == */* ]]; then
+      rustc_dir="${rustc_bin%/*}"
+      pip_path="$(path_without_entry "${PATH}" "${rustc_dir}")"
+      if [[ "${pip_path}" != "${PATH}" ]]; then
+        echo "Lumo: Windows pip 安装暂时隔离 rustc 探测（后续 Cargo 构建仍使用原 PATH）。" >&2
+      fi
+    fi
+  fi
+  PATH="${pip_path}" "${venv_python}" -m pip install -r "${ppt_root}/requirements.txt"
+}
+
+cleanup_pip_interrupted_state
+install_ppt_requirements
 
 cd "${platform_root}"
 
