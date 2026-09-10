@@ -9,6 +9,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -128,9 +129,30 @@ function findDshPackageManifest(relativeRoot, name) {
   return undefined
 }
 
+function restoreDshPackageLink(relativeRoot, name) {
+  const parts = name.split('/')
+  const target = resolve(sourceDshRoot, relativeRoot, 'node_modules', ...parts)
+  if (existsSync(resolve(target, 'package.json'))) return true
+  const virtualStoreLink = resolve(sourceDshRoot, 'node_modules', '.pnpm', 'node_modules', ...parts)
+  if (!existsSync(resolve(virtualStoreLink, 'package.json'))) return false
+
+  mkdirSync(dirname(target), { recursive: true })
+  rmSync(target, { recursive: true, force: true })
+  const linkTarget = process.platform === 'win32'
+    ? virtualStoreLink
+    : relative(dirname(target), virtualStoreLink)
+  symlinkSync(linkTarget, target, process.platform === 'win32' ? 'junction' : 'dir')
+  return true
+}
+
 function ensureDshHostDependencies() {
-  const missing = dshHostDependencyProbes
+  let missing = dshHostDependencyProbes
     .filter(([relativeRoot, name]) => findDshPackageManifest(relativeRoot, name) === undefined)
+  if (missing.length === 0) return
+
+  // pnpm's virtual store can survive while one workspace-level link is lost.
+  // Restore that single link directly before invoking a full install.
+  missing = missing.filter(([relativeRoot, name]) => !restoreDshPackageLink(relativeRoot, name))
   if (missing.length === 0) return
 
   repairWorkspaceDependencies(
@@ -138,6 +160,7 @@ function ensureDshHostDependencies() {
     missing.map(([, , label]) => label).join(', '),
     missing.map(([relativeRoot, name]) => join(relativeRoot, 'node_modules', ...name.split('/'))),
   )
+  for (const [relativeRoot, name] of missing) restoreDshPackageLink(relativeRoot, name)
   const stillMissing = missing
     .filter(([relativeRoot, name]) => findDshPackageManifest(relativeRoot, name) === undefined)
   if (stillMissing.length > 0) {

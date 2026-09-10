@@ -398,9 +398,9 @@ run_pnpm_install --config.confirmModulesPurge=false install --frozen-lockfile
 #
 # 先清状态文件再装：pnpm 的「已是最新」只看 node_modules 下的状态文件，不校验文件
 # 是否还在磁盘上——被删掉或中断安装留下的空洞，`pnpm install --frozen-lockfile`
-# （连 `--force` 一起）都报 "Already up to date" 而不修复（pnpm 11.7.0 实测）。
-# 工作区要同时清虚拟存储锁与工作区状态，少了后者照样走 fast path；.modules.yaml 保留，
-# 它记着 nodeLinker / hoist 等安装期设置。
+# 可能报 "Already up to date" 而不修复（pnpm 11.7.0 实测）。不要用全局 --force：它会
+# 把所有平台的 optionalDependencies 一起拉下来。工作区要同时清虚拟存储锁与工作区状态，
+# 少了后者照样走 fast path；.modules.yaml 保留，它记着 nodeLinker / hoist 等安装期设置。
 install_workspace_dependencies() {
   local root="$1"
   rm -f -- "${root}/node_modules/.pnpm/lock.yaml" "${root}/node_modules/.pnpm-workspace-state-v1.json"
@@ -414,6 +414,12 @@ install_workspace_dependencies() {
 }
 
 dsh_workspace_dependencies_ready() {
+  workspace_package_ready() {
+    local package_root="$1" package_name="$2"
+    [[ -e "${dsh_root}/${package_root}/node_modules/${package_name}" ]] \
+      || [[ -e "${dsh_root}/node_modules/${package_name}" ]] \
+      || [[ -e "${dsh_root}/node_modules/.pnpm/node_modules/${package_name}" ]]
+  }
   # A stale pnpm workspace state can leave TypeScript itself present while
   # package-level links used by the host reference graph are gone (notably ws,
   # zod and chokidar after an interrupted cross-architecture install). The
@@ -421,10 +427,10 @@ dsh_workspace_dependencies_ready() {
   # inexpensive sentinel list aligned with the packages that the desktop host
   # build compiles before the runtime closure can repair itself.
   [[ -f "${dsh_root}/node_modules/typescript/bin/tsc" ]] \
-    && [[ -e "${dsh_root}/packages/api/gateway/node_modules/ws" ]] \
-    && [[ -e "${dsh_root}/packages/api/gateway/node_modules/@types/ws" ]] \
-    && [[ -e "${dsh_root}/packages/util/chunked-list/node_modules/zod" ]] \
-    && [[ -e "${dsh_root}/packages/boot/app-boot/node_modules/chokidar" ]]
+    && workspace_package_ready "packages/api/gateway" "ws" \
+    && workspace_package_ready "packages/api/gateway" "@types/ws" \
+    && workspace_package_ready "packages/util/chunked-list" "zod" \
+    && workspace_package_ready "packages/settings/settings-file" "chokidar"
 }
 
 if ! dsh_workspace_dependencies_ready; then
