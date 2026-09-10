@@ -118,6 +118,7 @@ describe('Lumo native Harness integration', () => {
 		path === '/lumo/api/flows/launch-flow/versions/2' ? { flow_id: 'launch-flow', version: 2, reviewer: 'reviewer-b', definition: { nodes: [{ id: 'start', operator: 'echo' }, { id: 'publish', operator: 'identity' }], edges: [{ from: 'start', to: 'publish' }] } } :
         init?.method === 'PUT' && path === '/lumo/api/projects/growth/automations/release-check' ? { automationId: 'release-check', projectId: 'growth', triggerKind: 'event', triggerSpec: 'release.ready', flowRef: 'launch-flow', enabled: false } :
 			init?.method === 'PATCH' && path === '/lumo/api/agent-presets/contract-review' ? { id: 'contract-review', name: '合同复核 Agent', status: 'disabled', revision: 2 } :
+			init?.method === 'POST' && path === '/lumo/api/agent-presets' ? { id: 'research-expert', name: '研究专家', description: '整理证据并给出结论', owner_user_id: 'palmer', status: 'active', version: '1.0.0', revision: 1, provider: 'openai', model_ref: 'gpt-5', connector_ids: [], knowledge_space_ids: [], max_concurrency: 1, max_budget_cents: 0, timeout_seconds: 3600, max_delegation_depth: 0 } :
         path === '/lumo/api/overview' ? overview :
 			path === '/lumo/api/agent-presets' ? { agent_presets: [{ id: 'contract-review', name: '合同复核 Agent', owner_user_id: 'palmer', status: calls.includes('PATCH /lumo/api/agent-presets/contract-review') ? 'disabled' : 'active', version: '1.0.0', revision: calls.includes('PATCH /lumo/api/agent-presets/contract-review') ? 2 : 1, provider: 'openai', model_ref: 'gpt-5', connector_ids: ['crm'], knowledge_space_ids: ['legal'], max_concurrency: 2, max_budget_cents: 0, timeout_seconds: 3600, max_delegation_depth: 0 }] } :
 			path === '/lumo/api/workers' ? { workers: [{ worker_id: 'agent:contract-review', worker_kind: 'agent', display_name: '合同复核 Agent', status: 'active', runtime_status: 'active', active_tasks: 1, max_concurrency: 2, load: .5, eligible: true }] } :
@@ -202,14 +203,14 @@ describe('Lumo native Harness integration', () => {
     render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
     const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
     expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual([
-      '资料库', '技能市场', '项目', '更多应用 · 灵感',
+      '资料库', '技能中心', '项目', '更多应用 · 灵感',
     ])
     expect(within(navigation).queryByRole('button', { name: '开放设计' })).toBeNull()
     expect(within(navigation).queryByRole('button', { name: 'PPT 生成' })).toBeNull()
 
     fireEvent.click(within(navigation).getByRole('button', { name: '项目' }))
     expect(await screen.findByText('用量计量')).toBeTruthy()
-    expect(await screen.findByText('合同复核 Agent')).toBeTruthy()
+    expect((await screen.findAllByText('合同复核 Agent')).length).toBeGreaterThan(0)
 		expect(await screen.findByText('启用 · 2 并发 · 执行态 active · 1/2 运行中')).toBeTruthy()
 		fireEvent.click(screen.getByRole('button', { name: '版本差异' }))
 		expect(await screen.findByText('流程版本对比')).toBeTruthy()
@@ -234,9 +235,10 @@ describe('Lumo native Harness integration', () => {
 		await screen.findByText(/已保存 doc-ops 的 v5/)
 		expect(calls.some(call => call === 'PUT /lumo/api/knowledge/sources/doc-ops')).toBe(true)
 
-    fireEvent.click(within(navigation).getByRole('button', { name: '技能市场' }))
-    // Navigate to 能力目录 from SkillHub
-    fireEvent.click(await screen.findByRole('button', { name: '能力目录' }))
+    fireEvent.click(within(navigation).getByRole('button', { name: '技能中心' }))
+    // 技能与专家拆分后，从「技能」页进入已安装技能治理。
+    fireEvent.click(await screen.findByRole('tab', { name: /技能/ }))
+    fireEvent.click(await screen.findByRole('button', { name: '管理已安装技能' }))
     // 技能名经 localizedSkillName 落地;断言渲染出的中文名,证明 /lumo/api/skills 的响应真驱动了这块
     expect(await screen.findByText('架构与调度图')).toBeTruthy()
     const spotlight = document.querySelector<HTMLElement>('.lumo-skill-card')!
@@ -244,7 +246,7 @@ describe('Lumo native Harness integration', () => {
     expect(spotlight.style.getPropertyValue('--spot-x')).not.toBe('')
     fireEvent.change(screen.getByRole('textbox', { name: '技能名称' }), { target: { value: 'campaign-review' } })
     fireEvent.change(screen.getByRole('textbox', { name: '技能版本内容' }), { target: { value: '# Campaign review\nReview the launch plan.' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存治理版本' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存技能草稿' }))
     expect(await screen.findByText(/内容已进入治理目录/)).toBeTruthy()
     expect(calls.some(call => call === 'POST /lumo/api/governance/skills')).toBe(true)
 
@@ -292,7 +294,7 @@ describe('Lumo native Harness integration', () => {
     const entry = registered.find(item => item.name === 'sidebar.navigation')
     const Navigation = entry!.Component
     // 单机版（deployment.mode=local，桌面本地 runtime）不显示服务端工作台与资料库
-    // 入口：左侧只保留技能市场。
+    // 入口：左侧只保留技能中心。
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       generatedAt: new Date().toISOString(),
       deployment: { mode: 'local', label: '本地单机', storage: 'sqlite', middleware: [], distributed: false, desktop: true, clusterReady: false, clusterOnly: false },
@@ -300,13 +302,13 @@ describe('Lumo native Harness integration', () => {
     }), { status: 200, headers: { 'content-type': 'application/json' } })))
     render(<Navigation wide />)
     const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
-    await waitFor(() => expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual(['技能市场']))
+    await waitFor(() => expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual(['技能中心']))
     expect(within(navigation).queryByRole('button', { name: '项目' })).toBeNull()
     expect(within(navigation).queryByRole('button', { name: '资料库' })).toBeNull()
     expect(within(navigation).queryByRole('button', { name: '更多' })).toBeNull()
   })
 
-  it('lists SkillHub skills and packs with quick-install', async () => {
+  it('separates experts from skills and supports creating an expert', async () => {
     const registered = mountLumo()
     const entry = registered.find(item => item.name === 'sidebar.navigation')
     const overlay = registered.find(item => item.name === 'shell.overlay')
@@ -316,27 +318,35 @@ describe('Lumo native Harness integration', () => {
     const setDraft = vi.fn()
     render(<><Entry wide /><Overlay /><Dock inputActions={{ setDraft, submit: vi.fn() }} /></>)
 
-    fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '技能市场' }))
-    // 默认技能 tab：SkillHub 卡片渲染名称、评分、下载量与来源。
-    expect(await screen.findByText('腾讯文档 TENCENT DOCS')).toBeTruthy()
-    expect(screen.getByText('下载 71.9万')).toBeTruthy()
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '技能中心' }))
+    // 默认专家 tab：专属专家与 SkillHub 专家模板分区显示。
+    expect(await screen.findByText('我的专家')).toBeTruthy()
+    expect(await screen.findByText('专家模板')).toBeTruthy()
+    expect(screen.getByText('合同复核 Agent')).toBeTruthy()
+    expect(screen.getByText('自动化测试')).toBeTruthy()
     expect(calls.some(call => call === 'GET /lumo/api/skillhub/catalog')).toBe(true)
 
-    // Use the loaded skill name even when it differs from the marketplace slug.
-    fireEvent.click(screen.getByRole('button', { name: '安装' }))
-    expect(await screen.findByText('已安装')).toBeTruthy()
-    expect(calls.some(call => call === 'POST /lumo/api/skillhub/install')).toBe(true)
-    fireEvent.click(screen.getByRole('button', { name: /在对话中使用/ }))
-    expect(setDraft).toHaveBeenLastCalledWith('/docs-live ')
+    fireEvent.click(screen.getByRole('button', { name: '＋ 新建专家' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '专家名称' }), { target: { value: '研究专家' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '职责说明' }), { target: { value: '整理证据并给出结论' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建专家' }))
+    expect(await screen.findByText(/专家「研究专家」已创建/)).toBeTruthy()
+    expect(calls.some(call => call === 'POST /lumo/api/agent-presets')).toBe(true)
 
-    // 第二个 tab：专家包。
-    fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '技能市场' }))
-    fireEvent.click(screen.getByRole('tab', { name: /专家包/ }))
-    expect(await screen.findByText('自动化测试')).toBeTruthy()
-    expect(screen.getByText('6 个技能')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '安装专家包' }))
+    fireEvent.click(screen.getByRole('button', { name: '添加专家' }))
+    expect(calls.some(call => call === 'POST /lumo/api/skillhub/install')).toBe(true)
     fireEvent.click(await screen.findByRole('button', { name: '在对话中使用 自动化测试' }))
     expect(setDraft).toHaveBeenLastCalledWith('/automation-testing ')
+
+    // 技能 tab 只呈现单项技能及安装动作。
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '技能中心' }))
+    fireEvent.click(screen.getByRole('tab', { name: /技能/ }))
+    expect(await screen.findByText('腾讯文档 TENCENT DOCS')).toBeTruthy()
+    expect(screen.getByText('下载 71.9万')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '安装' }))
+    expect(await screen.findByText('已安装')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /在对话中使用 腾讯文档/ }))
+    expect(setDraft).toHaveBeenLastCalledWith('/docs-live ')
   }, 15000)
 
   it('keeps the home composer clean and opens creative workbenches only through /design and /ppt', async () => {
