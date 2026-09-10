@@ -96,11 +96,39 @@ if (!existsSync(resolve(dshRoot, 'package.json'))) {
   throw new Error(`无法构建桌面 runtime：找不到 ${resolve(dshRoot, 'package.json')}`)
 }
 
+// The host half is compiled before the package-closure walk below. A partially
+// linked upstream workspace therefore used to fail inside stream-server.ts
+// with a misleading chain of TS2307/implicit-any diagnostics (most commonly
+// after an interrupted cross-architecture pnpm install). Keep this small
+// preflight before buildDshHostPackages so direct `cargo tauri build` invocations
+// repair the same state that build.sh's install-components step repairs.
+const dshHostDependencyProbes = [
+  ['node_modules/typescript/bin/tsc', 'TypeScript'],
+  ['packages/api/gateway/node_modules/ws', 'ws'],
+  ['packages/api/gateway/node_modules/@types/ws', '@types/ws'],
+  ['packages/util/chunked-list/node_modules/zod', 'zod'],
+  ['packages/boot/app-boot/node_modules/chokidar', 'chokidar'],
+]
+
+function ensureDshHostDependencies() {
+  const missing = dshHostDependencyProbes
+    .filter(([relativePath]) => !existsSync(resolve(sourceDshRoot, relativePath)))
+  if (missing.length === 0) return
+
+  repairWorkspaceDependencies(sourceDshRoot, missing.map(([, name]) => name).join(', '))
+  const stillMissing = missing
+    .filter(([relativePath]) => !existsSync(resolve(sourceDshRoot, relativePath)))
+  if (stillMissing.length > 0) {
+    throw new Error(`无法构建桌面 runtime：重装 DSH 依赖后仍缺少 ${stillMissing.map(([, name]) => name).join(', ')}`)
+  }
+}
+
 // The packaged app must not run pnpm or reach the registry on first launch.
 // Resolve the upstream plugin packages once while building, then copy their
 // complete production dependency closure into the app bundle below.
 const skillhubArchive = prepareSkillHubArchive(resolve(repoRoot, 'platform', '.build', 'skillhub'))
 prepareUpstreamPlugins()
+ensureDshHostDependencies()
 
 // Overridden packages have no projected lib/. Emit each face before tsdown
 // consumes it, including API packages with separate Host and Client programs.
@@ -287,7 +315,7 @@ function repairWorkspaceDependencies(root, missingName) {
     rmSync(resolve(root, stateFile), { force: true })
   }
   const result = spawnExecutable(process.platform === 'win32' ? 'corepack.cmd' : 'corepack', [
-    'pnpm', 'install', '--frozen-lockfile', '--config.confirmModulesPurge=false',
+    'pnpm', 'install', '--frozen-lockfile', '--trust-lockfile', '--config.confirmModulesPurge=false',
   ], { cwd: root, stdio: 'inherit' })
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) {

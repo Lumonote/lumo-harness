@@ -20,10 +20,15 @@
       .status { display: flex; justify-content: space-between; color: #74818b; font-size: 13px; font-variant-numeric: tabular-nums; }
       code { display: none; margin: 24px 0; padding: 16px 18px; overflow: auto; white-space: pre-wrap; word-break: break-all; border: 1px solid #2f4656; border-radius: 12px; color: #ffcfad; background: #11161c; -webkit-user-select: text; user-select: text; }
       body.failed code { display: block; }
-      small { color: #74818b; }
       .hint { display: none; }
       body.failed .hint { display: block; }
       body.failed .booting { display: none; }
+      .failure-actions { display: none; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+      body.failed .failure-actions { display: flex; }
+      .failure-actions button { max-width: 100%; padding: 9px 13px; overflow-wrap: anywhere; border: 1px solid #45657a; border-radius: 9px; color: #dff4ff; background: #1a3444; font: inherit; text-align: left; cursor: pointer; }
+      .failure-actions button:hover:not(:disabled) { border-color: #7fd1ff; background: #23495f; }
+      .failure-actions button:disabled { cursor: not-allowed; opacity: .5; }
+      .action-error { color: #ffad70; font-size: 12px; }
     </style>
   </head>
   <body>
@@ -36,16 +41,47 @@
       <div class="bar"></div>
       <div class="status"><span id="phase">等待 127.0.0.1 端口就绪…</span><span id="elapsed">0 s</span></div>
       <code id="message"></code>
-      <small id="log"></small>
+      <div class="failure-actions">
+        <button id="open-log" type="button" disabled>runtime 日志</button>
+        <span id="action-error" class="action-error" role="status" aria-live="polite"></span>
+      </div>
     </main>
     <script>
       const started = Date.now();
       const $ = (id) => document.getElementById(id);
+      let currentLogPath = '';
       const tick = setInterval(() => { $('elapsed').textContent = `${Math.round((Date.now() - started) / 1000)} s`; }, 1000);
-      // Rust 壳通过 webview.eval 调用这些钩子；这里没有 IPC，也不需要任何 capability。
+      async function invokeDesktop(command) {
+        const globalTauri = window.__TAURI__;
+        if (globalTauri && globalTauri.core && typeof globalTauri.core.invoke === 'function') {
+          return globalTauri.core.invoke(command);
+        }
+        const internals = window.__TAURI_INTERNALS__;
+        if (internals && typeof internals.invoke === 'function') return internals.invoke(command);
+        throw new Error('桌面命令通道尚未就绪，请从托盘菜单查看运行时日志');
+      }
+      $('open-log').addEventListener('click', async () => {
+        if (!currentLogPath) return;
+        const button = $('open-log');
+        const error = $('action-error');
+        error.textContent = '';
+        button.disabled = true;
+        try {
+          await invokeDesktop('open_runtime_log');
+          button.textContent = '已定位 runtime 日志';
+        } catch (cause) {
+          button.disabled = false;
+          error.textContent = cause && cause.message ? cause.message : String(cause);
+        }
+      });
+      // Rust 壳通过 webview.eval 更新这些钩子；日志按钮走 Tauri 的全局 core.invoke。
       window.__lumoBoot = {
         status(text) { $('phase').textContent = text; },
-        logPath(path) { $('log').textContent = path ? `runtime 日志：${path}` : ''; },
+        logPath(path) {
+          currentLogPath = path ? String(path) : '';
+          $('open-log').textContent = currentLogPath ? `打开 runtime 日志：${currentLogPath}` : 'runtime 日志';
+          $('open-log').disabled = !currentLogPath;
+        },
         fail(message, logPath) {
           clearInterval(tick);
           document.body.classList.add('failed');
@@ -54,6 +90,7 @@
           $('title').textContent = '本地运行时没有启动';
           $('phase').textContent = '启动失败';
           $('message').textContent = message || '未知错误';
+          $('action-error').textContent = '';
           if (logPath) this.logPath(logPath);
         },
       };

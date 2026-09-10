@@ -31,7 +31,7 @@ function write(root: string, relativePath: string, content: string): void {
   writeFileSync(target, content)
 }
 
-/** 形似 dsh 的最小源树：三个包 + 假 tsc（把探针点名的 lib 文件写出来）。 */
+/** 形似 dsh 的最小源树：探针包 + 假 tsc（把探针点名的 lib 文件写出来）。 */
 function fakeDsh(label: string): { root: string; counter: string } {
   const root = mkdtempSync(resolve(tmpdir(), `lumo-prepare-${label}-`))
   temporaries.push(root)
@@ -42,6 +42,7 @@ function fakeDsh(label: string): { root: string; counter: string } {
   write(root, 'packages/util/brand/package.json', '{"name":"@fake/brand","type":"module"}\n')
   write(root, 'packages/llm/llm/package.json', '{"name":"@fake/llm","type":"module"}\n')
   write(root, 'packages/core/agent/package.json', '{"name":"@fake/agent","type":"module"}\n')
+  write(root, 'packages/util/native-command/package.json', '{"name":"@fake/native-command","type":"module"}\n')
   // 假 tsc：按探针清单把 lib/types 写出来，并在 counter 里记录每次被调用。
   // root 用 __dirname 推出（tsc 位于 <root>/node_modules/typescript/bin/），
   // 避免跨 spawnSync 传环境变量。
@@ -54,6 +55,7 @@ const files = [
   ['packages/llm/llm/lib/types/assistant-stream.d.ts', 'export declare function assistantStreamChunks(): void\\n'],
   ['packages/core/agent/lib/types/types.d.ts', 'export declare const InboxState: unknown\\n'],
   ['packages/core/agent/lib/types/index.d.ts', '(agentCtx: Context, agent: Agent)\\n'],
+  ['packages/util/native-command/lib/types/index.d.ts', 'export { nativeFileManager, revealNativePath } from "./path-opener.ts"\\n'],
 ]
 for (const [relative, content] of files) {
   const target = path.join(root, relative)
@@ -80,6 +82,8 @@ describe('ensureLibEntriesReexport', () => {
     // 合成脚本只处理 lib/types 下的 .js；.d.ts 探针文件看内容就行。
     expect(readFileSync(resolve(root, 'packages/core/agent/lib/types/index.d.ts'), 'utf8'))
       .toContain('(agentCtx: Context, agent: Agent)')
+    expect(readFileSync(resolve(root, 'packages/util/native-command/lib/types/index.d.ts'), 'utf8'))
+      .toContain('revealNativePath')
   })
 
   it('已经新鲜的源树跳过重建（增量重复构建零成本）', () => {
@@ -100,6 +104,7 @@ describe('ensureLibEntriesReexport', () => {
     write(root, 'packages/llm/llm/lib/types/assistant-stream.d.ts', 'export declare function assistantStreamChunks(): void\n')
     write(root, 'packages/core/agent/lib/types/types.d.ts', 'export declare const InboxState: unknown\n')
     write(root, 'packages/core/agent/lib/types/index.d.ts', '(agentCtx: Context, agent: Agent)\n')
+    write(root, 'packages/util/native-command/lib/types/index.d.ts', 'export { nativeFileManager, revealNativePath } from "./path-opener.ts"\n')
 
     expect(ensureLibEntriesReexport(root)).toBe(true)
 

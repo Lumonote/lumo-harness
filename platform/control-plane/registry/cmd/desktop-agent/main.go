@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -62,11 +63,221 @@ type command struct {
 	ID       string `json:"id"`
 	Action   string `json:"action"`
 	Revision int64  `json:"revision"`
-	Body     struct {
-		Name    string `json:"name"`
-		Version string `json:"version"`
-	} `json:"body"`
+	Body     json.RawMessage `json:"body"`
 	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type runtimeCommandBody struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+func (c command) runtimeBody() (runtimeCommandBody, error) {
+	var body runtimeCommandBody
+	decoder := json.NewDecoder(bytes.NewReader(c.Body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		return body, errors.New("desktop-agent: invalid runtime command body")
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return body, errors.New("desktop-agent: runtime command body must be one JSON object")
+	}
+	return body, nil
+}
+
+func (c command) taskBody() (taskEnvelope, error) {
+	var body taskEnvelope
+	decoder := json.NewDecoder(bytes.NewReader(c.Body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		return body, errors.New("desktop-agent: invalid execute_task body")
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return body, errors.New("desktop-agent: execute_task body must be one JSON object")
+	}
+	return body, validateTaskEnvelope(body)
+}
+
+// taskEnvelope is the only payload accepted by the execute_task command. It
+// deliberately contains the immutable task contract, rather than a command,
+// shell, environment or model selector. The local runner owns execution under
+// its separately provisioned identity.
+type taskEnvelope struct {
+	TaskID         string          `json:"task_id"`
+	RunID          string          `json:"run_id"`
+	Attempt        int             `json:"attempt"`
+	WorkerID       string          `json:"worker_id"`
+	ProjectID      string          `json:"project_id"`
+	Title          string          `json:"title"`
+	Intent         string          `json:"intent"`
+	IntentContract json.RawMessage `json:"intent_contract"`
+	DeadlineMS     int64           `json:"deadline_ms"`
+	SessionRef     string          `json:"session_ref"`
+}
+
+type taskInboxRecord struct {
+	Version   int          `json:"version"`
+	CommandID string       `json:"command_id"`
+	Task      taskEnvelope `json:"task"`
+	CreatedAt time.Time    `json:"created_at"`
+}
+
+type taskReceipt struct {
+	Version   int             `json:"version"`
+	CommandID string          `json:"command_id"`
+	Task      taskEnvelope    `json:"task"`
+	State     string          `json:"state"`
+	Summary   string          `json:"summary"`
+	Output    json.RawMessage `json:"output,omitempty"`
+	UpdatedAt time.Time       `json:"updated_at"`
+}
+
+type taskRunnerRequest struct {
+	Type      string       `json:"type"`
+	CommandID string       `json:"command_id"`
+	Task      taskEnvelope `json:"task"`
+}
+
+type taskRunnerResponse struct {
+	State   string          `json:"state"`
+	Summary string          `json:"summary"`
+	Output  json.RawMessage `json:"output,omitempty"`
+}
+
+var taskIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$`)
+
+func validateTaskEnvelope(task taskEnvelope) error {
+	if !taskIDPattern.MatchString(task.TaskID) || !taskIDPattern.MatchString(task.RunID) ||
+		task.Attempt < 1 || task.Attempt > 1_000_000 ||
+		!strings.HasPrefix(task.WorkerID, "user:") || !taskIDPattern.MatchString(strings.TrimPrefix(task.WorkerID, "user:")) ||
+		task.ProjectID == "" || !taskIDPattern.MatchString(task.ProjectID) || task.SessionRef == "" || len(task.SessionRef) > 160 {
+		return errors.New("desktop-agent: execute_task identity is invalid")
+	}
+	if len([]rune(task.Title)) > 512 || strings.TrimSpace(task.Title) == "" || len([]rune(task.Intent)) > 16000 || strings.TrimSpace(task.Intent) == "" {
+		return errors.New("desktop-agent: execute_task title or intent is invalid")
+	}
+	if task.DeadlineMS < 0 {
+		return errors.New("desktop-agent: execute_task deadline is invalid")
+	}
+	if len(task.IntentContract) > 256<<10 || (len(task.IntentContract) > 0 && !json.Valid(task.IntentContract)) {
+		return errors.New("desktop-agent: execute_task contract is invalid")
+	}
+	return nil
+}
+
+func createImmutableJSON(path string, value any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err = f.Write(raw); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	if closeErr != nil {
+		_ = os.Remove(path)
+		return closeErr
+	}
+	return nil
+}
+
+func persistTaskInbox(dir string, commandID string, task taskEnvelope) (taskInboxRecord, bool, error) {
+	record := taskInboxRecord{Version: 1, CommandID: commandID, Task: task, CreatedAt: time.Now().UTC()}
+	path := filepath.Join(dir, task.RunID+".json")
+	err := createImmutableJSON(path, record)
+	if err == nil {
+		return record, true, nil
+	}
+	if !errors.Is(err, os.ErrExist) {
+		return record, false, err
+	}
+	raw, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return record, false, readErr
+	}
+	var existing taskInboxRecord
+	if json.Unmarshal(raw, &existing) != nil || existing.Version != 1 || existing.CommandID == "" || existing.Task.RunID != task.RunID {
+		return record, false, errors.New("desktop-agent: task inbox record is invalid")
+	}
+	existingRaw, _ := json.Marshal(existing.Task)
+	wantedRaw, _ := json.Marshal(task)
+	if existing.CommandID != commandID || !bytes.Equal(existingRaw, wantedRaw) {
+		return record, false, errors.New("desktop-agent: run ID is already bound to a different task")
+	}
+	return existing, false, nil
+}
+
+func persistTaskReceipt(dir string, receipt taskReceipt) error {
+	path := filepath.Join(dir, receipt.Task.RunID+".json")
+	err := createImmutableJSON(path, receipt)
+	if err == nil || !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	raw, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return readErr
+	}
+	var existing taskReceipt
+	if json.Unmarshal(raw, &existing) != nil {
+		return errors.New("desktop-agent: task result record is invalid")
+	}
+	existingRaw, _ := json.Marshal(existing)
+	wantedRaw, _ := json.Marshal(receipt)
+	if !bytes.Equal(existingRaw, wantedRaw) {
+		return errors.New("desktop-agent: task result is immutable")
+	}
+	return nil
+}
+
+func taskResultPayload(receipt taskReceipt, nodeID string) ([]byte, error) {
+	payload := map[string]any{
+		"task_id": receipt.Task.TaskID, "run_id": receipt.Task.RunID, "state": receipt.State,
+		"session_ref": receipt.Task.SessionRef, "node_id": nodeID, "summary": receipt.Summary,
+	}
+	if len(receipt.Output) > 0 {
+		payload["output"] = json.RawMessage(receipt.Output)
+	}
+	return json.Marshal(payload)
+}
+
+func runTaskRunner(ctx context.Context, socket, commandID string, task taskEnvelope) (taskRunnerResponse, error) {
+	var out taskRunnerResponse
+	if socket == "" {
+		return out, errors.New("desktop-agent: task runner is not configured")
+	}
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	conn, err := dialer.DialContext(ctx, "unix", socket)
+	if err != nil {
+		return out, errors.New("desktop-agent: task runner unavailable")
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	if err = json.NewEncoder(conn).Encode(taskRunnerRequest{Type: "execute_task", CommandID: commandID, Task: task}); err != nil {
+		return out, errors.New("desktop-agent: task runner request failed")
+	}
+	decoder := json.NewDecoder(io.LimitReader(conn, 1<<20+1))
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(&out); err != nil {
+		return out, errors.New("desktop-agent: task runner response is invalid")
+	}
+	if out.State != "COMPLETED" && out.State != "FAILED" && out.State != "CANCELLED" {
+		return out, errors.New("desktop-agent: task runner returned an invalid state")
+	}
+	if len(out.Output) > 900_000 || (len(out.Output) > 0 && !json.Valid(out.Output)) || len([]rune(out.Summary)) > 16000 {
+		return out, errors.New("desktop-agent: task runner result exceeds the receipt contract")
+	}
+	if out.State == "COMPLETED" && strings.TrimSpace(out.Summary) == "" && len(out.Output) == 0 {
+		return out, errors.New("desktop-agent: completed task has no deliverable")
+	}
+	return out, nil
 }
 type message struct {
 	Type          string          `json:"type"`
@@ -83,7 +294,7 @@ type message struct {
 	Arch          string          `json:"arch,omitempty"`
 }
 type options struct {
-	gateway, realm, nodeID, stateDir, installDir, caFile, codeFile, clientVersion, allowed string
+	gateway, realm, nodeID, stateDir, installDir, caFile, codeFile, clientVersion, allowed, taskRunnerSocket string
 	trustFile, shapeJSON string
 	shape plan.Shape
 	maxRuntime                                                                             time.Duration
@@ -109,6 +320,7 @@ func run() error {
 	flag.StringVar(&o.codeFile, "enrollment-code-file", "", "file containing the one-time activation code")
 	flag.StringVar(&o.clientVersion, "client-version", "0.1.0", "client version approved in device policy")
 	flag.StringVar(&o.allowed, "allow-runtime-digests", "", "explicit local consent: comma-separated exact manifest digests permitted to execute")
+	flag.StringVar(&o.taskRunnerSocket, "task-runner-socket", "", "optional absolute mode-0600 Unix socket for the provisioned task runner")
 	flag.DurationVar(&o.maxRuntime, "max-runtime", time.Minute, "maximum lifetime of a locally approved process (up to 5m)")
 	flag.Parse()
 	if !filepath.IsAbs(o.trustFile) { return errors.New("desktop-agent: -trust-file is required") }
@@ -121,11 +333,14 @@ func run() error {
 	}
 	o.gateway = strings.TrimRight(o.gateway, "/")
 	idPattern := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
-	if !idPattern.MatchString(o.realm) || !idPattern.MatchString(o.nodeID) || !filepath.IsAbs(o.stateDir) || !filepath.IsAbs(o.installDir) || o.maxRuntime <= 0 || o.maxRuntime > 5*time.Minute {
+	if !idPattern.MatchString(o.realm) || !idPattern.MatchString(o.nodeID) || !filepath.IsAbs(o.stateDir) || !filepath.IsAbs(o.installDir) || (o.taskRunnerSocket != "" && !filepath.IsAbs(o.taskRunnerSocket)) || o.maxRuntime <= 0 || o.maxRuntime > 5*time.Minute {
 		return errors.New("desktop-agent: realm, node, absolute directories and a runtime limit up to 5m are required")
 	}
 	if filepath.Clean(o.stateDir) == string(filepath.Separator) || filepath.Clean(o.installDir) == string(filepath.Separator) {
 		return errors.New("desktop-agent: dedicated identity and installation directories are required")
+	}
+	if o.taskRunnerSocket != "" && filepath.Clean(o.taskRunnerSocket) == string(filepath.Separator) {
+		return errors.New("desktop-agent: a dedicated task runner socket is required")
 	}
 	for _, pair := range [][2]string{{o.stateDir,o.installDir},{o.installDir,o.stateDir},{o.installDir,o.trustFile}} {
 		rel, err := filepath.Rel(pair[0], pair[1])

@@ -346,11 +346,28 @@ install_workspace_dependencies() {
   rm -f -- "${root}/node_modules/.pnpm/lock.yaml" "${root}/node_modules/.pnpm-workspace-state-v1.json"
   (
     cd "${root}"
-    run_pnpm_install install --frozen-lockfile
+    # The upstream lockfile is committed and frozen; trust it so pnpm 11 does
+    # not perform a registry-wide provenance check for every one of its 1,500+
+    # entries before it can recreate local workspace links.
+    run_pnpm_install install --frozen-lockfile --trust-lockfile
   )
 }
 
-if [[ ! -d "${dsh_root}/node_modules/typescript" ]]; then
+dsh_workspace_dependencies_ready() {
+  # A stale pnpm workspace state can leave TypeScript itself present while
+  # package-level links used by the host reference graph are gone (notably ws,
+  # zod and chokidar after an interrupted cross-architecture install). The
+  # first host tsc then reports misleading implicit-any errors. Keep this
+  # inexpensive sentinel list aligned with the packages that the desktop host
+  # build compiles before the runtime closure can repair itself.
+  [[ -f "${dsh_root}/node_modules/typescript/bin/tsc" ]] \
+    && [[ -e "${dsh_root}/packages/api/gateway/node_modules/ws" ]] \
+    && [[ -e "${dsh_root}/packages/api/gateway/node_modules/@types/ws" ]] \
+    && [[ -e "${dsh_root}/packages/util/chunked-list/node_modules/zod" ]] \
+    && [[ -e "${dsh_root}/packages/boot/app-boot/node_modules/chokidar" ]]
+}
+
+if ! dsh_workspace_dependencies_ready; then
   echo "Lumo: deepseek-harness 依赖缺失或不完整，安装..." >&2
   install_workspace_dependencies "${dsh_root}"
 fi

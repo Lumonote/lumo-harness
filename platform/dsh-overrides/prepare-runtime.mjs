@@ -165,6 +165,11 @@ const LIB_FRESHNESS_PROBES = [
   ['packages/util/brand/lib/types/index.js', 'brandString'],
   ['packages/llm/llm/lib/types/assistant-stream.d.ts', 'assistantStreamChunks'],
   ['packages/core/agent/lib/types/types.d.ts', 'InboxState'],
+  // session-controller's host entry imports both symbols. A source checkout can
+  // be current while this gitignored declaration still predates the file-manager
+  // reveal API, which makes the first overridden host-package compile fail.
+  ['packages/util/native-command/lib/types/index.d.ts', 'nativeFileManager'],
+  ['packages/util/native-command/lib/types/index.d.ts', 'revealNativePath'],
   // 0.1.5-alpha.1 的 agent 显式化重构把 AgentSetup 收敛为 (agentCtx, agent) 双参；
   // 旧 lib 仍是单参（"Expected 2 or more, but got 1" 此形状）。session-controller
   // 的 host 类型编译依赖该签名，探针必须盯住 index.d.ts 这一行而不能只看 types.d.ts。
@@ -245,7 +250,13 @@ export function prepareRuntime(sourceRoot, targetRoot) {
   ensureLibEntriesReexport(sourceRoot)
   const expected = fingerprint(sourceRoot)
   const marker = resolve(targetRoot, '.lumo-stage')
-  if (existsSync(marker) && readFileSync(marker, 'utf8').trim() === expected) return targetRoot
+  if (existsSync(marker) && readFileSync(marker, 'utf8').trim() === expected) {
+    // The source workspace can be installed after this snapshot was created.
+    // Keep the content cache, but refresh package-level node_modules links so
+    // TypeScript can resolve dependencies such as packages/api/gateway -> ws.
+    linkWorkspaceModules(sourceRoot, targetRoot)
+    return targetRoot
+  }
 
   retryRemove(targetRoot)
   mkdirSync(targetRoot, { recursive: true })

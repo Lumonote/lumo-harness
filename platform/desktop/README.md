@@ -160,9 +160,8 @@ runtime 在后台线程里拉起；本地 Web 端口一应答，窗口就切到�
 `runtime/compile-cache`），第二次以后的启动直接复用字节码。
 
 应用在菜单栏有一个模板图标（亮/暗菜单栏自动着色），菜单项为「显示 DeepSeek Harness」
-「查看运行时日志」「退出 DeepSeek Harness」。关闭窗口只是把它收进菜单栏，runtime 继续
-运行；点 Dock 图标或菜单栏的「显示 DeepSeek Harness」即可重新打开。真正退出用菜单栏的
-「退出 DeepSeek Harness」或 ⌘Q，此时本地 runtime 会一并结束。
+「查看运行时日志」「退出 DeepSeek Harness」。关闭主窗口、菜单栏的「退出 DeepSeek Harness」
+或 ⌘Q 都会退出应用，并一并结束本地 runtime；若只想重新打开窗口，可重新启动应用。
 
 ## 图标
 

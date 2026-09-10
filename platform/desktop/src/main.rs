@@ -2,10 +2,13 @@ use std::{
     env, fs,
     fs::OpenOptions,
     io::{Read, Write},
-    net::{SocketAddr, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -25,6 +28,7 @@ const TRAY_ID: &str = "lumo-tray";
 const MENU_SHOW: &str = "show";
 const MENU_LOG: &str = "log";
 const MENU_QUIT: &str = "quit";
+const DEFAULT_WEB_PORT: u16 = 3080;
 // 冷启动要加载 800+ 个包的模块图，慢机器上首启动可到 40 秒以上；30 秒的旧上限会把
 // 一个还在正常加载的 runtime 误判成失败。窗口已经不再被阻塞，这个上限只决定何时放弃。
 const BOOT_DEADLINE: Duration = Duration::from_secs(120);
@@ -48,9 +52,21 @@ const INTRINSIC_TO_STRING_SHIM: &str = r#"(() => {
 
 struct LocalRuntime(Mutex<Option<Child>>);
 
+struct RuntimeShutdown(AtomicBool);
+
 struct RuntimeLogPath(PathBuf);
 
 struct ShellStarted(Instant);
+
+impl Drop for LocalRuntime {
+    fn drop(&mut self) {
+        if let Ok(process) = self.0.get_mut() {
+            if let Some(process) = process.as_mut() {
+                terminate_process_tree(process);
+            }
+        }
+    }
+}
 
 /// 把壳自身的阶段时间写进 runtime.log：用户机器上“打开很久才显示”时，
 /// 这是唯一能区分“壳没起来”“runtime 没起来”“端口没就绪”的证据。
@@ -254,9 +270,76 @@ fn probe_web_server(address: SocketAddr) -> Result<(), String> {
     }
 }
 
+/// Pick a port that this runtime can own before spawning it.
+///
+/// A plain readiness probe cannot distinguish the newly spawned DSH server
+/// from an unrelated process already listening on the same port. Keep the
+/// stable default when it is free; when the default is occupied, use an OS
+/// assigned loopback port so the child cannot mistake somebody else's HTTP
+/// response for its own readiness. `LUMO_LOCAL_WEB_PORT` is treated as a
+/// preferred port, not a hard reservation, so preview launches get the same
+/// stale-process recovery as packaged launches.
+fn select_web_port() -> Result<u16, String> {
+    let requested = env::var("LUMO_LOCAL_WEB_PORT").unwrap_or_else(|_| "3080".to_string());
+    let requested_port = requested
+        .parse::<u16>()
+        .map_err(|error| format!("本地 Web 端口无效 `{requested}`：{error}"))?;
+    if requested_port == 0 {
+        return Err("本地 Web 端口不能是 0".to_string());
+    }
+
+    let requested_address = SocketAddr::from(([127, 0, 0, 1], requested_port));
+    match TcpListener::bind(requested_address) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(requested_port)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .map_err(|fallback| format!("无法选择空闲本地 Web 端口：{fallback}"))?;
+            let port = listener
+                .local_addr()
+                .map_err(|fallback| format!("无法读取空闲本地 Web 端口：{fallback}"))?
+                .port();
+            drop(listener);
+            Ok(port)
+        }
+        Err(error) => Err(format!(
+            "本地 Web 端口 {requested_port} 无法监听（127.0.0.1）：{error}",
+        )),
+    }
+}
+
+fn register_runtime(app: &AppHandle, child: Child) -> Result<(), String> {
+    let mut child = Some(child);
+    let shutdown = app.state::<RuntimeShutdown>();
+    match app.state::<LocalRuntime>().0.lock() {
+        Ok(mut guard) => {
+            if !shutdown.0.load(Ordering::SeqCst) {
+                *guard = child.take();
+                return Ok(());
+            }
+        }
+        Err(_) => {
+            if let Some(mut child) = child.take() {
+                terminate_process_tree(&mut child);
+            }
+            return Err("本地 DSH runtime 状态锁已损坏".to_string());
+        }
+    }
+
+    if let Some(mut child) = child {
+        terminate_process_tree(&mut child);
+    }
+    Err("应用正在退出，本地 DSH runtime 未继续运行".to_string())
+}
+
 /// Spawn the bundled runtime and record the child in managed state. Returns the
 /// local Web URL to navigate to once the port answers.
 fn spawn_runtime(app: &AppHandle) -> Result<String, String> {
+    if app.state::<RuntimeShutdown>().0.load(Ordering::SeqCst) {
+        return Err("应用正在退出，本地 DSH runtime 未启动".to_string());
+    }
     let data_dir = app
         .path()
         .app_data_dir()
@@ -265,7 +348,11 @@ fn spawn_runtime(app: &AppHandle) -> Result<String, String> {
         .map_err(|error| format!("无法创建应用数据目录 {}：{error}", data_dir.display()))?;
     let sqlite_path = data_dir.join("lumo.sqlite");
     let runtime_log_path = app.state::<RuntimeLogPath>().0.clone();
-    let port = env::var("LUMO_LOCAL_WEB_PORT").unwrap_or_else(|_| "3080".to_string());
+    let port = select_web_port()?;
+    let port_text = port.to_string();
+    if port != DEFAULT_WEB_PORT {
+        log_stage(app, &format!("3080 已被占用，改用本地 Web 端口 {port}"));
+    }
     let state_dir = data_dir.join("runtime");
     // dsh web 的浏览器鉴权靠每个进程随机的 launch token；桌面产品不打印 URL，
     // 由 lumo-platform-ui 插件在装配完成后把带 token 的入口写到这个文件。
@@ -282,7 +369,12 @@ fn spawn_runtime(app: &AppHandle) -> Result<String, String> {
         .create(true)
         .append(true)
         .open(&runtime_log_path)
-        .map_err(|error| format!("无法创建 runtime 日志 {}：{error}", runtime_log_path.display()))?;
+        .map_err(|error| {
+            format!(
+                "无法创建 runtime 日志 {}：{error}",
+                runtime_log_path.display()
+            )
+        })?;
     let stderr = log_file
         .try_clone()
         .map_err(|error| format!("无法准备 runtime 日志：{error}"))?;
@@ -296,7 +388,7 @@ fn spawn_runtime(app: &AppHandle) -> Result<String, String> {
     command
         .env("LUMO_DEPLOYMENT_MODE", "local")
         .env("LUMO_DSH_PROFILE", "web")
-        .env("LUMO_WEB_PORT", &port)
+        .env("LUMO_WEB_PORT", &port_text)
         .env("LUMO_SQLITE_PATH", &sqlite_path)
         .env("DSH_HOME", data_dir.join("dsh"))
         .env("LUMO_RUNTIME_STATE_DIR", &state_dir)
@@ -317,13 +409,14 @@ fn spawn_runtime(app: &AppHandle) -> Result<String, String> {
         .spawn()
         .map_err(|error| format!("无法启动本地 DSH runtime `{runtime}`：{error}"))?;
     log_stage(app, &format!("runtime 已 spawn（pid {}）", child.id()));
-    if let Ok(mut guard) = app.state::<LocalRuntime>().0.lock() {
-        *guard = Some(child);
-    }
+    register_runtime(app, child)?;
 
     let log_display = runtime_log_path.display().to_string();
-    boot_eval(app, &format!("window.__lumoBoot.logPath({})", js_string(&log_display)));
-    wait_for_web_server(app, &port, |elapsed| {
+    boot_eval(
+        app,
+        &format!("window.__lumoBoot.logPath({})", js_string(&log_display)),
+    );
+    wait_for_web_server(app, &port_text, |elapsed| {
         boot_eval(
             app,
             &format!(
@@ -385,23 +478,33 @@ fn wait_for_handoff(app: &AppHandle, file: &PathBuf, base_url: &str) -> Result<S
 /// Run the boot sequence on a worker thread so the window shows immediately
 /// instead of the app sitting invisible in the Dock for the whole cold start.
 fn boot_runtime_in_background(app: AppHandle) {
-    thread::spawn(move || match spawn_runtime(&app) {
-        Ok(url) => match url.parse::<tauri::Url>() {
-            Ok(parsed) => {
-                log_stage(&app, "切换到工作台");
-                if let Some(window) = main_window(&app) {
-                    if let Err(error) = window.navigate(parsed) {
-                        report_boot_failure(&app, &format!("无法打开本地 Web 地址：{error}"));
+    thread::spawn(move || {
+        let result = match spawn_runtime(&app) {
+            Ok(url) => match url.parse::<tauri::Url>() {
+                Ok(parsed) => {
+                    log_stage(&app, "切换到工作台");
+                    if let Some(window) = main_window(&app) {
+                        if let Err(error) = window.navigate(parsed) {
+                            Err(format!("无法打开本地 Web 地址：{error}"))
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        Err("主窗口已关闭，本地 DSH runtime 未继续运行".to_string())
                     }
                 }
-            }
-            Err(error) => report_boot_failure(&app, &format!("本地 Web 地址无效：{error}")),
-        },
-        Err(message) => report_boot_failure(&app, &message),
+                Err(error) => Err(format!("本地 Web 地址无效：{error}")),
+            },
+            Err(message) => Err(message),
+        };
+        if let Err(message) = result {
+            report_boot_failure(&app, &message);
+        }
     });
 }
 
 fn report_boot_failure(app: &AppHandle, message: &str) {
+    kill_runtime(app);
     eprintln!("lumo-desktop: {message}");
     let log_path = app.state::<RuntimeLogPath>().0.display().to_string();
     boot_eval(
@@ -461,6 +564,9 @@ fn show_main_window(app: &AppHandle) {
 }
 
 fn kill_runtime(app: &AppHandle) {
+    if let Some(shutdown) = app.try_state::<RuntimeShutdown>() {
+        shutdown.0.store(true, Ordering::SeqCst);
+    }
     if let Some(runtime) = app.try_state::<LocalRuntime>() {
         if let Ok(mut child) = runtime.0.lock() {
             if let Some(process) = child.as_mut() {
@@ -475,6 +581,9 @@ fn kill_runtime(app: &AppHandle) {
 /// 父进程立即消失而孙进程活下来。先给整个进程组 SIGTERM，留几秒优雅退出，再 SIGKILL 兜底。
 #[cfg(unix)]
 fn terminate_process_tree(process: &mut Child) {
+    if matches!(process.try_wait(), Ok(Some(_))) {
+        return;
+    }
     let group = -(process.id() as i32);
     unsafe {
         libc::kill(group, libc::SIGTERM);
@@ -486,6 +595,9 @@ fn terminate_process_tree(process: &mut Child) {
             Ok(None) => thread::sleep(Duration::from_millis(50)),
             Err(_) => break,
         }
+    }
+    if matches!(process.try_wait(), Ok(Some(_))) {
+        return;
     }
     unsafe {
         libc::kill(group, libc::SIGKILL);
@@ -508,22 +620,27 @@ fn terminate_process_tree(process: &mut Child) {
     let _ = process.wait();
 }
 
-fn reveal_runtime_log(app: &AppHandle) {
+#[tauri::command]
+fn open_runtime_log(app: AppHandle) -> Result<(), String> {
     let path = app.state::<RuntimeLogPath>().0.clone();
     #[cfg(target_os = "macos")]
-    {
-        let _ = Command::new("open").arg("-R").arg(&path).spawn();
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        #[cfg(target_os = "windows")]
-        {
-            let _ = Command::new("explorer")
-                .arg(format!("/select,{}", path.display()))
-                .spawn();
-        }
-        #[cfg(not(target_os = "windows"))]
-        eprintln!("lumo-desktop: runtime log at {}", path.display());
+    let result = Command::new("open").arg("-R").arg(&path).spawn();
+    #[cfg(target_os = "windows")]
+    let result = Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let result = Command::new("xdg-open")
+        .arg(path.parent().unwrap_or(&path))
+        .spawn();
+    result
+        .map(|_| ())
+        .map_err(|error| format!("无法打开 runtime 日志位置 {}：{error}", path.display()))
+}
+
+fn reveal_runtime_log(app: &AppHandle) {
+    if let Err(error) = open_runtime_log(app.clone()) {
+        eprintln!("lumo-desktop: {error}");
     }
 }
 
@@ -571,6 +688,7 @@ fn main() {
             app.manage(ShellStarted(shell_started));
             app.manage(RuntimeLogPath(log_path));
             app.manage(LocalRuntime(Mutex::new(None)));
+            app.manage(RuntimeShutdown(AtomicBool::new(false)));
             log_stage(&handle, "壳进入 setup");
 
             // The window comes up on the bundled boot page first; the worker
@@ -597,14 +715,17 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 关窗口 = 收进菜单栏，runtime 继续跑；真正退出走托盘菜单或 ⌘Q。
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            // 关闭主窗口就是退出应用；退出路径会杀掉它自己启动的 runtime 进程组。
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
                 if window.label() == MAIN_WINDOW {
-                    api.prevent_close();
-                    let _ = window.hide();
+                    let app = window.app_handle();
+                    log_stage(&app, "主窗口关闭，退出应用并清理 runtime");
+                    kill_runtime(&app);
+                    app.exit(0);
                 }
             }
         })
+        .invoke_handler(tauri::generate_handler![open_runtime_log])
         .build(tauri::generate_context!())
         .expect("error while building Lumo desktop");
 

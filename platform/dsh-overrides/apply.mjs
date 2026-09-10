@@ -110,10 +110,10 @@ export function applyLumoDshOverrides(root) {
   // workspace/history browser. Add a dedicated seat in staged copies instead
   // of replacing ui-workspace or editing the upstream checkout.
   patchFile(root, 'packages/client/ui-sidebar/src/client/index.ts', [[
-    "        'sidebar.brand.name': { kind: 'single', scope: 'root' },\n",
-    "        'sidebar.brand.name': { kind: 'single', scope: 'root' },\n"
-      + "        // LUMO_SIDEBAR_NAVIGATION: product navigation above session history.\n"
-      + "        'sidebar.navigation': { kind: 'list', scope: 'root' },\n",
+    "      'sidebar.brand.name': { kind: 'single', scope: 'root' },\n",
+    "      'sidebar.brand.name': { kind: 'single', scope: 'root' },\n"
+      + "      // LUMO_SIDEBAR_NAVIGATION: product navigation above session history.\n"
+      + "      'sidebar.navigation': { kind: 'list', scope: 'root' },\n",
   ]], 'LUMO_SIDEBAR_NAVIGATION')
 
   patchFile(root, 'packages/client/ui-sidebar/src/client/contract/slots.ts', [
