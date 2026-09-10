@@ -110,23 +110,34 @@ if (!existsSync(resolve(dshRoot, 'package.json'))) {
 // preflight before buildDshHostPackages so direct `cargo tauri build` invocations
 // repair the same state that build.sh's install-components step repairs.
 const dshHostDependencyProbes = [
-  ['node_modules/typescript/bin/tsc', 'TypeScript'],
-  ['packages/api/gateway/node_modules/ws', 'ws'],
-  ['packages/api/gateway/node_modules/@types/ws', '@types/ws'],
-  ['packages/util/chunked-list/node_modules/zod', 'zod'],
-  ['packages/boot/app-boot/node_modules/chokidar', 'chokidar'],
+  ['.', 'typescript', 'TypeScript'],
+  ['packages/api/gateway', 'ws', 'ws'],
+  ['packages/api/gateway', '@types/ws', '@types/ws'],
+  ['packages/util/chunked-list', 'zod', 'zod'],
+  ['packages/settings/settings-file', 'chokidar', 'chokidar'],
 ]
+
+function findDshPackageManifest(relativeRoot, name) {
+  const parts = name.split('/')
+  for (let cursor = resolve(sourceDshRoot, relativeRoot); ; cursor = dirname(cursor)) {
+    const candidate = resolve(cursor, 'node_modules', ...parts, 'package.json')
+    if (existsSync(candidate)) return candidate
+    const parent = dirname(cursor)
+    if (parent === cursor) break
+  }
+  return undefined
+}
 
 function ensureDshHostDependencies() {
   const missing = dshHostDependencyProbes
-    .filter(([relativePath]) => !existsSync(resolve(sourceDshRoot, relativePath)))
+    .filter(([relativeRoot, name]) => findDshPackageManifest(relativeRoot, name) === undefined)
   if (missing.length === 0) return
 
-  repairWorkspaceDependencies(sourceDshRoot, missing.map(([, name]) => name).join(', '))
+  repairWorkspaceDependencies(sourceDshRoot, missing.map(([, , label]) => label).join(', '))
   const stillMissing = missing
-    .filter(([relativePath]) => !existsSync(resolve(sourceDshRoot, relativePath)))
+    .filter(([relativeRoot, name]) => findDshPackageManifest(relativeRoot, name) === undefined)
   if (stillMissing.length > 0) {
-    throw new Error(`无法构建桌面 runtime：重装 DSH 依赖后仍缺少 ${stillMissing.map(([, name]) => name).join(', ')}`)
+    throw new Error(`无法构建桌面 runtime：重装 DSH 依赖后仍缺少 ${stillMissing.map(([, , label]) => label).join(', ')}`)
   }
 }
 
@@ -327,7 +338,7 @@ function repairWorkspaceDependencies(root, missingName) {
     rmSync(resolve(root, stateFile), { force: true })
   }
   const result = spawnExecutable(process.platform === 'win32' ? 'corepack.cmd' : 'corepack', [
-    'pnpm', 'install', '--frozen-lockfile', '--trust-lockfile', '--config.confirmModulesPurge=false',
+    'pnpm', 'install', '--frozen-lockfile', '--trust-lockfile', '--prod=false', '--config.confirmModulesPurge=false',
   ], { cwd: root, stdio: 'inherit' })
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) {
@@ -1071,9 +1082,10 @@ function downloadOfficialNode(version, target) {
   rmSync(extractedRoot, { recursive: true, force: true })
   const extract = windows
     // Git/MSYS GNU tar treats the colon in a Windows drive path as the
-    // remote-archive separator (for example, `E:\\...`). Force local file
-    // handling so portable builds work regardless of the drive letter.
-    ? spawnSync('tar', ['--force-local', '-xf', archive, '-C', cacheDirectory], { encoding: 'utf8' })
+    // remote-archive separator (for example, `E:\\...`). Run inside the
+    // cache directory and pass only the archive name so every tar variant
+    // sees a local file, without relying on GNU-only --force-local.
+    ? spawnSync('tar', ['-xf', archiveName], { cwd: cacheDirectory, encoding: 'utf8' })
     : spawnSync('tar', ['-xzf', archive, '-C', cacheDirectory, '--strip-components', '2',
       `node-v${version}-${target}/bin/node`,
       `node-v${version}-${target}/lib/node_modules/corepack`,
