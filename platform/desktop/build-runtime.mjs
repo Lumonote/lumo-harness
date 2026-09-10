@@ -133,7 +133,11 @@ function ensureDshHostDependencies() {
     .filter(([relativeRoot, name]) => findDshPackageManifest(relativeRoot, name) === undefined)
   if (missing.length === 0) return
 
-  repairWorkspaceDependencies(sourceDshRoot, missing.map(([, , label]) => label).join(', '))
+  repairWorkspaceDependencies(
+    sourceDshRoot,
+    missing.map(([, , label]) => label).join(', '),
+    missing.map(([relativeRoot, name]) => join(relativeRoot, 'node_modules', ...name.split('/'))),
+  )
   const stillMissing = missing
     .filter(([relativeRoot, name]) => findDshPackageManifest(relativeRoot, name) === undefined)
   if (stillMissing.length > 0) {
@@ -332,13 +336,20 @@ function workspaceRootOwning(packageRoot) {
   return undefined
 }
 
-function repairWorkspaceDependencies(root, missingName) {
+function repairWorkspaceDependencies(root, missingName, staleDependencyPaths = []) {
   console.warn(`Lumo: [WARN] 缺少 ${missingName}，重装 ${relative(repoRoot, root)} 的依赖后重试...`)
+  // pnpm may consider the workspace up to date while a package-level link is
+  // missing. Remove only the links reported by the preflight; do not remove
+  // the whole virtual store (or use --force, which fetches every optional
+  // dependency for every platform).
+  for (const staleDependencyPath of staleDependencyPaths) {
+    rmSync(resolve(root, staleDependencyPath), { recursive: true, force: true })
+  }
   for (const stateFile of ['node_modules/.pnpm/lock.yaml', 'node_modules/.pnpm-workspace-state-v1.json']) {
     rmSync(resolve(root, stateFile), { force: true })
   }
   const result = spawnExecutable(process.platform === 'win32' ? 'corepack.cmd' : 'corepack', [
-    'pnpm', 'install', '--force', '--frozen-lockfile', '--trust-lockfile', '--prod=false', '--config.confirmModulesPurge=false',
+    'pnpm', 'install', '--frozen-lockfile', '--trust-lockfile', '--prod=false', '--config.confirmModulesPurge=false',
   ], { cwd: root, stdio: 'inherit' })
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) {
