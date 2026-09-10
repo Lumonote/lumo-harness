@@ -336,6 +336,22 @@
 .lumo-governed-source pre { max-height: 340px; margin: 10px 0; padding: 11px; overflow: auto; border-radius: 7px; background: var(--lumo-bg); color: var(--lumo-ink); font: 10px/1.55 var(--lumo-mono); white-space: pre-wrap; }
 .lumo-version-form { display: grid; gap: 9px; align-content: start; }
 
+/* Skills management: the local/cluster directory reads as a card list, and the
+   create form keeps its primary action on a dedicated footer row. */
+.lumo-skill-admin-list { gap: 8px; }
+.lumo-skill-admin-list > div { grid-template-columns: minmax(0, 1fr) 96px 170px auto; padding: 13px 14px; border: 1px solid var(--lumo-line); border-top: 1px solid var(--lumo-line); border-radius: 11px; background: var(--lumo-accent-2); transition: border-color .18s, background .18s, transform .18s; }
+.lumo-skill-admin-list > div:first-child { border-top: 1px solid var(--lumo-line); }
+.lumo-skill-admin-list > div:hover { border-color: var(--lumo-accent-36); background: var(--lumo-accent-6); transform: translateX(2px); }
+.lumo-skill-admin-list > div.selected { border-color: var(--lumo-accent-36); background: var(--lumo-accent-6); }
+.lumo-skill-admin-list b { font-size: 13px; }
+.lumo-skill-admin-list small { font-size: 10px; line-height: 1.5; }
+.lumo-skill-admin-list i, .lumo-skill-admin-list em { font-size: 10px; }
+.lumo-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
+.lumo-confirm { display: inline-flex; align-items: center; gap: 6px; }
+.lumo-confirm .lumo-button { min-height: 28px; }
+.lumo-skill-compose { grid-template-columns: minmax(0, 1fr) 150px 130px; gap: 13px; padding: 16px; border: 1px solid var(--lumo-line); border-radius: 12px; background: var(--lumo-accent-2); }
+.lumo-skill-compose > button[type='submit'] { grid-column: 1 / -1; justify-self: end; }
+
 .lumo-section-actions { display: flex; align-items: center; gap: 8px; }
 .lumo-connector-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .lumo-connector-card { display: flex; flex-direction: column; min-height: 196px; padding: 15px; border: 1px solid var(--lumo-line); border-radius: 12px; background: var(--lumo-accent-2); cursor: pointer; transition: border-color .2s, transform .2s, background .2s; }
