@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -227,8 +227,22 @@ describe('baseline bundle reconciliation', () => {
     expect(bundles.slice(0, 3)).toEqual(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-context'])
     expect(bundles).toContain('dshmarket')
     expect(new Set(bundles).size).toBe(bundles.length)
-    // Every other manifest field survives the write.
-    expect(manifest.dependencies).toEqual({ 'dsh-context': '^0.42.0' })
+    // Existing dependency specs survive; the shipped baseline is recorded so
+    // the market's Installed tab agrees with Discover.
+    expect(manifest.dependencies).toEqual({
+      'dsh-context': '^0.42.0',
+      dshmarket: '1.0.0',
+      '@liustack/modlens': '1.0.0',
+      'dsh-cost-meter': '1.0.0',
+      'dsh-dream-skin': '1.0.0',
+      '@linxin666/dsh-client-ui-task-board': '1.0.0',
+      'dsh-univer-office': '1.0.0',
+    })
+    // The market resolves presence and activation from the profile's own
+    // node_modules, not the shared fallback directory.
+    for (const name of baselineBundlePackages()) {
+      expect(lstatSync(join(profileDir, 'node_modules', ...name.split('/'))).isSymbolicLink()).toBe(true)
+    }
     expect(manifest.dsh.profile.patchReload).toBe('live')
 
     // Re-running is a no-op: the reconciled list is already persisted.

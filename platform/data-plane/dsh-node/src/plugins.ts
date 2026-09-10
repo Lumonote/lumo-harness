@@ -129,6 +129,24 @@ export function baselineBundlePackages(): string[] {
   return BASE_PROFILE_PLUGINS.map(({ name }) => name)
 }
 
+/** Version the packaged runtime actually carries for one package, or undefined when absent. */
+function readPackagedVersion(runtimeModules: string, name: string): string | undefined {
+  try {
+    const manifest = JSON.parse(readFileSync(resolve(runtimeModules, ...name.split('/'), 'package.json'), 'utf8')) as { version?: unknown }
+    return typeof manifest.version === 'string' && manifest.version !== '' ? manifest.version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Version pinned in {@link BASE_PROFILE_PLUGINS} for one baseline package, or undefined. */
+function pinnedBaselineVersion(name: string): string | undefined {
+  const spec = BASE_PROFILE_PLUGINS.find(plugin => plugin.name === name)?.spec
+  if (spec === undefined) return undefined
+  const at = spec.lastIndexOf('@')
+  return at > 0 ? spec.slice(at + 1) : undefined
+}
+
 // 打包 runtime 下 dsh-node 把这份名单逐个 symlink 到 DSH_HOME/profiles/node_modules，
 // 让 patch 里的裸包名（name: '@lumo/...'）能从 profile 目录按 Node 的父级上溯解析到。
 // 新插件进了 PLATFORM_PLUGIN_MODULES、且 local/web profile 真的会挂载它，就必须同步加
@@ -287,23 +305,36 @@ function ensurePackagedProfileModules(profile: string, env: NodeJS.ProcessEnv): 
       }
       throw new Error(`dsh-node: packaged runtime is missing ${name}`)
     }
-    const link = resolve(modulesDir, ...name.split('/'))
-    mkdirSync(resolve(link, '..'), { recursive: true })
-    let stat
-    try {
-      stat = lstatSync(link)
-    } catch {
-      stat = undefined
-    }
-    if (stat !== undefined) {
-      if (!stat.isSymbolicLink()) {
-        throw new Error(`dsh-node: ${link} exists and is not a symlink`)
-      }
-      if (readlinkSync(link) === target) continue
-      unlinkSync(link)
-    }
-    symlinkSync(target, link, 'junction')
+    linkPackagedModule(modulesDir, name, target, true)
   }
+}
+
+/**
+ * Symlink one packaged runtime package into a profile `node_modules` directory.
+ *
+ * The shared fallback directory belongs to dsh-node alone, so a non-symlink
+ * there is a hard error. Inside a profile pnpm owns the directory, and a real
+ * package (for example one updated through the market) must win: the market
+ * resolves presence and activation from `<profile>/node_modules`.
+ */
+function linkPackagedModule(linkDir: string, name: string, target: string, strict: boolean): void {
+  const link = resolve(linkDir, ...name.split('/'))
+  mkdirSync(resolve(link, '..'), { recursive: true })
+  let stat
+  try {
+    stat = lstatSync(link)
+  } catch {
+    stat = undefined
+  }
+  if (stat !== undefined) {
+    if (!stat.isSymbolicLink()) {
+      if (strict) throw new Error(`dsh-node: ${link} exists and is not a symlink`)
+      return
+    }
+    if (readlinkSync(link) === target) return
+    unlinkSync(link)
+  }
+  symlinkSync(target, link, 'junction')
 }
 
 /** Outcome of one {@link reconcileBaselineBundles} pass. */
@@ -508,7 +539,7 @@ export function ensurePackagedBaselineBundles(options: {
   if (!existsSync(manifestPath) && !initProfileManifest(options.profile, env['LUMO_DSH_CLI'], env)) return
   if (!existsSync(manifestPath)) return
 
-  let manifest: { dsh?: { profile?: { bundles?: unknown; patchReload?: string } } }
+  let manifest: { dependencies?: Record<string, string>; dsh?: { profile?: { bundles?: unknown; patchReload?: string } } }
   try {
     manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as typeof manifest
   } catch (error: unknown) {
@@ -543,10 +574,32 @@ export function ensurePackagedBaselineBundles(options: {
   if (added.length > 0) {
     console.log(`dsh-node: 登记 ${added.length} 个基线插件 bundle(s)：${added.join(', ')}`)
   }
-  if (added.length === 0 && removed.length === 0 && nextOwned.length === owned.length) return
+
+  // The market's Installed tab reads profile `dependencies` and resolves
+  // presence/activation from `<profile>/node_modules`, while Discover also
+  // accepts `dsh.profile.bundles`. A bundle-only baseline therefore looked
+  // installed in Discover but left Installed empty. Record the shipped
+  // baseline the way `dsh plugin add` would: a profile-local link plus a
+  // dependency entry.
+  const baselineNames = new Set(baselineBundlePackages())
+  const dependencies = { ...(manifest.dependencies ?? {}) }
+  let dependenciesChanged = false
+  const profileModulesDir = resolve(profileDir, 'node_modules')
+  for (const name of bundles) {
+    if (!baselineNames.has(name)) continue
+    const target = resolve(runtimeModules, ...name.split('/'))
+    if (!existsSync(resolve(target, 'package.json'))) continue
+    linkPackagedModule(profileModulesDir, name, target, false)
+    if (dependencies[name] !== undefined) continue
+    dependencies[name] = readPackagedVersion(runtimeModules, name) ?? pinnedBaselineVersion(name) ?? '*'
+    dependenciesChanged = true
+  }
+
+  if (added.length === 0 && removed.length === 0 && nextOwned.length === owned.length && !dependenciesChanged) return
 
   writeFileSync(manifestPath, `${JSON.stringify({
     ...manifest,
+    ...(dependenciesChanged ? { dependencies } : {}),
     dsh: {
       ...manifest.dsh,
       profile: { ...manifest.dsh?.profile, bundles },
