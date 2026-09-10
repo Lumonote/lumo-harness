@@ -338,7 +338,7 @@ function repairWorkspaceDependencies(root, missingName) {
     rmSync(resolve(root, stateFile), { force: true })
   }
   const result = spawnExecutable(process.platform === 'win32' ? 'corepack.cmd' : 'corepack', [
-    'pnpm', 'install', '--frozen-lockfile', '--trust-lockfile', '--prod=false', '--config.confirmModulesPurge=false',
+    'pnpm', 'install', '--force', '--frozen-lockfile', '--trust-lockfile', '--prod=false', '--config.confirmModulesPurge=false',
   ], { cwd: root, stdio: 'inherit' })
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) {
