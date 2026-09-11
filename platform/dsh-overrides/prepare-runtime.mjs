@@ -31,18 +31,27 @@ const scriptRoot = dirname(fileURLToPath(import.meta.url))
 // app 平时正常、发消息（会话加锁）即报 "Cannot find module .../bin/system.node"。
 // 与上游 AGENTS.md 的口径一致（仓库测试只编 host addon）：宿主平台包缺 bin 时先编
 // 一次；全部已存在的 bin/ 再投影进快照并纳入指纹，重编后二进制一变快照自动重建。
-function hostNativeAddonPackageName() {
+// 源树里的平台目录名是 `<platform>-<arch>`（native/system/packages/darwin-x64），带
+// node-addon-system- 前缀的是 npm 包名；build.ts 按目录名遍历，两者不可混用。
+// 曾按 npm 包名拼源树路径，existsSync 恒假 → 编译被静默跳过，上面的症状就是这么漏出去的。
+function hostNativeAddonDirectoryName() {
   // flock 仅支持 darwin/linux；win32 无平台包，build.ts --host-addon-only 也会空转。
   if (process.platform !== 'darwin' && process.platform !== 'linux') return null
-  return `node-addon-system-${process.platform}-${process.arch}`
+  return `${process.platform}-${process.arch}`
 }
 
-function ensureNativeAddonsBuilt(sourceRoot) {
-  const packageName = hostNativeAddonPackageName()
-  if (packageName === null) return
-  const hostPackage = resolve(sourceRoot, 'native', 'system', 'packages', packageName)
-  if (!existsSync(hostPackage)) return // 源树没有该工作区（旧上游），无需处理
-  if (existsSync(resolve(hostPackage, 'bin'))) return
+export function ensureNativeAddonsBuilt(sourceRoot) {
+  const directoryName = hostNativeAddonDirectoryName()
+  if (directoryName === null) return
+  const packagesRoot = resolve(sourceRoot, 'native', 'system', 'packages')
+  if (!existsSync(packagesRoot)) return // 源树没有该工作区（旧上游），无需处理
+  const hostPackage = resolve(packagesRoot, directoryName)
+  if (!existsSync(resolve(hostPackage, 'prebuilds.json'))) {
+    // 认错目录名曾经只是静默跳过，代价由用户承担（见上）。宁可构建期硬失败。
+    throw new Error(`Lumo DSH staging: ${hostPackage} 不存在（宿主平台包目录名应为 ${directoryName}）；上游 native/system 目录布局变了`)
+  }
+  const binDirectory = resolve(hostPackage, 'bin')
+  if (existsSync(binDirectory)) return
   const tsx = resolve(sourceRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'tsx.cmd' : 'tsx')
   if (!existsSync(tsx)) {
     throw new Error('Lumo DSH staging: native/system 平台包缺 bin/ 且源树无 tsx，请先在 deepseek-harness 执行 pnpm build:native-system')
@@ -51,6 +60,10 @@ function ensureNativeAddonsBuilt(sourceRoot) {
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) {
     throw new Error(`Lumo DSH staging: 构建宿主 native addon 失败（${String(result.status ?? result.signal)}）`)
+  }
+  // build.ts 成功却没落盘 = 上游产物路径变了，投影进快照的仍是空 bin/。
+  if (!existsSync(binDirectory)) {
+    throw new Error(`Lumo DSH staging: build.ts 执行成功但 ${binDirectory} 仍不存在；上游 native addon 产物路径变了`)
   }
 }
 

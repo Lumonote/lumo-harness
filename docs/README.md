@@ -128,6 +128,6 @@
 | `deepseek_harness_lang_selection.md` | 自研语言选型 | §12.3 |
 | `deepseek_harness_gateway_no_apisix.md` | 网关全自研修订 | §12 |
 
-## 七、公众号文章与物料
+## 七、产品导览与物料
 
-产品介绍文章《单机版 DeepSeek-Harness：把「一切皆插件」装进一台电脑》及配套推广图、广告图、截图素材，见 [`wechat/README.md`](./wechat/README.md)。
+产品导览《单机版 DeepSeek-Harness：把「一切皆插件」装进一台电脑》及配套推广图、截图素材，见 [`guide/README.md`](./guide/README.md)。
