@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>单机版 DeepSeek-Harness 推广图 · 2350×1000</title>
+<style>
+  /* ============================================================
+     单机版 DeepSeek-Harness · 公众号推广图（2.35:1）
+     可编辑源文件：改这里 → 用 .tooling/render/render.js 重新导出 PNG
+     ============================================================ */
+  :root{
+    --bg-0:#060C1C;
+    --bg-1:#0B1530;
+    --bg-2:#101E44;
+    --ink:#F3F7FF;
+    --muted:#9DAFCF;
+    --dim:#7186AC;
+    --blue:#4D6BFE;
+    --cyan:#5EC4FF;
+    --violet:#9B7BFF;
+    --green:#37D9A0;
+    --orange:#FFA96B;
+    --line:rgba(122,163,255,.22);
+    --line-2:rgba(122,163,255,.40);
+    --card:rgba(15,26,56,.86);
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{background:#05080F;}
+  body{
+    font-family:"PingFang SC","Hiragino Sans GB","Heiti SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+    text-rendering:geometricPrecision;
+  }
+  #stage{
+    position:relative;
+    width:2350px;height:1000px;overflow:hidden;
+    display:flex;
+    background:
+      radial-gradient(1200px 720px at 8% -12%, #1A2C63 0%, rgba(16,28,64,0) 62%),
+      radial-gradient(1000px 640px at 96% 112%, #16255A 0%, rgba(16,28,64,0) 60%),
+      linear-gradient(112deg, var(--bg-0) 0%, var(--bg-1) 46%, var(--bg-2) 100%);
+  }
+  /* 蓝图网格 */
+  #stage::before{
+    content:"";position:absolute;inset:0;
+    background-image:
+      linear-gradient(rgba(122,163,255,.075) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(122,163,255,.075) 1px, transparent 1px);
+    background-size:52px 52px;
+    mask-image:radial-gradient(1400px 900px at 30% 40%, #000 12%, rgba(0,0,0,.35) 62%, transparent 100%);
+    -webkit-mask-image:radial-gradient(1400px 900px at 30% 40%, #000 12%, rgba(0,0,0,.35) 62%, transparent 100%);
+    pointer-events:none;
+  }
+  .glow{position:absolute;border-radius:50%;filter:blur(90px);pointer-events:none;}
+  .g1{width:620px;height:620px;left:-180px;top:-260px;background:rgba(77,107,254,.42);}
+  .g2{width:520px;height:520px;left:520px;top:640px;background:rgba(94,196,255,.16);}
+  .g3{width:640px;height:640px;right:-200px;top:-160px;background:rgba(155,123,255,.26);}
+
+  /* ---------- 左栏 ---------- */
+  .left{
+    position:relative;z-index:2;
+    width:1240px;flex:0 0 1240px;
+    padding:132px 90px 0 108px;
+    display:flex;flex-direction:column;
+  }
+  .eyebrow{
+    display:inline-flex;align-items:center;gap:14px;align-self:flex-start;
+    height:52px;padding:0 24px;border-radius:26px;
+    background:rgba(77,107,254,.14);
+    border:1px solid rgba(94,196,255,.42);
+    color:#CFE2FF;font-size:24px;font-weight:600;letter-spacing:.06em;
+  }
+  .eyebrow .dot{
+    width:11px;height:11px;border-radius:50%;background:var(--cyan);
+    box-shadow:0 0 14px 4px rgba(94,196,255,.75);
+  }
+  h1{
+    margin-top:40px;
+    font-size:112px;line-height:1.14;font-weight:600;letter-spacing:-.012em;
+    color:var(--ink);
+  }
+  h1 .hl{
+    background:linear-gradient(96deg,#7FA0FF 0%,#5EC4FF 52%,#9B7BFF 100%);
+    -webkit-background-clip:text;background-clip:text;
+    -webkit-text-fill-color:transparent;color:transparent;
+  }
+  .prod{
+    margin-top:30px;
+    display:inline-flex;align-items:baseline;gap:16px;align-self:flex-start;
+  }
+  .prod .name{font-size:46px;font-weight:600;color:#DCE8FF;letter-spacing:.01em;}
+  .prod .tag{
+    font-size:24px;font-weight:600;color:#8FD0FF;
+    padding:6px 16px;border-radius:10px;
+    background:rgba(94,196,255,.12);border:1px solid rgba(94,196,255,.30);
+  }
+  .rule{
+    margin-top:38px;width:150px;height:6px;border-radius:3px;
+    background:linear-gradient(90deg,var(--blue),var(--cyan));
+    box-shadow:0 0 26px rgba(94,196,255,.55);
+  }
+  .arch{
+    margin-top:34px;width:100%;
+    font-size:30px;line-height:1.62;color:var(--muted);font-weight:400;
+  }
+  .arch b{color:#CFE2FF;font-weight:600;}
+  .arch .k{
+    color:#8FD0FF;font-weight:600;
+    font-family:"SF Mono",Menlo,Consolas,monospace;font-size:27px;
+  }
+  .facts{
+    margin-top:auto;margin-bottom:112px;
+    display:flex;gap:18px;
+  }
+  .fact{
+    flex:1 1 0;padding:22px 26px;border-radius:18px;
+    background:linear-gradient(180deg,rgba(18,32,66,.92),rgba(11,21,46,.92));
+    border:1px solid var(--line);border-top:3px solid rgba(94,196,255,.55);
+  }
+  .fact .k{
+    display:block;font-size:29px;font-weight:600;color:#EAF2FF;
+    font-family:"SF Mono",Menlo,Consolas,monospace;letter-spacing:.01em;
+  }
+  .fact .v{display:block;margin-top:9px;font-size:22px;color:var(--dim);}
+
+  /* ---------- 右栏：模拟工作台窗口 ---------- */
+  .right{
+    position:relative;z-index:2;flex:1 1 auto;
+    padding:150px 108px 0 0;
+  }
+  .win{
+    position:relative;height:724px;border-radius:24px;
+    display:flex;flex-direction:column;
+    background:linear-gradient(180deg,rgba(14,25,54,.94),rgba(9,17,38,.94));
+    border:1px solid var(--line-2);
+    box-shadow:0 40px 90px rgba(2,6,18,.72), inset 0 1px 0 rgba(160,195,255,.16);
+    overflow:hidden;
+  }
+  .win::after{
+    content:"";position:absolute;left:0;right:0;top:0;height:3px;
+    background:linear-gradient(90deg,var(--blue),var(--cyan),var(--violet));
+    opacity:.9;
+  }
+  .titlebar{
+    flex:0 0 62px;height:62px;display:flex;align-items:center;gap:12px;
+    padding:0 26px;border-bottom:1px solid rgba(122,163,255,.14);
+  }
+  .tl{width:14px;height:14px;border-radius:50%;}
+  .tl.r{background:#FF6B6B;}.tl.y{background:#FFC46B;}.tl.g{background:#5FE0A8;}
+  .titlebar .addr{
+    margin-left:16px;flex:1 1 auto;height:34px;border-radius:17px;
+    background:rgba(122,163,255,.09);border:1px solid rgba(122,163,255,.18);
+    display:flex;align-items:center;justify-content:center;
+    font-family:"SF Mono",Menlo,Consolas,monospace;
+    font-size:20px;color:#9FC2F5;letter-spacing:.02em;
+  }
+  .win-body{padding:30px 32px 0 32px;flex:1 1 auto;}
+  .cap-head{
+    display:flex;align-items:center;justify-content:space-between;
+    font-size:25px;font-weight:600;color:#B9CCEA;
+  }
+  .cap-head .badge{
+    font-size:20px;font-weight:600;color:#BFF0D8;
+    padding:6px 14px;border-radius:9px;
+    background:rgba(55,217,160,.13);border:1px solid rgba(55,217,160,.34);
+  }
+  .caps{
+    margin-top:20px;display:grid;
+    grid-template-columns:1fr 1fr;gap:18px;
+  }
+  .cap{
+    position:relative;height:176px;border-radius:18px;padding:22px 24px 0 24px;
+    background:linear-gradient(180deg,rgba(20,35,73,.92),rgba(12,22,50,.92));
+    border:1px solid var(--line);
+    overflow:hidden;
+  }
+  .cap::before{
+    content:"";position:absolute;left:22px;top:0;width:86px;height:4px;border-radius:0 0 4px 4px;
+  }
+  .cap .ico{
+    position:absolute;right:22px;top:22px;width:46px;height:46px;
+    border-radius:13px;display:flex;align-items:center;justify-content:center;
+    border:1px solid currentColor;
+  }
+  .cap .t{font-size:32px;line-height:1.24;font-weight:600;color:#F0F5FF;letter-spacing:.01em;}
+  .cap .e{
+    margin-top:4px;font-size:18px;line-height:1.2;font-weight:600;letter-spacing:.10em;text-transform:uppercase;
+  }
+  .cap .d{margin-top:10px;font-size:23px;line-height:1.4;color:var(--muted);}
+  .cap.blue::before{background:var(--blue);}   .cap.blue .e,.cap.blue .ico{color:#8FA6FF;}
+  .cap.cyan::before{background:var(--cyan);}   .cap.cyan .e,.cap.cyan .ico{color:#7BD4FF;}
+  .cap.violet::before{background:var(--violet);} .cap.violet .e,.cap.violet .ico{color:#B49BFF;}
+  .cap.green::before{background:var(--green);} .cap.green .e,.cap.green .ico{color:#63E6B4;}
+  .ribbon{
+    margin-top:20px;height:88px;border-radius:18px;
+    display:flex;align-items:center;gap:18px;padding:0 26px;
+    background:linear-gradient(96deg,rgba(77,107,254,.20),rgba(155,123,255,.16));
+    border:1px solid rgba(155,123,255,.42);
+  }
+  .ribbon .rk{
+    flex:0 0 auto;font-size:21px;font-weight:600;color:#0A1030;
+    padding:8px 16px;border-radius:10px;
+    background:linear-gradient(96deg,#7FA0FF,#9B7BFF);
+  }
+  .ribbon .rt{font-size:25px;font-weight:600;color:#DCE7FF;}
+  .ribbon .rt b{color:#B9A5FF;}
+
+  /* 窗口底部状态条 */
+  .win-foot{
+    flex:0 0 88px;height:88px;margin:0 0 0 0;
+    display:flex;align-items:center;gap:16px;padding:0 32px;
+    border-top:1px solid rgba(122,163,255,.16);
+    background:linear-gradient(180deg,rgba(10,19,42,.35),rgba(8,15,34,.85));
+  }
+  .win-foot .lf{
+    display:flex;align-items:center;gap:12px;
+    font-size:22px;font-weight:600;color:#B9CCEA;white-space:nowrap;
+  }
+  .win-foot .lf .ic{
+    width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+    color:#7BD4FF;background:rgba(94,196,255,.12);border:1px solid rgba(94,196,255,.34);
+  }
+  .win-foot .sp{flex:1 1 auto;}
+  .chip{
+    height:44px;padding:0 18px;border-radius:12px;display:flex;align-items:center;gap:9px;
+    font-size:20px;font-weight:600;color:#C8D8F4;
+    background:rgba(122,163,255,.10);border:1px solid rgba(122,163,255,.26);
+    white-space:nowrap;
+  }
+  .chip i{width:8px;height:8px;border-radius:50%;display:block;}
+  .footer{
+    position:absolute;left:108px;bottom:44px;z-index:3;
+    display:flex;align-items:center;gap:14px;
+    font-size:22px;color:#8CA2C6;letter-spacing:.04em;
+  }
+  .footer .mark{
+    font-size:24px;font-weight:600;color:#A8BEE4;letter-spacing:.02em;
+  }
+  .footer .sep{width:1px;height:20px;background:rgba(122,163,255,.30);}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="glow g1"></div>
+  <div class="glow g2"></div>
+  <div class="glow g3"></div>
+
+  <!-- ================= 左栏 ================= -->
+  <div class="left">
+    <div class="eyebrow"><span class="dot"></span>LUMO AI · 单机版桌面应用</div>
+
+    <h1>把「一切皆插件」<br><span class="hl">装进一台电脑</span></h1>
+
+    <div class="prod">
+      <span class="name">单机版 DeepSeek-Harness</span>
+      <span class="tag">Tauri 2 + Rust</span>
+    </div>
+
+    <div class="rule"></div>
+
+    <div class="arch">
+      不是「给 dsh 套个壳」，而是在开源内核上长出来的多智能体平台。<br>
+      <b>永不改 dsh 源码</b>，只经 Cordis 插件、<span class="k">ctx.*</span> 服务注册与配置覆写扩展。
+    </div>
+
+    <div class="facts">
+      <div class="fact">
+        <span class="k">127.0.0.1:3080</span>
+        <span class="v">本地工作台，随开随用</span>
+      </div>
+      <div class="fact">
+        <span class="k">lumo.sqlite</span>
+        <span class="v">数据只落本机</span>
+      </div>
+      <div class="fact">
+        <span class="k">132 + 13</span>
+        <span class="v">技能与专家包</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 右栏 ================= -->
+  <div class="right">
+    <div class="win">
+      <div class="titlebar">
+        <span class="tl r"></span><span class="tl y"></span><span class="tl g"></span>
+        <span class="addr">DSH Desktop · 127.0.0.1:3080 · LUMO_DEPLOYMENT_MODE=local</span>
+      </div>
+      <div class="win-body">
+        <div class="cap-head">
+          <span>能力不是功能，是长在内核上的插件</span>
+          <span class="badge">创造模式 · 无限扩展</span>
+        </div>
+        <div class="caps">
+          <div class="cap blue">
+            <div class="t">技能市场</div>
+            <div class="e">Skll1hub</div>
+            <div class="d">132 技能 / 13 专家包<br>Skill → Expert → Expert Group</div>
+            <div class="ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.6"/></svg></div>
+          </div>
+          <div class="cap cyan">
+            <div class="t">插件市场</div>
+            <div class="e">dsh-market</div>
+            <div class="d">界面里搜索，一键在线安装<br>装完重启即生效</div>
+            <div class="ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3h4v3.2a2.2 2.2 0 1 0 0 4.4V14h-3.2a2.2 2.2 0 1 0-4.4 0H3v-4h3.2a2.2 2.2 0 1 0 0-4.4H3V3h7z"/><path d="M14 14h7v4h-3.2a2.2 2.2 0 1 1-4.4 0H10"/></svg></div>
+          </div>
+          <div class="cap violet">
+            <div class="t">生成 PPT</div>
+            <div class="e">Ppt Master</div>
+            <div class="d">内容层 × 视觉层分离<br>模板是可替换的提供方</div>
+            <div class="ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3.5" width="18" height="12.5" rx="2"/><path d="M12 16v4.5M8 20.5h8M8 8.5l3 2.2-3 2.2M13.5 13h3"/></svg></div>
+          </div>
+          <div class="cap green">
+            <div class="t">开放设计</div>
+            <div class="e">Open Design</div>
+            <div class="d">一句话出可编辑设计方案<br>原型 / 品牌 / 演示 / 文档</div>
+            <div class="ico"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 4.5v9L12 21l-9-4.5v-9z"/><path d="M12 12l9-4.5M12 12v9M12 12L3 7.5"/></svg></div>
+          </div>
+        </div>
+        <div class="ribbon">
+          <span class="rk">创造模式</span>
+          <span class="rt">一句需求，<b>现场造插件</b>——改路由、加分页，改完即生效</span>
+        </div>
+      </div>
+      <div class="win-foot">
+        <span class="lf">
+          <span class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5M4 19h16M8 15l3.5-4.5L15 13l4-6"/></svg></span>
+          会话日志 · 上下文可观测
+        </span>
+        <span class="sp"></span>
+        <span class="chip"><i style="background:#5EC4FF;box-shadow:0 0 10px #5EC4FF"></i>Token 用量</span>
+        <span class="chip"><i style="background:#37D9A0;box-shadow:0 0 10px #37D9A0"></i>耗时</span>
+        <span class="chip"><i style="background:#9B7BFF;box-shadow:0 0 10px #9B7BFF"></i>上下文占用</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span class="mark">Lumo AI</span>
+    <span class="sep"></span>
+    <span>单机版 DeepSeek-Harness · 从内核到技能市场到 PPT 到开放设计</span>
+  </div>
+</div>
+</body>
+</html>

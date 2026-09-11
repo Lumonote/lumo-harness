@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>单机版 DeepSeek-Harness：把「一切皆插件」装进一台电脑</title>
+</head>
+<body style="margin:0;padding:0;background:#f2f3f5;">
+<section style="width:100%;max-width:680px;box-sizing:border-box;overflow:hidden;margin:0 auto;padding:28px 20px 24px;background:#ffffff;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue',Arial,sans-serif;">
+
+  <!-- 封面 -->
+  <section style="background:linear-gradient(135deg,#0b1b3a,#1b2f6b);border-radius:14px;padding:32px 22px 28px;margin:0 0 18px;">
+    <p style="margin:0 0 12px;font-size:12px;letter-spacing:2px;color:#5ec4ff;font-weight:700;">AI 智能体 · 单机版落地</p>
+    <h1 style="margin:0 0 12px;font-size:24px;line-height:1.5;color:#ffffff;font-weight:800;">单机版 DeepSeek-Harness</h1>
+    <p style="margin:0;font-size:15px;line-height:1.8;color:#b6c8e6;">把官方「一切皆插件」的内核装进一台电脑：技能市场、在线装插件、生成 PPT、开放设计</p>
+  </section>
+
+  <!-- 一句话架构 -->
+  <section style="background:#f0f4ff;border-left:4px solid #4d6bfe;padding:15px 16px;margin:0 0 18px;border-radius:0 6px 6px 0;">
+    <p style="margin:0;font-size:14.5px;line-height:1.8;color:#2f3542;"><b style="color:#4d6bfe;">一句话架构：</b>它不是「给 dsh 套个壳」，而是<b>在开源 deepseek-harness 之上长出来的多智能体平台</b>——铁律是<b>永不改 dsh 源码</b>，只通过 Cordis 插件 / bundle、<b>ctx.*</b> 服务注册、<b>cordis.patch.yml</b> 覆写、以 npm 依赖方式扩展。单机版用 <b>Tauri 2（Rust）做壳</b>：Rust 壳把一个<b>本地 DSH Web worker 作为子进程拉起</b>（自包含的 Node + DSH CLI + Web 前端 + SQLite + Lumo 插件，全部打进 .app 的 runtime），工作台就跑在 <span style="background:#eef2ff;border-radius:4px;padding:1px 5px;font-family:Menlo,monospace;font-size:12.5px;">127.0.0.1:3080</span> 上；环境置 <span style="background:#eef2ff;border-radius:4px;padding:1px 5px;font-family:Menlo,monospace;font-size:12.5px;">LUMO_DEPLOYMENT_MODE=local</span>，数据只落 <span style="background:#eef2ff;border-radius:4px;padding:1px 5px;font-family:Menlo,monospace;font-size:12.5px;">lumo.sqlite</span>。技能市场、插件市场、PPT、开放设计——全是挂在这个内核上的 Lumo 插件 / 技能。</p>
+  </section>
+
+  <!-- 01 设置 -->
+  <h2 style="margin:26px 0 12px;font-size:19px;line-height:1.5;color:#16213e;font-weight:800;border-left:4px solid #4d6bfe;padding-left:10px;">01 · 设置 / 主题面板：插件化的前端</h2>
+  <img src="assets/article/01.jpg" style="width:100%;display:block;border-radius:10px;margin:0 0 8px;" alt="设置-主题面板">
+  <p style="font-size:14px;line-height:1.8;color:#3f3f3f;margin:0 0 20px;">皮肤、强调色、壁纸全是<b>可配置项</b>。前端用 React 18 + Vite，数据来自 session 事件流投影；Slot 渲染器让<b>单个插件崩溃不影响兄弟插件</b>。</p>
+
+  <!-- 02 技能市场 -->
+  <h2 style="margin:26px 0 12px;font-size:19px;line-height:1.5;color:#16213e;font-weight:800;border-left:4px solid #7c3aed;padding-left:10px;">02 · 技能市场 Skll1hub：像 WorkBuddy 的 SkillHub，但长在本地</h2>
+  <img src="assets/article/02.jpg" style="width:100%;display:block;border-radius:10px;margin:0 0 8px;" alt="技能市场-技能">
+  <p style="font-size:14px;line-height:1.8;color:#3f3f3f;margin:0 0 12px;">技能 132 个、专家包 13 个，按「办公 / 内容创作 / 开发编程 / AI Agent / 行业」分桶。技能入口是 <b>ctx.skills seam + tool-skill</b>（渐进式披露的 SKILL.md），目录由 <b>skill-catalog + gen-*-catalog</b> 脚本生成，不是手写数组。</p>
+  <img src="assets/article/03.jpg" style="width:100%;display:block;border-radius:10px;margin:0 0 8px;" alt="技能市场-专家包">
+  <p style="font-size:14px;line-height:1.8;color:#3f3f3f;margin:0 0 20px;">第二页是行业化的<b>专家包</b>（科技 / 医疗 / 人力资源 / 法律 / 生活服务 / 设计 / 电商……）。分层和 WorkBuddy 一致：<b>Skill → Expert（技能+MCP+知识+Harness 配置）→ Expert Group</b>。装一个专家包，本地 Agent 立刻会看病历、写合同、筛简历。</p>
+
+  <!-- 03 插件市场 -->
+  <h2 style="margin:26px 0 12px;font-size:19px;line-height:1.5;color:#16213e;font-weight:800;border-left:4px solid #e63946;padding-left:10px;">03 · 插件市场：在线一键安装</h2>
+  <img src="assets/article/04.jpg" style="width:100%;display:block;border-radius:10px;margin:0 0 8px;" alt="插件市场">
+  <p style="font-size:14px;line-height:1.8;color:#3f3f3f;margin:0 0 20px;">跟技能市场并排还有一个<b>插件市场（dsh-market）</b>，支持<b>在界面里直接搜索、按分类（UI 增强 / 用量与计费 / 视觉增强）筛选、点「安装」在线装插件</b>。卡片显示作者、下载量、Star、版本要求（如 DSH ≥ 0.1.1-rc.2）。本质是把 <b>cordis.patch.yml 以「insert 一行插件」方式叠进插件树</b>——装完重启即生效，还能「收藏 / 已安装 / 任务」管理。</p>
+  <img src="assets/article/05.jpg" style="width:100%;display:block;border-radius:10px;margin:0 0 8px;" alt="检查更新">
+  <p style="font-size:14px;line-height:1.8;color:#3f3f3f;margin:0 0 20px;">底座和插件都支持<b>实时更新</b>：发现新版本会弹出「检查更新」面板，列出版本号、更新说明（修复 / 其他变动）与「开始更新」，由你主动触发、确认后一键升级；旁边还能「查看组件版本」核对底座与已装插件。</p>
+
+  <!-- 04 创造模式 -->
+  <h2 style="margin:26px 0 12px;font-size:19px;line-height:1.5;color:#16213e;font-weight:800;border-left:4px solid #16a34a;padding-left:10px;">04 · 创造模式：插件能无限扩展</h2>
+  <img src="assets/article/06.jpg" style="width:100%;display:block;border-radius:10px;margin:0 0 8px;" alt="创造模式">
+  <p style="font-size:14px;line-height:1.8;color:#3f3f3f;margin:0 0 20px;">更关键的是，它能<b>实时改造自己</b>——不只是「用」插件，还能「造」插件。把需求一句话丢给它（比如「把侧栏入口从底部挪到主菜单更显眼处、并增加阅读器分页/图片」），它会先<b>巡视注册表</b>（cordis_inspect_query 看服务、看 sidebar.navigation 协议与 webServer 接口），再端到端规划（pkp-5），然后改插件、加路由、加分页，改完即生效。工具调用、思考链路、耗时在对话里全程可见。</p>
+  <img src="assets/article/07.jpg" style="width:100%;display:block;border-radius:10px;margin:0 0 8px;" alt="知识库工作台">
+  <p style="font-size:14px;line-height:1.8;color:#3f3f3f;margin:0 0 20px;">这是创造模式在「知识库工作台构建」里的落点：把库内文档做成可浏览、阅读、检索的本地工作台（总览 / 主题 / 文档 / 阅读 / 检索 / 配置），还能在文档上标记「适合」。你一句需求，它就把「想用的东西」改造成真正长在自己电脑上的工作台。</p>
+
+  <!-- 05 PPT -->
+  <h2 style="margin:26px 0 12px;font-size:19px;line-height:1.5;color:#16213e;font-weight:800;border-left:4px solid #0891b2;padding-left:10px;">05 · 能生成 PPT：模板市场，不是单个生成器</h2>
+  <img src="assets/article/08.jpg" style="width:100%;display:block;border-radius:10px;margin:0 0 8px;" alt="PPT-生成">
+  <p style="font-size:14px;line-height:1.8;color:#3f3f3f;margin:0 0 20px;">做法是<b>内容层 × 视觉层分离</b>：agent 负责提炼要点、组织叙事；模板负责字体、配色、版式、图形语言。同样的内容套不同模板，产出气质完全不同的 PPT——模板本身也是一种「可替换提供方」。</p>
+
+  <!-- 06 开放设计 -->
+  <h2 style="margin:26px 0 12px;font-size:19px;line-height:1.5;color:#16213e;font-weight:800;border-left:4px solid #6d28d9;padding-left:10px;">06 · 能开放设计：从一句话到「可编辑的设计方案」</h2>
+  <img src="assets/article/09.jpg" style="width:100%;display:block;border-radius:10px;margin:0 0 8px;" alt="开放设计">
+  <p style="font-size:14px;line-height:1.8;color:#3f3f3f;margin:0 0 20px;">「<b>从一句话开始，生成可编辑的设计方案</b>」：界面原型 / 线框图 / 移动应用 / 品牌视觉 / 演示文稿 / 文档。生成的是<b>设计结构</b>（布局、组件、信息层级）而非静态图，可以继续改、迭代——由多模态 + Agent 布局 + 代码生成多个能力 seam 协同。</p>
+
+  <!-- 07 会话日志 -->
+  <h2 style="margin:26px 0 12px;font-size:19px;line-height:1.5;color:#16213e;font-weight:800;border-left:4px solid #0369a1;padding-left:10px;">07 · 会话日志：上下文可观测</h2>
+  <img src="assets/article/10.jpg" style="width:100%;display:block;border-radius:10px;margin:0 0 8px;" alt="会话日志">
+  <p style="font-size:14px;line-height:1.8;color:#3f3f3f;margin:0 0 12px;">Token / 耗时 / 上下文浏览器一应俱全（系统提示词、工具定义、用户消息、注入内容各占多少）。<b>可观测性本身也是插件</b>（如 dsh-context）——能看见上下文被怎么消耗，才谈得上压缩、瘦身、把它变成可靠的生产工具。</p>
+  <img src="assets/article/11.jpg" style="width:100%;display:block;border-radius:10px;margin:0 0 8px;" alt="会话-工作界面">
+  <p style="font-size:14px;line-height:1.8;color:#3f3f3f;margin:0 0 20px;">真实的工作界面：左侧是会话 / 轨道（对话、一次次的工具调用与轨迹），右侧直接在浏览器里预览产物，底部是上下文、耗时与<b>高缓存命中率</b>统计——写文章的每一步，都被可观测地记了下来。</p>
+
+  <!-- 一句话总结 -->
+  <section style="background:linear-gradient(135deg,#0b1b3a,#12307a);border-radius:14px;padding:22px 20px;margin:0 0 12px;">
+    <p style="margin:0 0 8px;font-size:14px;line-height:1.8;color:#5ec4ff;font-weight:700;">一句话记住它</p>
+    <p style="margin:0;font-size:15px;line-height:1.9;color:#ffffff;font-weight:700;">单机版不是「网页套壳」，而是把官方「一切皆插件」的内核装进一台电脑，再把技能市场、插件市场、PPT、开放设计当作插件长上去。</p>
+  </section>
+  <p style="font-size:12.5px;line-height:1.8;color:#8a94a6;margin:0 0 22px;">本文基于 lumo-harness 源码（platform/desktop 的 Rust/Tauri 壳与 main.rs、platform/dsh-plugins、platform/upstream、docs/architecture.md）及上游 deepseek-harness 官方文档（docs/architecture.zh.md、packages/boot、packages/skills、apps/web）核写：单机版 = Tauri 2（Rust）壳拉起本地 DSH Web worker（SQLite only），在 deepseek-harness 之上以 Cordis 插件零侵入扩展；截图中的技能/插件数量与版本为运行态快照，以实际版本为准。</p>
+
+  <!-- Lumo AI 联系卡 -->
+  <section style="background:#f6f8ff;border:1px solid #dfe6ff;border-radius:14px;padding:20px 20px 18px;margin:0 0 8px;">
+    <table style="width:100%;border-collapse:collapse;margin:0 0 10px;">
+      <tr>
+        <td style="padding:0;vertical-align:middle;width:50px;">
+          <section style="width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,#4d6bfe,#8b5cf6);display:flex;align-items:center;justify-content:center;">
+            <span style="color:#ffffff;font-size:19px;font-weight:800;">L</span>
+          </section>
+        </td>
+        <td style="padding:0 0 0 12px;vertical-align:middle;">
+          <p style="margin:0 0 2px;font-size:15px;font-weight:800;color:#16213e;">Lumo AI · 智能体深度研究</p>
+          <p style="margin:0;font-size:12px;color:#8a94a6;">Harness 架构 / Agent 工程 / 单机落地</p>
+        </td>
+      </tr>
+    </table>
+    <p style="margin:0;font-size:13px;line-height:1.8;color:#5b6472;">如果你也在琢磨「怎么把智能体框架真正落地成产品」，欢迎转发给正在搭 Agent 基建或桌面端的朋友。</p>
+  </section>
+  <p style="margin:0;font-size:12px;line-height:1.7;color:#a3adc0;text-align:center;">本文由 Lumo AI 出品 · 转载请联系授权</p>
+
+</section>
+</body>
+</html>

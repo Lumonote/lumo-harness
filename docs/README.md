@@ -127,3 +127,7 @@
 | `deepseek_harness_gateway_tech_selection.md` | 网关技术选型（原含 APISIX/Envoy） | §12（已修订为全自研） |
 | `deepseek_harness_lang_selection.md` | 自研语言选型 | §12.3 |
 | `deepseek_harness_gateway_no_apisix.md` | 网关全自研修订 | §12 |
+
+## 七、公众号文章与物料
+
+产品介绍文章《单机版 DeepSeek-Harness：把「一切皆插件」装进一台电脑》及配套推广图、广告图、截图素材，见 [`wechat/README.md`](./wechat/README.md)。
