@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 
 // 桌面构建链的 DSH Client 面类型前置检查：快照里「哪些项目必须先有 tsc 产物」
 // 的名单规则。这条规则错了只会在全新克隆上炸成 tsdown 的 UNRESOLVED_ENTRY，
@@ -19,26 +19,67 @@ function hasDshClientSource(packageDirectory) {
 // face-specific 叶子项目，clientBundle() 的浏览器入口 lib/types/client/index.js
 // 只有它们会产出（host 面从不编译 src/client/**）。按目录名枚举会漏掉这些包，
 // 全新克隆因此只带 host 面产物进快照，Client tsdown 序当场 UNRESOLVED_ENTRY。
+//
+// 还有第二类漏网：没有 src/client 的纯 Node 客户端库（tsdown 走
+// clientLibrary()/clientOnly，只在 Client 面构建），入口同样是被 Client tsdown
+// 消费的 lib/types/index.js。它们既不在 packages/client 组，也没有 src/client，
+// 按下面的启发式会被整包漏掉——test-support/remote-mock 就是这么在 Client 序
+// 炸 UNRESOLVED_ENTRY 的。这类包由 tsconfig.client.json 的 references 兜底枚举。
 export function dshClientTypeConfigs(root) {
+  const configs = new Set()
   const packagesRoot = resolve(root, 'packages')
-  if (!existsSync(packagesRoot)) return []
-  return readdirSync(packagesRoot, { withFileTypes: true })
-    .filter((group) => group.isDirectory())
-    .flatMap((group) => {
+  if (existsSync(packagesRoot)) {
+    for (const group of readdirSync(packagesRoot, { withFileTypes: true })) {
+      if (!group.isDirectory()) continue
       const groupRoot = resolve(packagesRoot, group.name)
-      return readdirSync(groupRoot, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory())
-        .flatMap((entry) => {
-          const directory = join('packages', group.name, entry.name)
-          if (!existsSync(resolve(root, directory, 'tsdown.config.ts'))) return []
-          // packages/client/* 整组都在 Client 面（含只做 staticLinked 的包，
-          // 它们的入口同样是 lib/types）；组外只认真的产出浏览器半的包。
-          if (group.name !== 'client' && !hasDshClientSource(resolve(root, directory))) return []
-          const config = ['tsconfig.json', 'tsconfig.client.json']
-            .find((name) => existsSync(resolve(root, directory, name)))
-          return config === undefined ? [] : [join(directory, config)]
-        })
-    })
+      for (const entry of readdirSync(groupRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const directory = join('packages', group.name, entry.name)
+        if (!existsSync(resolve(root, directory, 'tsdown.config.ts'))) continue
+        // packages/client/* 整组都在 Client 面（含只做 staticLinked 的包，
+        // 它们的入口同样是 lib/types）；组外只认真的产出浏览器半的包。
+        if (group.name !== 'client' && !hasDshClientSource(resolve(root, directory))) continue
+        const config = dshClientTypeConfig(root, directory)
+        if (config !== undefined) configs.add(config)
+      }
+    }
+  }
+  // Client tsc 聚合项目点名了整张 Client 编译图：凡在该图里、又有 tsdown.config.ts
+  // 的包，其 lib/types 都会被 Client tsdown 消费。这一层与上面的启发式取并集，
+  // 顺序无关（Set 去重），已存在的包不受影响。
+  for (const directory of dshClientReferencedDirectories(root)) {
+    if (!existsSync(resolve(root, directory, 'tsdown.config.ts'))) continue
+    const config = dshClientTypeConfig(root, directory)
+    if (config !== undefined) configs.add(config)
+  }
+  return [...configs]
+}
+
+/** 包本地 Client tsc 配置：优先 tsconfig.json，其次 tsconfig.client.json。 */
+function dshClientTypeConfig(root, directory) {
+  const name = ['tsconfig.json', 'tsconfig.client.json']
+    .find((candidate) => existsSync(resolve(root, directory, candidate)))
+  return name === undefined ? undefined : join(directory, name)
+}
+
+// tsconfig.client.json 是 JSONC（注释 + 行尾逗号），不整体 parse，只按 key 取
+// references 的 path 字符串。引用可以指向包目录，也可以直接指向 tsconfig 文件。
+// 只认 packages/<group>/<package> 这一层，挡掉嵌套 tsconfig 与工作区外引用。
+const TSCONFIG_REFERENCE_PATH = /"path"\s*:\s*"([^"]+)"/g
+
+function dshClientReferencedDirectories(root) {
+  const aggregate = resolve(root, 'tsconfig.client.json')
+  if (!existsSync(aggregate)) return []
+  const directories = new Set()
+  for (const match of readFileSync(aggregate, 'utf8').matchAll(TSCONFIG_REFERENCE_PATH)) {
+    const reference = match[1]
+    if (!reference.startsWith('.')) continue
+    const target = resolve(root, reference)
+    const directory = relative(root, reference.endsWith('.json') ? dirname(target) : target)
+      .split(sep).join('/')
+    if (/^packages\/[^/]+\/[^/]+$/.test(directory)) directories.add(directory)
+  }
+  return [...directories].sort()
 }
 
 export function hasUsableDshClientTypes(root, config) {

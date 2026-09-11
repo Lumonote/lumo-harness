@@ -174,6 +174,13 @@ const LIB_FRESHNESS_PROBES = [
   // 旧 lib 仍是单参（"Expected 2 or more, but got 1" 此形状）。session-controller
   // 的 host 类型编译依赖该签名，探针必须盯住 index.d.ts 这一行而不能只看 types.d.ts。
   ['packages/core/agent/lib/types/index.d.ts', '(agentCtx: Context, agent: Agent)'],
+  // 11d6bd05f3 给 SkillSummary 本身加了可选 path（侧栏文件/技能引用预览），
+  // session-controller 的 skill-catalog 随即消费它；旧 .d.ts 只有 SkillCandidate /
+  // SkillDefinition 上有 path，SkillSummary 没有，覆盖层 host 编译当场 TS2339
+  // "Property 'path' does not exist"。探针必须盯住 SkillSummary 的 JSDoc 注释行——
+  // 裸 `readonly path?: string` 会被同文件另两个接口满足而漏判；也不能只看 skill
+  // 包的 src，它随 master 前进，lib/ 不会。
+  ['packages/skill/skill/lib/types/index.d.ts', 'Absolute instruction file path when supplied by the provider'],
 ]
 
 export function ensureLibEntriesReexport(sourceRoot) {

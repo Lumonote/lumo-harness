@@ -116,6 +116,14 @@ const dshHostDependencyProbes = [
   ['packages/api/gateway', '@types/ws', '@types/ws'],
   ['packages/util/chunked-list', 'zod', 'zod'],
   ['packages/settings/settings-file', 'chokidar', 'chokidar'],
+  // 上游 master 新增的工作区包（2026-09）：test-support/remote-mock 的 @vitest/spy
+  // 是 production dependency，而整包 node_modules 在旧安装里根本不存在；
+  // test-support/client-runtime 源码 import 了 @deepseek-ai/dsh-client-web/src/*.ts
+  // 这类子路径，必须靠包级 node_modules 链接走 exports 解析，该链接在旧安装里丢了。
+  // 缺了它们，refreshDshClientTypePrerequisites() 的 tsc 只会以 TS2307 静默失败
+  // 在 Client 面类型刷新，而不是给出「依赖没装」的可读诊断。
+  ['packages/test-support/remote-mock', '@vitest/spy', '@vitest/spy'],
+  ['packages/test-support/client-runtime', '@deepseek-ai/dsh-client-web', '@deepseek-ai/dsh-client-web'],
 ]
 
 function findDshPackageManifest(relativeRoot, name) {
@@ -152,20 +160,36 @@ function ensureDshHostDependencies() {
 
   // pnpm's virtual store can survive while one workspace-level link is lost.
   // Restore that single link directly before invoking a full install.
-  missing = missing.filter(([relativeRoot, name]) => !restoreDshPackageLink(relativeRoot, name))
-  if (missing.length === 0) return
-
-  repairWorkspaceDependencies(
-    sourceDshRoot,
-    missing.map(([, , label]) => label).join(', '),
-    missing.map(([relativeRoot, name]) => join(relativeRoot, 'node_modules', ...name.split('/'))),
-  )
-  for (const [relativeRoot, name] of missing) restoreDshPackageLink(relativeRoot, name)
-  const stillMissing = missing
-    .filter(([relativeRoot, name]) => findDshPackageManifest(relativeRoot, name) === undefined)
-  if (stillMissing.length > 0) {
-    throw new Error(`无法构建桌面 runtime：重装 DSH 依赖后仍缺少 ${stillMissing.map(([, , label]) => label).join(', ')}`)
+  let repaired = false
+  missing = missing.filter(([relativeRoot, name]) => {
+    if (!restoreDshPackageLink(relativeRoot, name)) return true
+    repaired = true
+    return false
+  })
+  if (missing.length > 0) {
+    repairWorkspaceDependencies(
+      sourceDshRoot,
+      missing.map(([, , label]) => label).join(', '),
+      missing.map(([relativeRoot, name]) => join(relativeRoot, 'node_modules', ...name.split('/'))),
+    )
+    for (const [relativeRoot, name] of missing) restoreDshPackageLink(relativeRoot, name)
+    const stillMissing = missing
+      .filter(([relativeRoot, name]) => findDshPackageManifest(relativeRoot, name) === undefined)
+    if (stillMissing.length > 0) {
+      throw new Error(`无法构建桌面 runtime：重装 DSH 依赖后仍缺少 ${stillMissing.map(([, , label]) => label).join(', ')}`)
+    }
+    repaired = true
   }
+  if (repaired) refreshIsolatedDshModuleLinks()
+}
+
+// 预检跑在快照准备之后：修复只落在源树，而快照的包级 node_modules 是 prepare 阶段
+// 逐个链出来的。对上游新增、源树原本连 node_modules 目录都没有的包
+//（test-support/remote-mock），快照里不会有对应软链——不补链，快照内的 tsc/tsdown
+// 仍然 TS2307 找不到刚恢复的依赖。重跑一次 prepare-runtime 即可：指纹未变时它走
+// 缓存分支，只执行 linkWorkspaceModules 把新增目录链进快照，不重编任何产物。
+function refreshIsolatedDshModuleLinks() {
+  runPlatformScript('prepare-runtime.mjs', [sourceDshRoot, dshRoot], 'DSH 隔离运行时依赖链接刷新失败')
 }
 
 // The packaged app must not run pnpm or reach the registry on first launch.
