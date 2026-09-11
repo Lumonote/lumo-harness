@@ -19,8 +19,15 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
 platform_root="$script_dir"
 dsh_root="$repo_root/deepseek-harness"
+dsh_source_lib="$platform_root/deploy/lib/dsh-source.sh"
+# 该文件是随仓库提交的部署源码（.gitignore 用 `!platform/deploy/lib/` 显式放行）。
+# 它缺失只可能是在尚未包含它的旧 ref 上构建；直接报清楚，而不是让 bash 抛晦涩的路径错误。
+if [[ ! -f "$dsh_source_lib" ]]; then
+  echo "build.sh: 缺少 $dsh_source_lib；请在包含该文件的分支/tag 上构建（该文件随仓库提交）。" >&2
+  exit 1
+fi
 # shellcheck source=deploy/lib/dsh-source.sh
-source "$platform_root/deploy/lib/dsh-source.sh"
+source "$dsh_source_lib"
 
 # 子进程入口（xargs -P 并行构建单个镜像）：`$0 __build-image <spec>`，上下文经
 # LUMO_BUILD_* 环境变量恢复。真正的分发在文件末尾，函数定义完之后。

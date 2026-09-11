@@ -769,14 +769,18 @@ func connect(parent context.Context, o options, id identity) error {
 							result.Result = json.RawMessage(`{"converged":true}`)
 						}
 					case "start":
+						body, bodyErr := cmd.runtimeBody()
+						if bodyErr != nil {
+							break
+						}
 						consented := false
 						for _, item := range desired.Artifacts {
-							if item.Name == cmd.Body.Name && item.Version == cmd.Body.Version && allowed[item.Digest] {
+							if item.Name == body.Name && item.Version == body.Version && allowed[item.Digest] {
 								consented = true
 							}
 						}
 						if consented && reconcile() == nil && ctx.Err() == nil && cmd.ExpiresAt.After(time.Now()) {
-							spec, err := installer.RuntimeSpec(cmd.Body.Name, cmd.Body.Version)
+							spec, err := installer.RuntimeSpec(body.Name, body.Version)
 							if err == nil {
 								status, err := supervisor.Start(spec)
 								if err == nil {
@@ -795,7 +799,11 @@ func connect(parent context.Context, o options, id identity) error {
 							}
 						}
 					case "stop":
-						status, err := supervisor.Stop(ctx, cmd.Body.Name+"@"+cmd.Body.Version)
+						body, bodyErr := cmd.runtimeBody()
+						if bodyErr != nil {
+							break
+						}
+						status, err := supervisor.Stop(ctx, body.Name+"@"+body.Version)
 						if err == nil {
 							result.State = "completed"
 							result.Result, _ = json.Marshal(status)

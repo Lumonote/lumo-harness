@@ -84,15 +84,18 @@ cd ../desktop && ./preview-local.sh
 
 `--push` 需配合 `--registry`，推送前会校验 `platform/package.json`、`Chart.yaml`、`tauri.conf.json` 三处版本一致，不一致直接拒绝。桌面包必须在同平台同架构宿主上构建（native wheel 与 Rust 壳都不可跨架构）。
 
-### 自动打包：`.github/workflows/release.yml`
+### 手动打包：`.github/workflows/release.yml`
 
-| 触发 | 产物 |
+打包**只支持手动触发**：push / tag 不再自动运行。在 GitHub Actions 页面选择 `release`
+→ **Run workflow**，再选择要构建的分支或 tag。
+
+| 手动选择的分支 / tag | 产物 |
 | --- | --- |
-| push 到 `main` / 手动 `workflow_dispatch` | 12 个镜像单架构验证构建（**不推送**）；macOS / Windows 安装包上传为 Actions artifact |
-| push 到其他分支 | 桌面**测试包**（artifact 名带 `-test` 后缀），不构建镜像 |
-| push tag `v*` | 镜像多架构推 `ghcr.io/lumonote`，安装包附到 GitHub Release |
+| `main` 或 tag `v*` | macOS / Windows 安装包上传为 Actions artifact |
+| 其他分支 | 桌面**测试包**（artifact 名带 `-test` 后缀） |
+| tag `v*` | 除 artifact 外，安装包附到 GitHub Release |
 
-门禁（typecheck / 测试 / `go vet` / 第一铁律校验）由 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) 单独负责，与产物职责分离。发布前需保证 tag 名（如 `v0.1.0`）与上述三处版本号一致。
+门禁（typecheck / 测试 / `go vet` / 第一铁律校验）由 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) 单独负责，与产物职责分离。发布前需保证 tag 名（如 `v0.1.0`）与 `platform/package.json`、`Chart.yaml`、`tauri.conf.json` 三处版本号一致。
 
 ## 文档
 

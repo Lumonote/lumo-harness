@@ -1,0 +1,5 @@
+# 强制 shell 脚本在所有平台（含 Windows runner）都以 LF 检出。
+# CRLF 会让 bash 把 \r 当成文件名字符，source 时报
+# "No such file or directory"，日志里看不出与真实缺文件的区别。
+*.sh text eol=lf
+*.bash text eol=lf

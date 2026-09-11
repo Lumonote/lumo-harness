@@ -3,7 +3,7 @@
 - 日期：2026-09-09
 - 前置：`platform/build.sh`（一键构建入口）、`.github/workflows/ci.yml`（门禁，不产物）、
   [`2026-09-02-one-click-build-design.md`](./2026-09-02-one-click-build-design.md) §5（`release.yml` 的原始设计，未实现）
-- 状态：设计已确认，未实现
+- 状态：已实现；**触发方式已变更**：由 push/tag 自动触发改为仅 `workflow_dispatch` 手动触发（见 §3.1）。
 
 ---
 
@@ -100,13 +100,10 @@
 
 ```yaml
 on:
-  push:
-    branches: ['**']
-    tags: ['v*']
-  workflow_dispatch:
+  workflow_dispatch:   # 仅手动；push / tag 不自动触发
 ```
 
-| job | runner | 非 `main` 分支 | push 到 `main` / 手动 | 打 tag `v*` |
+| job | runner | 手动选非 `main` 分支 | 手动选 `main` | 手动选 tag `v*` |
 |-----|--------|---------------|----------------------|-------------|
 | `images` | `ubuntu-latest` | 不运行 | `build.sh --targets images`（单架构，**不推**，验证 Dockerfile 可构建） | `--targets images --push --registry ghcr.io/lumonote --platform linux/amd64,linux/arm64 --version ${tag#v}` |
 | `desktop` | matrix `macos-14` → `darwin-arm64`<br>`macos-15-intel` → `darwin-x64`<br>`windows-latest` → `win-x64` | `build.sh --targets <t>` → artifact 名带 `-test` 后缀 | `build.sh --targets <t>` → `upload-artifact` | 同上，artifact 另附到 Release |

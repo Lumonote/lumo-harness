@@ -45,6 +45,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # 只装依赖不构建上游 dsh 时，@deepseek-ai/* 的 package.json types 指向的
+      # lib/types 不存在，平台 typecheck 会全线 TS2307。上游 master 重构期
+      # `pnpm run build` 的 tsdown 主机面是坏的（见 dsh-overrides/prepare-runtime.mjs），
+      # 因此按桌面构建链的等价做法：tsc -b 产出 host lib/types，再合成 lib 入口。
+      - name: Build upstream dsh host outputs
+        run: |
+          (cd ../deepseek-harness && node --max-old-space-size=4096 node_modules/typescript/bin/tsc -b tsconfig.host.json)
+          node desktop/synthesize-dsh-libs.mjs
+
       - name: Typecheck
         run: pnpm run typecheck
 

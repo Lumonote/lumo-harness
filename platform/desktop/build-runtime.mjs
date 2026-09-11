@@ -1134,16 +1134,19 @@ function downloadOfficialNode(version, target) {
     rmSync(archive, { force: true })
     throw new Error(`官方 Node 归档校验失败：${archiveName} 期望 ${expected} 实际 ${actual}`)
   }
-  // Windows 的官方归档是 zip，macOS 是 tar.gz；两者都只取 node/corepack/npm，
-  // 其余文件交由平台工作区的依赖闭包提供。
   const extractedRoot = resolve(cacheDirectory, `node-v${version}-${target}`)
   rmSync(extractedRoot, { recursive: true, force: true })
+  // Windows 的官方归档是 zip，而 Git/MSYS 的 GNU tar 不认 zip（会报
+  // "This does not look like a tar archive"）。改用 PowerShell 解压，路径用
+  // 单引号字面量，既避开 zip 也避开盘符冒号被 tar 当远端分隔符的问题。
+  // macOS/Linux 仍是 tar.gz，继续用 tar 只取 node/corepack/npm。
   const extract = windows
-    // Git/MSYS GNU tar treats the colon in a Windows drive path as the
-    // remote-archive separator (for example, `E:\\...`). Run inside the
-    // cache directory and pass only the archive name so every tar variant
-    // sees a local file, without relying on GNU-only --force-local.
-    ? spawnSync('tar', ['-xf', archiveName], { cwd: cacheDirectory, encoding: 'utf8' })
+    ? spawnSync('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `Expand-Archive -LiteralPath '${archive.replace(/'/g, "''")}' -DestinationPath '${cacheDirectory.replace(/'/g, "''")}' -Force`,
+    ], { cwd: cacheDirectory, encoding: 'utf8' })
     : spawnSync('tar', ['-xzf', archive, '-C', cacheDirectory, '--strip-components', '2',
       `node-v${version}-${target}/bin/node`,
       `node-v${version}-${target}/lib/node_modules/corepack`,
