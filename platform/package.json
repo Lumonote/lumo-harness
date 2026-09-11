@@ -20,7 +20,7 @@
     "desktop:dev": "cd desktop && cargo tauri dev",
     "desktop:build": "cd desktop && cargo tauri build --bundles app",
     "desktop:dmg": "cd desktop && cargo tauri build --bundles app && bash make-dmg.sh",
-    "desktop:win": "cd desktop && cargo tauri build --bundles msi,nsis"
+    "desktop:win": "cd desktop && cargo tauri build --bundles nsis"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

@@ -121,9 +121,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lumo-desktop-${{ matrix.target }}${{ steps.suffix.outputs.suffix }}
-          path: |
-            platform/desktop/target/release/bundle/msi/*.msi
-            platform/desktop/target/release/bundle/nsis/*.exe
+          path: platform/desktop/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
   # 只在 tag 上运行：桌面包全部成功后才发布 Release（fail-closed）。
@@ -145,7 +143,7 @@ jobs:
         run: |
           files=()
           while IFS= read -r f; do files+=("$f"); done < <(
-            find artifacts -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \) | sort
+            find artifacts -type f \( -name '*.dmg' -o -name '*.exe' \) | sort
           )
           test "${#files[@]}" -gt 0 || { echo "没有可发布的安装包" >&2; exit 1; }
           printf '发布 %s 个文件：\n' "${#files[@]}"

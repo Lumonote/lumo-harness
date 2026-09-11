@@ -77,7 +77,7 @@ cd ../desktop && ./preview-local.sh
 ```sh
 ./platform/build.sh                            # 12 个 Docker 镜像（默认）
 ./platform/build.sh --targets darwin-arm64     # macOS 桌面包（dmg）
-./platform/build.sh --targets win-x64          # Windows MSI + NSIS
+./platform/build.sh --targets win-x64          # Windows NSIS 安装包
 ./platform/build.sh --targets all              # 镜像 + 宿主架构桌面包
 ./platform/build.sh --dry-run --targets all    # 只打印将执行的命令
 ```

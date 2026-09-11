@@ -6,7 +6,7 @@
 #
 #   ./platform/build.sh                        # 默认 = --targets images
 #   ./platform/build.sh --targets darwin-arm64
-#   ./platform/build.sh --targets win-x64       # Windows MSI + NSIS 安装包
+#   ./platform/build.sh --targets win-x64       # Windows NSIS 安装包
 #   ./platform/build.sh --targets all          # 镜像 + 本机架构桌面包
 #   ./platform/build.sh --targets images --push --registry ghcr.io/lumonote \
 #                       --platform linux/amd64,linux/arm64
@@ -306,19 +306,20 @@ build_desktop() {
       fi
       ;;
     win-x64)
-      run env "LUMO_DESKTOP_TARGET=$target" cargo tauri build --bundles msi,nsis
+      # 只出 NSIS。runtime 约 1.3GB / 4.6 万文件，WiX 3.14 的 light.exe（32 位）
+      # 在最终生成 CAB 时失败——Tauri 默认吞掉 light.exe 的 stderr，只报
+      # "failed to run ...\light.exe"（tauri-apps/tauri#7372、#12085）。NSIS 流式
+      # 打包同一份 payload 可正常产出，因此 Windows 交付 NSIS 安装包。
+      run env "LUMO_DESKTOP_TARGET=$target" cargo tauri build --bundles nsis
       local bundle_root="$platform_root/desktop/target/release/bundle"
       if [[ $dry_run -eq 1 ]]; then
-        printf '+ test -n "$(find %q -type f -name "*.msi" -print -quit)"  # Windows MSI\n' "$bundle_root/msi"
         printf '+ test -n "$(find %q -type f -name "*.exe" -print -quit)"  # Windows NSIS\n' "$bundle_root/nsis"
       else
-        local msi nsis
-        msi="$(find "$bundle_root/msi" -type f -name '*.msi' -print -quit 2>/dev/null || true)"
+        local nsis
         nsis="$(find "$bundle_root/nsis" -type f -name '*.exe' -print -quit 2>/dev/null || true)"
-        [[ -n "$msi" ]] || die "Windows MSI 产物不存在：$bundle_root/msi"
         [[ -n "$nsis" ]] || die "Windows NSIS 产物不存在：$bundle_root/nsis"
         echo "Windows 安装包构建完成："
-        printf '  %s\n  %s\n' "$msi" "$nsis"
+        printf '  %s\n' "$nsis"
       fi
       ;;
     *) die "内部错误：未知桌面 target：$target" ;;

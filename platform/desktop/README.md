@@ -60,7 +60,8 @@ Windows 使用同一个总入口，在 Git Bash 中执行：
 
 也可以在 Windows 构建机的 `platform` 目录执行 `pnpm run desktop:win`。构建需要 Rust
 MSVC 工具链、Node.js、Python 3.10+、Corepack 和 WebView2；产物位于
-`platform/desktop/target/release/bundle/msi` 与 `platform/desktop/target/release/bundle/nsis`。
+`platform/desktop/target/release/bundle/nsis`。Windows 只出 NSIS：runtime 约 1.3GB，
+WiX `light.exe` 生成 CAB 会失败，NSIS 可正常打包同一份 payload。
 Windows 包内使用 `runtime/lumo-runtime.cmd`、`node.exe` 和 `python/python.exe`，运行时不依赖
 当前 checkout 或开发机上的 Node。
 
@@ -176,7 +177,7 @@ Windows 直接使用仓库中的 PNG 图标，不依赖 bash、Swift 或 macOS �
 - `icons/icon.png`：1024×1024，内容占 824×824 的圆角矩形（圆角约 22.5%），四周透明，
   与 macOS 系统图标同一规范——直接拿方图当图标就是 Dock 里那个“太正方体”的效果；
 - `icons/Lumo.icns`：完整尺寸集，bundler 原样使用；
-- `icons/icon.ico`：Windows MSI/NSIS 使用的 ICO，构建前由 `before-build.mjs` 从同一 PNG 源生成；
+- `icons/icon.ico`：Windows NSIS 使用的 ICO，构建前由 `before-build.mjs` 从同一 PNG 源生成；
 - `icons/tray.png`：44×44 单色模板图标，供菜单栏使用；
 - `desktop-assets/lumo-logo.png`：512×512 品牌蓝圆盘徽章，供启动页 `boot.html` 使用，
   同时被 `dsh-overrides/brand-web.mjs` 拷成 `/branding/logo.png`（favicon 与工作台品牌标）。

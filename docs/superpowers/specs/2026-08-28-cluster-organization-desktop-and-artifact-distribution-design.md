@@ -71,7 +71,7 @@ requireClusterReady(request):
 
 ### 3.1 PC 应用边界
 
-PC 端软件由安装包（Windows MSI、macOS PKG/DMG、Linux 包）交付，包含用户界面、受限的本地 Worker 运行时、更新器和节点证书存储。它不是控制面副本，也不直接访问 PostgreSQL、Vault、Scheduler 管理接口或任意 Nacos namespace。
+PC 端软件由安装包（Windows NSIS、macOS PKG/DMG、Linux 包）交付，包含用户界面、受限的本地 Worker 运行时、更新器和节点证书存储。它不是控制面副本，也不直接访问 PostgreSQL、Vault、Scheduler 管理接口或任意 Nacos namespace。
 
 节点分两类：
 
