@@ -62,6 +62,22 @@ git -C deepseek-harness status --porcelain -uno   # 必须无输出
 | 集群调度 | Scheduler 支持 EDF 截止时间、加权公平队列、能力值匹配、硬反亲和与安全抢占 |
 | 跨节点协同 | Seam Proxy 把平台新增的能力 seam 网络可达；远程子智能体放置、`ctx.jobs` 跨节点取消、复制的会话日志 |
 
+## 产品一览
+
+以下推广图概览工作台与核心能力，点击图片可查看原图；真实运行截图见下方「界面与功能」。
+
+[![工作台与上下文统计](./docs/guide/assets/ads/deepseek-harness-ad-01-workbench.png)](./docs/guide/assets/ads/deepseek-harness-ad-01-workbench.png)
+
+[![技能市场 / 插件市场](./docs/guide/assets/ads/deepseek-harness-ad-02-marketplace.png)](./docs/guide/assets/ads/deepseek-harness-ad-02-marketplace.png)
+
+[![PPT 与开放设计](./docs/guide/assets/ads/deepseek-harness-ad-03-ppt-design.png)](./docs/guide/assets/ads/deepseek-harness-ad-03-ppt-design.png)
+
+[![创造模式：一句话生成插件](./docs/guide/assets/ads/deepseek-harness-ad-04-creation-mode.png)](./docs/guide/assets/ads/deepseek-harness-ad-04-creation-mode.png)
+
+[![桌面架构拆解](./docs/guide/assets/ads/deepseek-harness-ad-05-architecture.png)](./docs/guide/assets/ads/deepseek-harness-ad-05-architecture.png)
+
+[![智能体能力与工作流程](./docs/guide/assets/ads/deepseek-harness-ad-06-agent-capabilities.png)](./docs/guide/assets/ads/deepseek-harness-ad-06-agent-capabilities.png)
+
 ## 界面与功能
 
 以下截图取自本地单机版的真实运行态。截图中的技能 / 插件数量与版本是运行快照，以实际版本为准。
