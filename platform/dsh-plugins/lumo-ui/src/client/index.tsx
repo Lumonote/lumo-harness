@@ -1326,6 +1326,26 @@ function SkillHubCard({ children, tone, index }: { children: ReactNode; tone: st
   return <article className="lumo-skillhub-card" data-tone={tone} style={{ '--lumo-order': String(index) } as CSSProperties}>{children}</article>
 }
 
+/**
+ * 宿主 dsh 当前生效的模型（provider + model）。
+ *
+ * 创建 / 编辑专家不再让用户手填 Provider 与模型，而是沿用「当前选中的模型」。
+ * 该状态归宿主所有：`ctx.sessions` 给出当前会话，`ctx.modelDirectories` 给出该会话
+ * 解析后的生效模型（未显式选过时回落到模型目录的默认值）。
+ *
+ * Lumo 的 Surface 拿不到 ctx（`SkillHubSurface()` 无 props，`shell.overlay` 的
+ * PropsRuntime 只带 input / inputActions），所以由 `apply()` 在装配时把这个解析器
+ * 挂到模块级变量上。**按需解析而不是订阅**：表单打开与提交各解析一次，
+ * 避免为一个只读展示去维护跨插件的订阅生命周期。
+ */
+interface HostModelSelection { provider: string; model: string }
+
+let hostModelResolver: (() => HostModelSelection | undefined) | undefined
+
+function resolveHostModel(): HostModelSelection | undefined {
+  try { return hostModelResolver?.() } catch { return undefined }
+}
+
 function SkillHubSurface() {
   const [tab, setTab] = useState<SkillHubTab>('专家')
   const [query, setQuery] = useState('')
@@ -1352,8 +1372,16 @@ function SkillHubSurface() {
   const [editingExpert, setEditingExpert] = useState<AgentPreset | null>(null)
   const [savingExpert, setSavingExpert] = useState(false)
   const [deletingExpert, setDeletingExpert] = useState('')
+  // 宿主当前选中的模型；解析不到时保留手填字段（否则服务端 requiredString 会直接 400）。
+  const [hostModel, setHostModel] = useState<HostModelSelection | undefined>(undefined)
   const bridge = useNativeConversationBridge()
   const allLabel = '全部'
+  // 表单打开时解析一次宿主当前模型；提交时会再解析一次（见 createExpert / updateExpert），
+  // 这样表单开着时用户切换了模型也不会写进过期的值。
+  useEffect(() => {
+    if (!createExpertOpen && editingExpert === null) { setHostModel(undefined); return }
+    setHostModel(resolveHostModel())
+  }, [createExpertOpen, editingExpert])
   const listEndRef = useRef<HTMLDivElement>(null)
   const loadMoreRef = useRef<() => void>(() => {})
   const searchSeq = useRef(0)
@@ -1419,10 +1447,16 @@ function SkillHubSurface() {
     const fields = new FormData(form)
     const name = String(fields.get('name') ?? '').trim()
     const description = String(fields.get('description') ?? '').trim()
-    const provider = String(fields.get('provider') ?? '').trim()
-    const modelRef = String(fields.get('model_ref') ?? '').trim()
-    if (!name || !description || !provider || !modelRef) {
-      setNotice('请填写专家名称、职责、Provider 和模型。')
+    // 沿用宿主当前选中的模型；解析不到时才回落到手填字段（那时表单会显示这两个输入）。
+    const active = resolveHostModel() ?? hostModel
+    const provider = active?.provider ?? String(fields.get('provider') ?? '').trim()
+    const modelRef = active?.model ?? String(fields.get('model_ref') ?? '').trim()
+    if (!name || !description) {
+      setNotice('请填写专家名称与职责说明。')
+      return
+    }
+    if (!provider || !modelRef) {
+      setNotice('没有解析到当前选中的模型，请先选择模型，或填写 Provider 与模型。')
       return
     }
     setCreatingExpert(true); setNotice('')
@@ -1450,6 +1484,8 @@ function SkillHubSurface() {
     event.preventDefault()
     if (editingExpert === null || savingExpert) return
     const fields = new FormData(event.currentTarget)
+    // 与创建一致：沿用宿主当前选中的模型，解析不到才回落到手填字段。
+    const active = resolveHostModel() ?? hostModel
     setSavingExpert(true); setNotice('')
     try {
       const updated = await api<AgentPreset>(`/lumo/api/agent-presets/${encodeURIComponent(editingExpert.id)}`, {
@@ -1457,7 +1493,7 @@ function SkillHubSurface() {
         body: JSON.stringify({
           revision: editingExpert.revision,
           name: String(fields.get('name') ?? '').trim(), description: String(fields.get('description') ?? '').trim(),
-          provider: String(fields.get('provider') ?? '').trim(), model_ref: String(fields.get('model_ref') ?? '').trim(),
+          provider: active?.provider ?? String(fields.get('provider') ?? '').trim(), model_ref: active?.model ?? String(fields.get('model_ref') ?? '').trim(),
           project_id: String(fields.get('project_id') ?? '').trim(), system_prompt_ref: String(fields.get('system_prompt_ref') ?? '').trim(),
           max_concurrency: Number(fields.get('max_concurrency') ?? 1),
         }),
@@ -1566,8 +1602,12 @@ function SkillHubSurface() {
       <header><div><span>CREATE EXPERT</span><h2>创建一个专属专家</h2><p>先定义职责和模型，创建后可在项目中继续配置技能、知识与连接器。</p></div><button type="button" className="lumo-quiet" onClick={() => setCreateExpertOpen(false)} aria-label="关闭新建专家">×</button></header>
       <div className="lumo-expert-create-grid">
         <label><span>专家名称</span><input name="name" required maxLength={160} placeholder="例如：合同复核专家" /></label>
-        <label><span>Provider</span><select name="provider" defaultValue="openai"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="deepseek">DeepSeek</option><option value="custom">自定义 Provider</option></select></label>
-        <label><span>模型</span><input name="model_ref" required defaultValue="gpt-5" placeholder="例如：gpt-5" /></label>
+        {hostModel === undefined
+          ? <>
+            <label><span>Provider</span><select name="provider" defaultValue="openai"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="deepseek">DeepSeek</option><option value="custom">自定义 Provider</option></select></label>
+            <label><span>模型</span><input name="model_ref" required defaultValue="gpt-5" placeholder="例如：gpt-5" /></label>
+          </>
+          : <div className="wide lumo-expert-model"><span>模型</span><p>沿用当前选中的模型 <b>{hostModel.provider}</b> · <b>{hostModel.model}</b></p></div>}
         <label><span>项目范围</span><input name="project_id" placeholder="留空则对整个 Realm 生效" /></label>
         <label className="wide"><span>职责说明</span><textarea name="description" required maxLength={500} rows={3} placeholder="说明它负责什么、如何判断结果，以及哪些事项需要交回给人。" /></label>
         <label className="wide"><span>系统提示引用 <i>可选</i></span><input name="system_prompt_ref" maxLength={256} placeholder="受保护配置中的引用名称" /></label>
@@ -1579,8 +1619,12 @@ function SkillHubSurface() {
       <header><div><span>EDIT EXPERT</span><h2>编辑专家</h2><p>修改会保存到专家目录，并立即反映在当前列表中。</p></div><button type="button" className="lumo-quiet" onClick={() => setEditingExpert(null)} aria-label="关闭编辑专家">×</button></header>
       <div className="lumo-expert-create-grid">
         <label><span>专家名称</span><input name="name" required maxLength={160} defaultValue={editingExpert.name} /></label>
-        <label><span>Provider</span><input name="provider" required maxLength={128} defaultValue={editingExpert.provider} /></label>
-        <label><span>模型</span><input name="model_ref" required maxLength={256} defaultValue={editingExpert.model_ref} /></label>
+        {hostModel === undefined
+          ? <>
+            <label><span>Provider</span><input name="provider" required maxLength={128} defaultValue={editingExpert.provider} /></label>
+            <label><span>模型</span><input name="model_ref" required maxLength={256} defaultValue={editingExpert.model_ref} /></label>
+          </>
+          : <div className="wide lumo-expert-model"><span>模型</span><p>保存后沿用当前选中的模型 <b>{hostModel.provider}</b> · <b>{hostModel.model}</b>；原为 {editingExpert.provider} · {editingExpert.model_ref}</p></div>}
         <label><span>最大并发</span><input name="max_concurrency" required type="number" min={1} max={1000} defaultValue={editingExpert.max_concurrency} /></label>
         <label><span>项目范围</span><input name="project_id" maxLength={128} defaultValue={editingExpert.project_id ?? ''} placeholder="留空则对整个 Realm 生效" /></label>
         <label><span>系统提示引用</span><input name="system_prompt_ref" maxLength={256} defaultValue={editingExpert.system_prompt_ref ?? ''} /></label>
@@ -2659,6 +2703,24 @@ interface LumoInputTriggerSource {
 }
 interface LumoInputTriggerService { registerSource(source: LumoInputTriggerSource): () => void }
 
+/**
+ * `ctx.sessions` 的最小投影：只用到「当前会话 id」。无会话时为 undefined
+ * （见 ui-conversation 的 `sessions.list.getSnapshot().current`）。
+ */
+interface LumoHostSessions {
+  list: { getSnapshot(): { current?: string | null } }
+}
+
+/**
+ * `ctx.modelDirectories` 的最小投影。`directoryFor` 返回该会话共享的模型目录
+ * （与 /model 弹窗同一份状态），其 store 快照的 `current` 即生效模型——未显式
+ * 选过时它已经回落到目录默认值，目录尚未加载完则为 null。未知会话会抛错，
+ * 由 resolveHostModel 的 try/catch 兜住并退回手填字段。
+ */
+interface LumoHostModelDirectories {
+  directoryFor(sessionId: string): { store: { getSnapshot(): { current?: { provider?: string; model?: string } | null } } }
+}
+
 function creativeCommandClaim(name: string): LumoCommandClaim | undefined {
   const command = lumoCreativeCommands.find(item => item.name === name)
   if (command === undefined) return undefined
@@ -2725,5 +2787,24 @@ export function apply(ctx: ClientContext): void {
     const inputTriggers = triggerCtx.get('inputTriggers') as LumoInputTriggerService | undefined
     if (inputTriggers === undefined) return
     triggerCtx.effect(() => inputTriggers.registerSource(lumoCreativeCommandSource), 'lumo-ui: creative slash commands')
+  })
+  // 创建 / 编辑专家沿用「宿主当前选中的模型」：sessions 给出当前会话，modelDirectories
+  // 给出该会话解析后的生效模型。Surface 拿不到 ctx，所以在这里把解析器挂到模块级变量上
+  // （见 hostModelResolver 的说明）。与 inputTriggers 同理用 ctx.inject 等这两个服务就绪，
+  // 避免和它们的装配顺序耦合；任一缺失时解析器保持 undefined，表单会自动退回手填字段。
+  ctx.inject(['sessions', 'modelDirectories'], (modelCtx) => {
+    const sessions = modelCtx.get('sessions') as LumoHostSessions | undefined
+    const modelDirectories = modelCtx.get('modelDirectories') as LumoHostModelDirectories | undefined
+    if (sessions === undefined || modelDirectories === undefined) return
+    hostModelResolver = () => {
+      const sessionId = sessions.list.getSnapshot().current
+      if (sessionId === undefined || sessionId === null) return undefined
+      const current = modelDirectories.directoryFor(sessionId).store.getSnapshot().current
+      if (current === undefined || current === null) return undefined
+      const provider = String(current.provider ?? '').trim()
+      const model = String(current.model ?? '').trim()
+      return provider === '' || model === '' ? undefined : { provider, model }
+    }
+    modelCtx.effect(() => () => { hostModelResolver = undefined }, 'lumo-ui: host model selection bridge')
   })
 }

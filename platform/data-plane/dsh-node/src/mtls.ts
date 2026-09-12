@@ -5,7 +5,7 @@
  * assertMutualTLSFileConfig / readMutualTLSFiles 等运行时校验，改契约先改它。
  *
  * 为什么镜像而不是相对导入：dsh-node 在打包 runtime 里是以 .ts 源码被 tsx 直接
- * 加载的（tauri.conf.json 把 target/lumo-runtime 映射到 Resources/runtime），
+ * 加载的（tauri.conf.json 把 lumo-runtime 映射到 Resources/runtime），
  * `../../../shared/...` 会落到 Resources/ 下——那里没有 shared。今天这条是
  * `import type`，tsx 会擦除所以侥幸不炸；但一旦有人把它改成值导入（引一个校验
  * 函数），打包态就会以 ERR_MODULE_NOT_FOUND 在启动时崩掉，与 worker-binding.ts

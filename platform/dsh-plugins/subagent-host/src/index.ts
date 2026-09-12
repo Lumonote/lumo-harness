@@ -108,6 +108,7 @@ export async function registerSubagentHost(ctx: Context, config: SubagentHostCon
   const executions = new Set<Promise<void>>()
   const persistence = new AbortController()
   let delivery: ReturnType<typeof startCallbackDelivery> | undefined
+  let governed: ReturnType<typeof startGovernedDispatch> | undefined
   const server: Server = createSubagentHost({
     host,
     port,
@@ -115,6 +116,7 @@ export async function registerSubagentHost(ctx: Context, config: SubagentHostCon
     tokens,
     callbackOrigins,
     governedOnly: !!config.runtimeReport,
+    stopGoverned: (realm, runId) => governed?.stop(realm, runId),
     runs,
     // 已发布会话 = 已结集(运行表条目已摘)或他处占用的幂等键:重放闸(见 server.ts)
     sessionExists: (childId) => ctx.agents.get(SessionId(childId)) !== undefined,
@@ -138,7 +140,6 @@ export async function registerSubagentHost(ctx: Context, config: SubagentHostCon
 
   ctx.effect(() => {
     let reports: ReturnType<typeof startRuntimeReports> | undefined
-    let governed: ReturnType<typeof startGovernedDispatch> | undefined
     server.on('error', (e: unknown) => {
       // 端口占用等致命错误:必须响亮,否则节点看着活着却没有子代理放置能力
       ctx.logger.error('subagent-host: 监听 %s:%d 失败: %s', host, port, e)
@@ -159,8 +160,8 @@ export async function registerSubagentHost(ctx: Context, config: SubagentHostCon
     return async () => {
       server.closeAllConnections?.()
       server.close()
-      await reports?.close()
       await governed?.close()
+      await reports?.close()
       persistence.abort()
       for (const run of runs.values()) run.cancel()
       await Promise.allSettled([...executions])

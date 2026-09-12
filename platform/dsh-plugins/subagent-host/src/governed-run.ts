@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { setTimeout as delay } from 'node:timers/promises'
-import { PgGovernedDispatch, type GovernedExecution, type GovernedResult } from './governed-dispatch.ts'
+import { ExecutionConflictError, type PgGovernedDispatch, type GovernedExecution, type GovernedResult } from './governed-dispatch.ts'
 import { assertExecutionPreset, type WorkerBinding } from './worker-binding.ts'
 import { readChildResult } from './tturn.ts'
 
@@ -15,14 +15,16 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
     session_ref: execution.sessionRef, node_id: nodeId, state: 'FAILED', summary: '' }
   let dispose: (() => Promise<void>) | undefined
   let detach: (() => void) | undefined
+  let signal = stop
   try {
+    if (execution.cancelled) return { ...result, state: 'CANCELLED', summary: 'Task cancelled before execution' }
     assertExecutionPreset(binding, execution.task.realm, execution.preset)
     if (execution.task.project_id !== binding.projectId) throw new Error('task project does not match the installed runtime')
     const depth = execution.task.intent_contract?.depth ?? 0
     if (!Number.isSafeInteger(depth) || depth < 0 || depth > execution.preset.max_delegation_depth) throw new Error('invalid task delegation depth')
     const remaining = execution.deadlineMS > 0 ? execution.deadlineMS - Date.now() : Infinity
     if (remaining <= 0) return { ...result, state: 'CANCELLED', summary: 'Task deadline elapsed before execution' }
-    const signal = AbortSignal.any([stop, AbortSignal.timeout(Math.min(remaining, execution.preset.timeout_seconds * 1000))])
+    signal = AbortSignal.any([stop, AbortSignal.timeout(Math.min(remaining, execution.preset.timeout_seconds * 1000))])
     signal.throwIfAborted()
     const handle = await ctx.agents.create({
       sessionId: SessionId(execution.sessionRef), signal,
@@ -45,7 +47,10 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
     await handle.agent.whenIdle()
     const body = readChildResult(handle.agent, execution.runId)
     result.state = signal.aborted || body.stopReason === 'aborted' ? 'CANCELLED' : body.stopReason === 'completed' ? 'COMPLETED' : 'FAILED'
-    result.summary = [...(body.output ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')].slice(0, 16000).join('')
+    const text = (body.output ?? []).flatMap(block =>
+      block && typeof block === 'object' && 'type' in block && block.type === 'text' &&
+        'text' in block && typeof block.text === 'string' ? [block.text] : [])
+    result.summary = [...text.join('\n')].slice(0, 16000).join('')
     if (body.output?.length) result.output = body.output
     if (!result.summary) result.summary = `Agent stopped: ${body.stopReason ?? 'error'}`
     if (result.state === 'COMPLETED' && !body.output?.length) {
@@ -58,23 +63,26 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
     return result
   } catch (error) {
     ctx.logger.warn('governed task %s stopped: %s', execution.runId, error)
-    return { ...result, state: stop.aborted ? 'CANCELLED' : 'FAILED', summary: stop.aborted ? 'Execution stopped by runtime' : 'Agent execution failed; inspect its session log' }
+    return { ...result, state: signal.aborted ? 'CANCELLED' : 'FAILED', summary: signal.aborted ? 'Execution cancelled or timed out' : 'Agent execution failed; inspect its session log' }
   } finally {
     detach?.()
     await dispose?.().catch(error => ctx.logger.warn('governed session disposal failed: %s', error))
   }
 }
 
-export function startGovernedDispatch(ctx: Context, store: PgGovernedDispatch, onError: (error: unknown) => void) {
+type GovernedStore = Pick<PgGovernedDispatch, 'config' | 'take' | 'shouldStop' | 'save' | 'recover' | 'deliver'>
+
+export function startGovernedDispatch(ctx: Context, store: GovernedStore, onError: (error: unknown) => void) {
   const active = new Map<string, { execution: GovernedExecution; stop: AbortController; done: Promise<void> }>()
   const closing = new AbortController()
   let running: Promise<void> | undefined
+  let delivering: Promise<void> | undefined
   let closed = false
   const persist = async (execution: GovernedExecution, result: GovernedResult) => {
     for (;;) {
       try { await store.save(execution, result); return } catch (error) {
+        if (closing.signal.aborted || error instanceof ExecutionConflictError) throw error
         onError(error)
-        if (closing.signal.aborted) throw error
         await delay(1000, undefined, { signal: closing.signal }).catch(() => {})
       }
     }
@@ -82,8 +90,8 @@ export function startGovernedDispatch(ctx: Context, store: PgGovernedDispatch, o
   const tick = () => {
     if (closed || running) return
     running = (async () => {
-      await store.deliver()
       for (const item of active.values()) if (await store.shouldStop(item.execution)) item.stop.abort()
+      await store.recover()
       while (!closed && active.size < store.config.capacity) {
         const execution = await store.take()
         if (!execution) break
@@ -93,12 +101,24 @@ export function startGovernedDispatch(ctx: Context, store: PgGovernedDispatch, o
           .then(result => persist(execution, result)).catch(onError).finally(() => active.delete(execution.runId))
         active.set(execution.runId, { execution, stop, done })
       }
-    })().catch(onError).finally(() => { running = undefined })
+    })().catch(error => {
+      // A failed authority read must not let an unfenced model keep working.
+      for (const item of active.values()) item.stop.abort()
+      onError(error)
+    }).finally(() => { running = undefined })
   }
-  const timer = setInterval(tick, 1000)
+  const deliver = () => {
+    if (closed || delivering) return
+    delivering = store.deliver().catch(onError).finally(() => { delivering = undefined })
+  }
+  const timer = setInterval(() => { tick(); deliver() }, 1000)
   timer.unref()
   tick()
+  deliver()
   return {
+    stop(realm: string, runId: string) {
+      if (realm === store.config.realm) active.get(runId)?.stop.abort()
+    },
     async close() {
       closed = true
       clearInterval(timer)
@@ -107,6 +127,7 @@ export function startGovernedDispatch(ctx: Context, store: PgGovernedDispatch, o
       await running
       for (const item of active.values()) item.stop.abort()
       await Promise.allSettled([...active.values()].map(item => item.done))
+      await delivering
       await store.deliver().catch(onError)
     },
   }

@@ -14,6 +14,7 @@ require_value() { [[ -n "${!1:-}" ]] || fail "$1 必须指向目标环境，不�
 
 require_command curl
 require_command go
+require_command pnpm
 require_value LUMO_TEST_PG_DSN
 require_value LUMO_TEST_RMQ_ENDPOINT
 require_value LUMO_TEST_NACOS_HEALTH_URL
@@ -49,6 +50,7 @@ run_go_integration() {
 # Scheduler lease expiry is the real fencing/takeover check; the session-log
 # suite exercises two writer identities against the same PG log for resume.
 run_go_integration scheduler ./internal/integration
+run_go_integration governance ./internal/store
 run_go_integration flows ./internal/integration
 run_go_integration projects ./internal/integration
 run_go_integration registry ./internal/integration
@@ -58,5 +60,10 @@ run_go_integration usage-ledger ./internal/integration
 
 echo "cluster-acceptance: running real PG session resume/fencing tests"
 (cd "$root_dir/platform" && pnpm exec vitest run dsh-plugins/session-log/__tests__/pg-log.spec.ts)
+
+echo "cluster-acceptance: running governed dispatch/recovery and durable callback transactions"
+(cd "$root_dir/platform" && pnpm exec vitest run \
+  dsh-plugins/subagent-host/__tests__/governed-dispatch.pg.spec.ts \
+  dsh-plugins/subagent-remote/__tests__/receipts.pg.spec.ts)
 
 echo "cluster-acceptance: passed (real dependencies and isolated PG schema)"

@@ -52,6 +52,8 @@ export interface SubagentHostOptions {
   callbackOrigins: ReadonlySet<string>
   /** A pinned Worker accepts tasks only through the durable governed inbox. */
   governedOnly?: boolean
+  /** Authenticated cancellation of a governed execution (same realm). */
+  stopGoverned?: (realm: string, runId: string) => void
   /** 承载侧运行表:`key = runKeyOf(realm, childId)`。host 读,run.ts 写。 */
   runs: RunRegistry
   /**
@@ -125,6 +127,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: Subage
     // 发布前窗口:child 还在一次本地 create 内,stop 是 no-op——child 照常跑完并
     // 回执 completed;该窗口的取消语义随行 6 控制信号通道(JobControlSeam),本切片不做。
     options.runs.get(runKeyOf(caller.realm, childId))?.cancel()
+    options.stopGoverned?.(caller.realm, childId)
     respondOk(res, { ok: true })
   } catch (e) {
     const code = seamErrorCode(e)

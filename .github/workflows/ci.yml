@@ -13,6 +13,17 @@ on:
 jobs:
   platform:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lumo_test
+          POSTGRES_PASSWORD: lumo_test
+          POSTGRES_DB: lumo_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U lumo_test -d lumo_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     defaults:
       run:
         working-directory: platform
@@ -60,6 +71,11 @@ jobs:
       - name: Unit tests
         run: pnpm run test
 
+      - name: Governed dispatch and durable callback transactions
+        env:
+          LUMO_TEST_PG_DSN: postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable
+        run: pnpm exec vitest run dsh-plugins/subagent-host/__tests__/governed-dispatch.pg.spec.ts dsh-plugins/subagent-remote/__tests__/receipts.pg.spec.ts
+
       - name: Verify upstream dsh tree is pristine (第一铁律)
         run: |
           describe="$(git -C ../deepseek-harness describe --tags --dirty)"
@@ -69,6 +85,17 @@ jobs:
 
   control-plane-go:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lumo_test
+          POSTGRES_PASSWORD: lumo_test
+          POSTGRES_DB: lumo_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U lumo_test -d lumo_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     strategy:
       fail-fast: false
       matrix:
@@ -99,6 +126,8 @@ jobs:
         run: go build ./...
 
       - name: Test
+        env:
+          LUMO_TEST_PG_DSN: ${{ contains(fromJSON('["governance","scheduler"]'), matrix.module) && 'postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable' || '' }}
         run: go test ./...
 
       - name: Vet

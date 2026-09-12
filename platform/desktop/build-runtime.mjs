@@ -30,6 +30,17 @@ const repoRoot = resolve(desktopRoot, '..', '..')
 // Snapshot preparation, compilation and runtime staging share output paths.
 // Hold the lock for the entire process, including failure cleanup.
 acquireBuildLock(resolve(repoRoot, 'platform', '.build', 'desktop-runtime.lock'))
+
+// runtime 暂存目录早先放在 cargo 的 target/ 下（见下方 stagingRoot 的说明），CI 的
+// rust-cache 会把 target/ 整棵当缓存区，旧缓存里因此留着那棵 46k 文件的树，恢复回来
+// 后仍会让当轮 rust-cache 去扫它并刷出 ENOENT 报错。这里在构建最早期先清掉，让修复
+// 在缓存自然过期之前就生效；新路径在 target/ 之外，不受影响。
+rmSync(resolve(desktopRoot, 'target', 'lumo-runtime'), {
+  recursive: true,
+  force: true,
+  maxRetries: 4,
+  retryDelay: 500,
+})
 // CI and local product builds may project an already-modified developer
 // checkout into a clean temporary commit. Accept that clean snapshot directly
 // so the source checkout never needs to be renamed, linked, or edited.
@@ -66,7 +77,14 @@ const nodeCacheRoot = resolve(repoRoot, 'platform', '.build', 'node')
 // PPT venv 按 target 分目录：native wheel 决定了 x64 venv 只能在 x64 环境里建。
 const pptVenvRoot = resolve(bundledSkillsRoot, 'ppt-master', `.venv-${buildTarget}`)
 console.log(`桌面 runtime 构建目标：${buildTarget}（宿主 ${hostPlatform()}-${hostArch()}）`)
-const stagingRoot = resolve(desktopRoot, 'target', 'lumo-runtime')
+// 暂存目录必须留在 cargo 的 target/ 之外。CI 的缓存动作 rust-cache 把 target/
+// 整棵当作 cargo 缓存区扫描并清理，而它在遇到名为 tests 的目录时，会认为那是 Rust
+// 测试工具留下的嵌套工作区，进而去 opendir <tests>/target 与 <tests>/trybuild
+// （见其 cleanup.ts 的 cleanProfileTarget）。本载荷有 46k 个文件、其中若干第三方包
+// 自带 tests 目录，于是每轮构建都刷出一批 ENOENT 报错；同时让缓存平白多传 1.3GB，
+// 而载荷在下面每次构建都会被 rmSync 重建——缓存它本就毫无收益。放到 desktop/ 下
+// 既避开 target/，也让 tauri.conf.json 的 resources 仍能用不含 ../ 的相对路径。
+const stagingRoot = resolve(desktopRoot, 'lumo-runtime')
 const modulesRoot = resolve(stagingRoot, 'node_modules')
 const upstreamPluginRoot = resolve(desktopRoot, 'target', 'lumo-upstream-plugins')
 const upstreamPluginModulesRoot = resolve(upstreamPluginRoot, 'node_modules')
@@ -81,6 +99,9 @@ const gracefullyOptionalDependencyNames = new Set(['metaharness'])
 // 裁剪规则见下方 pruneStagedRuntime；目录名单提前到常量区，避免顶层调用时撞上 TDZ。
 const PRUNE_DIRECTORY_NAMES = new Set(['test', 'tests', '__tests__', 'docs', 'doc', 'example', 'examples', '.github'])
 // 这两个名字不会出现在可 require 的路径里，任意深度都可裁；其余只裁包根一层（见 pruneDeadWeight）。
+// `tests` 不能升到「任意深度」：zod/src/v3/benchmarks/primitives.ts 就 import 了
+// ../tests/Mocker.js，全深度裁剪会删掉被引用的文件。嵌套 tests 目录的处置见
+// stagingRoot 的说明——靠把载荷挪出 cargo target 目录解决，而不是删文件。
 const PRUNE_ANYWHERE_DIRECTORY_NAMES = new Set(['__tests__', '.github'])
 const upstreamPluginSpecs = [
   'dshmarket@1.41.0',

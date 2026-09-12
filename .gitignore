@@ -12,6 +12,7 @@ deepseek-harness/
 .serena/
 .omc/
 .workbuddy/
+.workbuddy-ai/
 
 # ── 平台侧的可复现装配物：能被脚本重建的东西不入库 ──────────────────────
 # 固定上游 Skill 快照。由 platform/upstream/install-components.sh 按
@@ -24,6 +25,12 @@ platform/upstream/skills/
 # Tauri 由 cargo tauri 生成的能力/ACL schema
 platform/desktop/gen/schemas/
 platform/desktop/icons/icon.ico
+
+# 桌面 runtime 暂存树：由 build-runtime.mjs 每次构建重建，经 tauri.conf.json 的
+# resources 打进包里。**刻意不放在 target/ 下** —— CI 的 rust-cache 会把 target/
+# 整棵当缓存区扫描，既会多传 1.3GB 又会因第三方包的 tests 目录刷出 ENOENT 报错。
+# 不再被无锚点的 `target/` 规则覆盖，所以必须在这里显式忽略。
+platform/desktop/lumo-runtime/
 
 
 # Byte-compiled / optimized / DLL files

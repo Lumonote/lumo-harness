@@ -28,9 +28,9 @@ export interface ExecutionPreset {
 
 export function assertWorkerBinding(binding: WorkerBinding): void {
   const id = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
-  if (![binding.agentId, binding.userId, binding.projectId].every(value => id.test(value)) ||
+  if (!binding || ![binding.agentId, binding.userId, binding.projectId].every(value => typeof value === 'string' && id.test(value)) ||
       !Number.isSafeInteger(binding.presetRevision) || binding.presetRevision < 1 ||
-      !binding.provider?.trim() || !binding.model?.trim()) {
+      typeof binding.provider !== 'string' || !binding.provider.trim() || typeof binding.model !== 'string' || !binding.model.trim()) {
     throw new Error('worker runtime requires a fixed Agent, owner, project, revision and model route')
   }
 }

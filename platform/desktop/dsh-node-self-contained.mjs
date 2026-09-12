@@ -2,7 +2,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 
 // dsh-node 在打包 runtime 里以 .ts 源码被 tsx 直接加载（tauri.conf.json 把
-// target/lumo-runtime 映射到 Resources/runtime），所以它的值导入只能落在包内，或者
+// lumo-runtime 映射到 Resources/runtime），所以它的值导入只能落在包内，或者
 // 是 runtime/node_modules 能解析的包名。跨树相对路径（../../../shared/…、
 // ../../../dsh-plugins/…）在源码布局成立、打包态必然 ERR_MODULE_NOT_FOUND：
 // cluster.ts 的 worker-binding 导入曾让桌面包启动即崩。

@@ -49,7 +49,7 @@ macOS 构建结果位于 `target/debug/bundle/macos/Lumo.app`。Tauri 构建前�
 
 同一 checkout 的 runtime 构建共用 `platform/.build/desktop-runtime.lock`，从准备快照到
 产物落盘期间只允许一个构建进程运行。重复启动会显示持锁进程的 PID 并退出，避免同时
-清理、复制 `target/lumo-runtime` 导致 `ENOTEMPTY` 或产物缺失。正常退出及可处理的中断会
+清理、复制 `lumo-runtime/` 导致 `ENOTEMPTY` 或产物缺失。正常退出及可处理的中断会
 释放锁；强制结束进程后若有残留锁，确认所有构建已停止，再删除该锁目录并重新构建。
 
 Windows 使用同一个总入口，在 Git Bash 中执行：

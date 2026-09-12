@@ -99,8 +99,7 @@ export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunR
         ...(req.parent.maxTokens !== undefined ? { maxTokens: req.parent.maxTokens } : {}),
         subagentDepth: depth,
       },
-      setup(childCtx) {
-        const child = childCtx.agent as Agent
+      setup(childCtx, child) {
         appendDelegatedPolicyOverrides(child.session, {
           sandboxMode: req.parent.sandboxMode as SandboxMode | undefined,
           approvalPolicy: req.parent.approvalPolicy,
