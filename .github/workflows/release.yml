@@ -21,6 +21,8 @@
 # setup-uv 自 v8 起改为不可变发布、不再维护 vN 浮动标签，所以它的最高可用浮动主版本
 # 就是 v7（已 node24）；若要跟到 v10 必须改成固定版本号。Swatinem/rust-cache@v2 与
 # dtolnay/rust-toolchain@stable 本身不跑 Node，无需调整。
+# 另外 setup-uv 的 `version` 输入钉了精确的 uv 版本 —— 它默认要联网抓版本清单才能开工，
+# 属于与构建无关的单点故障，理由见该步骤的注释。
 
 name: release
 
@@ -96,6 +98,16 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
         with:
+          # 必须钉**精确**版本，不能留空、也不能写成范围。setup-uv 在未指定 version 时会走
+          # determineVersion → resolveVersion，最终落到 getLatestVersionFromNdjson()：先联网抓
+          # raw.githubusercontent.com/astral-sh/versions/main/v1/uv.ndjson，才肯开始装。
+          # 该请求与构建毫无关系，却成了单点故障 —— macOS Intel 那台 runner 就因
+          # `Error: fetch failed` 卡在第 10 步（另两台同时正常）。
+          # 依据源码（v7 src/download/download-version.ts 的 resolveVersion）：显式版本会走
+          # `versionInput` 分支，并因 isExplicitVersion() 立即返回，版本解析阶段零网络请求。
+          # 注意范围写法（如 `>=0.12`）会命中 resolveVersionSpecifierToLatest，同样触发那次抓取，
+          # 所以只有精确版本能真正消除这个依赖。
+          version: "0.12.13"
           # 默认 glob 是 `**/uv.lock,**/requirements*.txt`，从仓库根遍历整棵工作区。而
           # platform/desktop/target 下有 pnpm 装出来的插件树（.pnpm 虚拟存储全是软链/联接），
           # Windows 上 stat 这些链接会直接 EPERM 中断本步骤。target/ 里还有历史构建残留的
