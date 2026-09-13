@@ -1,12 +1,15 @@
 # 打包与发布。与 platform/build.sh 共用同一份构建逻辑（见
 # docs/superpowers/specs/2026-09-09-readme-license-and-release-workflow-design.md）。
 #
-# 触发语义（仅手动）：
-#   - 只由 workflow_dispatch 触发，push / tag 均不再自动运行；这样不会在尚未包含
-#     打包脚本依赖（如 platform/deploy/lib/dsh-source.sh）的旧 ref 上误触失败。
-#   - 在 Actions 页面 Run workflow，选择要构建的分支或 tag：
+# 触发语义：
+#   - 推送 v* tag **自动触发**（正式发版路径）：三个平台的桌面包全部成功后，安装包附到
+#     同名 GitHub Release（见下方 release job 的 fail-closed 依赖）。
+#   - 也可在 Actions 页面 Run workflow 手动触发，选择要构建的分支或 tag：
 #       main / tag v*  → 正式产物（tag v* 另附到 GitHub Release）
 #       其他分支       → 桌面测试包（artifact 名带 -test）
+#   - **分支 push 依旧不触发**：打包依赖 platform/deploy/lib/dsh-source.sh 等脚本，旧 ref 上
+#     不存在，早先的自动 push 触发会在这些 ref 上误触失败。tag 是人主动打的，不适用该顾虑；
+#     这也是当初收窄成「仅手动」时唯一要防的场景。
 #
 # 门禁（typecheck / test / vet / 第一铁律）仍由 ci.yml 负责，本 workflow 只产物。
 #
@@ -23,6 +26,9 @@ name: release
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: read

@@ -298,13 +298,15 @@ helm template lumo platform/deploy/helm/lumo-platform
 
 ### 发布：`.github/workflows/release.yml`
 
-打包**只支持手动触发**：push / tag 不再自动运行。在 GitHub Actions 页面选择 `release` → **Run workflow**，再选择要构建的分支或 tag。
+**推送 `v*` tag 会自动打包**：macOS（arm64 / x64）与 Windows（x64）三个桌面包全部成功后，安装包附到同名 GitHub Release（fail-closed，任一平台失败则不发）。分支 push 不会触发。
 
-| 手动选择的分支 / tag | 产物 |
+也可以在 Actions 页面选择 `release` → **Run workflow** 手动构建：
+
+| 选择的分支 / tag | 产物 |
 | --- | --- |
-| `main` 或 tag `v*` | macOS / Windows 安装包上传为 Actions artifact |
+| tag `v*` | macOS / Windows 安装包，附到 GitHub Release（推送 tag 时自动执行） |
+| `main` | macOS / Windows 安装包上传为 Actions artifact |
 | 其他分支 | 桌面**测试包**（artifact 名带 `-test` 后缀） |
-| tag `v*` | 除 artifact 外，安装包附到 GitHub Release |
 
 门禁（typecheck / 测试 / `go vet` / 第一铁律校验）由 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) 单独负责，与产物职责分离。发布前需保证 tag 名（如 `v0.1.0`）与 `platform/package.json`、`Chart.yaml`、`tauri.conf.json` 三处版本号一致。
 
