@@ -1,0 +1,48 @@
+# 推送 v* tag 即自动创建（或更新）GitHub Release，正文取自 CHANGELOG.md 对应版本的小节。
+#
+# 与 release.yml 的分工：
+#   - 本 workflow 只把 CHANGELOG 同步到 Release 页面，不构建任何东西，秒级完成；
+#   - release.yml 负责构建桌面安装包并上传到同一个 Release（手动触发，耗时数十分钟）。
+# 两者都对「Release 已存在」做了幂等处理（更新 / 覆盖上传），所以先后顺序无所谓。
+# 正文抽取逻辑与 release.yml 共用 .github/scripts/release-notes.sh，保证两边一致。
+name: changelog-release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # 回退分支要用 git describe 找上一个 tag，浅克隆拿不到。
+          fetch-depth: 0
+
+      - name: Generate release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          bash .github/scripts/release-notes.sh "${GITHUB_REF_NAME#v}" > "$RUNNER_TEMP/notes.md"
+          echo '--- 将写入 Release 的正文 ---'
+          cat "$RUNNER_TEMP/notes.md"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$RUNNER_TEMP/notes.md" \
+              --verify-tag
+          fi

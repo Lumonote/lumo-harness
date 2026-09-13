@@ -150,6 +150,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      # 本 job 只做「取产物 + 发布」，但要读 CHANGELOG.md 与 release-notes.sh 生成正文。
+      - uses: actions/checkout@v5
+
       - name: Download artifacts
         uses: actions/download-artifact@v7
         with:
@@ -159,6 +162,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           files=()
           while IFS= read -r f; do files+=("$f"); done < <(
             find artifacts -type f \( -name '*.dmg' -o -name '*.exe' \) | sort
@@ -166,12 +170,16 @@ jobs:
           test "${#files[@]}" -gt 0 || { echo "没有可发布的安装包" >&2; exit 1; }
           printf '发布 %s 个文件：\n' "${#files[@]}"
           printf '  %s\n' "${files[@]}"
-          # 同一 tag 重跑时不因 release 已存在而失败，改为覆盖上传。
+          # 正文与 changelog-release.yml 同源：都取 CHANGELOG.md 的对应小节，
+          # 而不是 GitHub 自动生成的 notes —— 后者在 release 被删后重建时会悄悄替换掉 CHANGELOG。
+          bash .github/scripts/release-notes.sh "${GITHUB_REF_NAME#v}" > "$RUNNER_TEMP/notes.md"
+          # 同一 tag 重跑时不因 release 已存在而失败，改为覆盖上传并同步正文。
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
+            gh release edit "${GITHUB_REF_NAME}" --notes-file "$RUNNER_TEMP/notes.md"
           else
             gh release create "${GITHUB_REF_NAME}" \
               --title "${GITHUB_REF_NAME}" \
-              --generate-notes \
+              --notes-file "$RUNNER_TEMP/notes.md" \
               "${files[@]}"
           fi

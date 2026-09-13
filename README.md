@@ -308,6 +308,8 @@ helm template lumo platform/deploy/helm/lumo-platform
 
 门禁（typecheck / 测试 / `go vet` / 第一铁律校验）由 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) 单独负责，与产物职责分离。发布前需保证 tag 名（如 `v0.1.0`）与 `platform/package.json`、`Chart.yaml`、`tauri.conf.json` 三处版本号一致。
 
+推送 `v*` tag 还会触发 [`.github/workflows/changelog-release.yml`](./.github/workflows/changelog-release.yml)：它把 [`CHANGELOG.md`](./CHANGELOG.md) 中对应版本的小节同步成 GitHub Release 正文（只改正文、不构建产物，秒级完成）。**因此发版前请先更新 `CHANGELOG.md`**；正文抽取由 [`.github/scripts/release-notes.sh`](./.github/scripts/release-notes.sh) 负责，上面两个 workflow 共用同一份逻辑，取不到对应小节时会回退为提交列表而不会让发布失败。
+
 ## 测试与质量检查
 
 平台 TS 侧：
@@ -332,6 +334,7 @@ go build ./... && go vet ./... && go test ./...
 
 | 文档 | 内容 |
 | --- | --- |
+| [`CHANGELOG.md`](./CHANGELOG.md) | 版本变更记录（按版本与类型分组） |
 | [`docs/README.md`](./docs/README.md) | 文档地图与阅读路径（**从这里开始**） |
 | [`docs/architecture.md`](./docs/architecture.md) | 唯一权威技术规范（§0–§15） |
 | [`docs/roadmap.md`](./docs/roadmap.md) | 实施蓝图与端到端流程（§16–§17） |
