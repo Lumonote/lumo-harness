@@ -1,5 +1,10 @@
 name: platform-ci
 
+# Action 版本口径与 release.yml 一致：统一取「首个声明 node24 运行时的主版本」，
+# 只求消除 Node 20 弃用告警，不做跨多个主版本的跃迁（无从在本地验证其行为变更）。
+# 各处对应关系：checkout v4→v5、setup-node v4→v5、pnpm/action-setup v3→v5
+# （v4 仍是 node20）、setup-go v5→v6、azure/setup-helm v4→v5。
+
 on:
   push:
     paths:
@@ -28,10 +33,10 @@ jobs:
       run:
         working-directory: platform
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Checkout upstream dsh
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: deepseek-ai/deepseek-harness
           ref: master
@@ -39,12 +44,12 @@ jobs:
           path: deepseek-harness
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v3
+        uses: pnpm/action-setup@v5
         with:
           version: 11.7.0
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: 'pnpm'
@@ -114,10 +119,10 @@ jobs:
       run:
         working-directory: platform/control-plane/${{ matrix.module }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.25.x'
           cache-dependency-path: 'platform/control-plane/*/go.sum'
@@ -140,16 +145,16 @@ jobs:
     if: ${{ false }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Start minimal Local-lite
         run: docker compose -f platform/deploy/compose.local.yml up -d && docker compose -f platform/deploy/compose.local.yml down
 
   production-gates:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Setup Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
       - name: Render default chart (mTLS and controls disabled by default)
         run: helm template lumo platform/deploy/helm/lumo-platform >/dev/null
       - name: Render enforced production controls and Istio mTLS

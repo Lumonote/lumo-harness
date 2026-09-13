@@ -9,6 +9,15 @@
 #       其他分支       → 桌面测试包（artifact 名带 -test）
 #
 # 门禁（typecheck / test / vet / 第一铁律）仍由 ci.yml 负责，本 workflow 只产物。
+#
+# Action 版本：统一取「首个声明 node24 运行时的主版本」，而不是各自的最新主版本。
+# 目标只是消除 GitHub 的 Node 20 弃用告警（Node 20 已从托管 runner 移除），而跨多个
+# 主版本升级会引入无从在本地验证的行为变更；这些浮动主版本标签在各自线内仍持续收补丁。
+# 两个例外：actions/upload-artifact 首个 node24 是 v6（v5 仍是 node20），
+# actions/download-artifact 更晚，v5/v6 都还是 node20，首个 node24 是 v7。
+# setup-uv 自 v8 起改为不可变发布、不再维护 vN 浮动标签，所以它的最高可用浮动主版本
+# 就是 v7（已 node24）；若要跟到 v10 必须改成固定版本号。Swatinem/rust-cache@v2 与
+# dtolnay/rust-toolchain@stable 本身不跑 Node，无需调整。
 
 name: release
 
@@ -36,10 +45,10 @@ jobs:
             target: win-x64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Checkout upstream dsh
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: deepseek-ai/deepseek-harness
           ref: master
@@ -47,12 +56,12 @@ jobs:
           path: deepseek-harness
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v3
+        uses: pnpm/action-setup@v5
         with:
           version: 11.7.0
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: 'pnpm'
@@ -69,7 +78,7 @@ jobs:
       # cargo install 每次重编译 tauri-cli 约 5 分钟；按 runner 平台缓存已装好的二进制。
       - name: Cache tauri CLI
         id: tauri-cli-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/bin
           key: cargo-tauri-cli-${{ runner.os }}-${{ runner.arch }}
@@ -79,7 +88,16 @@ jobs:
         run: cargo install tauri-cli --version "^2.0.0" --locked
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
+        with:
+          # 默认 glob 是 `**/uv.lock,**/requirements*.txt`，从仓库根遍历整棵工作区。而
+          # platform/desktop/target 下有 pnpm 装出来的插件树（.pnpm 虚拟存储全是软链/联接），
+          # Windows 上 stat 这些链接会直接 EPERM 中断本步骤。target/ 里还有历史构建残留的
+          # requirements.txt，同样会把遍历引进去。这里改为点名仓库里真正的两个依赖文件：
+          # 既绕开 target/，也省掉一次全仓库扫描。
+          cache-dependency-glob: |
+            deepseek-harness/python/sdk/uv.lock
+            platform/upstream/skills/ppt-master/requirements.txt
 
       # install-components.sh 要求 PPT 解释器可重定位（Homebrew 的 python 链接
       # Cellar 绝对路径，会在打包阶段才失败）。uv 的 standalone Python 是官方推荐路径。
@@ -110,7 +128,7 @@ jobs:
 
       - name: Upload macOS dmg
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: lumo-desktop-${{ matrix.target }}${{ steps.suffix.outputs.suffix }}
           path: platform/desktop/target/release/bundle/dmg/*.dmg
@@ -118,7 +136,7 @@ jobs:
 
       - name: Upload Windows installers
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: lumo-desktop-${{ matrix.target }}${{ steps.suffix.outputs.suffix }}
           path: platform/desktop/target/release/bundle/nsis/*.exe
@@ -133,7 +151,7 @@ jobs:
       contents: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
 

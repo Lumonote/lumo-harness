@@ -41,6 +41,14 @@ rmSync(resolve(desktopRoot, 'target', 'lumo-runtime'), {
   maxRetries: 4,
   retryDelay: 500,
 })
+// 上游插件安装目录早先也在 target/ 下（见下方 upstreamPluginRoot 的说明）。旧缓存恢复
+// 回来的是同一棵链接已残的 pnpm 树，照样会被遍历工作区的工具撞上，所以一并清掉。
+rmSync(resolve(desktopRoot, 'target', 'lumo-upstream-plugins'), {
+  recursive: true,
+  force: true,
+  maxRetries: 4,
+  retryDelay: 500,
+})
 // CI and local product builds may project an already-modified developer
 // checkout into a clean temporary commit. Accept that clean snapshot directly
 // so the source checkout never needs to be renamed, linked, or edited.
@@ -86,7 +94,14 @@ console.log(`桌面 runtime 构建目标：${buildTarget}（宿主 ${hostPlatfor
 // 既避开 target/，也让 tauri.conf.json 的 resources 仍能用不含 ../ 的相对路径。
 const stagingRoot = resolve(desktopRoot, 'lumo-runtime')
 const modulesRoot = resolve(stagingRoot, 'node_modules')
-const upstreamPluginRoot = resolve(desktopRoot, 'target', 'lumo-upstream-plugins')
+// 上游插件安装目录同理不能留在 cargo 的 target/ 下。它是一棵 pnpm 树，`.pnpm` 虚拟
+// 存储里全是软链/联接；rust-cache 会把 target/ 整棵打进缓存再恢复回来，Windows 上这些
+// 链接会变成不可访问的残骸（stat 直接 EPERM），于是任何遍历工作区的工具都会被打断
+// （实测 astral-sh/setup-uv 的 cache-dependency-glob 就是第一个受害者）。更糟的是
+// prepareUpstreamPlugins 的「已装好」快路径只核对顶层 manifest，认不出嵌套依赖链已断，
+// 会跳过重装、把故障拖到闭包解析阶段才炸。挪出 target/ 后这棵树只由它自己管、不过缓存，
+// 代价是 CI 每轮重装一次这几个插件（本地目录还在时仍走快路径，零成本）。
+const upstreamPluginRoot = resolve(desktopRoot, 'lumo-upstream-plugins')
 const upstreamPluginModulesRoot = resolve(upstreamPluginRoot, 'node_modules')
 const packagedTypeScriptPlugins = new Set(['@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/web-fetch-fakeip'])
 // RuVector's current published manifest still lists MetaHarness packages in
@@ -910,7 +925,7 @@ function prepareUpstreamPlugins() {
     })),
   }, null, 2)}\n`)
   console.log('准备桌面基础插件（市场 / 视觉 / 浏览器 / 上下文 / 费用）...')
-  // --ignore-workspace：这个目录位于 platform/desktop/target 下，pnpm 会一路向上找到
+  // --ignore-workspace：这个目录位于 platform/ 之下，pnpm 会一路向上找到
   // platform/pnpm-workspace.yaml，转而安装整个平台工作区，插件一个都装不进来。
   // --config.auto-install-peers=false：几个上游插件把 @deepseek-ai/* 声明为 peer，交集
   // 出来的范围（>=0.1.1 <0.2.0）匹配不上只有预发布号的 dsh-settings。这些 peer 本就该由

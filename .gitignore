@@ -32,6 +32,11 @@ platform/desktop/icons/icon.ico
 # 不再被无锚点的 `target/` 规则覆盖，所以必须在这里显式忽略。
 platform/desktop/lumo-runtime/
 
+# 上游插件安装目录（prepareUpstreamPlugins 就地 pnpm install）：同样**刻意不放在
+# target/ 下** —— 它是一棵带软链/联接的 pnpm 树，过一遍 CI 缓存再恢复回来在 Windows
+# 上会变成不可访问的残骸，任何遍历工作区的工具（如 setup-uv 的依赖 glob）都会被打断。
+platform/desktop/lumo-upstream-plugins/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
