@@ -48,6 +48,7 @@ describe('profile plugin installation', () => {
     expect(headless.some(({ name }) => name === 'deepseek-harness-auth')).toBe(false)
     expect(headless.some(({ name }) => name === '@yejiming/dsh-data-agent')).toBe(false)
     expect(local.map(({ name }) => name)).toEqual([
+      '@lumo/agent-teams',
       '@lumo/dsh-platform-ui', '@lumo/open-design', '@lumo/archify',
       '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/knowledge-vault', '@lumo/skill-local',
       '@lumo/web-fetch-fakeip',

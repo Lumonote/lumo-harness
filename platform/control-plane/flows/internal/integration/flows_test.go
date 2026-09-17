@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -57,10 +58,7 @@ func def(t *testing.T, operators ...string) json.RawMessage {
 		id := fmt.Sprintf("n%d", i)
 		d.Nodes = append(d.Nodes, domain.FlowNode{ID: id, Operator: op})
 		if i > 0 {
-			d.Edges = append(d.Edges, struct {
-				From string `json:"from"`
-				To   string `json:"to"`
-			}{fmt.Sprintf("n%d", i-1), id})
+			d.Edges = append(d.Edges, domain.FlowEdge{From: fmt.Sprintf("n%d", i-1), To: id})
 		}
 	}
 	b, err := json.Marshal(d)
@@ -183,6 +181,21 @@ func TestApproveAtomicity(t *testing.T) {
 	}
 }
 
+// sameJSON 比语义而不比字节。flow_trigger_outbox.payload 是 JSONB 列，PG 写入时
+// 会规范化键序与空白（`{"a":1,"b":2}` 读回来是 `{"a": 1, "b": 2}`），所以拿 Go
+// 字面量去比字节恒不相等——那测的是 PG 的序列化格式，不是「原负载被复制了」。
+func sameJSON(t *testing.T, want, got json.RawMessage) bool {
+	t.Helper()
+	var w, g any
+	if err := json.Unmarshal(want, &w); err != nil {
+		t.Fatalf("期望负载不是合法 JSON: %v", err)
+	}
+	if err := json.Unmarshal(got, &g); err != nil {
+		t.Fatalf("实际负载不是合法 JSON: %v", err)
+	}
+	return reflect.DeepEqual(w, g)
+}
+
 // A manual replay must remain a new, auditable attempt even after automation
 // bindings or the flow's current version have changed. The original payload and
 // captured binding are copied to a fresh outbox record, never re-matched.
@@ -245,14 +258,22 @@ func TestFailedRunReplayPinsPayloadAndPublishedVersion(t *testing.T) {
 	); err != nil {
 		t.Fatalf("读重放事件: %v", err)
 	}
-	if string(gotPayload) != string(payload) || automationID != "automation-ticket" || flowID != f.ID || version != 1 || replayOf != runID {
+	if !sameJSON(t, payload, gotPayload) || automationID != "automation-ticket" || flowID != f.ID || version != 1 || replayOf != runID {
 		t.Fatalf("重放没有固定原始快照: payload=%s automation=%s flow=%s version=%d replayOf=%d", gotPayload, automationID, flowID, version, replayOf)
 	}
 
 	if _, err := st.EnqueueReplay(ctx, f.ID, "r1", runID+999); err != store.ErrNotFound {
 		t.Fatalf("不存在运行应拒绝: %v", err)
 	}
-	if err := st.FinishTriggerRun(ctx, triggerID, "automation-ticket", "succeeded", json.RawMessage(`{}`), nil); err != nil {
+	// 终点运行不可重复终结：一次尝试只有一次 running → 终态。这不是实现细节，
+	// 它正是「重放是新的尝试、不是翻旧账」的前提，所以顺手钉住这条守卫。
+	if err := st.FinishTriggerRun(ctx, triggerID, "automation-ticket", "succeeded", json.RawMessage(`{}`), nil); err != store.ErrRunFinalized {
+		t.Fatalf("重复终结已终结的运行应 ErrRunFinalized: %v", err)
+	}
+	// 「成功运行不得重放」要的是 EnqueueReplay 的**状态谓词**，而上面那条路走不通
+	// 正是产品的正确行为，所以这里直接改状态造出前提。注意这条运行此时**已经**有
+	// 一条排队的重放：断言仍然成立，说明状态谓词判在 already_queued 回退之前。
+	if _, err := pool.Exec(ctx, `UPDATE flow_runs SET status='succeeded' WHERE id=$1`, runID); err != nil {
 		t.Fatalf("置成功运行: %v", err)
 	}
 	if _, err := st.EnqueueReplay(ctx, f.ID, "r1", runID); err != store.ErrRunNotReplayable {

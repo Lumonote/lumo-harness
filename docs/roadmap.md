@@ -22,7 +22,7 @@ platform/
     registry/          # Nacos 适配 + 联邦
     scheduler/         # 放置 + 并发闸 + 重平衡
     policy/            # OPA bundle + 评估 SDK
-    usage-ledger/      # 计量（PG 明细 + Doris 聚合 + Redis 限流）
+    usage-ledger/      # 计量（PG 明细 + 日聚合 + RocketMQ 传输；限流走 Redis）
     flow-engine/       # DAG 编排 + 算子目录 + 血缘
     trigger-bus/       # cron + webhook + RocketMQ 延时
     agentteams/        # roster/task_board/mailbox（RocketMQ backing）

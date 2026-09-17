@@ -40,7 +40,10 @@ services:
     volumes:
       - redisdata:/data
   minio:
-    image: minio/minio:latest
+    # 见 compose.standalone.yml 同名服务的注释：`latest` 已不可拉（Docker Hub 不再
+    # 为 minio/minio 提供该标签），必须钉具体版本，且两个 compose 文件的版本必须一致
+    # ——否则 standalone 能起的拓扑在 cluster 里起不来，反之亦然。
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: [server, /data]
     environment:
       MINIO_ROOT_USER: "${LUMO_MINIO_ROOT_USER:-lumo}"
@@ -199,8 +202,23 @@ services:
       retries: 30
       start_period: 60s
   opa:
-    image: openpolicyagent/opa:latest
-    command: ["run", "--server", "/policies"]
+    # 版本**钉死**而不是 `latest`：策略文件的语义跟着 OPA 的主版本走（本仓库的 rego 用的是
+    # 1.x 的 `if` 规则体语法），而 `session-control.rego` 是用 1.3.0 的
+    # `opa check --strict` + `opa eval` 逐条验过的——浮动 tag 会让「验过的策略」与
+    # 「在跑的引擎」不再对应同一件事。升级时连同策略一起验，不要靠漂移。
+    image: openpolicyagent/opa:1.3.0
+    # `--addr=0.0.0.0:8181` 不能省。**OPA 默认只监听容器内的 loopback**
+    # （`run --server` 的日志是 `"addrs":["localhost:8181"]`），而 compose 网络里
+    # 兄弟容器解析到的是容器 IP，不是 lo —— 于是 `http://opa:8181` 一律连接失败。
+    # 后果不是「少一个守卫」而是**三个消费方全部静默 fail-closed**：
+    # connector-gateway（`LUMO_OPA_ADDR`）的外部调用全拒、terminal-gateway 的 presence
+    # 全拒、session-control 的每条控制指令都得到 `policy_unavailable`。fail-closed 是
+    # 设计，所以症状看起来像「权限不足」而不是「连不上引擎」。
+    # 实测（2026-09-16）：同一条 command 在自定义网络上做容器间 curl，
+    # 默认绑定 → 000，加 `--addr` → 200。acceptance-cluster.sh 必填的
+    # `LUMO_TEST_OPA_HEALTH_URL` 探针也会因此失败——那正是唯一能抓到这个的检查，
+    # 而它至今没有完整跑过一轮。
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "/policies"]
     volumes:
       - ./policies:/policies:ro
   tei:
@@ -284,6 +302,10 @@ services:
       - LUMO_DEPLOYMENT_MODE=cluster
       - LUMO_CLUSTER_STATUS=ready
       - LUMO_SCHEDULER_URL=http://scheduler-0:8083
+      # §8.4 共享执行控制（C5）的**提交入口**。没有它，`ctx.sessionControl.dispatch`
+      # 只会抛 ControlCommandRoutingError —— 控制指令必须由调用方自己 POST 到控制面，
+      # 而控制台后端并不知道那个地址。生效面（session_control_state 闸门）不依赖它。
+      - LUMO_SESSION_CONTROL_URL=http://session-control:8092
       - LUMO_CLUSTER_ID=${LUMO_CLUSTER_ID:-cluster-a}
       - LUMO_AUTH_HOST=0.0.0.0
       - LUMO_AUTH_PORT=3080
@@ -355,6 +377,8 @@ services:
       - LUMO_CONNECTOR_GATEWAY_URL=http://connector-gateway:8082
       - LUMO_SUBAGENT_HOST_TOKENS={"cluster-a-dsh-1":"${LUMO_SUBAGENT_HOST_TOKEN:-dev-subagent-token}"}
       - LUMO_SCHEDULER_URL=http://scheduler-0:8083
+      # 同 dsh-web：控制指令的提交入口（§8.4）。
+      - LUMO_SESSION_CONTROL_URL=http://session-control:8092
       - LUMO_NACOS_ADDR=http://nacos:8848
       - LUMO_NACOS_SERVICE=lumo-dsh-node
       - LUMO_NACOS_GROUP=DEFAULT_GROUP
@@ -377,6 +401,18 @@ services:
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       - LUMO_CLUSTER_ID=cluster-a
       - LUMO_ROLE=node
+      # 承载节点是本集群的**上报方**：调度的联邦注册表只按自报判存活，而一个调度实例
+      # 只能替一个集群自报（LUMO_SCHEDULER_CLUSTER_ID 单值）。没有这一行，cluster-a
+      # 的判定输入就只能来自别处，判定一开就成了「没人报 → 全体 down → 新放置全被拒」。
+      - LUMO_SCHEDULER_URL=http://scheduler-0:8083
+      # 同 dsh-web：控制指令的提交入口（§8.4）。
+      - LUMO_SESSION_CONTROL_URL=http://session-control:8092
+      # 版本一致性前置（§7.4.1）的**声明方**。与存活同理：说「这个集群现在跑的是哪个
+      # 版本」的必须是承载节点（跑着的那个东西的版本），不是调度器自己的版本。
+      # 每个集群一个变量，是为了让「滚动升级升到一半」可以在本机复现：
+      #   LUMO_CLUSTER_B_VERSION=v2 docker compose up
+      # 默认两边都是 dev，于是闸门打开时判定为一致（放行）。
+      - LUMO_CLUSTER_VERSION=${LUMO_CLUSTER_A_VERSION:-dev}
       - LUMO_REALM=dev
       - "LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       - LUMO_REDIS_URL=redis://redis:6379
@@ -429,6 +465,13 @@ services:
       - LUMO_CONNECTOR_GATEWAY_URL=http://connector-gateway:8082
       - LUMO_SUBAGENT_HOST_TOKENS={"cluster-b-dsh-1":"${LUMO_SUBAGENT_HOST_TOKEN:-dev-subagent-token}"}
       - LUMO_SCHEDULER_URL=http://scheduler-0:8083
+      # 同 dsh-web：控制指令的提交入口（§8.4）。
+      #
+      # 注意这里指向的是**同一个** session-control 实例，而本节点声明的是 cluster-b。
+      # 那是本 compose 的拓扑现状（两个逻辑集群共享一个网络与一个 PostgreSQL），
+      # 不是「控制面按集群分片」——`session_control_state` 里没有集群维度，一个会话
+      # 的控制状态是全局唯一的。真拆成两个物理集群时，这一行与那张表的维度必须一起改。
+      - LUMO_SESSION_CONTROL_URL=http://session-control:8092
       - LUMO_NACOS_ADDR=http://nacos:8848
       - LUMO_NACOS_SERVICE=lumo-dsh-node
       - LUMO_NACOS_GROUP=DEFAULT_GROUP
@@ -451,6 +494,14 @@ services:
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       - LUMO_CLUSTER_ID=cluster-b
       - LUMO_ROLE=node
+      # 同上：cluster-b 的存活由它自己的承载节点自报，不能靠 scheduler 实例认领。
+      - LUMO_SCHEDULER_URL=http://scheduler-0:8083
+      # 同 dsh-web：控制指令的提交入口（§8.4）。cluster-b 指向同一个实例，见
+      # cluster-b-dsh-0 处关于「两个逻辑集群共享一个控制面」的说明。
+      - LUMO_SESSION_CONTROL_URL=http://session-control:8092
+      # 同 cluster-a：版本声明方是承载节点。两个集群各一个变量，
+      # 让「升到一半」能在本机复现（见 cluster-a-dsh-1 的注释）。
+      - LUMO_CLUSTER_VERSION=${LUMO_CLUSTER_B_VERSION:-dev}
       - LUMO_REALM=dev
       - "LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       - LUMO_REDIS_URL=redis://redis:6379
@@ -483,7 +534,7 @@ services:
   scheduler-0:
     build: { context: ../control-plane, dockerfile: scheduler/Dockerfile }
     image: lumo/scheduler:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-0", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-0", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
     depends_on:
       postgres: { condition: service_healthy }
       nacos: { condition: service_healthy }
@@ -491,11 +542,40 @@ services:
   scheduler-1:
     build: { context: ../control-plane, dockerfile: scheduler/Dockerfile }
     image: lumo/scheduler:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-1", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-1", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
     depends_on:
       postgres: { condition: service_healthy }
       nacos: { condition: service_healthy }
     ports: ["18093:8083"]
+
+  # 每集群一份的**本地决策者**（architecture.md:703 的两层）。
+  #
+  # 它们存在的理由不是「多几个副本」，而是**让降级可达**：全局 scheduler（上面那对主备）
+  # 没有 leader 时，本集群的任务仍要能落下去，而「本地」需要身份——一个服务两个集群的全局
+  # 实例既没有、也不该有集群身份（认领了 cluster-a，cluster-b 的本地放置就没人管了）。
+  # 没有这两个服务，`server.degradedPlacement` 的三条判据第一条就恒不成立，
+  # 整条降级路径在任何拓扑里都走不到——那正是「门禁齐全而闸门从未打开」的老病。
+  #
+  # 顺带：设了 `LUMO_SCHEDULER_CLUSTER_ID` 即开启**自报**（见 cmd/scheduler/main.go 的
+  # RunClusterReporter），于是「谁代表本集群宣称存活」有了天然归属——本地决策者。
+  # 这一步**不**撤掉 dsh-node 侧的上报方：注册表本就接受多个上报方，而先加替代者、
+  # 验证它确实在报，再撤旧路径，比在一次改动里两头都动安全。
+  scheduler-cluster-a:
+    build: { context: ../control-plane, dockerfile: scheduler/Dockerfile }
+    image: lumo/scheduler:dev
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-cluster-a", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_SCHEDULER_CLUSTER_ID=cluster-a", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+    ports: ["18094:8083"]
+  scheduler-cluster-b:
+    build: { context: ../control-plane, dockerfile: scheduler/Dockerfile }
+    image: lumo/scheduler:dev
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-cluster-b", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_SCHEDULER_CLUSTER_ID=cluster-b", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+    ports: ["18095:8083"]
 
   collaborator-0:
     build: { context: ../control-plane, dockerfile: collaborator/Dockerfile }
@@ -516,7 +596,7 @@ services:
   registry:
     build: { context: ../control-plane, dockerfile: registry/Dockerfile }
     image: lumo/registry:dev
-    environment: ["REGISTRY_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "REGISTRY_TRUST_FILE=/run/secrets/registry-trust", "REGISTRY_LOCAL_ROOT=/var/lib/registry/objects", "REGISTRY_PORT=8084", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["REGISTRY_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=registry-0", "REGISTRY_TRUST_FILE=/run/secrets/registry-trust", "REGISTRY_LOCAL_ROOT=/var/lib/registry/objects", "REGISTRY_PORT=8084", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     secrets: [registry-trust]
     volumes:
       - registrydata:/var/lib/registry/objects
@@ -530,6 +610,10 @@ services:
     environment:
       - "LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
+      # Instance identity for the heartbeat table. Without it the publisher falls
+      # back to <container-id>-1, which makes the readiness report unreadable and
+      # leaves a new row behind on every recreate.
+      - LUMO_INSTANCE=connector-gateway-0
       - LUMO_REDIS_ADDR=redis:6379
       - LUMO_LISTEN=:8082
       - LUMO_OPA_ADDR=http://opa:8181
@@ -551,21 +635,88 @@ services:
   llm-gateway:
     build: { context: ../control-plane, dockerfile: llm-gateway/Dockerfile }
     image: lumo/llm-gateway:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_LISTEN=:8088", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=llm-gateway-0", "LUMO_LISTEN=:8088", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["18088:8088"]
+  # 边缘网关（§12.1 南北向的「门」，缺口 C3）。它只干四件事：协议接入、路由分发、
+  # 横切治理、边界隔离——门后才是真正的能力，所以路由表是它唯一的配置。
+  #
+  # 路由表**随仓库进容器**（只读挂载）而不是走 env 内联 JSON：这张表是「门后有哪些面」
+  # 的声明，需要 review、diff 与门禁（platform/deploy/edge-routes-verify.sh），
+  # 塞进 env 就三样都做不了。
+  #
+  # 限流复用与内部网关同一份共享令牌桶（§12.2「与内部网关共享同一限流库」）。
+  # `LUMO_EDGE_LIMITER_FAIL_OPEN` 保持缺省 false：Redis 抖动时**拒绝**而不是放行。
+  #
+  # CORS 走 `LUMO_EDGE_CORS_ORIGINS`（网关自己的白名单，按**请求的 Origin** 裁决），
+  # **不**设 `LUMO_CORS_ORIGIN`：后者是 observability 中间件读的名字，它会按配置的
+  # 来源把 ACAO 写死，两个语义不同的 CORS 层叠在同一个响应上（gate.go:122-124 明确
+  # 要求部署 edge-gateway 时不要再设它）。此处此前设的正是 `LUMO_CORS_ORIGIN`，
+  # 于是边缘自己的白名单一直是空的、边缘层等于没在管事——注释、代码与部署三者不一致，
+  # 而表现上又「能用」（中间件那层替它把 preflight 答了），所以没有门禁能看出来。
+  edge-gateway:
+    build: { context: ../control-plane, dockerfile: edge-gateway/Dockerfile }
+    image: lumo/edge-gateway:dev
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=edge-gateway-0", "LUMO_LISTEN=:8080", "LUMO_EDGE_ROUTES=/etc/lumo/edge-routes.json", "LUMO_EDGE_REDIS_URL=redis://redis:6379", "LUMO_EDGE_CORS_ORIGINS=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    volumes: ["./edge-routes.dev.json:/etc/lumo/edge-routes.json:ro"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+    ports: ["18080:8080"]
+  # 终端网关（§8.2 多端，缺口 C4）：终端无关事件汇 + 能力协商 + replay + presence。
+  # 它**不实现状态机**——pause/resume/stop 的语义在 session-control，终端只渲染视图
+  # 与发送控制事件（§8.4.3 末句）。
+  #
+  # `LUMO_OPA_URL` 缺省为空 = **fail-closed**：presence 这类敏感动作在策略引擎不可用时
+  # 被拒绝而不是放行。本地拓扑没有 OPA 容器，所以这里显式指向它并接受「敏感动作全拒」
+  # 这一行为——那是安全的一侧，且日志会说明是策略引擎不可用而不是权限不足。
+  terminal-gateway:
+    build: { context: ../control-plane, dockerfile: terminal-gateway/Dockerfile }
+    image: lumo/terminal-gateway:dev
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=terminal-gateway-0", "LUMO_LISTEN=:8090", "LUMO_OPA_URL=http://opa:8181", "LUMO_TERMINAL_SIGNING_SECRET=${LUMO_TERMINAL_SIGNING_SECRET:-dev-terminal-signing-secret}", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      opa: { condition: service_started }
+    # 宿主端口刻意**避开 18090**：可选 overlay `compose.cluster.devices.yml` 已经把 18090 给了
+    # governance 容器里的设备网关（TLS passthrough，见 docs/desktop-devices.md）。两个文件合并
+    # 时同一宿主端口被声明两次，compose 会直接拒绝启动——而这条接线是手写的，没有任何机制会拦住它。
+    ports: ["18091:8090"]
+  # 共享执行控制（§8.4，缺口 C5）：pause/resume/stop/abort/approve/reject/replay/degrade
+  # 一律裁成**可审计的一等事件**，并给出控制台要的只读投影（状态 + 此刻可点的按钮 +
+  # 时间线 + 队列现场）。终端的控制按钮走这里，终端自己不实现状态机（§8.4.3 末句）。
+  #
+  # 两处与 terminal-gateway 同源的取舍：
+  #   * `LUMO_OPA_URL` 指向 opa 而不是留空：每条控制指令必须经 OPA 评估（§8.4.2）。
+  #     留空 = fail-closed 全拒；策略引擎不可用与权限不足在响应里是两个不同的码
+  #     （policy_unavailable vs policy_denied），不会被误读成权限问题。
+  #   * 同一会话同一时刻只有一条「生效中」的脉冲（§8.4.2 并发控制）：进程内队列保证
+  #     本实例的 FIFO 与强制接管，库端行锁 + 版本比较后交换保证跨实例只有一条真正落地。
+  #
+  # **未接线**：把已生效的指令下发到会话执行面（§8.1 suspend / `agent.inject()`）。
+  # 因此每条响应的 `effectuation` 恒为 recorded —— 状态与审计是真的，会话那边还没被动过。
+  # 这是刻意的顺序（先落库再下发：**记了没做**可对账，**做了没记**无从追溯），不是遗漏。
+  session-control:
+    build: { context: ../control-plane, dockerfile: session-control/Dockerfile }
+    image: lumo/session-control:dev
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=session-control-0", "LUMO_LISTEN=:8092", "LUMO_OPA_URL=http://opa:8181", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      opa: { condition: service_started }
+    # 宿主端口按「18000 + 容器端口」= 18092。18090 留给可选 overlay 的设备网关、
+    # 18091 已给 terminal-gateway、18093 是 scheduler-1，18092 是这段里最后一个空位。
+    ports: ["18092:8092"]
   flows:
     build: { context: ../control-plane, dockerfile: flows/Dockerfile }
     image: lumo/flows:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_LISTEN=:8087", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=flows-0", "LUMO_LISTEN=:8087", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["18087:8087"]
   projects:
     build: { context: ../control-plane, dockerfile: projects/Dockerfile }
     image: lumo/projects:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_LISTEN=:8086", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=projects-0", "LUMO_LISTEN=:8086", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["18086:8086"]
@@ -578,6 +729,7 @@ services:
       - LUMO_LISTEN=:8089
       - LUMO_DEPLOYMENT_MODE=cluster
       - LUMO_CLUSTER_STATUS=ready
+      - LUMO_INSTANCE=governance-0
       # Enable the separate device TLS listener with compose.cluster.devices.yml.
       - LUMO_DESKTOP_GATEWAY_ENABLED=false
       - "LUMO_AUTH_BOOTSTRAP_REALM=${LUMO_REALM:-dev}"
@@ -609,7 +761,7 @@ services:
   usage-ledger:
     build: { context: ../control-plane, dockerfile: usage-ledger/Dockerfile }
     image: lumo/usage-ledger:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_RMQ_ENDPOINT=rocketmq:8081", "LUMO_LISTEN=:8085", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=usage-ledger-0", "LUMO_RMQ_ENDPOINT=rocketmq:8081", "LUMO_LISTEN=:8085", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
       rocketmq-topic-init: { condition: service_completed_successfully }

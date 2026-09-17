@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,8 +28,14 @@ import (
 )
 
 type Config struct {
-	DeploymentMode    domain.DeploymentMode
-	ClusterStatus     string
+	DeploymentMode domain.DeploymentMode
+	// ClusterStatus is the operator's declaration (LUMO_CLUSTER_STATUS), not the
+	// effective status. The gate is resolved per request from this plus Health.
+	ClusterStatus string
+	// Health supplies the derived readiness. It is required whenever the
+	// declaration says ready, because a declared-but-unverified cluster is
+	// exactly the state that must not open the management surface.
+	Health            domain.HealthSource
 	SchedulerURL      string
 	ClusterID         string
 	ControlPlaneToken string
@@ -46,13 +53,19 @@ type Config struct {
 	DeviceGateway *device.Gateway
 }
 
+// clusterRetryAfter is the Retry-After advertised when the cluster is declared
+// ready but unhealthy. It is a fixed window rather than the readiness refresh
+// interval so the HTTP layer does not have to learn how readiness is produced;
+// 15s keeps a polling client within roughly one heartbeat age of the flip.
+const clusterRetryAfter = 15 * time.Second
+
 type Server struct {
 	store *store.Store
 	cfg   Config
 	log   *slog.Logger
 }
 
-func New(st *store.Store, cfg Config, log *slog.Logger) *Server {
+func New(st *store.Store, cfg Config, log *slog.Logger) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -68,13 +81,23 @@ func New(st *store.Store, cfg Config, log *slog.Logger) *Server {
 	if cfg.AuthCaptchaTTL <= 0 {
 		cfg.AuthCaptchaTTL = 2 * time.Minute
 	}
+	// Refuse to start rather than start closed. A declared-ready cluster with no
+	// health source would answer CLUSTER_ONLY to every management request with
+	// nothing in the logs to explain it, which is indistinguishable from a
+	// permission bug.
+	if domain.IntentIsCluster(cfg.DeploymentMode, cfg.ClusterStatus) && cfg.Health == nil {
+		return nil, errors.New("governance: 已声明 LUMO_CLUSTER_STATUS=ready 但未配置就绪态来源，无法验证集群健康，拒绝启动")
+	}
 	if st != nil {
 		st.SetOIDCProvider("", "")
-		if cfg.OIDC.Enabled() && cfg.OIDC.Validate() == nil && domain.RequireCluster(cfg.DeploymentMode, cfg.ClusterStatus) == nil {
+		// OIDC availability follows the declaration, not health: login is the
+		// path an operator uses to fix a degraded cluster, so closing it during
+		// degradation would remove the only way in.
+		if cfg.OIDC.Enabled() && cfg.OIDC.Validate() == nil && domain.IntentIsCluster(cfg.DeploymentMode, cfg.ClusterStatus) {
 			st.SetOIDCProvider(cfg.OIDC.Issuer, cfg.OIDC.Realm)
 		}
 	}
-	return &Server{store: st, cfg: cfg, log: log}
+	return &Server{store: st, cfg: cfg, log: log}, nil
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
@@ -188,12 +211,52 @@ func (s *Server) caller(w http.ResponseWriter, r *http.Request) (caller, bool) {
 	return caller{userID: userID, realm: realm, roles: store.NormalizeRoles(r.Header.Get("X-Lumo-Roles"))}, true
 }
 
+// gate resolves the current cluster gate. It reads a cached readiness verdict,
+// so it is cheap enough to call on every management request.
+func (s *Server) gate() domain.ClusterGate {
+	var health domain.ClusterHealth
+	if s.cfg.Health != nil {
+		health = s.cfg.Health.Health()
+	}
+	return domain.ResolveGate(s.cfg.DeploymentMode, s.cfg.ClusterStatus, health)
+}
+
+// requireCluster gates the cluster-only management surface.
+//
+// The two refusal paths are deliberately different status codes. A deployment
+// that was never declared a ready cluster is refused permanently with 403: the
+// caller must change configuration, and retrying will never help. One that was
+// declared ready but is not healthy is refused temporarily with 503: the state
+// resolves on its own, and 403 would send an operator to change configuration
+// when the real problem is a dead service.
 func (s *Server) requireCluster(w http.ResponseWriter) bool {
-	if err := domain.RequireCluster(s.cfg.DeploymentMode, s.cfg.ClusterStatus); err != nil {
-		writeError(w, http.StatusForbidden, "CLUSTER_ONLY", "该功能仅在状态为 ready 的 Cluster 部署中可用")
+	gate := s.gate()
+	if gate.Ready {
+		return true
+	}
+	if gate.Effective == domain.ClusterDegraded {
+		writeClusterNotReady(w, gate)
 		return false
 	}
-	return true
+	writeError(w, http.StatusForbidden, domain.ErrClusterOnly.Error(), "该功能仅在状态为 ready 的 Cluster 部署中可用")
+	return false
+}
+
+// writeClusterNotReady reports a degraded cluster with enough detail to act on:
+// the reason, the services at fault, and when the verdict was taken.
+func writeClusterNotReady(w http.ResponseWriter, gate domain.ClusterGate) {
+	w.Header().Set("Retry-After", strconv.Itoa(int(clusterRetryAfter.Seconds())))
+	body := map[string]any{
+		"error":   domain.ErrClusterNotReady.Error(),
+		"message": "集群已声明就绪但当前不健康：" + gate.Reason,
+	}
+	if len(gate.Unready) > 0 {
+		body["unready_services"] = gate.Unready
+	}
+	if gate.EvaluatedAt != "" {
+		body["evaluated_at"] = gate.EvaluatedAt
+	}
+	writeJSON(w, http.StatusServiceUnavailable, body)
 }
 
 func isRealmAdmin(c caller) bool {
@@ -208,14 +271,22 @@ func requireRealmAdmin(w http.ResponseWriter, c caller) bool {
 	return false
 }
 
+// health is a liveness endpoint and stays 200 while the process can serve HTTP.
+//
+// It deliberately does not fail on a degraded cluster: governance is the service
+// an operator uses to diagnose one, and a failing liveness probe would restart
+// it in a loop at exactly the wrong moment. Cluster readiness is reported in the
+// embedded features block, and there is no /readyz for the same reason — wiring
+// cluster health to a load-balancer probe would pull the login path out of
+// rotation during degradation.
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "features": domain.NewFeatures(s.cfg.DeploymentMode, s.cfg.ClusterStatus)})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "features": domain.NewFeatures(s.gate())})
 }
 
 func metrics(w http.ResponseWriter, _ *http.Request) { observability.Handler(w, nil) }
 
 func (s *Server) features(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, domain.NewFeatures(s.cfg.DeploymentMode, s.cfg.ClusterStatus))
+	writeJSON(w, http.StatusOK, domain.NewFeatures(s.gate()))
 }
 
 type userRequest struct {

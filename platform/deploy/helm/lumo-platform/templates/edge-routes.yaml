@@ -1,0 +1,82 @@
+{{- /*
+The edge gateway's route table (values.edgeGateway.routes), rendered as the JSON
+file the gateway loads from LUMO_EDGE_ROUTES.
+
+Why this is a template rather than a checked-in file next to
+edge-routes.dev.json: the table names **upstream hosts**, and in Kubernetes a
+host is `<service name>.<namespace>.svc` — or, as the routing package requires
+(sprite: `url.Host`, exact string equality against the whitelist),
+`<release>-<service>:<port>` for this chart's flat Service names. The release
+name is a deployment-time fact: the cluster profile is documented to be
+installed twice in one namespace (`lumo` and `lumo-b`), so a checked-in table
+would be correct for exactly one of them and would fail the other's whitelist at
+startup. Same reasoning for the ports: they come from each service's own
+`port`, so changing `services.flows.port` cannot leave the route table pointing
+at the old number — which would look consistent in both files and fail only as a
+502 once traffic arrived.
+
+What the render-time checks below buy over the runtime validator: a route that
+names a service nobody deploys is a **render error** here, whereas at runtime it
+is a 502 discovered by whoever happens to send the first matching request. The
+two are complementary and both are wanted; the validator
+(platform/deploy/edge-routes-verify.sh, which feeds this rendered file to
+cmd/edge-gateway-check) is what proves the output is actually loadable.
+
+The whitelist is derived from the routes rather than declared beside them. That
+is not a weakening: for the dev table a hand-written whitelist is a second place
+to get a host name wrong, and edge-routes-verify.sh already asserts it has no
+dangling entries (every entry used by some route). Here the equivalent
+constraint — "no route may point at a host that is not a deployed Service" — is
+enforced by construction, one level up.
+*/ -}}
+{{- /* `index`, not `.Values.services.edge-gateway`: Go templates read the hyphen as
+       subtraction and fail to parse. See the same note in templates/secret.yaml. */}}
+{{- $edgeGateway := index .Values.services "edge-gateway" | default dict }}
+{{- if $edgeGateway.enabled }}
+{{- if not .Values.edgeGateway.routes }}
+{{- fail "services.edge-gateway.enabled=true requires edgeGateway.routes: the gateway refuses to start on an empty table (every north-south request would 404), so an empty table is a configuration error rather than a valid choice. Set services.edge-gateway.enabled=false to deploy without the edge gateway." }}
+{{- end }}
+{{- $name := include "lumo-platform.name" . }}
+{{- $whitelist := list }}
+{{- $routes := list }}
+{{- range $i, $r := .Values.edgeGateway.routes }}
+{{- /* Type guard before any field access. Without it a malformed entry (an empty
+       scalar from a `--set` that parsed unexpectedly, a bare string, a nested
+       list) fails with "can't evaluate field prefix in type interface {}" and the
+       column of a template line — a message that names the machinery rather than
+       the value the operator wrote. Same class as the hyphen trap above. */}}
+{{- if not (kindIs "map" $r) }}
+{{- fail (printf "edgeGateway.routes[%d] must be a mapping with `prefix` and `service` (got %s): write it as { prefix: /v1/x, service: flows }" $i (kindOf $r)) }}
+{{- end }}
+{{- if not $r.prefix }}
+{{- fail (printf "edgeGateway.routes[%d] has no `prefix`" $i) }}
+{{- end }}
+{{- if not $r.service }}
+{{- fail (printf "edgeGateway.routes[%d] (prefix %s) has no `service`: every route must name a key of values.services so its upstream host and port can be derived rather than duplicated" $i $r.prefix) }}
+{{- end }}
+{{- $svc := index $.Values.services $r.service }}
+{{- if not $svc }}
+{{- fail (printf "edgeGateway.routes[%d] (prefix %s) points at service %q, which is not a key of values.services" $i $r.prefix $r.service) }}
+{{- end }}
+{{- if not $svc.enabled }}
+{{- fail (printf "edgeGateway.routes[%d] (prefix %s) points at service %q, which is disabled: the Service would not exist, and the mismatch would surface as a 502 on the first matching request instead of here. Enable the service or delete the route." $i $r.prefix $r.service) }}
+{{- end }}
+{{- $host := printf "%s-%s:%v" $name $r.service $svc.port }}
+{{- $whitelist = append $whitelist $host }}
+{{- $routes = append $routes (dict "prefix" $r.prefix "upstream" (printf "http://%s" $host) "rate_limit_rpm" (int (default 0 $r.rateLimitRpm))) }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-edge-routes
+  labels:
+    {{- include "lumo-platform.labels" . | nindent 4 }}
+data:
+  # Mounted as a **directory** at /etc/lumo (templates/deployment.yaml), not as a
+  # single file via subPath. That is deliberate: the gateway reloads this table on
+  # SIGHUP, and a subPath mount does not receive ConfigMap updates — the file would
+  # keep the content it had when the pod started, so the hot-reload path could
+  # never observe a change and every table edit would silently require a restart.
+  edge-routes.json: |
+    {{- dict "whitelist" ($whitelist | uniq | sortAlpha) "routes" $routes | toPrettyJson | nindent 4 }}
+{{- end }}

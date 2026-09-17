@@ -52,9 +52,17 @@ CREATE TABLE IF NOT EXISTS project_spaces (
   space_id   TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   realm      TEXT NOT NULL,
-  name       TEXT NOT NULL,
-  UNIQUE (project_id, name)
+  name       TEXT NOT NULL
 );
+-- 同项目内 Space 名唯一。用**具名唯一索引**而不是建表时的内联 UNIQUE：
+--   * CREATE TABLE IF NOT EXISTS 对既有库是空操作，内联约束加不上去（同
+--     deploy/migrations/004_service_heartbeats.sql 的理由）；
+--   * 内联 UNIQUE 会让 PG 自动命名一个 project_spaces_project_id_name_key，
+--     与具名索引并存时「谁先建表」会留下**不同**的索引集——同一张表两种形状。
+-- TS 侧 dsh-plugins/project 与它共表（两服务同库、同时在线），两侧逐字相同。
+-- 唯一性不是装饰：server.go 的 createSpace 把 UpsertSpace 的错误映射成 409
+-- 「space conflict」——那条分支只在约束真的存在时才可能触发。
+CREATE UNIQUE INDEX IF NOT EXISTS project_spaces_project_name_uq ON project_spaces (project_id, name);
 
 CREATE TABLE IF NOT EXISTS project_automations (
   automation_id TEXT PRIMARY KEY,

@@ -244,11 +244,58 @@ Agent 在客户端证书剩余不超过 1 小时时结束当前连接，用同�
 
 ## 命令与本地进程
 
-设备命令只有 `reconcile`、`start`、`stop`，请求必须带当前策略 `revision`；后两者还需
+管理面能提交的设备命令只有 `reconcile`、`start`、`stop`（`POST /v1/desktop-nodes/{nodeID}/device/commands`
+对其它动作一律 400），请求必须带当前策略 `revision`；后两者还需
 提供已批准闭包中的精确 `name` 和 `version`。命令绑定当时的连接与 revision，有效
 5 分钟，每台设备最多 16 条未完成且未过期命令。重连、租约结束、策略变化或吊销会
 中断旧命令，不跨连接重放。命令记录显示最近 50 条，包含动作、revision、创建和到期
 时间、状态与返回结果。`completed` 表示该动作完成；`start` 完成并不表示进程会永久运行。
+
+**注意上面这句说的是「管理面能提交的动作」，不是「设备实际会收到的动作」。** 控制面内部
+还会造出第四种动作 `execute_task`：Scheduler 的派发 outbox 经
+`governance/internal/store/devices.go` 的 `dispatchDeviceTask` 桥成一行命令，经同一条
+WebSocket 下发给设备。**这条链路已于 2026-09-17 接通：**
+
+- 设备侧处理 `execute_task`：`validateTaskEnvelope` → 落不可变收件箱 → 回
+  `completed`/`{"accepted":true}`（这里的 `completed` 是**已接受**，不是已完成）→
+  **异步**跑 `-task-runner-socket`。没配 runner socket、收件箱写失败、或本机已有一次执行
+  在跑时一律拒绝（`command_denied`），**不会**「先接受再报 FAILED」——接受会在任务账本上
+  写下假的 `RUNNING`。收件箱与回执都不可变，重发同一份回执是幂等的。
+- 最终结果走**新的入站消息类型 `task_result`**
+  （`{"type":"task_result","command_id":"…","result":{…}}`），`result` 就是
+  `domain.TaskResult` 的逐字段同构，网关直接 `Unmarshal` + `Validate`。**回执先于上报**：
+  本地没留下回执就不上报。
+- **上线顺序是硬约束**：网关对未知入站类型一律 `default: return`，**直接关连接**。因此必须
+  **先部署 governance、再滚动设备**；反过来会表现为「设备频繁重连」，与结果通道本身无关。
+- 控制面用命令行上的 `run_id`/`attempt`/`session_ref` 钉死身份，设备自报与之不一致即拒；
+  `node_id` 一律取认证连接的身份（设备无法影响它）。结果只能记在**已被接受**的命令上，
+  审计 actor 为 `device:<node_id>`。
+
+**第五种内部动作 `cancel_task`（2026-09-17 加入）**，用来把 Scheduler 的 `CANCELLING` 送到正在
+跑这个任务的设备上。它同样不出现在管理面能提交的动作里：
+
+- 产生方是 `DispatchDeviceCancellations`（`governance/internal/store/devices.go`），跑在设备网关
+  每秒那一跳上。触发条件是「该 run 的 `execute_task` 命令仍活跃，且对应的调度任务为
+  `CANCELLING`」；连接键是 `run_id = scheduler_tasks.task_id`。
+- 设备收到后取消该 run 的 context：`runTaskRunner` **关闭 socket** 而不只是停止等待——那一问一答
+  的交换用的是**绝对 30s 期限**，阻塞中的读不会因为 context 取消而返回。回执记为
+  **`CANCELLED` 而不是 `FAILED`**：把操作员主动停掉的工作记成失败，是在任务账本上写假话。
+- **两处刻意的边界**：① 取消**不受每设备 16 条在途上限约束**——塞满 16 条命令的机器正是最需要
+  能被停下来的那台，上限是投递预算，不是「能不能停」的问题；② **runner 收到 EOF 之后是否真的
+  停止，由 socket 对端决定，不在本仓库的契约内**（runner 不在本仓库，所以也没有为它发明取消帧）。
+- 取消命中失败（任务已结束、或根本不在跑）**不是错误**：回 `completed`/`{"cancelled":false}`，
+  控制面按幂等处理。取消晚到是常态。
+
+**重启恢复（同日加入）**：设备连上之后先扫一遍任务目录，把**有 `<runID>.inbox.json` 但没有
+`<runID>.receipt.json`** 的 run 上报为 `FAILED`，summary 写明是重启中断。取 `FAILED` 而不是
+`CANCELLED`，因为设备已经不知道那次执行跑到哪一步了，而这两者的排查方向不同（查任务 vs 查设备）。
+重启恢复依赖 `task_result` 通道，所以它只能在 WebSocket 连上之后跑。
+
+顺序不变量（未落盘不收件、回执先于上报、没有 runner 不接受、执行不阻塞心跳）见
+`docs/superpowers/specs/2026-09-17-device-task-result-channel-design.md`。**已知缺口**：
+任务跑起来之后**没有取消通道**（设备命令面没有对应 action，runner socket 契约也没有取消帧），
+设备重启后也不会把「有收件箱、无回执」的 run 报成 FAILED —— 那条 run 会停在 `RUNNING`
+直到超时或人工处理。
 
 进程运行默认关闭。启用时需要同时满足：
 

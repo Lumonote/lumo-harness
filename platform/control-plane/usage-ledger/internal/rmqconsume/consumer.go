@@ -22,9 +22,9 @@ import (
 const (
 	// DefaultMaxMessageNum / DefaultInvisibleDuration 单批拉取量与不可见时长。
 	// invisibleDuration 必须 > 20s（v5 客户端约束）；重投即天然重试。
-	DefaultMaxMessageNum  = 16
-	DefaultInvisibleTime  = 30 * time.Second
-	defaultMaxRetry       = 5
+	DefaultMaxMessageNum = 16
+	DefaultInvisibleTime = 30 * time.Second
+	defaultMaxRetry      = 5
 )
 
 // ErrNoNewMessage broker 以错误形态告知「无新消息」（v5 简单消费者语义）——
@@ -33,12 +33,12 @@ const ErrNoNewMessage = "MESSAGE_NOT_FOUND"
 
 // Consumer RocketMQ → usage_ledger 消费者。
 type Consumer struct {
-	pool             *pgxpool.Pool
-	consumer         rmq.SimpleConsumer
-	maxMessageNum    int32
-	invisibleTime    time.Duration
-	maxRetry         int
-	log              *slog.Logger
+	pool          *pgxpool.Pool
+	consumer      rmq.SimpleConsumer
+	maxMessageNum int32
+	invisibleTime time.Duration
+	maxRetry      int
+	log           *slog.Logger
 	// onReject 毒丸/坏消息告警钩子。生产打 slog；测试注入捕获列表。
 	// 告警不是可选装饰：校验拒绝若静默，闭集就是一扇没人看着的门。
 	onReject func(msg string)

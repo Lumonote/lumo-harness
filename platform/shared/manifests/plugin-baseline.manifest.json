@@ -1,0 +1,64 @@
+{
+  "title": "桌面基线插件清单（跨文件单一真相源）",
+  "description": "2026-09-14。本文件是「桌面包固定安装哪些上游社区插件、各自钉哪个版本」的数值唯一来源。此前同一份名单存在于两处并靠注释要求手工保持一致：data-plane/dsh-node/src/plugins.ts 的 BASE_PROFILE_PLUGINS 与 PACKAGED_PROFILE_MODULES、desktop/build-runtime.mjs 的 upstreamPluginSpecs。消费方式按「能不能在运行期读仓库文件」分两档：build-runtime.mjs 在构建期、在仓库内运行，直接读本文件（零复制，结构上不可能漂移）；dsh-node 用 tsx 直跑源码、打包后目录布局与仓库不同，运行期读不到本文件，故由 tools/gen-plugin-baseline.mjs 生成 src/generated/plugin-baseline.ts 并提交，由 shared/manifests/__tests__/plugin-baseline.spec.ts 的漂移锁保证与原件一致。改清单 = 改本文件 + 跑 pnpm run codegen:plugin-baseline + 锁绿。语义注释（为什么钉这些版本、为什么排除某几个）写在本文件里，不在消费方重复。",
+  "policy": "每个 pin 必须与当前 dsh master 的公共 API 兼容。dsh-settings 在 0.1.2 移除了 installSettingsSection 与 settingsNamespace（由 SettingsProvider 取代），凡在运行期 import 这两个符号的插件都会让 Loader 拒绝整树启动，因此基线版本随 master 一起上移。升版前先在 master 上验证 import 校验通过，再改本文件。",
+  "baseline": [
+    {
+      "name": "dshmarket",
+      "version": "1.41.0",
+      "note": "插件市场：浏览、搜索、安装和更新 DSH 社区插件。原钉 1.36.0，因 dsh-settings 0.1.2 移除旧 API 后在运行期 import 失败，随 master 升到 1.41.0。"
+    },
+    {
+      "name": "@liustack/modlens",
+      "version": "3.25.2",
+      "note": "视觉理解：把图片、截图与附件转换成可追溯的视觉证据，为纯文本编码 agent 提供视觉桥接。"
+    },
+    {
+      "name": "dsh-context",
+      "version": "0.41.3",
+      "note": "上下文洞察：上下文组成、趋势、注入、压缩与每一步消息。原钉 0.38.1，与 dshmarket 同一原因随 master 升到 0.41.3。"
+    },
+    {
+      "name": "dsh-cost-meter",
+      "version": "1.6.7",
+      "note": "费用统计：会话、当日与历史费用，含预算、模型价格与用量。"
+    },
+    {
+      "name": "dsh-dream-skin",
+      "version": "8.30.1",
+      "note": "桌面换肤：8 套 iOS / Linear 式清透冷调主题加弥散光壁纸，每用户可调强调色。纯原生 --dsw-* token 实现，经其 cordis.patch.yml 在 Web 壳激活。"
+    },
+    {
+      "name": "@linxin666/dsh-client-ui-task-board",
+      "version": "0.3.14",
+      "note": "任务看板：dsh web GUI 的 Host 权威任务台帐，替换 Lumo 左侧菜单原「自动化」入口。"
+    },
+    {
+      "name": "dsh-univer-office",
+      "version": "0.2.14",
+      "note": "Univer 办公文档：DSH 与 Univer 的协作网关与查看器，含内联预览、浮动工作台与会话结束审阅。"
+    }
+  ],
+  "excluded": [
+    {
+      "name": "@anweat/dsh-browser",
+      "reason": "0.1.10（2026-08-29，最新版）仍 import dsh-settings 已被移除的 installSettingsSection 与 settingsNamespace，master 下无法通过 import 校验，且上游无更新版。已从桌面包基线移除；市场里装到其它 profile 的行为不受影响（那里的 dsh-settings 可能仍是旧 API）。"
+    },
+    {
+      "name": "@nanmicoder/dsh-agent-teams",
+      "reason": "0.1.15 调用了 master 已移除的 ctx.subagents.registerContinuableSetup，Loader 会直接拒绝整树启动。仍可通过 SkillHub 手动安装；dsh-node 的插件隔离会在失败时自动 quarantine 并重试。"
+    }
+  ],
+  "packagedFirstParty": [
+    "@deepseek-ai/dsh-storage-sqlite",
+    "@lumo/agent-teams",
+    "@lumo/dsh-platform-ui",
+    "@lumo/knowledge-vault",
+    "@lumo/open-design",
+    "@lumo/archify",
+    "@lumo/creative-skills",
+    "@lumo/ruflo-orchestration",
+    "@lumo/web-fetch-fakeip"
+  ],
+  "packagedFirstPartyNote": "打包 runtime 下 dsh-node 把 PACKAGED_PROFILE_MODULES 逐个 symlink 到 DSH_HOME/profiles/node_modules，让 patch 里的裸包名能从 profile 目录按 Node 的父级上溯解析到。该名单 = 本数组加 baseline 的包名，由生成器拼装；漏一个时 Loader 报 Cannot find package，整棵插件树挂载失败。"
+}

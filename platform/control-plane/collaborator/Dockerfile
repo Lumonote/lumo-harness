@@ -11,6 +11,7 @@ FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY collaborator/go.mod collaborator/go.sum ./
 COPY observability /observability
+COPY heartbeat /heartbeat
 RUN go mod download
 COPY collaborator .
 # CGO_ENABLED=0：语义合并由同镜像内的 yrs 进程提供，不依赖 cgo。

@@ -2,6 +2,7 @@ FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY scheduler/go.mod scheduler/go.sum ./
 COPY observability /observability
+COPY heartbeat /heartbeat
 RUN go mod download
 COPY scheduler .
 RUN CGO_ENABLED=0 go build -o /out/scheduler ./cmd/scheduler

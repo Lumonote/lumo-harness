@@ -111,7 +111,7 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient): () 
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
-    async execute(args: unknown, _exec: ToolRunContext): Promise<unknown> {
+    async execute(args: unknown, exec: ToolRunContext): Promise<unknown> {
       const a = args as {
         connectorId?: string; operation?: string
         pathParams?: Record<string, string>; query?: Record<string, string>
@@ -119,6 +119,13 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient): () 
       }
       if (!a.connectorId?.trim()) throw new Error('connector_invoke: connectorId 不能为空')
       if (!a.operation?.trim()) throw new Error('connector_invoke: operation 不能为空')
+
+      // 会话归属：审计要能回答「哪个会话调了外部系统」，而网关拿不到 dsh 会话
+      // ——它只认请求头。`agent.session` 的类型增强不一定在本插件的类型图里，
+      // 故与 session-log 的 `tools/pre-execute` 用同一种防御式取值。
+      // 取不到就不发这个头（审计照记，只是 session_id 为 NULL），不阻断调用。
+      const session = (exec as { agent?: { session?: { id?: unknown } } }).agent?.session?.id
+      const sessionRef = session === undefined || session === null ? undefined : String(session)
 
       try {
         const result = await client.invoke({
@@ -128,6 +135,7 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient): () 
           query: a.query,
           body: a.body,
           correlationId: a.correlationId,
+          sessionRef,
         })
         return {
           provenance: `external:connector/${a.connectorId}`,

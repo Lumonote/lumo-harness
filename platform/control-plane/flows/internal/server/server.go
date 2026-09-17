@@ -133,7 +133,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/flows", s.discover)
 	mux.HandleFunc("GET /v1/flows/{id}", s.get)
 	mux.HandleFunc("GET /v1/flows/{id}/versions/{version}", s.getVersion)
+	mux.HandleFunc("GET /v1/flows/{id}/versions/{version}/lineage/{node}", s.lineage)
 	mux.HandleFunc("GET /v1/flows/{id}/runs", s.listRuns)
+	mux.HandleFunc("GET /v1/projects/{pid}/cron/cursors", s.listCronCursors)
 	mux.HandleFunc("POST /v1/flows/{id}/runs/{runID}/replay", s.replayRun)
 	mux.HandleFunc("PUT /v1/flows/{id}/definition", s.updateDefinition)
 	mux.HandleFunc("POST /v1/flows/{id}/submit", s.submit)
@@ -383,6 +385,79 @@ func (s *Server) getVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"flow_id": f.ID, "version": version, "reviewer": reviewer, "definition": definition,
+	})
+}
+
+// lineage 是缺口 C7 的只读血缘查询面：回答「某条血缘链上游/下游是什么」。
+//
+// 两个诚实约束（都不能用「看起来正常」的实现糊过去）：
+//
+//   - direction 必须显式给出（up/down）。给个默认值会让「上游」与「下游」两种相反语义
+//     在调用方漏传时静默走错一边，而结果集形状完全一样、不会报错——这正是 E7 记下的
+//     「结果集被悄悄放大/缩小比报错危险」。
+//   - 血缘捕获未启用时返回 503 与可读原因，**不是** 200 + 空列表。空列表会被读成
+//     「这个节点没有上下游」，而事实是「我们根本没在采集」。
+//
+// 数据来源是 PG outbox 事实（不是 Nebula，也不是其缓存）：见 store.LineageNeighbors 的口径说明。
+func (s *Server) lineage(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	f, err := s.store.GetFlow(r.Context(), r.PathValue("id"), c.realm)
+	if err != nil || !canSee(f, c) {
+		http.Error(w, `{"error":"flow not found"}`, http.StatusNotFound)
+		return
+	}
+	if _, err := s.store.ProjectRole(r.Context(), f.ProjectID, c.realm, c.user); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, `{"error":"flow not found"}`, http.StatusNotFound)
+			return
+		}
+		s.log.Error("检查血缘查询项目权限失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	version, err := strconv.Atoi(r.PathValue("version"))
+	if err != nil || version < 1 {
+		http.Error(w, `{"error":"version must be a positive integer"}`, http.StatusBadRequest)
+		return
+	}
+	direction := r.URL.Query().Get("direction")
+	if direction != "up" && direction != "down" {
+		// 不默认：见上方注释。缺失与拼错给同一句可读文案。
+		http.Error(w, `{"error":"direction must be \"up\" or \"down\""}`, http.StatusBadRequest)
+		return
+	}
+	maxHops := 0
+	if raw := r.URL.Query().Get("max_hops"); raw != "" {
+		if maxHops, err = strconv.Atoi(raw); err != nil {
+			http.Error(w, `{"error":"max_hops must be an integer"}`, http.StatusBadRequest)
+			return
+		}
+	}
+	node := r.PathValue("node")
+	edges, err := s.store.LineageNeighbors(r.Context(), f.ID, version, node, direction, maxHops)
+	switch {
+	case errors.Is(err, store.ErrLineageUnavailable):
+		// 503 而不是 404/200：这不是「查不到」，是「这个部署没在做血缘采集」。
+		// 单独给 reason 字段，便于面板区分「没配」与「真没有」。
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "lineage unavailable", "reason": "lineage_not_configured", "detail": err.Error(),
+		})
+		return
+	case errors.Is(err, store.ErrNotFound):
+		http.Error(w, `{"error":"invalid lineage query"}`, http.StatusBadRequest)
+		return
+	case err != nil:
+		s.log.Error("查询血缘失败", "err", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"flow_id": f.ID, "version": version, "node": node, "direction": direction,
+		// source 写出来，调用方才知道这份答案来自 PG outbox 事实回放而不是图引擎缓存。
+		"source": "pg_outbox", "edges": edges,
 	})
 }
 

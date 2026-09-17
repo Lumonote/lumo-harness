@@ -84,6 +84,14 @@ spec:
               value: {{ .Values.dshNode.residency | quote }}
             - name: LUMO_CLUSTER_ID
               value: {{ .Values.dshNode.clusterId | quote }}
+            {{- /* 版本一致性前置（§7.4.1）的声明方。与存活自报同理必须是**承载节点**：
+                   它说的是「这个集群现在跑的是哪个版本」，而调度器自己的版本是另一条
+                   发布线。留空 = 不声明（整条省略，不是渲染成空串——空串在服务端语义上
+                   就是「没说」，但渲染出来会让读清单的人以为配了）。 */}}
+            {{- if .Values.dshNode.clusterVersion }}
+            - name: LUMO_CLUSTER_VERSION
+              value: {{ .Values.dshNode.clusterVersion | quote }}
+            {{- end }}
             - name: LUMO_REALM
               value: {{ .Values.dshNode.realm | quote }}
             - name: LUMO_ROLE
@@ -120,6 +128,12 @@ spec:
               value: {{ .Values.nacos.group | quote }}
             - name: LUMO_SCHEDULER_URL
               value: {{ printf "http://%s-scheduler:%v" (include "lumo-platform.name" .) .Values.services.scheduler.port | quote }}
+            # §8.4 共享执行控制（C5）的提交入口。键名带连字符，所以**不能**写
+            # `.Values.services.session-control.port` —— Go template 会把 `-` 当减法。
+            # 那是渲染期错误而不是静默空值，但仍然必须走 `index`。
+            # 对应断言见 deploy/helm-verify.sh 的 "points both dsh workloads"。
+            - name: LUMO_SESSION_CONTROL_URL
+              value: {{ printf "http://%s-session-control:%v" (include "lumo-platform.name" .) (index .Values.services "session-control").port | quote }}
             - name: LUMO_SUBAGENT_HOST_TOKEN
               valueFrom: { secretKeyRef: { name: {{ .Values.dshNode.hostTokenSecret }}, key: {{ .Values.dshNode.hostTokenKey }}, optional: false } }
             - name: LUMO_CONTROL_PLANE_TOKEN
@@ -317,6 +331,11 @@ spec:
               value: {{ .Values.dshWeb.schedulerUrl | quote }}
             - name: LUMO_SCHEDULER_API_URL
               value: {{ .Values.dshWeb.schedulerUrl | quote }}
+            # §8.4 共享执行控制（C5）的提交入口。dsh-web 是控制台后端，它的
+            # `ctx.sessionControl.dispatch` 把控制指令 POST 到这里；没有它，
+            # 控制台点了按钮只会拿到 ControlCommandRoutingError。
+            - name: LUMO_SESSION_CONTROL_URL
+              value: {{ .Values.dshWeb.sessionControlUrl | quote }}
             - name: LUMO_PROJECTS_URL
               value: {{ .Values.dshWeb.projectsUrl | quote }}
             - name: LUMO_FLOWS_URL

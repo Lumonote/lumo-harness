@@ -1,0 +1,19 @@
+{
+  "whitelist": [
+    "llm-gateway:8088",
+    "flows:8087",
+    "projects:8086",
+    "governance:8089",
+    "terminal-gateway:8090"
+  ],
+  "routes": [
+    { "prefix": "/v1/chat/", "upstream": "http://llm-gateway:8088", "rate_limit_rpm": 6000 },
+    { "prefix": "/v1/providers", "upstream": "http://llm-gateway:8088", "rate_limit_rpm": 600 },
+    { "prefix": "/v1/flows", "upstream": "http://flows:8087", "rate_limit_rpm": 3000 },
+    { "prefix": "/v1/operators", "upstream": "http://flows:8087", "rate_limit_rpm": 600 },
+    { "prefix": "/v1/projects", "upstream": "http://projects:8086", "rate_limit_rpm": 3000 },
+    { "prefix": "/v1/tasks/", "upstream": "http://projects:8086", "rate_limit_rpm": 3000 },
+    { "prefix": "/v1/auth/", "upstream": "http://governance:8089", "rate_limit_rpm": 1200 },
+    { "prefix": "/v1/terminals/", "upstream": "http://terminal-gateway:8090", "rate_limit_rpm": 600 }
+  ]
+}

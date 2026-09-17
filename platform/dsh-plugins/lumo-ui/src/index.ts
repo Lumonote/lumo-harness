@@ -427,7 +427,27 @@ function upstreamDemos(): UpstreamDemoService {
   return upstreamDemoService ??= createUpstreamDemoService()
 }
 
-export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, vault: VaultService | undefined, req: IncomingMessage, res: ServerResponse, skillhubRuntime?: SkillHubRuntime): Promise<void> {
+/**
+ * `ctx.agentTeams` 里本服务用得上的那一部分。
+ *
+ * 声明成窄接口而不是 import 插件类型：两者都是 dsh 公开面（`ctx.provide('agentTeams')`），
+ * 而窄接口让路由可以拿一个假服务直接测——本层唯一有风险的地方是「取哪些字段、怎么拼」，
+ * 而不是「dsh 会不会按契约把它注进来」。
+ */
+interface AgentTeamsService {
+  list(): Promise<Array<{ id: string; name: string; topology: string; captainSessionId: string }>>
+  status(teamId: string): Promise<{
+    team: {
+      id: string; name: string; topology: string; captainSessionId: string
+      members: Array<{ name: string; role?: string; model?: string; provider: string; status: string; ownerUserId?: string }>
+      tasks: Array<{ id: string; subject: string; status: string; assignee?: string; dependencies: string[] }>
+    }
+    progress: { total: number; pending: number; active: number; completed: number; failed: number; cancelled: number; ready: string[]; blocked: string[] }
+    settled: boolean
+  }>
+}
+
+export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, vault: VaultService | undefined, req: IncomingMessage, res: ServerResponse, skillhubRuntime?: SkillHubRuntime, agentTeams?: AgentTeamsService): Promise<void> {
   const pathname = new URL(req.url ?? '/', 'http://lumo.local').pathname
   // 单机版（Local Desktop）：vault 知识源 + fallback 身份,知识管理路由不套 realm 管理员角色门。
   const singleMachine = config.deploymentMode === 'local'
@@ -878,6 +898,43 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     return
   }
 
+  // 协作空间：把 dsh 的团队名册交给客户端，**这里不做拼接**。
+  //
+  // 员工、注册节点、任务上下游都已经各有各的面（`/lumo/api/users`、`/desktop-nodes`、
+  // `/delegations`），本路由只补 `agentTeams` 这一块。拼接——按成员上的 `ownerUserId`
+  // 把它挂到对应员工下面——是一个纯函数，放在客户端，于是它能被单测直接断言；
+  // 在服务端造一个聚合端点只会多出一处「两边字段一起改」的地方。
+  if (req.method === 'GET' && pathname === '/lumo/api/collaboration/teams') {
+    if (agentTeams === undefined) {
+      // 缺席要说成缺席。回一个空列表读起来是「没有团队」——那是一个结论，
+      // 而这个部署可能只是没装 agent-teams。
+      writeJson(res, 503, { error: 'agent_teams_unavailable', detail: 'ctx.agentTeams 未装配' })
+      return
+    }
+    try {
+      const listed = await agentTeams.list()
+      const teams = await Promise.all(listed.map(async entry => {
+        const projected = await agentTeams.status(entry.id)
+        return {
+          id: projected.team.id,
+          name: projected.team.name,
+          topology: projected.team.topology,
+          captain_session_id: projected.team.captainSessionId,
+          // 成员原样带出，**包括 ownerUserId 缺省**：客户端靠 `undefined` 把它放进
+          // 「未绑定」区，在这里补一个空串会让两种含义在传输中就已经分不开。
+          members: projected.team.members,
+          tasks: projected.team.tasks,
+          progress: projected.progress,
+          settled: projected.settled,
+        }
+      }))
+      writeJson(res, 200, { teams })
+    } catch (error) {
+      writeJson(res, 502, { error: 'agent_teams_read_failed', detail: error instanceof Error ? error.message : '读取团队失败' })
+    }
+    return
+  }
+
   if (pathname === '/lumo/api/users' && (req.method === 'GET' || req.method === 'POST')) {
     if (req.method === 'GET') {
       writeUpstream(res, await upstream(config, identity, 'governance', `/v1/users?q=${encodeURIComponent(new URL(req.url ?? '/', 'http://lumo.local').searchParams.get('q') ?? '')}`, req)); return
@@ -1018,6 +1075,26 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     const taskID = safeID(taskRuns[1])
     if (taskID === undefined) { writeJson(res, 400, { error: 'invalid task id' }); return }
     writeUpstream(res, await upstream(config, identity, 'governance', `/v1/tasks/${encodeURIComponent(taskID)}/runs`, req))
+    return
+  }
+
+  // The collaboration view and the full run result are separate governance
+  // faces: the collaboration payload carries summaries without multiplying large
+  // outputs, and the result face is where the output itself lives.
+  const taskCollaboration = pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/collaboration$/u)
+  if (req.method === 'GET' && taskCollaboration !== null) {
+    const taskID = safeID(taskCollaboration[1])
+    if (taskID === undefined) { writeJson(res, 400, { error: 'invalid task id' }); return }
+    writeUpstream(res, await upstream(config, identity, 'governance', `/v1/tasks/${encodeURIComponent(taskID)}/collaboration`, req))
+    return
+  }
+
+  const taskRunResult = pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/runs\/([^/]+)\/result$/u)
+  if (req.method === 'GET' && taskRunResult !== null) {
+    const taskID = safeID(taskRunResult[1])
+    const runID = safeID(taskRunResult[2])
+    if (taskID === undefined || runID === undefined) { writeJson(res, 400, { error: 'invalid task or run id' }); return }
+    writeUpstream(res, await upstream(config, identity, 'governance', `/v1/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/result`, req))
     return
   }
 
@@ -1419,6 +1496,11 @@ export function apply(ctx: Context, config: Config): void {
           runtimeCtx.get('sessionLogQuery') as SessionLogQuerySeam | undefined,
           runtimeCtx.get('knowledgeVault') as VaultService | undefined,
           req, res, skillhubRuntime,
+          // 与 knowledgeVault 同样是**机会式**的取法，不进上面的 inject 列表：
+          // inject 会等到列出的服务全部就绪才注册路由，把 agentTeams 加进去就等于
+          // 「没装 agent-teams 的形态整个 /lumo/api 都不工作」——一个可选功能拖垮全部。
+          // 取不到时路由回 503 并说明缺席，其余面照常。
+          runtimeCtx.get('agentTeams') as AgentTeamsService | undefined,
         ),
       })
       const disposeOps = runtimeCtx.webServer.register({ kind: 'exact', path: '/lumo/ops', handler: ops })

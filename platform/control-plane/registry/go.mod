@@ -4,10 +4,13 @@ go 1.25.0
 
 require (
 	github.com/klauspost/compress v1.19.2
+	github.com/lumo-harness/platform/heartbeat v0.0.0
 	github.com/lumo-harness/platform/observability v0.0.0
 )
 
 replace github.com/lumo-harness/platform/observability => ../observability
+
+replace github.com/lumo-harness/platform/heartbeat => ../heartbeat
 
 require (
 	github.com/gorilla/websocket v1.5.3

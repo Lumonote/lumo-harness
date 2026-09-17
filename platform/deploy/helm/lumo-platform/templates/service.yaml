@@ -5,7 +5,17 @@ kind: Service
 metadata:
   name: {{ include "lumo-platform.name" $ }}-{{ $name }}
 spec:
-  type: {{ $.Values.service.type }}
+  {{- /* Per-service override, defaulting to the global type. It exists for the
+         entry-layer services (edge-gateway, terminal-gateway): whether an entry
+         point is reachable from outside the cluster is a deployment decision, and
+         the only lever without this override is the **global** `service.type`,
+         which would flip all twelve services — including the internal faces that
+         must not be reachable. Leaving the default at ClusterIP means nothing is
+         exposed by accident; exposing an entry point means naming it here.
+         Whether an Ingress should front it instead is a product decision the
+         chart deliberately does not make (see docs/cluster-development-tasks.md,
+         D3): a Service type is a fact, an ingress topology is an opinion. */}}
+  type: {{ default $.Values.service.type $cfg.type }}
   selector: { lumo.dev/service: {{ $name }} }
   ports: [{ name: http, port: {{ $cfg.port }}, targetPort: http }]
 ---

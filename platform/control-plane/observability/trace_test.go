@@ -8,7 +8,7 @@ import (
 )
 
 func TestMiddlewarePropagatesValidTraceparentAndCorrelation(t *testing.T) {
-	metrics := &Metrics{gauges: make(map[string]float64)}
+	metrics := &Metrics{}
 	const parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 	handler := metrics.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := TraceID(r.Context()); got != "4bf92f3577b34da6a3ce929d0e0e4736" {
@@ -36,7 +36,7 @@ func TestMiddlewarePropagatesValidTraceparentAndCorrelation(t *testing.T) {
 }
 
 func TestMiddlewareCreatesSafeTraceForMissingOrInvalidHeaders(t *testing.T) {
-	metrics := &Metrics{gauges: make(map[string]float64)}
+	metrics := &Metrics{}
 	var seenTrace, seenCorrelation string
 	handler := metrics.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenTrace, seenCorrelation = TraceID(r.Context()), CorrelationID(r.Context())

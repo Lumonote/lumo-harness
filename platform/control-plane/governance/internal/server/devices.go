@@ -40,7 +40,9 @@ func (s *Server) deviceStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	connected := d.Status != "REVOKED" && d.ConnectionID != "" && d.ConnectionExpires != nil && d.ConnectionExpires.After(time.Now()) && d.CertificateExpires != nil && d.CertificateExpires.After(time.Now())
-	if !connected && d.Status == "ONLINE" { d.Status = "OFFLINE" }
+	if !connected && d.Status == "ONLINE" {
+		d.Status = "OFFLINE"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"device": d, "gateway_url": s.cfg.DeviceGateway.PublicURL(), "process_runtime": s.cfg.DeviceGateway.ProcessRuntimeEnabled(), "connected": connected,
 		"permissions": map[string]bool{"manage_policy": isRealmAdmin(c), "enroll": d.Status == "PENDING_ACTIVATION" && d.Revision > 0, "command": d.Status != "REVOKED", "start": c.userID == d.Owner && s.cfg.DeviceGateway.ProcessRuntimeEnabled()}})
 }
@@ -100,15 +102,21 @@ func (s *Server) deviceCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	var input struct {
 		Revision *int64 `json:"revision"`
-		Action  string `json:"action"`
-		Name    string `json:"name"`
-		Version string `json:"version"`
+		Action   string `json:"action"`
+		Name     string `json:"name"`
+		Version  string `json:"version"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	if input.Revision == nil { s.respondStoreError(w, store.ErrBadRequest); return }
-	if *input.Revision != d.Revision { s.respondStoreError(w, store.ErrConflict); return }
+	if input.Revision == nil {
+		s.respondStoreError(w, store.ErrBadRequest)
+		return
+	}
+	if *input.Revision != d.Revision {
+		s.respondStoreError(w, store.ErrConflict)
+		return
+	}
 	if input.Action != "reconcile" && input.Action != "start" && input.Action != "stop" {
 		s.respondStoreError(w, store.ErrBadRequest)
 		return

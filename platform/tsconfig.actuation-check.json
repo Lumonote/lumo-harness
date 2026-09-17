@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "shared/seam-contracts/**/*.ts",
+    "dsh-plugins/control/src/**/*.ts",
+    "dsh-plugins/control/__tests__/**/*.ts"
+  ],
+  "exclude": ["node_modules"]
+}

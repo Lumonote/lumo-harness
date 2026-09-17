@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lumo-harness/manifests/plugin-baseline.schema.json",
+  "title": "桌面基线插件清单",
+  "description": "plugin-baseline.manifest.json 的结构契约。基线 pin 名单是跨文件单一真相源：改版本只改清单，消费方（dsh-node 生成物、desktop 构建脚本）由漂移锁与直读保证同步。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "description", "policy", "baseline", "excluded", "packagedFirstParty"],
+  "properties": {
+    "title": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "policy": {
+      "type": "string",
+      "minLength": 1,
+      "description": "升版纪律：pin 必须与当前 dsh master 的公共 API 兼容。"
+    },
+    "baseline": {
+      "type": "array",
+      "minItems": 1,
+      "description": "桌面包固定安装的上游社区插件。数组顺序即安装与文档顺序，不要随意重排。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "version", "note"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "npm 包名（含 scope 时带 scope）。",
+            "pattern": "^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$"
+          },
+          "version": {
+            "type": "string",
+            "description": "精确版本，不接受范围写法：桌面构建不得因为 registry 上的 tag 移动而改变行为。",
+            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1,
+            "description": "这个插件是什么、为什么钉这个版本。"
+          }
+        }
+      }
+    },
+    "excluded": {
+      "type": "array",
+      "description": "曾被考虑但已移出基线的插件及原因。保留是为了防止有人再把它加回来。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "reason"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "packagedFirstParty": {
+      "type": "array",
+      "minItems": 1,
+      "description": "首方（@deepseek-ai / @lumo）模块中需要被 symlink 进 profile 的那部分。",
+      "items": {
+        "type": "string",
+        "pattern": "^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$"
+      },
+      "uniqueItems": true
+    },
+    "packagedFirstPartyNote": { "type": "string", "minLength": 1 }
+  }
+}

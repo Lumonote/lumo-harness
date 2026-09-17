@@ -2,6 +2,7 @@ FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY registry/go.mod registry/go.sum ./
 COPY observability /observability
+COPY heartbeat /heartbeat
 RUN go mod download
 COPY registry .
 RUN CGO_ENABLED=0 go build -o /out/registry ./cmd/registry

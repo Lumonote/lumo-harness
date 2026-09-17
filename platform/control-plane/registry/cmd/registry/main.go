@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/lumo-harness/platform/heartbeat"
 	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/registry/internal/objstore"
 	"github.com/lumo-harness/platform/registry/internal/server"
@@ -66,6 +67,16 @@ func main() {
 	if err := s.Init(ctx); err != nil {
 		log.Fatalf("registry: 建表失败: %v", err)
 	}
+
+	// 心跳上报：集群就绪态由心跳新鲜度与自报依赖派生（E4/D6）。
+	//
+	// 这里用 Background 而不是可取消的 ctx，因为本服务目前没有信号处理与优雅停机
+	// 路径（observability.Serve 直接阻塞在 ListenAndServe）。后果是 registry 重启时
+	// 不会写 stopping，旧实例的行直接变陈旧 —— 与崩溃同形，对就绪态而言是诚实的信号。
+	// 补上优雅停机是独立于 E4/D6 的一项工作。
+	heartbeat.StartPg(context.Background(), s.Pool(), heartbeat.Options{
+		Service: "registry", Depends: heartbeat.PgDependency(s.Pool()),
+	})
 
 	addr := ":" + env("REGISTRY_PORT", "8084")
 	srv := &http.Server{

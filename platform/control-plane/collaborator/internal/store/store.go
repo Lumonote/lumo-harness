@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -49,6 +50,9 @@ CREATE TABLE IF NOT EXISTS collab_snapshots (
 );
 
 -- 发布 outbox：与快照同事务写入，由 §5.4.3 管道消费触发向量重建
+--
+-- realm/space 冻结在 outbox 行上而不是派发时回查 collab_documents：
+-- 派发可能晚于一次空间迁移，回查会把旧事件投影到新空间（跨空间泄漏路径）。
 CREATE TABLE IF NOT EXISTS collab_publish_outbox (
   id         BIGSERIAL PRIMARY KEY,
   doc_id     TEXT NOT NULL,
@@ -56,9 +60,18 @@ CREATE TABLE IF NOT EXISTS collab_publish_outbox (
   space      TEXT NOT NULL,
   version    INTEGER NOT NULL,
   dispatched BOOLEAN NOT NULL DEFAULT false,
+  attempts   INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- CREATE TABLE IF NOT EXISTS 不会给已存在的库补列，必须显式 ALTER（幂等）
+ALTER TABLE collab_publish_outbox ADD COLUMN IF NOT EXISTS attempts   INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE collab_publish_outbox ADD COLUMN IF NOT EXISTS last_error TEXT NOT NULL DEFAULT '';
+
+-- 扫描条件是 dispatched = false（attempts 用尽的行由查询侧过滤）。
+-- 局部索引里 dispatched 恒为常量，因此 (dispatched, id) 实际等价于按 id 排序的
+-- 局部索引，可直接支撑 ORDER BY o.id LIMIT n，无需另建索引。
 CREATE INDEX IF NOT EXISTS idx_collab_outbox_pending
   ON collab_publish_outbox (dispatched, id) WHERE dispatched = false;
 
@@ -81,6 +94,19 @@ CREATE TABLE IF NOT EXISTS collab_space_grants (
   permissions TEXT[] NOT NULL,
   PRIMARY KEY (realm, space, subject)
 );
+
+-- 把主键修正到 (realm, space, subject)。旧 local-lite 的 DDL 用的是 (space, subject)，
+-- 两个 realm 会在同一个 space id 上互相覆盖 —— 这是租户隔离缺陷，不是格式问题。
+-- CREATE TABLE IF NOT EXISTS 对已存在的库是空操作，所以必须显式 ALTER；语句与
+-- deploy/migrations/002_collaborator_realm_grants.sql 逐字相同（漂移由
+-- shared/__tests__/ddl-ownership.spec.ts 的迁移↔服务收敛用例看守）。
+-- 代价是每次启动都 DROP+ADD 一次主键（与 control-plane/heartbeat 的 SchemaSQL 同款做法）：
+-- 换掉它就意味着「只跑服务 DDL 的 Compose 部署永远修不好这条主键」。
+ALTER TABLE collab_space_grants
+  DROP CONSTRAINT IF EXISTS collab_space_grants_pkey;
+
+ALTER TABLE collab_space_grants
+  ADD CONSTRAINT collab_space_grants_pkey PRIMARY KEY (realm, space, subject);
 `
 
 // Store 组合 PG（权威）与 Redis（WAL 热层）。
@@ -103,6 +129,13 @@ func New(ctx context.Context, pgDSN, redisAddr string) (*Store, error) {
 	return &Store{pg: pool, rdb: rdb}, nil
 }
 
+// NewPGOnly 只用 PostgreSQL 构造 Store（Redis 为空）。
+//
+// 存在意义是让「只碰 PG 的那一半」可被单独装配与测试：发布 outbox 的读取/确认/失败
+// 记录都只走 s.pg。**生产装配必须用 New**——任何 WAL/快照方法在 nil Redis 客户端上
+// 都会失败，而这是运行时才暴露的错误。
+func NewPGOnly(pool *pgxpool.Pool) *Store { return &Store{pg: pool} }
+
 // Init 幂等建表。
 func (s *Store) Init(ctx context.Context) error {
 	if _, err := s.pg.Exec(ctx, DDL); err != nil {
@@ -113,8 +146,14 @@ func (s *Store) Init(ctx context.Context) error {
 
 func (s *Store) Close() {
 	s.pg.Close()
-	_ = s.rdb.Close()
+	if s.rdb != nil {
+		_ = s.rdb.Close()
+	}
 }
+
+// Pool 暴露连接池给同进程的心跳上报（心跳表由 heartbeat 包与平台迁移
+// 004_service_heartbeats.sql 共同维护，见 platform/control-plane/heartbeat）。
+func (s *Store) Pool() *pgxpool.Pool { return s.pg }
 
 func walKey(id domain.DocumentID) string { return "collab:wal:" + string(id) }
 
@@ -364,38 +403,101 @@ func (s *Store) SnapshotAt(ctx context.Context, id domain.DocumentID, version in
 	return &snap, nil
 }
 
-// PendingPublishes 供 reindex 管道消费的未派发 outbox 记录。
-func (s *Store) PendingPublishes(ctx context.Context, limit int) ([]domain.Snapshot, error) {
+// PendingPublish 一条待派发的发布事件（outbox 行 + 其快照 + 文档标题）。
+//
+// 这是**投影管道的输入契约**，与 domain.Snapshot 刻意分开：Snapshot 是「模型可见
+// 内容的唯一来源」（铁律 17）的读取形状，它没有 realm/space（快照表也不存）；
+// 而 outbox 事件必须带 realm/space 才能把投影写进正确的租户与空间。
+// 把两者合成一个结构会让「读快照」的路径被迫返回空 realm —— 那种字段迟早被用错。
+type PendingPublish struct {
+	DocID     domain.DocumentID
+	Realm     domain.RealmID
+	Space     domain.SpaceID
+	Title     string
+	Version   int
+	Publisher string
+	Content   string
+	Attempts  int
+	CreatedAt time.Time
+}
+
+// PendingPublishes 读取尚未派发的发布事件，按 outbox 写入顺序（= 发布版本顺序）。
+//
+// 语义要点：
+//
+//  1. **至少一次，不是恰好一次。** 这里不加 FOR UPDATE SKIP LOCKED：不持有事务时
+//     它毫无作用（锁在语句结束即释放），而把 SELECT 与 MarkDispatched 合成一个事务
+//     意味着把 embedding 网络调用圈进数据库事务里。多副本同时扫到同一行是可接受
+//     的，因为下游 ingest 按 (doc_id, chunk_index) upsert 且带源版本单调校验。
+//  2. **按 id 升序**，所以同一文档的版本严格递增地到达下游，不会出现「先新后旧」
+//     把旧内容盖掉（ingest 侧遇到旧版本会显式拒绝，见 indexing.ErrSuperseded）。
+//  3. attempts 用尽的行不再返回：否则一条永久失败的行会长期占据 LIMIT 配额，
+//     把它后面所有新发布饿死。失败原因留在 last_error 供排查，见 CountStalledPublishes。
+//  4. INNER JOIN 快照/文档：文档被删除后其快照级联消失，残留的 outbox 行没有可投影
+//     的内容，跳过才是正确行为。**若将来新增删除文档的路径，必须同时清掉它的待派发行。**
+func (s *Store) PendingPublishes(ctx context.Context, limit, maxAttempts int) ([]PendingPublish, error) {
 	rows, err := s.pg.Query(ctx,
-		`SELECT o.doc_id, o.version, s.publisher, s.content, s.created_at
+		`SELECT o.doc_id, o.realm, o.space, d.title, o.version, s.publisher, s.content, o.attempts, s.created_at
 		 FROM collab_publish_outbox o
 		 JOIN collab_snapshots s ON s.doc_id = o.doc_id AND s.version = o.version
-		 WHERE o.dispatched = false ORDER BY o.id LIMIT $1`, limit)
+		 JOIN collab_documents d ON d.doc_id = o.doc_id
+		 WHERE o.dispatched = false AND o.attempts < $1
+		 ORDER BY o.id LIMIT $2`, maxAttempts, limit)
 	if err != nil {
 		return nil, fmt.Errorf("collaborator: 读 outbox 失败: %w", err)
 	}
 	defer rows.Close()
 
-	var out []domain.Snapshot
+	var out []PendingPublish
 	for rows.Next() {
-		var s domain.Snapshot
-		if err := rows.Scan(&s.DocID, &s.Version, &s.Publisher, &s.Content, &s.CreatedAt); err != nil {
+		var p PendingPublish
+		if err := rows.Scan(&p.DocID, &p.Realm, &p.Space, &p.Title, &p.Version,
+			&p.Publisher, &p.Content, &p.Attempts, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("collaborator: 扫描 outbox 失败: %w", err)
 		}
-		out = append(out, s)
+		out = append(out, p)
 	}
 	return out, rows.Err()
 }
 
 // MarkDispatched 标记 outbox 记录已被 reindex 管道消费。
+//
+// 只在**下游确认写入成功后**调用；调用失败或未调用都意味着下一轮重扫，重扫是安全的
+// （下游 upsert 幂等）。所以这里是「确认」，不是「认领」——没有认领列就没有超时回收。
 func (s *Store) MarkDispatched(ctx context.Context, id domain.DocumentID, version int) error {
 	_, err := s.pg.Exec(ctx,
-		`UPDATE collab_publish_outbox SET dispatched = true WHERE doc_id = $1 AND version = $2`,
+		`UPDATE collab_publish_outbox SET dispatched = true, last_error = ''
+		 WHERE doc_id = $1 AND version = $2 AND dispatched = false`,
 		string(id), version)
 	if err != nil {
 		return fmt.Errorf("collaborator: 标记 outbox 失败: %w", err)
 	}
 	return nil
+}
+
+// RecordDispatchFailure 记一次派发失败：累加 attempts 并保留最后一次原因，
+// 返回累加后的 attempts（调用方据此判断这一行是否刚刚触到停滞阈值）。
+//
+// terminal 为真表示「重试同一个载荷不可能成功」（契约不匹配等），直接把 attempts
+// 推到上限，避免把 embedding 调用白烧 maxAttempts 轮；原因仍留在 last_error。
+// 停滞的行不是静默丢弃：调用方会就这一次跨越阈值打日志，而且该文档下次发布会产生
+// 一条 attempts 归零的新行，天然自愈。
+func (s *Store) RecordDispatchFailure(ctx context.Context, id domain.DocumentID, version int, reason string, maxAttempts int, terminal bool) (int, error) {
+	var attempts int
+	err := s.pg.QueryRow(ctx,
+		`UPDATE collab_publish_outbox
+		    SET attempts = CASE WHEN $4 THEN $5 ELSE attempts + 1 END, last_error = $3
+		  WHERE doc_id = $1 AND version = $2 AND dispatched = false
+		 RETURNING attempts`,
+		string(id), version, reason, terminal, maxAttempts).Scan(&attempts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// 行已被确认（或不存在）：不是错误，交给调用方当作「无需记录」。
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("collaborator: 记录派发失败失败: %w", err)
+	}
+	return attempts, nil
 }
 
 // Permissions 查询主体在空间上的权限集合（空 = 无任何权限）。

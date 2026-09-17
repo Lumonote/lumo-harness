@@ -12,6 +12,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lumo-harness/platform/observability"
@@ -22,17 +24,93 @@ import (
 	"github.com/lumo-harness/platform/scheduler/internal/store"
 )
 
+// leaderState 本进程的领导权状态。
+//
+// 抽成接口只有一个目的：让测试能构造出「我是 leader」这一态。election.State 的
+// 领导权只能由真实租约驱动，而收割循环要验证的是**拿到领导权之后**的行为
+// （以及「不是 leader 时必须在碰库之前返回」这个次序），不是选举本身。
+// 生产装配仍传 *election.State，New 的签名不变。
+type leaderState interface {
+	Current() *domain.Lease
+	IsLeader() bool
+}
+
 // Server 调度服务 HTTP 层。
 type Server struct {
 	store        *store.Store
-	elec         *election.State
+	elec         leaderState
 	catalog      catalog.Catalog
 	log          *slog.Logger
 	controlToken string
 	workers      catalog.WorkerDirectory
+
+	// nodeMu / nodeSnap 缓存目录里的节点快照。见 metrics.go 的包注释：
+	// /metrics 是抓取路径，不能在里面查目录，所以存活信息在这里缓存。
+	nodeMu   sync.RWMutex
+	nodeSnap nodeSnapshot
+
+	// clusters / clusterThresholds / clusterEnforced 是联邦注册表的装配结果
+	// （见 cluster.go）。enforced 表示**本实例参与判定**：闸门、自报与集群维度
+	// 指标随之启停；上报与查询端点不受它影响。
+	clusters          clusterDirectory
+	clusterThresholds domain.ClusterThresholds
+	clusterEnforced   bool
+	// versionGate 版本一致性前置的生效开关（§7.4.1）。与 clusterEnforced 独立：
+	// 它消费版本声明而不是存活年龄，且只拦**全局**任务。
+	versionGate bool
+	// placementWeights 偏好打分权重（见 domain.PlacementWeights）。零值时用默认值
+	// （见 Weights），这样就地构造的测试 Server 不必关心它。
+	placementWeights domain.PlacementWeights
+
+	// localClusterID / clusterElec 是**降级放置**的装配（见 degradedPlacement）。
+	// localClusterID 为空表示本实例没有集群身份——它无从判断「本地」是什么，因此
+	// 无全局 leader 时对所有放置返回 503（也就是今天的行为，保持不变）。
+	localClusterID string
+	clusterElec    leaderState
+	degraded       atomic.Int64
 }
 
+// SetPlacementWeights 装配偏好打分权重。
+func (s *Server) SetPlacementWeights(w domain.PlacementWeights) { s.placementWeights = w }
+
 func (s *Server) SetWorkerDirectory(directory catalog.WorkerDirectory) { s.workers = directory }
+
+// SetClusterPlacement 装配本实例的集群身份与本地租约，从而启用**降级放置**。
+//
+// 不装配（clusterID 为空）时行为与今天完全一致：无全局 leader 即 503。
+// 这不是保守，而是判据本身要求的——没有集群身份的实例无从判断「本地」是什么。
+func (s *Server) SetClusterPlacement(clusterID string, local leaderState) {
+	s.localClusterID = strings.TrimSpace(clusterID)
+	s.clusterElec = local
+}
+
+// DegradedPlacements 降级期间成功放行的次数（指标用）。
+func (s *Server) DegradedPlacements() int64 { return s.degraded.Load() }
+
+// degradedPlacement 在没有全局租约时，判断这次放置能否走**本地**降级路径。
+// 可以则返回本地租约，否则 nil（调用方照旧 503）。
+//
+// 三条判据缺一不可，每一条都对应一种「放行会比 503 更坏」的情形：
+//
+//	① 本实例有集群身份——没有身份就无从判断「本地」；
+//	② 请求的目标集群 == 本实例的集群——跨集群放置是**真正的全局决策**，
+//	   用本地锁去批准它会造出两个集群各自以为自己是决策者；
+//	③ 本实例持有该集群的本地租约——**降级是换一把更小的锁，不是把锁拿掉**。
+//	   没有这一条，同一集群的多个实例会同时放行，那正是 fencing 存在要防的事。
+func (s *Server) degradedPlacement(targetCluster string) *domain.Lease {
+	if s.localClusterID == "" || s.clusterElec == nil {
+		return nil
+	}
+	if strings.TrimSpace(targetCluster) != s.localClusterID {
+		return nil
+	}
+	lease := s.clusterElec.Current()
+	if lease == nil {
+		return nil
+	}
+	s.degraded.Add(1)
+	return lease
+}
 
 // New 装配 HTTP 层。
 // controlTokens is intentionally optional so existing in-process callers stay
@@ -58,6 +136,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/tasks/{taskId}/cancel", s.handleCancel)
 	mux.HandleFunc("POST /v1/tasks/{taskId}/result", s.handleResult)
 	mux.HandleFunc("POST /v1/nodes", s.handleUpsertNode)
+	mux.HandleFunc("PUT /v1/clusters/{clusterId}", s.handleReportCluster)
+	mux.HandleFunc("GET /v1/clusters", s.handleListClusters)
+	mux.HandleFunc("GET /v1/clusters/{clusterId}", s.handleGetCluster)
 	mux.HandleFunc("POST /v1/reconcile", s.handleReconcile)
 	return mux
 }
@@ -83,11 +164,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	if pending, err := s.store.PendingCount(r.Context()); err == nil {
-		observability.SetGauge("lumo_scheduler_pending_tasks", float64(pending))
-	} else {
-		s.log.Warn("采集排队任务指标失败", "err", err)
-	}
+	s.publishSchedulerMetrics(r.Context())
 	observability.Handler(w, nil)
 }
 
@@ -118,6 +195,8 @@ type placeRequest struct {
 	Queue      string               `json:"queue"`
 	Weight     int                  `json:"weight"`
 	AvoidNodes []string             `json:"avoid_nodes"`
+	// PreferredClusters 软集群偏好：只影响候选排序，不做硬绑定（ClusterID 才是硬绑定）。
+	PreferredClusters []string `json:"preferred_clusters"`
 }
 
 func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +214,7 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 		WorkerID: req.WorkerID, ProjectID: req.ProjectID,
 		Requires: req.Requires, Priority: req.Priority, Residency: req.Residency,
 		DeadlineMS: req.DeadlineMS, Queue: req.Queue, Weight: req.Weight, AvoidNodes: req.AvoidNodes,
+		PreferredClusters: req.PreferredClusters,
 	}
 	if prior, err := s.store.ExistingPlacement(r.Context(), task); err != nil {
 		s.respondStoreError(w, err)
@@ -143,8 +223,21 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusCreated, prior)
 		return
 	}
-	// New placement still requires the elected leader and a current directory.
+	// New placement requires a decision-maker and a current directory.
+	//
+	// 首选全局租约（跨集群唯一决策者）。它不在时，本集群的任务仍可**本地**放置——
+	// 「本集群的任务落在本集群的节点上」本来就不需要任何跨集群信息（architecture §7.4.1
+	// 的降级曲线）。但它不是「没 leader 就放行」：degradedPlacement 要求本实例有集群身份、
+	// 目标集群就是它、且它持有该集群的本地租约——**换一把更小的锁，而不是把锁拿掉**。
 	lease := s.elec.Current()
+	degraded := false
+	if lease == nil {
+		lease = s.degradedPlacement(req.ClusterID)
+		degraded = lease != nil
+		if degraded {
+			s.log.Warn("全局调度不可用，使用集群本地租约放置", "cluster_id", s.localClusterID, "task_id", req.TaskID)
+		}
+	}
 	if lease == nil {
 		writeError(w, http.StatusServiceUnavailable, "no-leader", "当前无 leader，请稍后重试")
 		return
@@ -169,7 +262,8 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "worker-directory-unavailable", "无法确认执行者设备范围")
 		return
 	}
-	n := planner.Pick(task, nodes, active)
+	s.PreparePlacement(r.Context(), []*domain.Task{&task})
+	n := s.PickPrepared(r.Context(), task, nodes, active)
 	if n == nil {
 		s.queueAndMaybePreempt(w, r, lease, task, nodes)
 		return
@@ -189,6 +283,21 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		s.respondStoreError(w, err)
+		return
+	}
+	// 放置成功说明版本闸门这一刻没有拦住东西，清掉跃迁标记让下一次被拦重新打一条
+	// 日志——否则「被拦 → 恢复 → 又被拦」只有第一条会被说出来。
+	clearVersionBlock()
+	if degraded {
+		// 调用方要能区分「正常放置」与「降级放置」：两者的可用性含义不同，而响应体
+		// 长得一样时，只有指标在动，读响应的人看不出这一次是降级——而「这次放置是在
+		// 全局决策者缺席时做的」正是他需要知道的事。
+		// 匿名嵌入而不是改 domain.Placement：那是任务侧也在消费的 wire 契约，
+		// 为一个只在这一条路径上出现的字段改它，等于让所有消费方都跟着动。
+		writeJSON(w, http.StatusCreated, struct {
+			domain.Placement
+			Degraded bool `json:"degraded"`
+		}{Placement: p, Degraded: true})
 		return
 	}
 	writeJSON(w, http.StatusCreated, p)

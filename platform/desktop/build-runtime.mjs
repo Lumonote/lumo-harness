@@ -103,7 +103,7 @@ const modulesRoot = resolve(stagingRoot, 'node_modules')
 // 代价是 CI 每轮重装一次这几个插件（本地目录还在时仍走快路径，零成本）。
 const upstreamPluginRoot = resolve(desktopRoot, 'lumo-upstream-plugins')
 const upstreamPluginModulesRoot = resolve(upstreamPluginRoot, 'node_modules')
-const packagedTypeScriptPlugins = new Set(['@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/web-fetch-fakeip'])
+const packagedTypeScriptPlugins = new Set(['@lumo/agent-teams', '@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/web-fetch-fakeip'])
 // RuVector's current published manifest still lists MetaHarness packages in
 // `dependencies`, although the integration is intentionally removable and all
 // call sites degrade when the packages are absent. pnpm may therefore omit
@@ -118,23 +118,24 @@ const PRUNE_DIRECTORY_NAMES = new Set(['test', 'tests', '__tests__', 'docs', 'do
 // ../tests/Mocker.js，全深度裁剪会删掉被引用的文件。嵌套 tests 目录的处置见
 // stagingRoot 的说明——靠把载荷挪出 cargo target 目录解决，而不是删文件。
 const PRUNE_ANYWHERE_DIRECTORY_NAMES = new Set(['__tests__', '.github'])
-const upstreamPluginSpecs = [
-  'dshmarket@1.41.0',
-  '@liustack/modlens@3.25.2',
-  'dsh-context@0.41.3',
-  'dsh-cost-meter@1.6.7',
-  // Dream Skin：桌面换肤/主题插件（8 套 iOS / Linear 式清透冷调主题 + 弥散光壁纸 +
-  // 每用户强调色）。纯原生 --dsw-* token 实现，经其 cordis.patch.yml 在 Web 壳激活。
-  'dsh-dream-skin@8.30.1',
-  // 任务看板：dsh web GUI 的 Host 权威任务台帐（替换 Lumo 左侧菜单「自动化」入口）。
-  '@linxin666/dsh-client-ui-task-board@0.3.14',
-  // @nanmicoder/dsh-agent-teams 不在桌面包基线（master 不兼容）；仍可通过 SkillHub 安装。
-  // Univer 办公文档：DSH × Univer 协作网关与查看器——内联预览、浮动工作台与会话结束审阅（0.2.14）。
-  'dsh-univer-office@0.2.14',
-  // 版本漂移纪律：与 dsh-node/src/plugins.ts 的 BASE_PROFILE_PLUGINS 保持一致。
-  // 两个提升是 dsh-settings 0.1.2 移除旧 API 的直接后果（installSettingsSection /
-  // settingsNamespace），@anweat/dsh-browser 因无适配新版而退出基线，见其注释。
-]
+// 基线插件 pin 名单的唯一真相源：platform/shared/manifests/plugin-baseline.manifest.json。
+// 本脚本在构建期、在仓库内运行，直接读原件即可——不复制、不生成，因此结构上不可能与
+// dsh-node 侧的生成物漂移（那边因运行期读不到仓库文件才需要生成 + 漂移锁）。
+// 名单为何是这几个、为何钉这些版本、为什么排除某几个，都写在清单里，此处不再重复。
+const baselineManifestPath = resolve(repoRoot, 'platform', 'shared', 'manifests', 'plugin-baseline.manifest.json')
+if (!existsSync(baselineManifestPath)) {
+  throw new Error(`无法构建桌面 runtime：找不到基线插件清单 ${baselineManifestPath}`)
+}
+const baselineManifest = JSON.parse(readFileSync(baselineManifestPath, 'utf8'))
+if (!Array.isArray(baselineManifest.baseline) || baselineManifest.baseline.length === 0) {
+  throw new Error(`基线插件清单的 baseline 为空——清单不得为空：${baselineManifestPath}`)
+}
+const upstreamPluginSpecs = baselineManifest.baseline.map((entry) => {
+  if (typeof entry?.name !== 'string' || typeof entry?.version !== 'string') {
+    throw new Error(`基线插件清单有条目缺少 name/version：${JSON.stringify(entry)}`)
+  }
+  return `${entry.name}@${entry.version}`
+})
 
 if (!existsSync(resolve(dshRoot, 'package.json'))) {
   throw new Error(`无法构建桌面 runtime：找不到 ${resolve(dshRoot, 'package.json')}`)
@@ -389,6 +390,7 @@ for (const root of [
   resolve(repoRoot, 'platform', 'dsh-plugins', 'creative-skills'),
   resolve(repoRoot, 'platform', 'dsh-plugins', 'ruflo-orchestration'),
   resolve(repoRoot, 'platform', 'dsh-plugins', 'web-fetch-fakeip'),
+  resolve(repoRoot, 'platform', 'dsh-plugins', 'agent-teams'),
   knowledgeVaultRoot,
   ...upstreamPluginSpecs.map((spec) => packagePath(spec.slice(0, spec.lastIndexOf('@')), upstreamPluginRoot)),
 ]) {

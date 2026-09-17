@@ -6,6 +6,10 @@ require github.com/lumo-harness/platform/observability v0.0.0
 
 replace github.com/lumo-harness/platform/observability => ../observability
 
+require github.com/lumo-harness/platform/heartbeat v0.0.0
+
+replace github.com/lumo-harness/platform/heartbeat => ../heartbeat
+
 require (
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/redis/go-redis/v9 v9.7.0
@@ -22,3 +26,7 @@ require (
 	golang.org/x/sync v0.10.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
 )
+
+require github.com/lumo-harness/platform/ratelimit v0.0.0
+
+replace github.com/lumo-harness/platform/ratelimit => ../ratelimit

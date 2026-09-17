@@ -1641,3 +1641,114 @@ body *::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-brand-primar
   .lumo-device-command-log > div { grid-template-columns: minmax(0, 1fr) auto; }
   .lumo-device-command-log time { grid-column: 1 / -1; }
 }
+
+/* ── 协作空间 ────────────────────────────────────────────────────────────
+   节点的 translate3d 是 collaboration-layout.ts 的输出，不是这里的样式算出来的：
+   样式只决定「长什么样」，位置由那个纯函数决定。两者的分工必须清楚，否则又一次
+   出现「同一个任务的位置取决于样式表」这种事。 */
+.lumo-collaboration { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 380px); gap: 20px; min-height: 540px; align-items: start; }
+.lumo-collaboration-stage { display: flex; min-width: 0; flex-direction: column; gap: 12px; }
+.lumo-collaboration-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--lumo-muted); font-size: var(--lumo-fs-xxs-12); }
+.lumo-collaboration-focus { margin-inline-start: auto; color: var(--lumo-cyan); }
+
+.lumo-collaboration-space {
+  position: relative; min-height: 480px; overflow: hidden;
+  border: 1px solid var(--lumo-line); border-radius: var(--lumo-radius);
+  background: radial-gradient(120% 90% at 50% 108%, var(--lumo-accent-12), transparent 62%), var(--lumo-bg-deep);
+}
+/* 世界坐标系：所有节点与光轨都用 translate3d 定位，纵深就是 z。 */
+.lumo-collaboration-world { position: absolute; inset: 0; transform-origin: 50% 96%; transition: transform .28s ease; }
+
+/* 光轨：一条有方向、有发光的长条。它是委派边，不是推断出来的依赖。 */
+.lumo-collaboration-rail {
+  position: absolute; left: 50%; top: 50%; height: 1px; transform-origin: 0 50%;
+  background: linear-gradient(90deg, transparent, var(--lumo-cyan-line), transparent);
+  pointer-events: none;
+}
+
+.lumo-collaboration-node {
+  position: absolute; left: 50%; top: 50%; width: 176px; margin: -48px 0 0 -88px;
+  display: grid; gap: 3px; padding: 10px 12px; text-align: start;
+  border: 1px solid var(--lumo-line-strong); border-radius: var(--lumo-radius-sm);
+  background: var(--lumo-panel); color: var(--lumo-body);
+  font: inherit; cursor: pointer; box-shadow: 0 12px 30px rgb(0 0 0 / 35%);
+  transition: border-color .2s ease, box-shadow .2s ease, opacity .2s ease;
+}
+.lumo-collaboration-node b { color: var(--lumo-heading); font-size: var(--lumo-fs-xs-13); overflow-wrap: anywhere; }
+.lumo-collaboration-node small { color: var(--lumo-muted); font-size: var(--lumo-fs-xxxs-11); }
+.lumo-collaboration-owner { color: var(--lumo-cyan); font-size: var(--lumo-fs-xxxs-11); }
+.lumo-collaboration-node em { color: var(--lumo-faint); font-size: var(--lumo-fs-xxs-12); font-style: normal; }
+.lumo-collaboration-node.selected { border-color: var(--lumo-heading); box-shadow: 0 0 0 1px var(--lumo-line-strong), 0 16px 40px rgb(0 0 0 / 45%); }
+
+/* 状态色只在左边框上：整块变色会让文字对比度随状态漂移，而这张图要能长时间盯着看。
+   色相是按「注意力」而不是按字面语义分配的，六个色相互不接近：
+   待你决策取品牌橙（最强，看的人能立刻做点什么）、执行中取青、已交付取灰（完成的事
+   应当退后）、阻塞取琥珀、失败取红、排队取蓝灰。
+   这不是随手排的——第一版把 delivered 映射到 `--lumo-mint`、executing 映射到
+   `--lumo-accent-hover`，而这两个变量都落在橙色系上，于是两个状态几乎同色。
+   把状态色当装饰选，就是这个后果。 */
+.lumo-collaboration-node.awaiting-review { border-inline-start: 3px solid var(--lumo-mint); }
+.lumo-collaboration-node.executing { border-inline-start: 3px solid var(--lumo-cyan); }
+.lumo-collaboration-node.delivered { border-inline-start: 3px solid var(--lumo-line-strong); }
+.lumo-collaboration-node.blocked { border-inline-start: 3px solid var(--lumo-warn); }
+/* 节点全掉线：这是这张图上最该被一眼看到的一件事，所以取最强的告警色。 */
+.lumo-collaboration-node.offline { border-inline-start: 3px solid var(--lumo-danger); }
+.lumo-collaboration-node.queued { border-inline-start: 3px solid var(--lumo-muted); }
+/* 没有任务不是「已完成」，用虚线区分「这个状态是缺省，不是结论」。 */
+.lumo-collaboration-node.unknown { border-inline-start: 3px dashed var(--lumo-muted); }
+
+/* 名下的智能体。它们是挂在员工下面的执行者，不是同级节点——所以做成小片而不是卡片。 */
+.lumo-collaboration-agents { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.lumo-collaboration-agents i {
+  padding: 1px 6px; border: 1px solid var(--lumo-line); border-radius: 999px;
+  color: var(--lumo-cyan); font-size: var(--lumo-fs-xxxs-11); font-style: normal;
+}
+.lumo-collaboration-nobody { color: var(--lumo-faint); }
+
+/* 未绑定区。单独成区而不是随便挂一个人：挂错人的智能体看起来是正常的，比空着难发现得多。 */
+.lumo-collaboration-unbound {
+  display: grid; gap: 4px; padding: 10px 12px;
+  border: 1px dashed var(--lumo-warn); border-radius: var(--lumo-radius-sm);
+  color: var(--lumo-muted); font-size: var(--lumo-fs-xxs-12);
+}
+.lumo-collaboration-unbound b { color: var(--lumo-warn); }
+
+/* 目标入口。位置与 mockup 的底部指令条一致，但它做的是**交接**而不是创建：
+   创建路径只有「项目」里那一条。 */
+.lumo-collaboration-goal { display: flex; gap: 8px; align-items: center; }
+.lumo-collaboration-goal input {
+  flex: 1; min-width: 0; padding: 9px 12px;
+  border: 1px solid var(--lumo-line); border-radius: var(--lumo-radius-sm);
+  background: var(--lumo-panel); color: var(--lumo-body); font: inherit;
+}
+.lumo-collaboration-goal input::placeholder { color: var(--lumo-faint); }
+
+/* 视图切换。与 mockup 顶部那三个 tab 同一个位置，但只放真实存在的两个视图——
+   一个点了没反应的 tab 比没有这个 tab 更费人的时间。 */
+.lumo-collaboration-views { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--lumo-line); border-radius: 999px; }
+.lumo-collaboration-views button {
+  padding: 3px 12px; border: 0; border-radius: 999px; background: none;
+  color: var(--lumo-muted); font: inherit; font-size: var(--lumo-fs-xxxs-11); cursor: pointer;
+}
+.lumo-collaboration-views button.active { background: var(--lumo-accent-24); color: var(--lumo-heading); }
+.lumo-collaboration-team-filter { display: inline-flex; align-items: center; gap: 6px; color: var(--lumo-muted); font-size: var(--lumo-fs-xxxs-11); }
+.lumo-collaboration-team-filter select { padding: 3px 8px; border: 1px solid var(--lumo-line); border-radius: var(--lumo-radius-sm); background: var(--lumo-panel); color: var(--lumo-body); font: inherit; }
+
+/* 任务节点比员工节点窄：一张任务板上通常有更多节点，而每个节点的文字更短。 */
+.lumo-collaboration-node.task { width: 152px; margin: -42px 0 0 -76px; }
+.lumo-collaboration-node.task b { font-size: var(--lumo-fs-xxs-12); }
+/* 「可认领」是这张图上唯一「有人能立刻动手」的状态，所以与员工视图的「等待审核」共用
+   同一个品牌橙——同一个颜色在两处都表示「这里有人在等一个动作」。 */
+.lumo-collaboration-node.task.ready { border-inline-start: 3px solid var(--lumo-mint); }
+.lumo-collaboration-node.task.failed { border-inline-start: 3px solid var(--lumo-danger); }
+/* 指向阻塞任务的那条依赖边加粗并换成告警色：卡住的那一环要能在光轨里被认出来，
+   否则「任务沿光轨传递」这句话在这张图上就只是装饰。 */
+.lumo-collaboration-rail.blocked { height: 2px; background: linear-gradient(90deg, transparent, var(--lumo-warn), transparent); }
+
+.lumo-collaboration-detail { display: grid; gap: 8px; min-width: 0; border-inline-start: 1px solid var(--lumo-line); padding-inline-start: 18px; }
+.lumo-collaboration-detail .lumo-cluster-panel { border-top: 0; }
+
+@media (max-width: 1100px) {
+  .lumo-collaboration { grid-template-columns: minmax(0, 1fr); }
+  .lumo-collaboration-detail { border-inline-start: 0; padding-inline-start: 0; border-top: 1px solid var(--lumo-line); padding-top: 16px; }
+}

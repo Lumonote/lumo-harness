@@ -10,8 +10,12 @@ import (
 
 // RunScheduling retries only delivery of a durable Run. Explicit retry or
 // reassignment creates a different run id, including after uncertain HTTP I/O.
+//
+// The guard is the declared intent, not the derived gate: this loop is a
+// recovery mechanism, and stopping it while the cluster is degraded would stop
+// it exactly when the scheduler it delivers to is missing.
 func (s *Server) RunScheduling(ctx context.Context) {
-	if domain.RequireCluster(s.cfg.DeploymentMode, s.cfg.ClusterStatus) != nil || strings.TrimSpace(s.cfg.SchedulerURL) == "" {
+	if !domain.IntentIsCluster(s.cfg.DeploymentMode, s.cfg.ClusterStatus) || strings.TrimSpace(s.cfg.SchedulerURL) == "" {
 		return
 	}
 	ticker := time.NewTicker(2 * time.Second)

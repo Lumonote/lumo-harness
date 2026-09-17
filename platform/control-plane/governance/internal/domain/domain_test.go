@@ -2,24 +2,6 @@ package domain
 
 import "testing"
 
-func TestClusterFeaturesAndGate(t *testing.T) {
-	standalone := NewFeatures(ModeStandalone, ClusterReady)
-	if standalone.OrganizationGovernance || standalone.DesktopWorkers {
-		t.Fatal("standalone must not expose cluster-only capabilities")
-	}
-	if err := RequireCluster(ModeStandalone, ClusterReady); err != ErrClusterOnly {
-		t.Fatalf("standalone gate = %v, want CLUSTER_ONLY", err)
-	}
-
-	cluster := NewFeatures(ModeCluster, ClusterReady)
-	if !cluster.OrganizationGovernance || !cluster.SkillDistribution || !cluster.DesktopWorkers {
-		t.Fatalf("ready cluster features = %+v, want all enabled", cluster)
-	}
-	if err := RequireCluster(ModeCluster, ClusterReady); err != nil {
-		t.Fatalf("ready cluster rejected: %v", err)
-	}
-}
-
 func TestResolveEffectiveSkills(t *testing.T) {
 	skill := Skill{ID: "skill-review", Name: "review", Kind: SkillPrompt, CurrentVersion: "2.0.0"}
 	out, err := ResolveEffectiveSkills([]Candidate{

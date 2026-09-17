@@ -1,0 +1,137 @@
+# Cluster deployment profile — the Helm counterpart of compose.cluster.yml.
+#
+# `values.yaml` is the base: it renders a control plane that references four
+# operator-owned Secrets and leaves every optional capability switched off.
+# This file is the overlay that turns that into the *cluster* shape, so the two
+# topologies describe the same system rather than two different products.
+#
+#   helm upgrade --install lumo ./helm/lumo-platform -n lumo --create-namespace \
+#     -f ./helm/lumo-platform/values.cluster.yaml
+#
+# The chart models one node pool per release, so a second cluster id is a
+# second release rather than a second value — the same way compose.cluster.yml
+# spells out cluster-a and cluster-b explicitly:
+#
+#   helm upgrade --install lumo-b ./helm/lumo-platform -n lumo \
+#     -f ./helm/lumo-platform/values.cluster.yaml \
+#     --set nameOverride=lumo-platform-b --set dshNode.clusterId=cluster-b
+#
+# Every switch below is a decision, and the ones left off say why. They are
+# written out explicitly rather than left implicit so that a future change to
+# values.yaml cannot silently flip a production-affecting capability on.
+
+# --- turned ON: capabilities that define the cluster shape -----------------
+secrets:
+  # Mints the shared bearer Secrets so this profile is installable as-is, which
+  # is what compose.cluster.yml does with its development defaults. For a
+  # production cluster pass --set secrets.create=false and create the Secrets
+  # yourself; templates/secret.yaml lists which ones can be minted and which
+  # (vault token, real registry trust root) never can.
+  create: true
+
+dshNode:
+  # The definitional cluster capability: a horizontally scalable pool of
+  # subagent hosts with an HPA. compose.cluster.yml runs four of these across
+  # cluster-a and cluster-b; a single release here is one cluster's pool.
+  enabled: true
+  # The other half of `services.scheduler.clusterVersionGate` (left off there):
+  # which version this cluster's node pool is running. Written out as empty
+  # (undeclared) rather than omitted, and deliberately *not* derived from
+  # image.tag — the node pool runs its own image (dshNode.image, with its own
+  # tag), so borrowing the global tag would silently report the wrong version
+  # when only the node image is overridden. A wrong version is worse than a
+  # missing one: the gate would then permit exactly the mixed-version placement
+  # it exists to prevent. Setting this without the gate (or the reverse) is
+  # inert; cluster-registry-check.py fails the render on the gate-without-
+  # declarer half and on a split fleet.
+  clusterVersion: ""
+  governedWorker:
+    # Left off: one-preset-per-pod Worker identity is a per-pod specialisation
+    # rather than a cluster-wide default, and all six of its fields (owner,
+    # project, agent, preset revision, provider, model) must be known up front.
+    enabled: false
+
+dshWeb:
+  # The operator entry point. compose.cluster.yml always runs it.
+  enabled: true
+  identityAssertion:
+    # Generated as a bootstrap 48-byte HMAC. The auth proxy that fronts dsh-web
+    # must sign with the same value, so read it back once and configure the
+    # proxy:
+    #   kubectl -n lumo get secret lumo-dsh-web-identity \
+    #     -o jsonpath='{.data.secret}' | base64 -d
+    # For a throwaway local cluster, skip the proxy entirely instead with
+    #   --set dshWeb.identityAssertion.secretName= \
+    #   --set dshWeb.identityAssertion.allowStaticIdentity=true
+    secretName: lumo-dsh-web-identity
+
+services:
+  # The cluster shape is not uniform. Two schedulers are what make the
+  # lease/standby path exist at all — and it is the path cluster acceptance
+  # exists to exercise, so a single-replica scheduler would leave the profile
+  # unable to demonstrate the thing it is for. Two collaborators exercise the
+  # Nacos directory. The rest stay at the global replicaCount.
+  #
+  # This is only safe because every replica now gets LUMO_INSTANCE from its own
+  # pod name (templates/deployment.yaml); without that, two schedulers would
+  # both claim the literal holder "scheduler-0" and, because Acquire does not
+  # advance the fencing token when the holder is unchanged, both would pass
+  # checkFencing as leader.
+  #
+  # clusterEnforce is the other half of the cluster profile: it turns the
+  # federal registry from "a table nobody reads" into an admission gate — a
+  # cluster that stops self-reporting refuses new placements instead of quietly
+  # accepting work it cannot run. The reporters are the node pool, not these
+  # schedulers (a scheduler outliving an empty node pool must NOT keep the
+  # cluster looking healthy); see templates/deployment.yaml.
+  #
+  # clusterVersionGate (version-consistency precondition, §7.4.1) is written out
+  # as false rather than omitted, for the same reason everything else here is:
+  # turning it on converts "someone is mid-rollout" into "global tasks queue",
+  # and that response is byte-identical to "there is no capacity" (202 + PENDING)
+  # — only lumo_scheduler_placement_version_blocked and fleet_version tell them
+  # apart. It is also inert unless dshNode.clusterVersion is set (nobody
+  # declaring a version reads as "consistent"), so the two must be flipped
+  # together; cluster-registry-check.py fails the render on the half-pair.
+  scheduler: { enabled: true, port: 8083, replicas: 2, clusterEnforce: true, clusterVersionGate: false }
+  collaborator: { enabled: true, port: 8081, replicas: 2 }
+
+# --- left OFF: each needs an operator-specific fact this file cannot know ---
+
+connectorOAuth:
+  # Needs an external OAuth application: callbackUrl plus a registered client.
+  # Switching this on without one produces a connector-gateway that fails every
+  # authorization attempt at runtime rather than at render time.
+  enabled: false
+
+deviceGateway:
+  # Needs an exact public HTTPS origin, a server certificate and a dedicated
+  # device CA that only the operator holds. The chart deliberately refuses to
+  # guess any of them.
+  enabled: false
+  istioIngress:
+    # Additionally needs an Istio-managed ingress controller.
+    enabled: false
+
+serviceMesh:
+  istio:
+    # The trust domain is not guessed on purpose: a wrong SPIFFE trust domain
+    # is an authentication bug, not a configuration preference. Set this only
+    # once you know the mesh's trustDomain.
+    enabled: false
+
+productionControls:
+  # "Helm cannot make business/compliance choices." Enforcing this turns the
+  # approved policy references and the retention/cost boundaries into a
+  # render-time gate, and those numbers are not ours to invent.
+  enforced: false
+  observability:
+    # Needs a collector, a Loki endpoint and an object-store bucket.
+    enabled: false
+
+provisioner:
+  # Needs an artifact that has actually been published to the Registry
+  # (artifactName plus either artifactVersion or rolloutChannel).
+  enabled: false
+  runtime:
+    enabled: false

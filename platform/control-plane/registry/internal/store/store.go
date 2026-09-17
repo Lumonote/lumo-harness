@@ -195,6 +195,10 @@ func New(ctx context.Context, dsn string, objs objstore.Store, ts *trust.Store) 
 // Close 关闭连接池。
 func (s *Store) Close() { s.pool.Close() }
 
+// Pool 暴露连接池给同进程的心跳上报（心跳表由 heartbeat 包与平台迁移
+// 004_service_heartbeats.sql 共同维护，见 platform/control-plane/heartbeat）。
+func (s *Store) Pool() *pgxpool.Pool { return s.pool }
+
 // Init 建表。幂等。
 func (s *Store) Init(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, ddl); err != nil {

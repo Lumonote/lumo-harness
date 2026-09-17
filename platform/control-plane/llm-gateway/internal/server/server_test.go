@@ -21,6 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/lumo-harness/platform/llm-gateway/internal/batch"
 	"github.com/lumo-harness/platform/llm-gateway/internal/gateway"
 	"github.com/lumo-harness/platform/llm-gateway/internal/server"
 	"github.com/lumo-harness/platform/llm-gateway/internal/store"
@@ -51,8 +52,8 @@ func newFakeUpstream(t *testing.T, withUsage bool) *fakeUpstream {
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var req struct {
-			Stream         bool           `json:"stream"`
-			StreamOptions  map[string]any `json:"stream_options"`
+			Stream        bool           `json:"stream"`
+			StreamOptions map[string]any `json:"stream_options"`
 		}
 		_ = json.Unmarshal(body, &req)
 		f.gotStream = req.Stream
@@ -81,7 +82,7 @@ func newFakeUpstream(t *testing.T, withUsage bool) *fakeUpstream {
 			return
 		}
 		resp := map[string]any{
-			"model": "test-model",
+			"model":   "test-model",
 			"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": "好的"}}},
 		}
 		if f.withUsage {
@@ -96,7 +97,9 @@ func newFakeUpstream(t *testing.T, withUsage bool) *fakeUpstream {
 
 // setup：独立 schema + metering 依赖表同构（budget_trees/usage_event_outbox——DDL
 // 真相源在 TS pg-meter.ts，此处列子集够用）+ 网关测试服。
-func setup(t *testing.T, upstreamURL string) (*httptest.Server, *pgxpool.Pool) {
+//
+// opts 是变参：加可选能力（如批处理汇聚）时不该让既有用例全体改调用点。
+func setup(t *testing.T, upstreamURL string, opts ...server.Option) (*httptest.Server, *pgxpool.Pool) {
 	t.Helper()
 	schema := fmt.Sprintf("gw_srv_%d", time.Now().UnixNano())
 	base := testDSN(t)
@@ -142,7 +145,7 @@ func setup(t *testing.T, upstreamURL string) (*httptest.Server, *pgxpool.Pool) {
 		t.Fatalf("种子 provider: %v", err)
 	}
 	mux := http.NewServeMux()
-	server.New(st, gateway.New(http.DefaultClient, func(string, ...any) {}), nil).Register(mux)
+	server.New(st, gateway.New(http.DefaultClient, func(string, ...any) {}), nil, opts...).Register(mux)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	return ts, pool
@@ -150,7 +153,10 @@ func setup(t *testing.T, upstreamURL string) (*httptest.Server, *pgxpool.Pool) {
 
 func seedBudgets(t *testing.T, pool *pgxpool.Pool, userBudget, userTotal, projBudget, projTotal int64) {
 	t.Helper()
-	for _, row := range []struct{ kind, id string; budget, total int64 }{
+	for _, row := range []struct {
+		kind, id      string
+		budget, total int64
+	}{
 		{"user", "u1", userBudget, userTotal},
 		{"project", "p1", projBudget, projTotal},
 	} {
@@ -196,14 +202,14 @@ func call(t *testing.T, ts *httptest.Server, stream bool, extraHeaders map[strin
 }
 
 type outboxEvent struct {
-	CostType string `json:"costType"`
+	CostType string  `json:"costType"`
 	Qty      float64 `json:"qty"`
-	Unit     string `json:"unit"`
-	TraceID  string `json:"traceId"`
-	Emitter  string `json:"emitter"`
+	Unit     string  `json:"unit"`
+	TraceID  string  `json:"traceId"`
+	Emitter  string  `json:"emitter"`
 	CostUSD  float64 `json:"costUsd"`
-	Tokens   *int64 `json:"tokens"`
-	Model    string `json:"model"`
+	Tokens   *int64  `json:"tokens"`
+	Model    string  `json:"model"`
 	Context  struct {
 		UserID, DeptID, Role, ProjectID, AgentID, ComponentID, Feature, SessionRef string
 	} `json:"context"`
@@ -396,4 +402,72 @@ func call0(req *http.Request) (*http.Response, string) {
 	_, _ = buf.ReadFrom(resp.Body)
 	resp.Body.Close()
 	return resp, buf.String()
+}
+
+// batchWindow 正负例共用的窗口：负例要断言「没有窗口那么长的延迟」，所以它必须
+// 拿正例的窗口当上界，而不是拿一个宽松的绝对秒数。
+const batchWindow = 120 * time.Millisecond
+
+// 判据 8：批处理汇聚真的接在转发路径上。
+//
+// 「装上了但没接」是这类能力的典型故障——汇聚器自己的用例全绿，而请求根本没经过
+// 它（§7.2 的吞吐性质也就完全没生效）。这里量的是端到端可观测的那一面：请求延迟
+// 真的被窗口抬起来了，且计量不受影响（窗口只延迟，不改账）。
+func TestBatchCoalescingSitsOnTheForwardPath(t *testing.T) {
+	up := newFakeUpstream(t, true)
+	co, err := batch.New(batch.Config{Window: batchWindow, MaxBatch: 16})
+	if err != nil {
+		t.Fatalf("构造汇聚器: %v", err)
+	}
+	t.Cleanup(co.Close)
+
+	ts, pool := setup(t, up.ts.URL, server.WithCoalescer(co))
+	seedBudgets(t, pool, 1000, 1000, 1000, 1000)
+
+	start := time.Now()
+	resp, body := call(t, ts, false, nil)
+	elapsed := time.Since(start)
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("请求应成功: %d %s", resp.StatusCode, body)
+	}
+	if elapsed < batchWindow {
+		t.Fatalf("窗口 %s 未生效——请求没经过汇聚器: %s", batchWindow, elapsed)
+	}
+	if _, released := co.Stats(); released != 1 {
+		t.Fatalf("应恰好形成 1 批: released=%d", released)
+	}
+	if events := readOutbox(t, pool); len(events) != 1 {
+		t.Fatalf("汇聚只该延迟，不该改变计量: 事件数 %d", len(events))
+	}
+}
+
+// 判据 8 的负例：窗口关闭时必须与没有这一层同形（不延迟、不成批）。
+//
+// 没有这一条，上面那条可以被任何一次「无条件 sleep 一个窗口」满足——只检查「好
+// 输入能过」的判据，在它保护的机制被换成别的东西之后照样是绿的。
+func TestDisabledBatchCoalescingDoesNotDelay(t *testing.T) {
+	up := newFakeUpstream(t, true)
+	co, err := batch.New(batch.Config{Window: 0, MaxBatch: 0})
+	if err != nil {
+		t.Fatalf("构造汇聚器: %v", err)
+	}
+	t.Cleanup(co.Close)
+
+	ts, pool := setup(t, up.ts.URL, server.WithCoalescer(co))
+	seedBudgets(t, pool, 1000, 1000, 1000, 1000)
+
+	start := time.Now()
+	resp, body := call(t, ts, false, nil)
+	elapsed := time.Since(start)
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("请求应成功: %d %s", resp.StatusCode, body)
+	}
+	if elapsed >= batchWindow {
+		t.Fatalf("窗口关闭时不该有窗口量级的延迟: %s", elapsed)
+	}
+	if _, released := co.Stats(); released != 0 {
+		t.Fatalf("窗口关闭时不该成批: released=%d", released)
+	}
 }

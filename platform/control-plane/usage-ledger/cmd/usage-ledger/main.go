@@ -26,7 +26,9 @@ import (
 	"github.com/apache/rocketmq-clients/golang/v5/credentials"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/lumo-harness/platform/heartbeat"
 	"github.com/lumo-harness/platform/observability"
+	"github.com/lumo-harness/platform/usage-ledger/internal/analytics"
 	"github.com/lumo-harness/platform/usage-ledger/internal/ledger"
 	"github.com/lumo-harness/platform/usage-ledger/internal/rmqconsume"
 	"github.com/lumo-harness/platform/usage-ledger/internal/rmqpublish"
@@ -124,12 +126,24 @@ func main() {
 		}
 	}()
 
+	// 用量查询面（A5）：只读 PG 台账。
+	//
+	// 曾经设想的是「PG → 列存 cube → 查询」三段式，已移除：它要求额外组件、一个投影
+	// worker 与位点，还引入了一类只能靠约定维持的一致性（重放不得双计），而收益只是
+	// 把一次分组下推。台账是 append-only 的权威表，日聚合直接分组即可。
+	analyticsService, err := analytics.NewService(analytics.NewPgSource(pool))
+	if err != nil {
+		log.Error("用量查询服务构造失败", "err", err)
+		os.Exit(2)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.HandleFunc("GET /metrics", observability.Handler)
+	mux.Handle("GET /v1/usage/aggregate", analyticsService.AggregateHandler())
 	// 仪表化积压（§20/§21 已立指标）：outbox 未发布数。发布后未消费的积压在
 	// broker 侧，不在 PG 可见——此处是 publisher 侧的天花板告警口径。
 	mux.HandleFunc("GET /v1/metrics/pending", func(w http.ResponseWriter, r *http.Request) {
@@ -142,6 +156,10 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"pending_unpublished":%d}`, pending)
 	})
+
+	// 心跳上报：集群就绪态由心跳新鲜度与自报依赖派生（E4/D6），不再只看
+	// LUMO_CLUSTER_STATUS 这个静态声明。放在初始化之后，避免服务尚不可用就报 ready。
+	heartbeat.StartPg(ctx, pool, heartbeat.Options{Service: "usage-ledger", Logger: log, Depends: heartbeat.PgDependency(pool)})
 
 	addr := envOr("LUMO_LISTEN", ":8085")
 	log.Info("usage-ledger 启动", "addr", addr, "rmq", endpoint, "group", group, "topics", len(topics))

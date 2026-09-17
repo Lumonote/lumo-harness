@@ -21,6 +21,7 @@ import { spawn } from 'node:child_process'
 import { localStorageRows, localVaultRows, profileLifetimeOverlay, profileStorageRows, workflowEngineOverlay } from './workflow.ts'
 import { localSkillSnapshotAssembly, skillSnapshotSource, waitForSkillSnapshotFile } from './skills.ts'
 import { startNacosRegistration } from './nacos.ts'
+import { planClusterReporter, startClusterReporter } from './cluster-reporter.ts'
 import { clusterWiring, workerBindingFromEnv } from './cluster.ts'
 import {
   ensureProfilePlugins,
@@ -49,6 +50,7 @@ const dshRoot = process.env['LUMO_DSH_ROOT']
   : resolve(platformRoot, '..', 'deepseek-harness')
 
 const {
+  agentTeams: agentTeamsEntry,
   knowledge: knowledgeEntry,
   metering: meteringEntry,
   control: controlEntry,
@@ -124,6 +126,16 @@ const embeddingModel = process.env['LUMO_EMBEDDING_MODEL'] ?? 'BAAI/bge-m3'
 const embeddingDimension = integerEnv('LUMO_EMBEDDING_DIMENSION', 1024)
 const connectorGatewayURL = process.env['LUMO_CONNECTOR_GATEWAY_URL'] ?? 'http://localhost:58082'
 const governanceURL = process.env['LUMO_GOVERNANCE_URL'] ?? 'http://localhost:58089'
+// 控制面地址**故意没有缺省值**，与上面两个不同。
+//
+// 有缺省时，一个没配这个变量的部署会去连 localhost:8092，症状是「控制面连不上」——
+// 于是排查方向是网络、防火墙、容器名，而真实原因是「这个部署没有接线」。空值时
+// `dispatch` 抛的是 ControlCommandRoutingError（明说本实例没接控制面），这个区别
+// 值得用一次显式配置来换。
+//
+// local 形态本来就没有 session-control 这个服务（compose.local.yml 不启它），所以
+// 空值在那里的含义是准确的，不是漏配。
+const sessionControlURL = process.env['LUMO_SESSION_CONTROL_URL'] ?? ''
 const userID = process.env['LUMO_USER_ID'] ?? 'dev-user'
 const deptID = process.env['LUMO_DEPT_ID'] ?? 'dev-dept'
 const userRole = process.env['LUMO_USER_ROLE'] ?? 'operator'
@@ -225,7 +237,7 @@ const basePluginRows: PluginSummary[] = [
   { id: 'dsh-cost-meter', label: '费用统计', description: '会话、预算、模型价格与历史费用', surface: 'market', kind: 'runtime' },
   { id: 'dsh-dream-skin', label: '梦幻皮肤', description: '8 套高质感主题、弥散光壁纸与每用户强调色', surface: 'market', kind: 'runtime' },
   { id: 'dsh-task-board', label: '任务看板', description: 'Host 权威任务台帐：看板任务、真实 DSH 会话执行与定时调度', surface: 'market', kind: 'runtime' },
-  { id: 'dsh-agent-teams', label: '多智能体团队', description: '自然语言编排船长/成员、带依赖任务与消息，Web 树状监控', surface: 'operations', kind: 'runtime' },
+  { id: 'dsh-agent-teams', label: '多智能体团队（社区版）', description: '社区插件：自然语言编排船长/成员、带依赖任务与消息，Web 树状监控。基线未收录（依赖 master 已移除的 continuable API），可从市场安装', surface: 'operations', kind: 'runtime' },
   { id: 'dsh-univer-office', label: 'Univer 办公文档', description: 'DSH × Univer 协作网关与查看器：内联预览、浮动工作台与会话结束审阅', surface: 'market', kind: 'runtime' },
   { id: 'gpt-image-2-style-library', label: '图像风格库', description: 'GPT Image 2 模板、风格标签与工业级提示词', surface: 'skills', kind: 'runtime' },
   { id: 'ppt-master', label: '演示文稿生成', description: '生成、编辑和增强原生可编辑 PPTX', surface: 'skills', kind: 'runtime' },
@@ -235,6 +247,7 @@ const basePluginRows: PluginSummary[] = [
 const mountedPlugins: PluginSummary[] = localMode ? [
   ...basePluginRows,
   { id: 'subagent-local', label: '本机多智能体', description: '官方进程内生成与分叉，多智能体并行执行', surface: 'operations', kind: 'runtime' },
+  { id: 'agent-teams', label: '多智能体团队', description: '成员名册 + 任务板(DAG) + 会合面；单机在进程内派单，团队状态落本地 SQLite', surface: 'operations', kind: 'runtime' },
   { id: 'open-design', label: '开放设计', description: '产物优先的原型与视觉工作流', surface: 'skills', kind: 'runtime' },
   { id: 'archify', label: '架构与调度图', description: '可验证的系统图、流程图与多智能体调度视图', surface: 'skills', kind: 'runtime' },
 ] : [
@@ -247,6 +260,7 @@ const mountedPlugins: PluginSummary[] = localMode ? [
   { id: 'metering', label: '用量计量', description: '额度预留、提交与台账', surface: 'operations', kind: 'governance' },
   { id: 'session-log', label: '会话审计', description: '脱敏轨迹与可回放记录', surface: 'operations', kind: 'runtime' },
   { id: 'mailbox', label: '协作信箱', description: '跨智能体消息与领取确认', surface: 'operations', kind: 'runtime' },
+  { id: 'agent-teams', label: '多智能体团队', description: '成员名册 + 任务板(DAG) + 会合面；任务与名册落 PG，成员经 lumo-remote 放置到承载节点', surface: 'operations', kind: 'runtime' },
   { id: 'job-control', label: '作业控制', description: '任务状态与结果回写', surface: 'operations', kind: 'runtime' },
   { id: 'attachments', label: '附件', description: '安全附件引用', surface: 'operations', kind: 'runtime' },
   { id: 'object-store', label: '对象存储', description: '大对象读写边界', surface: 'operations', kind: 'runtime' },
@@ -339,6 +353,18 @@ const webFetchFakeIpPatchRow = localMode && isWebProfile
 `
   : ''
 
+// 多智能体团队（`ctx.agentTeams`）：一份插件同时覆盖单机与集群两种形态。
+// 形态差异不在装配层分支，而在插件内部按优先级探测成员 provider
+// （集群父节点命中 `lumo-remote`，单机回落 `spawn`/`fork`）；团队状态走 dsh
+// storage hub（单机 sqlite、集群 PG），会合面在有 mailbox 时自动升级到 PG。
+// 故这里只声明 `tools` 一个硬依赖 —— `subagents` 的挂载顺序不由本插件决定。
+const agentTeamsRows = `    - id: lumo-agent-teams
+      name: ${JSON.stringify(agentTeamsEntry)}
+      inject: [tools]
+      config:
+        realm: ${JSON.stringify(platformRealm)}
+`
+
 // 平台插件 patch（官方 patch 语法：insert 数组 = 追加条目）
 writeFileSync(
   patchPath,
@@ -368,7 +394,7 @@ ${webFetchFakeIpPatchRow}` : ''}${localMode ? '' : `- id: attachment-local
   disabled: true
 `}
 - insert:
-${localMode ? localStorageRows(dshProfile, sqlitePath) + localVaultRows(sqlitePath, platformRealm) + webFetchFakeIpRows : `    - id: lumo-object-store
+${localMode ? localStorageRows(dshProfile, sqlitePath) + localVaultRows(sqlitePath, platformRealm) + webFetchFakeIpRows + agentTeamsRows : `    - id: lumo-object-store
       name: ${JSON.stringify(objectStoreEntry)}
       inject: []
       config:
@@ -444,6 +470,8 @@ ${cluster.knowledge.rerank ? `        rerank: ${JSON.stringify(cluster.knowledge
         connectionString: ${JSON.stringify(pgDSN)}
         opaUrl: ${JSON.stringify(cluster.opaUrl)}
         opaToken: ${JSON.stringify(cluster.opaToken)}
+        controlPlaneUrl: ${JSON.stringify(sessionControlURL)}
+        controlPlaneToken: ${JSON.stringify(controlPlaneToken)}
     - id: lumo-project
       name: ${JSON.stringify(projectEntry)}
       inject: [tools]
@@ -475,7 +503,7 @@ ${cluster.knowledge.rerank ? `        rerank: ${JSON.stringify(cluster.knowledge
       config:
         connectionString: ${JSON.stringify(pgDSN)}
         realm: ${JSON.stringify(platformRealm)}
-    - id: lumo-recovery
+${agentTeamsRows}    - id: lumo-recovery
       name: ${JSON.stringify(recoveryEntry)}
       inject: [tools]
       config:
@@ -607,6 +635,30 @@ const nacosRegistration = !localMode && role === 'node' && process.env['LUMO_NAC
   })
   : { close: async (): Promise<void> => {} }
 
+// 集群存活自报（联邦注册表的客户端侧，见 cluster-reporter.ts）。与 Nacos 注册是
+// **两件不同的事**：Nacos 报的是「本机这个**节点**在服务发现里还活着」，这里报的是
+// 「本集群还活着」，后者是跨集群放置闸门的输入。多集群拓扑里一个调度实例只能替一个
+// 集群自报，其余集群若无人上报就会一起被判成 down——闸门随即拒掉它们的新放置，
+// 而失联的恰恰是「没人报」而不是「真挂了」。
+const clusterReporterPlan = planClusterReporter(process.env, deployment.mode, role)
+if (!clusterReporterPlan.enabled) {
+  // 关闭必须说出来。**但级别取决于形态**：在 cluster 形态下「本集群没有上报方」是
+  // 真正的风险（判定一开，本集群会在 down 阈值后被拒新放置，而日志里一片安静，
+  // 看起来像闸门自己坏了），所以是 warn；在 local/standalone 下这只是「这个形态
+  // 没有消费者」的说明，按 warn 打会在每次启动时制造一条假警报，把真警报淹掉。
+  const notice = `dsh-node: 集群存活自报未启用 —— ${clusterReporterPlan.reason}`
+  if (deployment.mode === 'cluster') {
+    console.warn(
+      `${notice}；若该控制面已启用集群失联判定（LUMO_CLUSTER_ENFORCE），本集群会在 down 阈值后被拒新放置`,
+    )
+  } else {
+    console.info(notice)
+  }
+}
+const clusterReporter = clusterReporterPlan.enabled
+  ? startClusterReporter(clusterReporterPlan)
+  : { close: async (): Promise<void> => {} }
+
 const packagedDshCli = process.env['LUMO_DSH_CLI']
 const windowsCorepack = process.platform === 'win32' && packagedDshCli === undefined
 const childCommand = packagedDshCli
@@ -641,7 +693,12 @@ process.once('SIGTERM', () => forwardSignal('SIGTERM'))
 process.once('SIGINT', () => forwardSignal('SIGINT'))
 
 const finish = (code: number): void => {
-  void nacosRegistration.close().finally(() => {
+  // 两个上报循环都要停掉再退出：自报定时器已 unref，单靠它不会拖住进程，但在退出
+  // 前取消在途请求可以避免一个必然失败的 PUT 把错误日志留在最后一行。
+  void Promise.allSettled([
+    nacosRegistration.close(),
+    clusterReporter.close(),
+  ]).finally(() => {
     rmSync(patchPath, { force: true })
     process.exit(code)
   })

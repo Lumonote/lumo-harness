@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/lumo-harness/platform/governance/internal/domain"
 	"github.com/lumo-harness/platform/governance/internal/store"
 	"github.com/lumo-harness/platform/observability"
 )
@@ -129,6 +130,7 @@ func (g *Gateway) dispatchTasks(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	lastError := ""
+	lastCancelError := ""
 	for {
 		_, err := g.options.Store.DispatchDeviceTasks(ctx, 32)
 		if err != nil && ctx.Err() == nil {
@@ -139,6 +141,20 @@ func (g *Gateway) dispatchTasks(ctx context.Context) {
 			}
 		} else if err == nil {
 			lastError = ""
+		}
+		// Cancellations ride the same tick rather than a slower loop of their own:
+		// a cancel that waits is a cancel that lets the work finish first, which is
+		// the one outcome it exists to prevent. The two share no other state, and
+		// each keeps its own last-error so one failing does not silence the other.
+		_, cancelErr := g.options.Store.DispatchDeviceCancellations(ctx, 32)
+		if cancelErr != nil && ctx.Err() == nil {
+			message := cancelErr.Error()
+			if message != lastCancelError {
+				log.Printf("device gateway cancellation dispatch unavailable: %s", message)
+				lastCancelError = message
+			}
+		} else if cancelErr == nil {
+			lastCancelError = ""
 		}
 		select {
 		case <-ctx.Done():
@@ -583,7 +599,9 @@ func (g *Gateway) connect(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if current.Revision != lastRevision {
-				if lastRevision >= 0 { return }
+				if lastRevision >= 0 {
+					return
+				}
 				policy := current.Policy
 				policy.Plan = nil
 				_ = ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -630,6 +648,25 @@ func (g *Gateway) connect(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err = g.options.Store.CompleteDeviceCommand(ctx, d.Realm, d.NodeID, connection, message.CommandID, message.State, message.Result); err != nil {
+				return
+			}
+		case "task_result":
+			// A device reports the outcome of a task it already accepted. The
+			// payload is domain.TaskResult-shaped, but none of it is trusted for
+			// identity: RecordDeviceTaskResult re-reads the run from the command
+			// row and refuses any mismatch. Rejections are logged because this
+			// path also drops the connection, and "device keeps reconnecting" is
+			// otherwise very easy to misattribute.
+			if _, err = g.options.Store.AuthenticateDevice(ctx, d.Realm, d.NodeID, d.PublicKeyHash, d.CertificateSerial); err != nil {
+				return
+			}
+			var reported domain.TaskResult
+			if err = json.Unmarshal(message.Result, &reported); err != nil {
+				log.Printf("device gateway rejected task result from %s: malformed payload", d.NodeID)
+				return
+			}
+			if err = g.options.Store.RecordDeviceTaskResult(ctx, d.Realm, d.NodeID, connection, message.CommandID, reported); err != nil {
+				log.Printf("device gateway rejected task result from %s: %v", d.NodeID, err)
 				return
 			}
 		default:

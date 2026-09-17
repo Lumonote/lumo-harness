@@ -6,7 +6,7 @@
   已在产事实：`control-plane/governance`（用户·部门·角色·技能授权·委派雏形）、
   `control-plane/scheduler`（放置/租约/EDF/加权公平/驻留硬过滤）、
   `control-plane/flows`（FlowEngine + TriggerBus + 持久 outbox + 运行幂等）、
-  `control-plane/usage-ledger`（`cost_type` 闭集台账 + Doris 日 cube）、
+  `control-plane/usage-ledger`（`cost_type` 闭集台账 + 只读 PG 日聚合查询面）、
   `dsh-plugins/session-log`（append-only 复制日志 + `queryWithStaleness`）
 - 外部输入：知识库《2026 多智能体任务管控与协作分发平台——架构设计与产品设计》（下称**研究稿**）
 - 状态：P5a–P5e 已落地：评分归一化、统一 Worker、任务/Run、报告、集群派单与本机多智能体入口已接入；报告的 `sessionLogQuery` 新鲜度闸门由宿主读面负责。本轮按要求未运行测试、构建或打包。

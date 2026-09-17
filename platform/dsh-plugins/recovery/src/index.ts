@@ -74,13 +74,24 @@ export function apply(ctx: Context, config: RecoveryConfig): void {
 
   ctx.on('tools/pre-execute', async function (exec, next) {
     const session = (exec as {
-      agent?: { session?: { id?: string; events?: readonly SessionEventLike[] } }
+      agent?: {
+        session?: {
+          id?: string
+          // 与 `provenance/src/index.ts` 同一理由：`Session#events` 属性已随上游
+          // `2026-09-09-deprecate-synchronous-session-event-reads` 删除，读事件要走
+          // `snapshotEvents()`（运行时实测 `Session.prototype.events === undefined`）。
+          snapshotEvents?: () => readonly SessionEventLike[]
+          events?: readonly SessionEventLike[]
+        }
+      }
     }).agent?.session
     const sessionRef = session?.id
     // 无会话上下文（系统内部调用）不记账：它们不属于可 resume 的 turn
     if (!sessionRef) return next()
 
-    const turn = currentTurn(session?.events ?? [])
+    // 键里的 turn 必须是真的：`currentTurn([])` 恒返 0，于是所有 turn 的幂等键都落在同一
+    // 命名空间上，第 2 轮里重复的同参调用会被当成第 1 轮的重复而吸收。
+    const turn = currentTurn(session?.snapshotEvents?.() ?? session?.events ?? [])
     const toolName = exec.name
     const warning = classifier.warnOnce(toolName)
     if (warning) ctx.logger.warn(warning)

@@ -19,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/lumo-harness/platform/heartbeat"
 	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/projects/internal/server"
 	"github.com/lumo-harness/platform/projects/internal/store"
@@ -72,6 +73,10 @@ func main() {
 	srv := server.New(st, log)
 	mux := http.NewServeMux()
 	srv.Register(mux)
+
+	// 心跳上报：集群就绪态由心跳新鲜度与自报依赖派生（E4/D6），不再只看
+	// LUMO_CLUSTER_STATUS 这个静态声明。放在初始化之后，避免服务尚不可用就报 ready。
+	heartbeat.StartPg(ctx, pool, heartbeat.Options{Service: "projects", Logger: log, Depends: heartbeat.PgDependency(pool)})
 
 	log.Info("projects 启动", "addr", *listen)
 	httpSrv := &http.Server{Addr: *listen, Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)), ReadHeaderTimeout: 10 * time.Second}

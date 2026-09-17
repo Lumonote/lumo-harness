@@ -1,9 +1,11 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { BASELINE_PLUGIN_PINS, PACKAGED_PROFILE_MODULES } from './generated/plugin-baseline.ts'
 import { homedir } from 'node:os'
 import { delimiter, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 export const PLATFORM_PLUGIN_MODULES = {
+  agentTeams: '@lumo/agent-teams',
   attachments: '@lumo/attachments',
   connector: '@lumo/connector',
   control: '@lumo/control',
@@ -24,7 +26,17 @@ export const PLATFORM_PLUGIN_MODULES = {
   seamHost: '@lumo/seam-host',
   seamProxy: '@lumo/seam-proxy',
   sessionLog: '@lumo/session-log',
-  sessionTitleGateway: '@lumo/session-title-gw',
+  // 这里**故意没有** sessionTitleGateway / `@lumo/session-title-gw`，不要加回来：
+  // `dsh-plugins/session-title-gw` **不是插件** —— 没有 `src/`，`package.json` 也没有
+  // `main`/`exports`，并且从未出现在 `index.ts` 的 loader 行里（那里没有解构这个键）。
+  // 它只是一个**验证切片**（`__tests__/title-route.spec.ts`），证明「标题辅助调用经网关路由」
+  // 是**纯 Config 事实**：上游 provider 的 `provider`/`model` 成对覆盖即可，`title` 零改动，
+  // 因此不需要任何插件代码。
+  //
+  // 把它登记在这里的代价不是「多个无害条目」：`profilePluginSpecs()` 会遍历本表，
+  // 于是每个 profile 都要 `dsh plugin add` 一个永远加载不了的包；而
+  // `isOptionalProfilePlugin('@lumo/...')` 恒为 false，安装一旦失败就**直接抛错终止启动**
+  // （可选插件才会降级为 warn）。登记它 = 给启动路径埋一个无条件失败的闸门。
   skillLocal: '@lumo/skill-local',
   storage: '@lumo/storage',
   subagentHost: '@lumo/subagent-host',
@@ -35,6 +47,7 @@ export const PLATFORM_PLUGIN_MODULES = {
 } as const
 
 const PLATFORM_PLUGIN_DIRECTORIES: Record<keyof typeof PLATFORM_PLUGIN_MODULES, string> = {
+  agentTeams: 'agent-teams',
   attachments: 'attachments',
   connector: 'connector',
   control: 'control',
@@ -55,7 +68,6 @@ const PLATFORM_PLUGIN_DIRECTORIES: Record<keyof typeof PLATFORM_PLUGIN_MODULES, 
   seamHost: 'seam-host',
   seamProxy: 'seam-proxy',
   sessionLog: 'session-log',
-  sessionTitleGateway: 'session-title-gw',
   skillLocal: 'skill-local',
   storage: 'storage',
   subagentHost: 'subagent-host',
@@ -76,28 +88,16 @@ const WEB_COMMUNITY_PLUGINS = [
  * important here: a desktop build must not change behavior because a registry
  * tag moved after the installer was produced.
  *
- * 版本漂移纪律（2026-09 · dsh master 重构期）：每个 pin 必须与当前 master 的
- * 公共 API 兼容。dsh-settings 在 0.1.2 把 installSettingsSection/settingsNamespace
- * 移除（SettingsProvider 取代），1.36.0 的 dshmarket 与 0.38.1 的 dsh-context
- * 在运行时直接 import 失败，因此随 master 升到 1.41.0 / 0.41.3。
- * `@anweat/dsh-browser` 自 0.1.10 （2026-08-29，最新版）仍 import 这两个旧符号，
- * master 下无法通过 import 校验，且上游无更新版——从桌面包基线移除；市场里装到
- * 其它 profile 的行为不受影响（那里用户的 dsh-settings 可能仍是旧 API）。
+ * 名单、版本与升版纪律的真相源是
+ * platform/shared/manifests/plugin-baseline.manifest.json —— 包括为什么排除
+ * `@anweat/dsh-browser`（仍 import dsh-settings 已移除的旧符号）与
+ * `@nanmicoder/dsh-agent-teams`（调用 master 已移除的 registerContinuableSetup）。
+ * 本文件只消费其生成物：改 pin = 改清单 + `pnpm run codegen:plugin-baseline`，
+ * 不要在下面手工加条目（漂移锁会红）。
  */
-export const BASE_PROFILE_PLUGINS = [
-  { name: 'dshmarket', spec: 'dshmarket@1.41.0' },
-  { name: '@liustack/modlens', spec: '@liustack/modlens@3.25.2' },
-  { name: 'dsh-context', spec: 'dsh-context@0.41.3' },
-  { name: 'dsh-cost-meter', spec: 'dsh-cost-meter@1.6.7' },
-  { name: 'dsh-dream-skin', spec: 'dsh-dream-skin@8.30.1' },
-  // 任务看板：dsh web GUI 的 Host 权威任务台帐（0.3.14）。替换 Lumo 左侧菜单原「自动化」入口。
-  { name: '@linxin666/dsh-client-ui-task-board', spec: '@linxin666/dsh-client-ui-task-board@0.3.14' },
-  // @nanmicoder/dsh-agent-teams 不在桌面包基线：0.1.15 调用了 master 已移除的
-  // ctx.subagents.registerContinuableSetup，Loader 会直接拒绝整树启动。仍可通过
-  // SkillHub 手动安装；dsh-node 的插件隔离会在失败时自动 quarantine 并重试。
-  // Univer 办公文档：DSH × Univer 协作网关与查看器——内联预览、浮动工作台与会话结束审阅（0.2.14）。
-  { name: 'dsh-univer-office', spec: 'dsh-univer-office@0.2.14' },
-] as const
+export const BASE_PROFILE_PLUGINS: readonly ProfilePluginSpec[] = BASELINE_PLUGIN_PINS.map(
+  pin => ({ name: pin.name, spec: pin.spec }),
+)
 
 export const OBSOLETE_PROFILE_PLUGINS = ['deepseek-harness-auth'] as const
 
@@ -149,25 +149,9 @@ function pinnedBaselineVersion(name: string): string | undefined {
 
 // 打包 runtime 下 dsh-node 把这份名单逐个 symlink 到 DSH_HOME/profiles/node_modules，
 // 让 patch 里的裸包名（name: '@lumo/...'）能从 profile 目录按 Node 的父级上溯解析到。
-// 新插件进了 PLATFORM_PLUGIN_MODULES、且 local/web profile 真的会挂载它，就必须同步加
-// 到这里——漏加时 Loader 报 Cannot find package，整个插件树挂载失败。
-const PACKAGED_PROFILE_MODULES = [
-  '@deepseek-ai/dsh-storage-sqlite',
-  '@lumo/dsh-platform-ui',
-  '@lumo/knowledge-vault',
-  '@lumo/open-design',
-  '@lumo/archify',
-  '@lumo/creative-skills',
-  '@lumo/ruflo-orchestration',
-  '@lumo/web-fetch-fakeip',
-  'dshmarket',
-  '@liustack/modlens',
-  'dsh-context',
-  'dsh-cost-meter',
-  'dsh-dream-skin',
-  '@linxin666/dsh-client-ui-task-board',
-  'dsh-univer-office',
-] as const
+// 名单 = 首方模块 + 基线包名，由 shared/manifests/plugin-baseline.manifest.json 拼装
+// （生成物 ./generated/plugin-baseline.ts）——不要再手抄：漏加时 Loader 报
+// Cannot find package，整个插件树挂载失败。
 
 export interface ProfilePluginSpec {
   name: string
@@ -182,7 +166,8 @@ export function profilePluginSpecs(profile: string, platformRoot: string, deploy
   }))
   if (deploymentMode === 'local') {
     // local 模式的知识源是 Vault（sqlite+FTS5），不是需要 PG 的 @lumo/knowledge 接缝。
-    const localOnly = new Set(['@lumo/dsh-platform-ui', '@lumo/knowledge-vault', '@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/skill-local', '@lumo/web-fetch-fakeip'])
+    // 本名单同时是 packagedFirstParty 清单的来源：打包 runtime 只 symlink 这些模块。
+    const localOnly = new Set(['@lumo/agent-teams', '@lumo/dsh-platform-ui', '@lumo/knowledge-vault', '@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/skill-local', '@lumo/web-fetch-fakeip'])
     return [
       ...local.filter(({ name }) => localOnly.has(name)),
       ...BASE_PROFILE_PLUGINS,

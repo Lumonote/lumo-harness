@@ -29,7 +29,16 @@ knowledge:
   rerankModel: BAAI/bge-reranker-v2-m3
 vault:
   address: http://vault:8200
+  # The chart never creates this one: a minted token would not be accepted by
+  # a real Vault. Leave the name empty to omit LUMO_VAULT_TOKEN entirely.
   tokenSecret: lumo-vault-token
+  tokenKey: token
+# Opt-in creation of the shared Secrets this chart references. Default false:
+# production credentials belong to the operator, not to the release object.
+# See templates/secret.yaml for exactly which Secrets are generated and why
+# the other ones are not.
+secrets:
+  create: false
 connectorOAuth:
   enabled: false
   callbackUrl: ""
@@ -124,6 +133,18 @@ dshNode:
   seamPort: 8090
   clusterId: default
   realm: dev
+  # 本集群池当前跑的组件版本，用于版本一致性前置（§7.4.1「同一 agent/组件版本先完成
+  # 全集群分发才允许全局调度」）。**留空 = 不声明**，这是默认。
+  #
+  # 声明方刻意是承载节点而不是调度器：与存活自报同一条判据——说的是「跑着的那个东西
+  # 是哪个版本」，而调度器自己的版本是另一条发布线。留空时即使
+  # services.scheduler.clusterVersionGate 打开，判定集合里也没有可比的东西（判为
+  # 「无信息一致」），闸门等于没开；cluster-registry-check.py 有一条静态规则专抓这个组合。
+  #
+  # 刻意**不**默认成 `image.tag`：本 chart 的节点池用的是另一个镜像
+  # （dshNode.image，自带 tag），拿全局 image.tag 顶替会在只覆盖节点镜像时静默报错版本。
+  # 自然取值是 dshNode.image 里的那个 tag，由运维显式写出。
+  clusterVersion: ""
   capacity: 8
   capabilities: subagent
   residency: ""
@@ -168,6 +189,10 @@ dshWeb:
   flowsUrl: http://lumo-platform-flows:8087
   connectorUrl: http://lumo-platform-connector-gateway:8082
   governanceUrl: http://lumo-platform-governance:8089
+  # §8.4 共享执行控制（C5）的提交入口。dsh-web 的 `ctx.sessionControl.dispatch`
+  # 把控制指令 POST 到这里；没有它，dispatch 只会抛 ControlCommandRoutingError。
+  # 生效面（session_control_state 闸门）不依赖它。
+  sessionControlUrl: http://lumo-platform-session-control:8092
   publicUrl: ""
   secureCookie: true
   registryUrl: http://lumo-platform-registry:8084
@@ -194,13 +219,84 @@ provisioner:
     enabled: true
     size: 10Gi
     storageClass: ""
+edgeGateway:
+  # 路由表（§12.1「路由分发」，缺口 C3 的实现）。放在 values 而不是环境变量里：它要能被
+  # review、能被 diff、能被门禁检查——platform/deploy/edge-routes-verify.sh 会把**渲染出来
+  # 的那一张**喂给网关自己的校验器（cmd/edge-gateway-check 复用 routing 包），塞进 env
+  # 三样都做不了。默认值与 compose.cluster.yml 挂载的 ./edge-routes.dev.json 一致：
+  # 两套拓扑描述的是同一个系统，不是两个产品。
+  #
+  # `service` 必须是 `services:` 里已有的键**且 enabled**。端口从那个服务的 `port` 派生，
+  # 上游主机名从 release 名派生（`<name>-<service>:<port>`）。两条都是刻意的：
+  #   * 端口写死（像 dev 表里的 "flows:8087"）在有人改 services.flows.port 之后会静默指向
+  #     旧端口，症状是运行期 502，而两份配置各自看起来都是对的；
+  #   * 主机名写死会在多 release 拓扑下**全数**失效（cluster-b 是第二个 release，Service
+  #     名带自己的前缀），而白名单要求与 url.Host **精确相等**，差一个字符就连不上。
+  # 指向不存在或已停用的服务在**渲染时**失败，不会等到运行期变成 502。
+  routes:
+    - { prefix: /v1/chat/, service: llm-gateway, rateLimitRpm: 6000 }
+    - { prefix: /v1/providers, service: llm-gateway, rateLimitRpm: 600 }
+    - { prefix: /v1/flows, service: flows, rateLimitRpm: 3000 }
+    - { prefix: /v1/operators, service: flows, rateLimitRpm: 600 }
+    - { prefix: /v1/projects, service: projects, rateLimitRpm: 3000 }
+    - { prefix: /v1/tasks/, service: projects, rateLimitRpm: 3000 }
+    - { prefix: /v1/auth/, service: governance, rateLimitRpm: 1200 }
+    - { prefix: /v1/terminals/, service: terminal-gateway, rateLimitRpm: 600 }
+  # 限流令牌桶。留空 = 由 redis.address 派生；指向另一个实例时显式给 URL。
+  redisUrl: ""
+  # Redis 抖动时**拒绝**而不是放行。默认 false 是刻意选的一侧：限流器不可用期间放行，
+  # 等于那段时间没有任何限流保护。
+  limiterFailOpen: false
+  # 0 = 不限。这三个是全局兜底；路由级配额在上面的 routes 里逐条给出。
+  globalRpm: 0
+  maxBodyBytes: 1048576
+  maxConns: 10000
+  # 边缘层的 CORS 白名单。`gate.CORS`（internal/gate）是边缘 CORS 的权威来源，按**请求的
+  # Origin** 决定是否放行；observability 中间件的 CORS 按配置的来源写死，两者语义不同。
+  # 留空 = 由 console.corsOrigin 派生（compose 的 dev 默认值也是它）。用列表而不是逗号串：
+  # 逗号串在 values 里很容易被读成一个来源。
+  corsOrigins: []
+terminalGateway:
+  # 敏感动作（presence 等）的签名密钥。**空字符串会让二进制 fail-closed 全拒**——那是安全
+  # 的一侧，但等于终端网关的敏感面整个不可用，所以这里默认给一个可铸造的名字。与
+  # governance.authSecret 同一套路：secrets.create=true 时由 chart 铸造，生产自备。
+  signingSecret: lumo-terminal-signing
+  signingKey: secret
+  # presence 过期靠**时间**判定，不靠断连回调——进程崩了不会送回调，靠回调的实现在崩溃时
+  # 会把幽灵在线状态一直留在名单里。
+  presenceTtl: 30s
+  #
+  # 已知缺口（不是接线遗漏）：历史事件源（session/event）尚未接线。未配置来源时本网关对
+  # WS 接入**诚实返回 503**，而不是伪造一段空历史，因此 chart 刻意**不**设
+  # LUMO_TERMINAL_MEM_EVENTS（那是测试/演示用的内存源）。它与 session-control 的
+  # effectuation 恒为 recorded 同类：服务能起、能上报心跳、能过就绪闸门，但那个 WS 面
+  # 还没接上真实来源。部署成功 ≠ 终端可看历史。
+
+# Each entry may also carry `replicas` to override the global replicaCount for
+# that one service; the cluster shape needs it because scheduler and
+# collaborator run in pairs while the rest run singly. Every replica gets
+# LUMO_INSTANCE from its pod name, so raising replicas is safe.
 services:
   collaborator: { enabled: true, port: 8081 }
   scheduler: { enabled: true, port: 8083 }
   registry: { enabled: true, port: 8084 }
   connector-gateway: { enabled: true, port: 8082 }
   llm-gateway: { enabled: true, port: 8088 }
+  # §8.4 共享执行控制（C5）。端口与 compose.cluster.yml 一致，且刻意不是 8091：
+  # 宿主/容器端口按「18000+端口」对应时 18091 已被 terminal-gateway 占着。
+  # 它读取 `LUMO_OPA_URL`（不是 connector-gateway 的 `LUMO_OPA_ADDR`）——两个名字都在
+  # templates/configmap.yaml 里，缺了那一条控制指令会静默全拒。
+  session-control: { enabled: true, port: 8092 }
   flows: { enabled: true, port: 8087 }
   projects: { enabled: true, port: 8086 }
   governance: { enabled: true, port: 8089 }
   usage-ledger: { enabled: true, port: 8085 }
+  # 「门」层的两个服务：边缘网关（§12.1，缺口 C3）与终端网关（§8.2，缺口 C4）。
+  # 端口与 compose.cluster.yml 一致（容器内 8080 / 8090）。
+  #
+  # 它们与内部服务有一处结构性不同：**是入口**，所以「要不要对外暴露」是部署决策，不是
+  # 一个可以预填的默认值。因此全局 `service.type` 保持 ClusterIP（不对外），需要暴露的
+  # 入口用这一条上的 `type:` 单独覆盖（见 templates/service.yaml）。反过来的做法——把全局
+  # 翻成 NodePort/LoadBalancer——会把**全部 12 个**服务一起暴露，包括本不该可达的内部面。
+  edge-gateway: { enabled: true, port: 8080 }
+  terminal-gateway: { enabled: true, port: 8090 }

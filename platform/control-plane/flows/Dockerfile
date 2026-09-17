@@ -4,6 +4,7 @@ FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY flows/go.mod flows/go.sum ./
 COPY observability /observability
+COPY heartbeat /heartbeat
 RUN go mod download
 COPY flows .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/flows ./cmd/flows

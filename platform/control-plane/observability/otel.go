@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -464,10 +465,47 @@ func (e *otlpExporter) metricsPayload() map[string]any {
 		counter("lumo.observability.metric_series_dropped.count", Default.droppedGauges.Load()), counter("lumo.observability.trace_dropped.count", e.droppedSpans.Load()),
 		gauge("lumo.http.server.inflight", float64(Default.inflight.Load())),
 	}
+	// 手动采集的 gauge。带标签的序列把标签作为 dataPoint 属性输出——只给
+	// Prometheus 文本路径加标签会让这里出现多个同名、无从区分的 dataPoint，
+	// 消费者只能合并或覆盖，两条导出路径就此静默分叉。排序是为了让同一份
+	// 指标在两条路径上的出现顺序都稳定，可直接文本比对。
 	Default.gaugeMu.RLock()
-	for name, value := range Default.gauges {
-		metrics = append(metrics, gauge(name, value))
+	type gaugePoint struct {
+		name   string
+		labels string
+		attrs  map[string]string
+		value  float64
+	}
+	points := make([]gaugePoint, 0, len(Default.gauges))
+	for key, series := range Default.gauges {
+		name := key
+		if i := strings.IndexByte(key, 0); i >= 0 {
+			name = key[:i]
+		}
+		points = append(points, gaugePoint{name: name, labels: series.labels, attrs: series.attrs, value: series.value})
 	}
 	Default.gaugeMu.RUnlock()
+	sort.Slice(points, func(i, j int) bool {
+		if points[i].name != points[j].name {
+			return points[i].name < points[j].name
+		}
+		return points[i].labels < points[j].labels
+	})
+	for _, p := range points {
+		point := map[string]any{"timeUnixNano": pointTime, "asDouble": p.value}
+		if len(p.attrs) > 0 {
+			attrNames := make([]string, 0, len(p.attrs))
+			for name := range p.attrs {
+				attrNames = append(attrNames, name)
+			}
+			sort.Strings(attrNames)
+			attrs := make([]any, 0, len(attrNames))
+			for _, name := range attrNames {
+				attrs = append(attrs, map[string]any{"key": name, "value": map[string]any{"stringValue": p.attrs[name]}})
+			}
+			point["attributes"] = attrs
+		}
+		metrics = append(metrics, map[string]any{"name": p.name, "gauge": map[string]any{"dataPoints": []any{point}}})
+	}
 	return map[string]any{"resourceMetrics": []any{map[string]any{"resource": e.resource(), "scopeMetrics": []any{map[string]any{"scope": map[string]any{"name": "github.com/lumo-harness/observability"}, "metrics": metrics}}}}}
 }

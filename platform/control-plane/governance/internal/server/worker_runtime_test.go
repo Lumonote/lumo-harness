@@ -11,7 +11,7 @@ import (
 
 func TestWorkerRuntimeRequiresServiceCredential(t *testing.T) {
 	mux := http.NewServeMux()
-	New(nil, Config{DeploymentMode: domain.ModeCluster, ClusterStatus: "ready", ControlPlaneToken: "runtime-service-token"}, nil).Register(mux)
+	newTestServer(t, Config{DeploymentMode: domain.ModeCluster, ClusterStatus: "ready", ControlPlaneToken: "runtime-service-token"}).Register(mux)
 	for _, path := range []string{"/v1/workers/agent:one/runtime", "/v1/runtime/agent-presets/one"} {
 		method := http.MethodPut
 		if strings.Contains(path, "agent-presets") {

@@ -32,7 +32,7 @@ func TestRequireSkillSourceAccessRestrictsPrivateSourceToAuthorOrAdmin(t *testin
 }
 
 func TestPublishSkillVersionRouteRequiresRealmAdmin(t *testing.T) {
-	s := New(nil, Config{DeploymentMode: domain.ModeCluster, ClusterStatus: domain.ClusterReady}, nil)
+	s := newTestServer(t, Config{DeploymentMode: domain.ModeCluster, ClusterStatus: domain.ClusterReady})
 	mux := http.NewServeMux()
 	s.Register(mux)
 
@@ -59,7 +59,7 @@ func TestPublishSkillVersionRouteRequiresRealmAdmin(t *testing.T) {
 }
 
 func TestRuntimeSkillSnapshotRouteRequiresRealmAdmin(t *testing.T) {
-	s := New(nil, Config{DeploymentMode: domain.ModeCluster, ClusterStatus: domain.ClusterReady}, nil)
+	s := newTestServer(t, Config{DeploymentMode: domain.ModeCluster, ClusterStatus: domain.ClusterReady})
 	mux := http.NewServeMux()
 	s.Register(mux)
 	for _, tc := range []struct {

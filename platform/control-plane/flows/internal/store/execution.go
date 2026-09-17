@@ -41,10 +41,16 @@ func (s *Store) PrepareTriggerBindings(ctx context.Context, id uint64, realm str
 			return nil, err
 		}
 		if !hasSnapshot {
+			// 两条绑定路径：event/webhook 按 trigger_spec（即事件名）扇出到所有订阅者；
+			// cron 只投给游标对应的那一个自动化，不按表达式匹配——两个自动化写同一个
+			// cron 表达式是合法的，按表达式匹配会让它们互相触发。
 			_, err = tx.Exec(ctx, `INSERT INTO flow_trigger_bindings (trigger_id, automation_id, flow_id, flow_version)
 			  SELECT t.id, a.automation_id, f.id, f.version
 			  FROM flow_trigger_outbox t
-			  JOIN project_automations a ON a.trigger_kind IN ('event','webhook') AND a.trigger_spec = t.event_name AND a.enabled
+			  JOIN project_automations a ON a.enabled AND (
+			       (t.source = 'event' AND a.trigger_kind IN ('event','webhook') AND a.trigger_spec = t.event_name)
+			    OR (t.source = 'cron' AND a.trigger_kind = 'cron' AND a.automation_id = t.cron_automation_id)
+			  )
 			  JOIN flows f ON f.id = a.flow_ref AND f.project_id = a.project_id AND f.realm = t.realm
 			  JOIN projects p ON p.id = a.project_id AND p.realm = t.realm AND p.status = 'active'
 			  JOIN flow_versions v ON v.flow_id = f.id AND v.version = f.version

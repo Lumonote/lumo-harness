@@ -106,17 +106,49 @@ if command -v docker >/dev/null 2>&1 && [[ -r "$compose_file" ]]; then
   if "${compose[@]}" config -q >/dev/null 2>&1; then
     pass "Compose topology renders"
     services="$("${compose[@]}" config --services)"
-    dsh_service="dsh-web"
-    [[ "$shape" == "standalone" ]] && dsh_service="dsh-node"
-    for service in postgres redis minio rocketmq nacos scheduler-0 governance registry "$dsh_service" prometheus; do
-      if grep -Fxq "$service" <<< "$services"; then
-        pass "required service $service is present"
-      else
-        fail "required service $service is absent from rendered topology"
-      fi
+    # 期望值刻意**写死**，不从 compose 文件反推：这个检查比的是「部署者期望哪些服务」
+    # 与「拓扑声明了哪些服务」，反推期望值会让检查恒真。任何一个默认服务从拓扑里消失
+    # 都必须红。2026-09-15 之前这里只列了 10 个，connector-gateway / llm-gateway / flows
+    # / projects / usage-ledger / collaborator / opa / vault / milvus / tei / etcd 缺席
+    # 时静态检查照样通过。
+    #
+    # 刻意排除 `profiles: [provisioner]` 的 provisioner / artifact-runtime：默认
+    # `config --services` 不渲染 profiled 服务，列进来会让每一次默认部署都误报。
+    shared_services=(
+      postgres redis minio rocketmq-namesrv rocketmq rocketmq-topic-init nacos prometheus
+    )
+    # 这份名单**必须与 topology 里的默认控制面服务逐字相等**。2026-09-16 复核发现它少了
+    # 三个：`edge-gateway` / `terminal-gateway`（C3/C4 落地时进了 compose 但没进这里）
+    # 与 `session-control`（C5）。少一个的后果不是「少查一个」，而是这个检查宣称的
+    # 「拓扑被改坏会红」对它不成立——三个服务从两条拓扑里同时消失，preflight 照样绿。
+    # 名单腐烂的方向恰是它唯一要防的方向，所以发现一处补一处。
+    control_plane_services=(
+      scheduler-0 registry connector-gateway llm-gateway edge-gateway terminal-gateway
+      session-control flows projects governance usage-ledger
+    )
+    if [[ "$shape" == "standalone" ]]; then
+      required_services=("${shared_services[@]}" "${control_plane_services[@]}" collaborator dsh-node)
+    else
+      # scheduler-1 是 standby（租约接管对象）；scheduler-cluster-a/b 是**每集群一份的
+      # 本地决策者**（architecture §7.4.1 的两层，全局调度缺席时由它们本地受理）。
+      # collaborator-0/1 与四个 cluster-*-dsh-* 是集群形态独有的多副本；
+      # etcd / milvus / opa / tei / tei-rerank / vault 只在 cluster 拓扑里，standalone 没有。
+      required_services=(
+        "${shared_services[@]}" "${control_plane_services[@]}"
+        etcd milvus opa tei tei-rerank vault
+        scheduler-1 scheduler-cluster-a scheduler-cluster-b
+        collaborator-0 collaborator-1
+        dsh-web cluster-a-dsh-0 cluster-a-dsh-1 cluster-b-dsh-0 cluster-b-dsh-1
+      )
+    fi
+    missing_services=""
+    for service in "${required_services[@]}"; do
+      grep -Fxq "$service" <<< "$services" || missing_services="$missing_services $service"
     done
-    if [[ "$shape" == "cluster" ]]; then
-      if grep -Fxq scheduler-1 <<< "$services"; then pass "cluster standby scheduler is present"; else fail "cluster topology lacks scheduler-1"; fi
+    if [[ -z "$missing_services" ]]; then
+      pass "all ${#required_services[@]} required $shape services are present in the rendered topology"
+    else
+      fail "required $shape services are absent from the rendered topology:$missing_services"
     fi
   else
     fail "Compose topology does not render; inspect required variables and compose diagnostics"

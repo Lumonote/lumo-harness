@@ -23,36 +23,176 @@ const (
 	ModeCluster    DeploymentMode = "cluster"
 )
 
-const ClusterReady = "ready"
+const (
+	// ClusterReady is the declared status meaning "this deployment is a cluster
+	// and it is expected to serve cluster-only APIs".
+	ClusterReady = "ready"
+	// ClusterNotReady is the declared status meaning "not a ready cluster". It is
+	// also the effective status when the operator never declared readiness.
+	ClusterNotReady = "not_ready"
+	// ClusterDegraded is an effective status that can never be declared: the
+	// operator said ready, but derived readiness does not hold. It exists so an
+	// operator can tell "nobody declared a cluster" apart from "a cluster was
+	// declared and it is broken" without reading a reason string.
+	ClusterDegraded = "degraded"
+)
 
 var ErrClusterOnly = errors.New("CLUSTER_ONLY")
 
+// ErrClusterNotReady reports a deployment that is configured as a cluster but is
+// not currently healthy. It is deliberately distinct from ErrClusterOnly: the
+// first is temporary and retryable, the second is a configuration fact.
+var ErrClusterNotReady = errors.New("CLUSTER_NOT_READY")
+
+// ClusterHealth is the derived readiness a gate decision needs. It is a plain
+// value rather than the heartbeat package's snapshot so this package stays free
+// of database dependencies, and so the gate can be tested without one.
+type ClusterHealth struct {
+	// Known is false when no evaluation is available at all. It is not the same
+	// as "not ready": it means the question could not be answered.
+	Known bool
+	// Ready is the derived verdict.
+	Ready bool
+	// Reason explains Ready=false.
+	Reason string
+	// Unready names the required services that are not serving.
+	Unready []string
+	// EvaluatedAt is when the verdict was computed.
+	EvaluatedAt time.Time
+}
+
+// HealthSource supplies the current derived readiness.
+//
+// Implementations must be cheap and must never block: the gate calls this on
+// every management request, so it has to read a cache rather than the database.
+type HealthSource interface {
+	Health() ClusterHealth
+}
+
+// HealthFunc adapts a function to HealthSource.
+type HealthFunc func() ClusterHealth
+
+func (f HealthFunc) Health() ClusterHealth { return f() }
+
+// ClusterGate is the resolved answer to "may cluster-only APIs serve right now".
+//
+// It separates three things that used to be one string:
+//
+//   - Mode:      is this a cluster deployment at all?
+//   - Intent:    what the operator declared via LUMO_CLUSTER_STATUS.
+//   - Effective: what the platform actually believes, after health is applied.
+//
+// Keeping them apart is what lets a declared-but-unhealthy deployment report
+// "degraded" instead of serving a management surface whose scheduler is dead.
+type ClusterGate struct {
+	Mode DeploymentMode `json:"deployment_mode"`
+	// Intent is the operator's declaration and never changes at runtime.
+	Intent string `json:"cluster_status_declared"`
+	// Effective is Intent narrowed by health: ClusterReady only when both hold,
+	// ClusterDegraded when the intent was ready but health does not.
+	Effective string `json:"cluster_status"`
+	// Ready is the single boolean handlers must branch on.
+	Ready bool `json:"cluster_ready"`
+	// Reason explains Ready=false and is empty when Ready is true.
+	Reason string `json:"cluster_not_ready_reason,omitempty"`
+	// Unready names the required services that are not serving.
+	Unready []string `json:"cluster_unready_services,omitempty"`
+	// EvaluatedAt is the RFC3339 time of the readiness verdict, empty when there
+	// has not been one.
+	EvaluatedAt string `json:"cluster_readiness_evaluated_at,omitempty"`
+}
+
+// IntentIsCluster reports whether the operator declared a ready cluster.
+//
+// It is deliberately health-free, because it answers a different question:
+// "is this deployment configured as a cluster". Startup validation and the login
+// path need exactly that. Authorization of management requests must use
+// ResolveGate instead — an intent-only check would keep serving those APIs on a
+// declared-but-dead cluster, which is the failure this split exists to prevent.
+func IntentIsCluster(mode DeploymentMode, intent string) bool {
+	return mode == ModeCluster && intent == ClusterReady
+}
+
+// ResolveGate combines the declared intent with derived readiness.
+//
+// Every early return leaves Ready false, so the gate is open only on the single
+// path where the mode is cluster, the operator declared ready, and health was
+// both evaluated and positive.
+func ResolveGate(mode DeploymentMode, intent string, health ClusterHealth) ClusterGate {
+	gate := ClusterGate{Mode: mode, Intent: intent, Effective: intent}
+	switch {
+	case mode != ModeCluster:
+		// Report "not_ready" rather than echoing the declaration: a standalone
+		// deployment that declares ready must not have cluster_status=ready
+		// sitting next to cluster_ready=false in the same payload.
+		gate.Effective = ClusterNotReady
+		gate.Reason = "部署模式不是 cluster"
+		return gate
+	case intent != ClusterReady:
+		gate.Reason = "未声明集群就绪（LUMO_CLUSTER_STATUS 不是 ready）"
+		return gate
+	}
+	gate.Effective = ClusterDegraded
+	if !health.EvaluatedAt.IsZero() {
+		gate.EvaluatedAt = health.EvaluatedAt.UTC().Format(time.RFC3339)
+	}
+	if !health.Known {
+		gate.Reason = "已声明集群就绪，但还没有就绪态求值结果"
+		return gate
+	}
+	gate.Unready = append([]string(nil), health.Unready...)
+	if !health.Ready {
+		gate.Reason = health.Reason
+		if gate.Reason == "" {
+			gate.Reason = "集群健康检查未通过"
+		}
+		return gate
+	}
+	gate.Effective = ClusterReady
+	gate.Ready = true
+	gate.Reason = ""
+	gate.Unready = nil
+	return gate
+}
+
 // Features is the server-authoritative capability descriptor. A UI may use it
-// to hide unavailable controls, but handlers must still call RequireCluster.
+// to hide unavailable controls, but handlers must still consult the gate.
 type Features struct {
-	DeploymentMode         DeploymentMode `json:"deployment_mode"`
-	ClusterStatus          string         `json:"cluster_status"`
-	OrganizationGovernance bool           `json:"organization_governance"`
-	SkillDistribution      bool           `json:"skill_distribution"`
-	DesktopWorkers         bool           `json:"desktop_workers"`
-	ArtifactRollouts       bool           `json:"artifact_rollouts"`
-	CrossNodeDelegation    bool           `json:"cross_node_delegation"`
+	DeploymentMode DeploymentMode `json:"deployment_mode"`
+	// ClusterStatus is the effective status, kept under its original name because
+	// existing clients already read it.
+	ClusterStatus string `json:"cluster_status"`
+	// The gate fields below exist so an operator can see *why* the cluster-only
+	// surface is closed instead of guessing from a bare boolean.
+	ClusterStatusDeclared  string   `json:"cluster_status_declared"`
+	ClusterReady           bool     `json:"cluster_ready"`
+	ClusterNotReadyReason  string   `json:"cluster_not_ready_reason,omitempty"`
+	ClusterUnreadyServices []string `json:"cluster_unready_services,omitempty"`
+	ClusterReadinessAt     string   `json:"cluster_readiness_evaluated_at,omitempty"`
+	OrganizationGovernance bool     `json:"organization_governance"`
+	SkillDistribution      bool     `json:"skill_distribution"`
+	DesktopWorkers         bool     `json:"desktop_workers"`
+	ArtifactRollouts       bool     `json:"artifact_rollouts"`
+	CrossNodeDelegation    bool     `json:"cross_node_delegation"`
 }
 
-func NewFeatures(mode DeploymentMode, clusterStatus string) Features {
-	enabled := mode == ModeCluster && clusterStatus == ClusterReady
+// NewFeatures describes what the deployment can currently serve. Everything
+// cluster-only is enabled exactly when the gate is open.
+func NewFeatures(gate ClusterGate) Features {
 	return Features{
-		DeploymentMode: mode, ClusterStatus: clusterStatus,
-		OrganizationGovernance: enabled, SkillDistribution: enabled,
-		DesktopWorkers: enabled, ArtifactRollouts: enabled, CrossNodeDelegation: enabled,
+		DeploymentMode:         gate.Mode,
+		ClusterStatus:          gate.Effective,
+		ClusterStatusDeclared:  gate.Intent,
+		ClusterReady:           gate.Ready,
+		ClusterNotReadyReason:  gate.Reason,
+		ClusterUnreadyServices: gate.Unready,
+		ClusterReadinessAt:     gate.EvaluatedAt,
+		OrganizationGovernance: gate.Ready,
+		SkillDistribution:      gate.Ready,
+		DesktopWorkers:         gate.Ready,
+		ArtifactRollouts:       gate.Ready,
+		CrossNodeDelegation:    gate.Ready,
 	}
-}
-
-func RequireCluster(mode DeploymentMode, clusterStatus string) error {
-	if mode != ModeCluster || clusterStatus != ClusterReady {
-		return ErrClusterOnly
-	}
-	return nil
 }
 
 // PermissionAction identifies a product action instead of a role. Roles are

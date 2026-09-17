@@ -8,8 +8,8 @@ import (
 // 两侧的 18 格断言会同时红——契约漂移无处藏。
 func TestCanProjectMatrix(t *testing.T) {
 	cases := []struct {
-		role  string
-		want  map[string]bool
+		role string
+		want map[string]bool
 	}{
 		{RoleOwner, map[string]bool{
 			ActionRead: true, ActionEdit: true, ActionMembersManage: true,

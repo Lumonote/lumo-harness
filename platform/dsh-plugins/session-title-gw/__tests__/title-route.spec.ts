@@ -98,8 +98,11 @@ async function waitFor<T>(probe: () => T | undefined, label: string): Promise<T>
   }
 }
 
-/** 日志窄化取数:title 路由预派发记录 / 最新一条 session/title。 */
-function titleEventsOf(session: { readonly events: readonly { type: string; data?: unknown }[] }): {
+/** 日志窄化取数:title 路由预派发记录 / 最新一条 session/title。
+ *  同步事件读取于上游 `2026-09-09-deprecate-synchronous-session-event-reads` 从
+ *  `session.events` 属性改成 `snapshotEvents()` 等方法；该 Agent Note 允许**测试文件**
+ *  调用它们来检查已发出的事件。 */
+function titleEventsOf(session: { snapshotEvents(): readonly { type: string; data?: unknown }[] }): {
   llmRequest?: { route: { provider: string; model: string }; titleProvider: unknown }
   latestTitle?: {
     source?: { kind?: string; provider?: string; model?: { provider?: string; model?: string } }
@@ -109,7 +112,7 @@ function titleEventsOf(session: { readonly events: readonly { type: string; data
 } {
   let latestTitle: ReturnType<typeof titleEventsOf>['latestTitle']
   let llmRequest: ReturnType<typeof titleEventsOf>['llmRequest']
-  for (const event of session.events) {
+  for (const event of session.snapshotEvents()) {
     if (event.type === 'session/title-llm-request') llmRequest = event.data as NonNullable<typeof llmRequest>
     if (event.type === 'session/title') latestTitle = event.data as NonNullable<typeof latestTitle>
   }
@@ -122,7 +125,10 @@ describe('session-title 经网关路由 · 与主循环同一 ctx.llm 截面(行
 
     // 触发:真实 parent(followup 一轮 user turn,whenIdle);first-prompt 节奏自动调度标题生成,
     // 它在 turn 结集后仍异步推进,故 whenIdle 之外还要轮询等日志证据。
-    const parent = h.ctx.agentLoop.create(
+    // `agentLoop.create` 在上游改为异步（`Promise<Agent>`，见 agent-loop 的
+    // `lib/types/index.d.ts`），漏 await 时拿到的是 Promise，下一行即
+    // `parent.followup is not a function`。
+    const parent = await h.ctx.agentLoop.create(
       SessionId('parent-gw'),
       { provider: 'mock', model: 'mock-model', maxTokens: 4096 },
       { cwd: process.cwd() },
@@ -159,7 +165,7 @@ describe('session-title 经网关路由 · 与主循环同一 ctx.llm 截面(行
     })
     expect(typeof latestTitle!.title).toBe('string')
     expect(latestTitle!.title!.length).toBeGreaterThan(0)
-    const userMessageSeqs = parent.session.events
+    const userMessageSeqs = parent.session.snapshotEvents()
       .filter((event) => event.type === 'user/message')
       .map((event) => event.seq) // seq 在事件信封上(append-only 日志的唯一序号),不在 data 里
     expect(latestTitle!.messageSeqs).toEqual(userMessageSeqs)

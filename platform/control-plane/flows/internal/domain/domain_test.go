@@ -52,10 +52,7 @@ func TestValidateDefinition(t *testing.T) {
 			d.Nodes = append(d.Nodes, FlowNode{ID: n.ID, Operator: n.Operator})
 		}
 		for _, e := range edges {
-			d.Edges = append(d.Edges, struct {
-				From string `json:"from"`
-				To   string `json:"to"`
-			}{e[0], e[1]})
+			d.Edges = append(d.Edges, FlowEdge{From: e[0], To: e[1]})
 		}
 		return d
 	}

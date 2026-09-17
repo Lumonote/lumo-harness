@@ -1,6 +1,7 @@
 {
   "name": "@lumo/session-title-gw",
   "version": "0.1.0",
+  "description": "验证切片，不是插件：证明会话标题的辅助 LLM 调用经网关路由是纯 Config 事实（上游 provider 的 provider/model 成对覆盖，title 零改动），因此无需插件代码。没有 src/ 与 main/exports，也刻意不登记在 dsh-node 的 PLATFORM_PLUGIN_MODULES 里 —— 见该文件中的说明。",
   "license": "MIT",
   "type": "module",
   "private": true,

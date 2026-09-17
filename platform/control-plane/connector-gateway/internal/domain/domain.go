@@ -233,6 +233,16 @@ func ValidateWebFetch(s WebFetchSpec) error {
 	if err != nil {
 		return fmt.Errorf("%w: URL 非法: %s", ErrOperation, err)
 	}
+	// 空 scheme 是**调用方输入问题**，不是出站策略拒绝。
+	//
+	// 必须单列这一支：`url.Parse` 对 "not a url" 这类字符串**不报错**（只拒控制字符，
+	// 空格合法），它被解析成一个「带路径的相对引用」，Scheme 为空。若不单列就会落到
+	// 下面那条「仅允许 http/https，收到 \"\"」，于是调用方拿到 403 egress_denied，
+	// 以为是自己没权限，而真正的问题是 URL 不是绝对地址。
+	// 非空但不是 http/https（如 ftp://）仍走下面那支 —— 那才是策略拒绝。
+	if u.Scheme == "" {
+		return fmt.Errorf("%w: URL 缺少 scheme，必须给出绝对地址（如 https://example.com/path）", ErrOperation)
+	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("%w: 仅允许 http/https，收到 %q", ErrEgressBlocked, u.Scheme)
 	}

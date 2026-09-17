@@ -3,6 +3,7 @@ FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY llm-gateway/go.mod llm-gateway/go.sum ./
 COPY observability /observability
+COPY heartbeat /heartbeat
 RUN go mod download
 COPY llm-gateway .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/llm-gateway ./cmd/llm-gateway

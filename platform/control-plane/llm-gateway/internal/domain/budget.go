@@ -28,7 +28,28 @@ type BudgetLimits struct {
 //
 // softLimit/budget/overdraft 为 0 的语义：0 表示「未配置该档」（TS resolveLimits 的
 // 缺省 0 同义——soft_limit=0 即无软限额档）。
+//
+// 负 overdraft 是**非法配置**，先拒绝（2026-09-15 补）。
+//
+// 判据在 canonical 那边：`budgetState` 走 `resolveLimits`，而后者对负数与非有限值
+// **抛错**（`shared/seam-contracts/budget-policy.ts` 的 `finite()`；用例
+// `budget-policy.spec.ts`「负数与非有限值抛错」钉住 `overdraft: -1` 必须抛）。
+// 写入侧同源：`setBudget`/`adjustBudget` 落库前也调 `resolveLimits`，所以库里不该有
+// 负 overdraft 的行。
+//
+// 这个函数没有错误返回值，于是把「拒绝」翻译成 `hard`——**返回一个看起来合理的态
+// 比拒绝坏得多**（canonical 注释原话），而且负 overdraft 的具体后果是 `used < budget`
+// 那一支会**遮住** hard 支（`budget+overdraft < budget`），于是一棵把透支额配成负数的
+// 树永远判不到 hard，静默放行。
+//
+// 为什么读侧也要兜（而不是「反正写不进来」）：`budget_metrics.go` 的 SQL 聚合是同一
+// 语义的第二份实现，它本来就按 `budget <= -overdraft` 把这种行算作 denied。若只让 Go
+// 这边继续给 soft，两边就在这个角落分叉——监控面板说「这批租户被拦住了」，网关实际在
+// 放行。镜像用例 `TestBudgetTreeCountsMirrorStateOfTree` 正是为抓这种分叉存在的。
 func BudgetState(used int64, l BudgetLimits) string {
+	if l.Overdraft < 0 {
+		return StateHard
+	}
 	switch {
 	case used < l.SoftLimit:
 		return StateWithin
@@ -54,10 +75,10 @@ func IsAllowed(state string) bool { return state != StateHard }
 
 // TreeRow budget_trees 一行的领域投影（列名对齐 TS BudgetTreeRow）。
 type TreeRow struct {
-	Budget     *int64
+	Budget      *int64
 	BudgetTotal *int64
-	SoftLimit  *int64
-	Overdraft  *int64
+	SoftLimit   *int64
+	Overdraft   *int64
 }
 
 // StateOfTree 单树判态（镜像 TS stateOfTree）：

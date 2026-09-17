@@ -85,7 +85,25 @@ func (UpdateSetMerger) Merge(state []byte, updates []domain.Update) ([]byte, err
 	return json.Marshal(set)
 }
 
-// AppendOnlyMerger 兼容旧状态读取与历史测试；新装配不得使用它。
+// AppendOnlyMerger 把增量按**到达顺序**原样拼接，因此违反 Merger 的收敛性契约
+// （同一增量集合换个顺序就产出不同字节）。它是**反面示例，不是备用内核**。
+//
+// 保留它的唯一理由是让「服务端内核为什么必须去重 + 排序」变成一条**会失败的断言**
+// 而不是一句注释（见 merger_test.go 的 TestAppendOnlyMergerIsNotConvergent，同一条
+// 用例里用 UpdateSetMerger 做对照）；生产装配的两条路——`UpdateSetMerger`（确定性
+// 更新集）与 `YrsProcessMerger`（yrs 语义内核）——都不需要它。
+//
+// 边界（三条，缺任何一条就该删掉它）：
+//
+//   - **为什么保留**：作为 Merger 接口契约的负例。删掉它就只剩「顺序敏感是不行的」
+//     这句话，而注释不会失败、测试会。原始记录见 §12.3：Yjs 生态无生产级 Go 实现，
+//     服务端要么转发原始二进制、要么做确定性更新集；本类型代表前者被否掉的那一支。
+//   - **谁能用**：**没有任何人**。2026-09-16 复核：全仓（Go 源码、测试、脚本、配置、
+//     文档）零引用，本类型没有 importer。`Name()` 里的「占位，非生产」是给误把它装配
+//     进去的人看的——一旦它出现在启动日志的 `kernel=` 字段里，就是配错了。
+//   - **什么时候删除**：当 (a) 收敛性契约在别处已有一条等价的负例，或 (b) 接口契约
+//     本身被改写（不再要求顺序无关）——两者任一成立即可删。在此之前删它属于
+//     「删掉证据」而不是「清理死代码」。
 type AppendOnlyMerger struct{}
 
 func (AppendOnlyMerger) Name() string { return "append-only(占位，非生产)" }

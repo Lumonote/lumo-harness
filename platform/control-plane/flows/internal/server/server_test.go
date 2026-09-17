@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/lumo-harness/platform/flows/internal/engine"
 	"github.com/lumo-harness/platform/flows/internal/server"
 	"github.com/lumo-harness/platform/flows/internal/store"
 )
@@ -73,7 +74,17 @@ func newTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, func(pid stri
 		t.Fatalf("init: %v", err)
 	}
 	mux := http.NewServeMux()
-	server.New(st, nil).Register(mux)
+	// 裸 engine.New() 不带 RuntimeConfig，三个上游算子会被登记进 unavailable，
+	// 于是含 kb.query / llm.answer 的定义会在 Validate 处被拒——那是**生产行为**
+	// （部署没配上游就不该存得下跑不起来的流程，GET /v1/operators 也靠它报
+	// available:false）。本文件测的是 HTTP 生命周期与权限，不是算子可用性，
+	// 所以显式注入一份「上游已配」的 engine：与 cmd/flows/main.go 同构，只是
+	// 地址是占位域名（这些用例从不真正执行流程，不会发出请求）。
+	server.New(st, nil, engine.New(engine.RuntimeConfig{
+		LLMURL: "http://llm.test", ConnectorURL: "http://connector.test",
+		KnowledgeURL: "http://knowledge.test", ControlToken: "test-control-token",
+		IdentitySecret: strings.Repeat("s", 32),
+	})).Register(mux)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	seed := func(pid string, members map[string]string) {

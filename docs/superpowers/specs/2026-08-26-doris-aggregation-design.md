@@ -1,9 +1,24 @@
 # 计量聚合设计说明 —— Doris cube：明细在 PG，聚合可重建，缺能力显式拒绝
 
+> **状态：已被取代（2026-09-14）。** 本设计**未实现即被放弃**——Doris 投影链路
+> （`internal/doris` / `internal/projection` / `analytics/doris.go`）已从
+> `platform/control-plane/usage-ledger` 移除，用量查询面收敛为只读 PG 台账的日粒度聚合。
+>
+> **放弃的理由**（保留本文作决策痕迹，不是因为还有效）：
+> ① `AGGREGATE KEY` + `SUM` 是**装载时聚合**语义，重放同一批会把 `qty`/`cost_usd`/`tokens`
+> 再加一次；要正确必须同时满足「cube 是 `UNIQUE KEY`」且「投影写的是键的**完整聚合值**而非批次增量」，
+> 而 `CREATE TABLE IF NOT EXISTS` 对已存在的表什么都不做 —— 一个历史聚合表会**永远静默双计**，
+> 没有任何一层报错，只在报表数字上缓慢漂移。
+> ② 收益只是把一次 `GROUP BY` 下推，代价是额外组件 + 投影 worker + 位点表 + 一类只能靠约定维持的一致性。
+> ③ 台账 append-only、无分区，直查的慢是**直白的**；而陈旧 cube 看起来和「没有用量」一模一样。
+>
+> 仍然有效的部分（已落到 PG 查询面）：报告时区固定 UTC 且 SQL/Go 同源、`[from, toEnd)` 半开区间、
+> 366 天跨度上限。现状见 `docs/cluster-development-tasks.md` 的「Usage analytics: 2026-09-14」。
+
 - 日期：2026-08-26
 - 前置：`2026-08-26-metering-outbox-design.md`（事件流/台账管线已定）；`platform/shared/manifests/usage-ledger.schema.json`（列清单唯一真相源）
-- 规范章节：`docs/architecture.md` §6.4（存储分工：明细进 PG、聚合进 Doris、限流走 Redis）
-- 状态：设计说明（Doris 未进拓扑；实现随 P2——待 Doris 接入触发联调）
+- 规范章节：`docs/architecture.md` §6.4（存储分工：明细进 PG、聚合直接在台账上分组、限流走 Redis）
+- 状态：~~设计说明（Doris 未进拓扑；实现随 P2——待 Doris 接入触发联调）~~ **已取代，不实施**
 - 环境：Doris 未起本地拓扑——**能力缺失显式拒绝**（铁律 21），本地看板走「PG 明细 + 降级提示」，不得模拟
 
 ## 1. 问题：明细不能回答「解释一次尖峰」

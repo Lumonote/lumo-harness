@@ -7,36 +7,11 @@
  */
 import { createHash } from 'node:crypto'
 import type { Idempotency } from '../../../shared/seam-contracts/recovery.ts'
+import { BUILTIN_IDEMPOTENCY } from '../../../shared/seam-contracts/tool-profiles.ts'
 
-/**
- * dsh 内置工具的默认分类。
- * 依据：纯读 → idempotent；覆盖写（同参数同结果）→ idempotent；
- * 增量改写、任意命令执行 → 非幂等或未知。
- */
-export const BUILTIN_IDEMPOTENCY: Readonly<Record<string, Idempotency>> = Object.freeze({
-  // 纯读：重放不产生副作用
-  read: 'idempotent',
-  glob: 'idempotent',
-  grep: 'idempotent',
-  ls: 'idempotent',
-  web_search: 'idempotent',
-  web_fetch: 'idempotent',
-  knowledge_query: 'idempotent',
-
-  // 覆盖写：同参数重放收敛到同一状态
-  write: 'idempotent',
-  todo_write: 'idempotent',
-
-  // 增量改写：重放会二次应用或直接失败 —— 非幂等
-  edit: 'non-idempotent',
-  multi_edit: 'non-idempotent',
-  notebook_edit: 'non-idempotent',
-
-  // 任意命令/外部世界：无法静态判断
-  bash: 'unknown',
-  pwsh: 'unknown',
-  subprocess: 'unknown',
-})
+// 表体见 shared/seam-contracts/tool-profiles.ts —— 三列（来源 / 副作用 / 幂等）一行一个工具，
+// 与 provenance 插件共用同一份事实。这里再导出一次只是为了保持本插件的公共 API 不变。
+export { BUILTIN_IDEMPOTENCY }
 
 export interface ClassifierConfig {
   /** 覆盖或补充内置分类（连接器工具应在此显式声明） */

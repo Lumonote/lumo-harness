@@ -1,3 +1,9 @@
+{{- $enabled := dict }}
+{{- range $name, $cfg := .Values.services }}
+{{- if $cfg.enabled }}
+{{- $_ := set $enabled $name true }}
+{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -5,6 +11,14 @@ metadata:
 data:
   LUMO_DEPLOYMENT_MODE: cluster
   LUMO_CLUSTER_STATUS: ready
+  # Readiness requires exactly the services this chart deploys, derived rather
+  # than hardcoded so that disabling a service in values.yaml narrows the
+  # requirement automatically. A static list would leave the gate permanently
+  # closed for a service that was deliberately switched off.
+  # sortAlpha is not cosmetic: sprig's keys does not sort, so an unsorted list
+  # would change on every render, show up as spurious drift in GitOps, and make
+  # the "not ready" reason string order unstable across restarts.
+  LUMO_REQUIRED_SERVICES: {{ join "," (sortAlpha (keys $enabled)) | quote }}
   LUMO_PG_DSN: {{ .Values.postgres.dsn | quote }}
   REGISTRY_PG_DSN: {{ .Values.postgres.dsn | quote }}
   LUMO_REDIS_ADDR: {{ .Values.redis.address | quote }}
@@ -13,6 +27,12 @@ data:
   LUMO_NACOS_SERVICE: {{ .Values.nacos.service | quote }}
   LUMO_NACOS_GROUP: {{ .Values.nacos.group | quote }}
   LUMO_OPA_ADDR: {{ .Values.opa.address | quote }}
+  # 同一个 OPA 有两个环境变量名：connector-gateway 读 `LUMO_OPA_ADDR`，
+  # session-control 与 terminal-gateway 读 `LUMO_OPA_URL`。**两条都要有**——只写前者的
+  # 后果是后两个服务的策略引擎基址为空，而空 = fail-closed 全拒：控制指令与终端敏感
+  # 动作会被拒，日志说「策略引擎不可用」，`helm template` 却完全看不出来，
+  # 与本文件头「一个错的 volume key 会挂载空目录而容器照常启动」同一类静默故障。
+  LUMO_OPA_URL: {{ .Values.opa.address | quote }}
   LUMO_LEDGER_TRANSPORT: rmq
   LUMO_MILVUS_URL: {{ .Values.knowledge.milvusUrl | quote }}
   LUMO_MILVUS_COLLECTION: {{ .Values.knowledge.milvusCollection | quote }}

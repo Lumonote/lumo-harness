@@ -23,7 +23,7 @@ func TestExecutionReportsCannotPerformRequesterReview(t *testing.T) {
 
 func TestCollaborationRoutesRequireClusterAndIdentity(t *testing.T) {
 	for _, mode := range []string{"local", "cluster"} {
-		api := New(nil, Config{DeploymentMode: domain.DeploymentMode(mode), ClusterStatus: "ready"}, nil)
+		api := newTestServer(t, Config{DeploymentMode: domain.DeploymentMode(mode), ClusterStatus: "ready"})
 		mux := http.NewServeMux()
 		api.Register(mux)
 		for _, route := range []struct{ method, path string }{

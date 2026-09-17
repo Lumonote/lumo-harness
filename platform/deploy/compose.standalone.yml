@@ -36,7 +36,13 @@ services:
       - redisdata:/data
 
   minio:         # 对象存储：日志冷层/制品/知识库原文
-    image: minio/minio:latest
+    # 必须钉**具体版本**，不能写 `latest`：Docker Hub 已不为 minio/minio 提供
+    # `latest` 标签（实测 2026-09-16：`pull access denied for minio/minio`），
+    # 而 compose 解析镜像名时不发探测请求，所以这个错误只在 `up` 时才暴露，
+    # 表现为「对象存储起不来」，与 minio 本身的配置毫无关系。
+    # 换版本是部署侧的取舍（MinIO 近期的分发与授权变更会影响默认行为），因此这里
+    # 钉一个已知可拉、且已被本仓库活库套件验证过的版本，换版本请改这一处。
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: "${LUMO_MINIO_ROOT_USER:-lumo}"
@@ -206,6 +212,13 @@ services:
       LUMO_NODE_RESIDENCY: "${LUMO_NODE_RESIDENCY:-}"
       LUMO_SCHEDULER_URL: http://scheduler-0:8083
       LUMO_SCHEDULER_API_URL: http://scheduler-0:8083
+      # §8.4 共享执行控制（C5）的提交入口，见 compose.cluster.yml 的 dsh-web 段。
+      #
+      # **刻意不进 depends_on**：`dispatch` 是运行期按需调用，不是启动期依赖。
+      # 把它写进 depends_on 会把「控制面起不来」升级成「数据面也起不来」——
+      # 而控制面不可用时，会话本身仍然可以跑，只是控制指令提交不了（调用方会拿到
+      # ControlPlaneUnreachableError）。可选依赖不该阻断主链路。
+      LUMO_SESSION_CONTROL_URL: http://session-control:8092
       LUMO_PROJECTS_URL: http://projects:8086
       LUMO_FLOWS_URL: http://flows:8087
       LUMO_GOVERNANCE_URL: http://governance:8089
@@ -347,6 +360,94 @@ services:
       LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
     ports:
       - "18088:8088"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # 边缘网关（§12.1 南北向的「门」，缺口 C3）：协议接入 / 路由分发 / 横切治理 / 边界隔离。
+  # 路由表随仓库只读挂载：它是「门后有哪些面」的声明，需要 review、diff 与门禁
+  # （platform/deploy/edge-routes-verify.sh），塞进 env 就三样都做不了。
+  # 限流复用与内部网关同一份共享令牌桶；fail-open 保持缺省 false（Redis 抖动时拒绝而非放行）。
+  #
+  # CORS 走 `LUMO_EDGE_CORS_ORIGINS`（网关自己的白名单，按**请求的 Origin** 裁决），
+  # **不**设 `LUMO_CORS_ORIGIN`：后者是 observability 中间件读的名字，它会按配置的
+  # 来源把 ACAO 写死，两个语义不同的 CORS 层叠在同一个响应上（gate.go:122-124 明确
+  # 要求部署 edge-gateway 时不要再设它）。此处此前设的正是 `LUMO_CORS_ORIGIN`，
+  # 于是边缘自己的白名单一直是空的、边缘层等于没在管事——而表现上又「能用」
+  # （中间件那层替它把 preflight 答了），没有门禁能看出来。两条拓扑同构，修一处必查另一处。
+  edge-gateway:
+    build:
+      context: ../control-plane
+      dockerfile: edge-gateway/Dockerfile
+    environment:
+      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
+      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
+      LUMO_INSTANCE: edge-gateway-0
+      LUMO_LISTEN: ":8080"
+      LUMO_EDGE_ROUTES: /etc/lumo/edge-routes.json
+      LUMO_EDGE_REDIS_URL: redis://redis:6379
+      LUMO_EDGE_CORS_ORIGINS: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
+    volumes:
+      - ./edge-routes.dev.json:/etc/lumo/edge-routes.json:ro
+    ports:
+      - "18080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  # 终端网关（§8.2 多端，缺口 C4）：终端无关事件汇 + 能力协商 + replay + presence。
+  # 不实现状态机——pause/resume/stop 的语义在 session-control（§8.4.3 末句）。
+  #
+  # `LUMO_OPA_URL` 与 `LUMO_TERMINAL_MEM_EVENTS` 都**故意留空**：
+  #   * 本拓扑没有 OPA 容器 → 敏感动作 fail-closed 全拒（安全的一侧，且日志会区分
+  #     「策略引擎不可用」与「权限不足」，不会被误读成权限问题）；
+  #   * 历史事件源未接线 → WS 接入诚实返回 503，而不是伪造一份空历史让终端以为
+  #     「本来就没有事件」。接线真实 session/event 来源是后续独立一步。
+  terminal-gateway:
+    build:
+      context: ../control-plane
+      dockerfile: terminal-gateway/Dockerfile
+    environment:
+      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
+      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
+      LUMO_INSTANCE: terminal-gateway-0
+      LUMO_LISTEN: ":8090"
+      LUMO_TERMINAL_SIGNING_SECRET: "${LUMO_TERMINAL_SIGNING_SECRET:-dev-terminal-signing-secret}"
+      LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
+    # 与集群拓扑用同一个宿主端口：同一个服务的开发入口不该随部署形态漂移（否则 curl 示例、
+    # 排查笔记、转发脚本都会按形态分叉）。18090 已被设备网关占用（compose.cluster.devices.yml），
+    # 一并避开，两条拓扑保持 18091。
+    ports:
+      - "18091:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # 共享执行控制（§8.4，缺口 C5）：控制指令裁成可审计的一等事件 + 控制台只读投影。
+  #
+  # 与集群形态唯一的差别是 `LUMO_OPA_URL`（本拓扑没有 OPA 容器，同 terminal-gateway）：
+  #   * 留空 → 每条控制指令被拒，响应里明确写 policy_unavailable 而不是 policy_denied，
+  #     日志也区分「策略引擎不可用」与「权限不足」，不会被误读成权限问题；
+  #   * **只读面不受影响**：状态、此刻可点的按钮、时间线、队列现场都能查——本地单机形态
+  #     下这就是它的用途（本机没有 OPA，但会话的排队与审计语义仍然可以看）。
+  # 因此本地要验证「指令真的被裁决」走 `go test`（活库用例，`LUMO_TEST_PG_DSN` 门控），
+  # 而不是指望这个拓扑——那正是 `acceptance-cluster.sh` 的职责。
+  session-control:
+    build:
+      context: ../control-plane
+      dockerfile: session-control/Dockerfile
+    environment:
+      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
+      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
+      LUMO_INSTANCE: session-control-0
+      LUMO_LISTEN: ":8092"
+      LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
+    # 与集群拓扑用同一个宿主端口：同一个服务的开发入口不该随部署形态漂移（否则 curl 示例、
+    # 排查笔记、转发脚本都会按形态分叉）。
+    ports:
+      - "18092:8092"
     depends_on:
       postgres:
         condition: service_healthy

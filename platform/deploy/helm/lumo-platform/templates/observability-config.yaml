@@ -43,8 +43,28 @@ data:
       - name: lumo-production
         interval: 30s
         rules:
+          # 错误率取 lumo_http_errors_total，**不是** lumo_http_requests_total{status=~"5.."}。
+          # 后者曾出现在这里，但 lumo_http_requests_total 是一个不带任何标签的计数器
+          # （observability/metrics.go:117 只打印裸值），按 status 选择会**永远选不到序列**，
+          # 记录出来的 lumo:http_error_ratio5m 恒为空——一条看起来存在、实际永不产出的规则。
+          # 中间件已把 status>=500 计进 lumo_http_errors_total，两者本就是同一件事。
+          #
+          # 这两条记录规则目前**没有仓库内消费者**（prometheus-alerts.yml 里没有引用，
+          # 仓库里也没有 Grafana 看板定义）。不要顺手把告警改成引用它们，原因有两条：
+          #
+          #   ① 维度对不上。lumo:http_error_ratio5m 按 `by (job)` 聚合，而控制面所有服务
+          #      共用同一个 job（见 platform/deploy/prometheus.yml 的注释），所以它把所有
+          #      服务塌成一条序列。LumoGateway5xx 要按 service 区分是哪个网关 5xx，用它
+          #      就只能得到「整个控制面 5xx 了」。
+          #   ② service 标签是抓取期由 prometheus.yml 的目标组附加的，而集群内那份
+          #      Prometheus 的抓取配置**不在本仓库里**。把告警挂到 `by (job, service)` 上，
+          #      等于把「告警能不能响」押在一个本仓库验证不了的前提上——那正是这条门禁
+          #      （platform/deploy/alerts-verify.sh）存在的理由。
+          #
+          # 另注：下面两条的维度处理并不一致——上面保留 job，下面 `sum by (le)` 把 job 也
+          # 丢了，记录出来的延迟曲线无任何维度。若将来要接看板，需要一并修。
           - record: lumo:http_error_ratio5m
-            expr: sum(rate(lumo_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(lumo_http_requests_total[5m])), 1)
+            expr: sum by (job) (rate(lumo_http_errors_total[5m])) / clamp_min(sum by (job) (rate(lumo_http_requests_total[5m])), 1)
           - record: lumo:http_request_latency_p95_5m
             expr: histogram_quantile(0.95, sum by (le) (rate(lumo_http_request_duration_seconds_bucket[5m])))
 {{- end }}

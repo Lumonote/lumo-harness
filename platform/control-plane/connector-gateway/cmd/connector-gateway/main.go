@@ -35,6 +35,7 @@ import (
 	"github.com/lumo-harness/platform/connector-gateway/internal/ratelimit"
 	"github.com/lumo-harness/platform/connector-gateway/internal/registry"
 	"github.com/lumo-harness/platform/connector-gateway/internal/server"
+	"github.com/lumo-harness/platform/heartbeat"
 	"github.com/lumo-harness/platform/observability"
 )
 
@@ -126,6 +127,9 @@ func main() {
 		log.Error("初始化审计表失败", "err", err)
 		os.Exit(1)
 	}
+	// 审计读取面与写入面共用同一个池，但分成两个类型：写必须响亮失败，读失败
+	// 只影响排查（见 audit/query.go 的包注释）。
+	auditReader := audit.NewReader(pool)
 	approvals := approval.NewPg(pool)
 	if err := approvals.Init(ctx); err != nil {
 		log.Error("初始化连接器审批存储失败", "err", err)
@@ -198,6 +202,7 @@ func main() {
 			Gateway:    gw,
 			Registry:   reg,
 			Approvals:  approvals,
+			Audit:      auditReader,
 			OAuth:      oauthManager,
 			Breakers:   brk,
 			Auth:       headerAuth{},
@@ -209,6 +214,10 @@ func main() {
 	}
 
 	go func() {
+		// 心跳上报：集群就绪态由心跳新鲜度与自报依赖派生（E4/D6），不再只看
+		// LUMO_CLUSTER_STATUS 这个静态声明。放在初始化之后，避免服务尚不可用就报 ready。
+		heartbeat.StartPg(ctx, pool, heartbeat.Options{Service: "connector-gateway", Logger: log, Depends: heartbeat.PgDependency(pool)})
+
 		log.Info("连接器网关启动", "listen", *listen,
 			"credentials", "env:"+*credPrefix, "limiterFailOpen", *failOpen,
 			"webEgress", fmt.Sprintf("rpm=%d burst=%d maxResp=%d allowPrivate=%t redact=%t",

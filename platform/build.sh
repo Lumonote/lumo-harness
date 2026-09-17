@@ -23,7 +23,7 @@ dsh_source_lib="$platform_root/deploy/lib/dsh-source.sh"
 # 该文件是随仓库提交的部署源码（.gitignore 用 `!platform/deploy/lib/` 显式放行）。
 # 它缺失只可能是在尚未包含它的旧 ref 上构建；直接报清楚，而不是让 bash 抛晦涩的路径错误。
 if [[ ! -f "$dsh_source_lib" ]]; then
-  echo "build.sh: 缺少 $dsh_source_lib；请在包含该文件的分支/tag 上构建（该文件随仓库提交）。" >&2
+  echo "build.sh: 缺少 ${dsh_source_lib}；请在包含该文件的分支/tag 上构建（该文件随仓库提交）。" >&2
   exit 1
 fi
 # shellcheck source=deploy/lib/dsh-source.sh
@@ -40,15 +40,24 @@ fi
 # ---- 镜像清单（§3）----
 # 形如 name|context(相对仓库根)|dockerfile(相对 context)。observability 是共享库、
 # Dockerfile.resume 是 dev-loop 变体、artifact-runtime 复用 provisioner 镜像，均不在此。
+#
+# 这份清单是**发布镜像集的唯一来源**：漏一个服务的后果是 `--push` 推出去的集合里没有它，
+# 而 `compose.cluster.yml` 里那个服务的 `image: lumo/<name>:dev` 与 Helm 的
+# `image.repository/<name>:tag` 都指向一个不存在的镜像——本地 `up.sh --build` 看不出来
+# （compose 自己会 build），只有走 registry 的那条路才炸。2026-09-16 复核补齐了
+# edge-gateway / terminal-gateway（C3/C4 落地时漏的）与 session-control（C5）。
 go_images=(
   "collaborator|platform/control-plane|collaborator/Dockerfile"
   "connector-gateway|platform/control-plane|connector-gateway/Dockerfile"
+  "edge-gateway|platform/control-plane|edge-gateway/Dockerfile"
   "flows|platform/control-plane|flows/Dockerfile"
   "governance|platform/control-plane|governance/Dockerfile"
   "llm-gateway|platform/control-plane|llm-gateway/Dockerfile"
   "projects|platform/control-plane|projects/Dockerfile"
   "registry|platform/control-plane|registry/Dockerfile"
   "scheduler|platform/control-plane|scheduler/Dockerfile"
+  "session-control|platform/control-plane|session-control/Dockerfile"
+  "terminal-gateway|platform/control-plane|terminal-gateway/Dockerfile"
   "usage-ledger|platform/control-plane|usage-ledger/Dockerfile"
   "provisioner|platform/control-plane|registry/Dockerfile.provisioner"
 )
@@ -265,6 +274,15 @@ build_images() {
   echo "== 镜像（${#go_images[@]} 个 Go + ${#root_images[@]} 个仓库根 context，并行度 ${jobs}）=="
   [[ $push -eq 1 ]] && check_version_consistency
   ensure_dsh_source_unless_dry
+
+  # 每个 Dockerfile 必须 COPY 它 go.mod 里 replace 的兄弟模块。漏一个，那个镜像就建不出来，
+  # 而错误要跑到容器里下完依赖才出现（`reading /heartbeat/go.mod: no such file or directory`）——
+  # 一次十几分钟。判据只是「两个集合相等」，所以放在这里，秒级失败在花钱之前。
+  if [[ $dry_run -eq 1 ]]; then
+    echo "+ check-dockerfile-modules $platform_root/control-plane"
+  else
+    python3 "$platform_root/tools/check-dockerfile-modules.py" "$platform_root/control-plane"
+  fi
 
   if [[ $dry_run -eq 1 || $jobs -eq 1 ]]; then
     for spec in "${go_images[@]}"; do docker_build_one "$spec"; done

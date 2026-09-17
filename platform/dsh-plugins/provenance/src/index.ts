@@ -83,7 +83,18 @@ export function apply(ctx: Context, config: ProvenanceConfig): void {
 
   ctx.on('tools/pre-execute', async function (exec, next) {
     const session = (exec as {
-      agent?: { session?: { id?: string; events?: readonly SessionEventLike[] } }
+      agent?: {
+        session?: {
+          id?: string
+          // 读事件用 `snapshotEvents()`：`Session#events` **属性**已随上游
+          // `2026-09-09-deprecate-synchronous-session-event-reads` 删除（运行时实测
+          // `Session.prototype.events === undefined`，只剩 `snapshotEvents` / `ownEvents` /
+          // `eventAt` 三个方法）。留 `events?` 只为兼容测试直发的极简形状，与
+          // `session-log/src/index.ts` 的兼容读法同一形态。
+          snapshotEvents?: () => readonly SessionEventLike[]
+          events?: readonly SessionEventLike[]
+        }
+      }
     }).agent?.session
     const sessionRef = session?.id
     // 无会话上下文（系统内部调用）不设闸：它们不在任何 turn 内，无上下文可污染
@@ -93,7 +104,11 @@ export function apply(ctx: Context, config: ProvenanceConfig): void {
     const warning = classifier.warnOnce(toolName)
     if (warning) ctx.logger.warn(warning)
 
-    const taint = computeTaint(session?.events ?? [], classifier)
+    // 这里**读不到事件就等于闸门失灵**，不是「没有污点」：`computeTaint([])` 的基线是
+    // `level: 'user'`，而 `adjudicateCall` 对非 `external` 一律 allow —— 于是受污染 turn 内的
+    // 写入会静默放行（2026-09-15 由「活库套件让从未执行的用例真跑」顺带查出，见当日日志）。
+    const events = session?.snapshotEvents?.() ?? session?.events ?? []
+    const taint = computeTaint(events, classifier)
     const effect = classifier.effectOf(toolName)
     const verdict = adjudicateCall(taint, effect, false)
 

@@ -107,12 +107,18 @@ type FlowNode struct {
 	Config   map[string]any `json:"config,omitempty"`
 }
 
+// FlowEdge 是 DAG 中的一条有向边。Type 描述边的血缘语义（数据流 / 控制流，
+// 见 internal/lineage 的 EdgeType* 常量）；缺省为空时由血缘抽取层按数据流处理，
+// 因此旧定义不写 type 也向后兼容——这是「加字段不破契约」的有意选择。
+type FlowEdge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Type string `json:"type,omitempty"`
+}
+
 type Definition struct {
 	Nodes []FlowNode `json:"nodes"`
-	Edges []struct {
-		From string `json:"from"`
-		To   string `json:"to"`
-	} `json:"edges"`
+	Edges []FlowEdge `json:"edges"`
 }
 
 // ValidateDefinition 入库护栏：形状、节点唯一、算子非空、边引用存在、DAG 无环（Kahn）。

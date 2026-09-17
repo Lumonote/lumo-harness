@@ -1,44 +1,515 @@
+# Lumo 平台告警规则（§7.4.2 全局监控面）。
+#
+# 每类告警绑定处置分级：P1 呼叫升级 / P2 值班处理 / P3 值班知会。分级不是装饰——
+# 它决定半夜会不会有人被叫醒，所以「谁在什么条件下被叫醒」必须能从文件里读出来，
+# 而不是留在口头约定里。三个标签各有分工：
+#
+#   class     规范里那一类的名字（§7.4.2 的六类）。门禁按它核对覆盖度。
+#   tier      P1/P2/P3，处置分级。人读的是这个。
+#   severity  critical/warning/info，Alertmanager 路由用。P1→critical，P2→warning，
+#             P3→info；两者冗余是有意的——路由按 severity，排班按 tier。
+#
+# 加规则时必须同时满足两条硬约束：
+#
+# ① **表达式里的每个指标名都必须真的有人写。** 门禁 platform/deploy/alerts-verify.sh
+#    把本文件里的指标名与 Go 侧的 SetGauge/ReplaceGauges 调用点对照，并带反例自证
+#    不是空转。历史上这里出过两条结构性死规则：`lumo_service_up == 0`（该指标是
+#    写死的字面量 1，永远不可能为 0）与 `lumo_http_requests_total{status=~"5.."}`
+#    （该计数器根本没有 status 标签，永远选不到序列）。两条都"看起来对"。
+#
+# ② **数据源本身要先能成立。** 有些类在特定形态下结构性不可用，那种情况必须在规则
+#    旁写清楚，不能靠一条永远不响的规则冒充覆盖。
+#
+# 评测位置：Prometheus 按 cluster_id 维度做全局视图（§7.4.2 的基础设施状态行：
+# 每集群 OTel → 本地 Prometheus → 远程写到全局采集器），因此凡是**带 cluster_id
+# 维度**的指标都按 cluster_id 聚合，而不是按 instance——按 instance 聚合会在副本
+# 重启时把「集群级问题」切成碎片。
+#
+# 这条规则的例外恰好是 instance_down 那一类：`up` 由 Prometheus 自己产生，它的
+# 维度就是 instance，没有 cluster_id 可聚合，判定也只能落到实例上。**不要**为了
+# 统一风格给它硬套 cluster_id——拼错的标签不会报错，它只会把维度全聚合掉。
+#
+# 关于「多出两类」：§7.4.2 用「等」收尾，下列六类之外本文件另有 instance_down 与
+# latency 两类，都是有意保留的，不是漂移：
+#
+#   instance_down  不是「多一条」，而是让其余所有告警不至于集体静默的前置条件。
+#                  控制面整体挂掉时，本文件里绝大多数表达式求值为空集——空集不触发
+#                  告警，看起来和「一切正常」完全一样。没有这一类，最大的故障反而
+#                  是最安静的故障。
+#   latency        是 queue_backlog 的前导信号。P3 知会级、不叫醒任何人，价值在于
+#                  积压告警响起时能立刻区分「吞吐不够」还是「单次变慢」。
 groups:
   - name: lumo-platform
     interval: 30s
     rules:
-      - alert: LumoServiceDown
-        expr: lumo_service_up == 0
-        for: 2m
+      # ── P1：正确性 / 可用性受损，需要呼叫升级 ──────────────────────────────
+
+      - alert: LumoTaskLost
+        # 活跃任务挂在一个「目录里已经不存在」的节点上。
+        #
+        # 与 catalog_ok 相与，不是冗余：节点集合来自目录快照，读取失败时沿用上一份
+        # （见 scheduler/internal/server/metrics.go），而陈旧的节点集合是真实集合的
+        # 子集，偏向**误报**孤儿。没有这一半，一次目录抖动就能把全部活跃任务判成孤儿。
+        #
+        # for: 5m 也来自同一件事：节点从心跳停止到被目录标成不健康需要一个心跳周期，
+        # 抖动与真死必须分得开。
+        expr: lumo_scheduler_orphaned_active_tasks > 0 and lumo_scheduler_catalog_ok == 1
+        for: 5m
         labels:
+          class: task_lost
+          tier: P1
           severity: critical
         annotations:
-          summary: "Lumo service is down"
-          description: "{{ $labels.instance }} has reported lumo_service_up=0 for 2 minutes."
+          summary: "有活跃任务的原节点已从节点目录消失"
+          description: >-
+            {{ $labels.instance }} 报告 {{ $value }} 个活跃任务挂在目录中已不存在的节点上。
+            这些任务既不在跑也不在排队，只能靠人工或对账收敛。**迁移前必须先确认 fencing
+            （原节点不可能仍在执行）**，否则违反 R2 的幂等要求（§7.4.1）。
+            持续超过 max_stall（默认 8h）后，调度器的停滞收割会自动把它们转死信
+            （scheduler_dead_letters 台账，见 internal/server/stall.go）；本条告警比它早
+            得多，是给人留的介入窗口——两条路径不是重复：一条催人，一条兜底。
 
-      - alert: LumoSchedulerQueueBacklog
+      - alert: LumoControlPlaneInstanceDown
+        # 控制面实例抓不到了。这是原来的 LumoServiceDown 的正确写法——那条用的是
+        # `lumo_service_up == 0`，而 lumo_service_up 是 /metrics 里写死的字面量 1，
+        # 它永远不可能为 0，所以那条告警从来没有、也不可能响过。
+        #
+        # 用 up 而不是某个自定义指标：up 由 Prometheus 自己产生，抓取失败即 0，
+        # 它不依赖被监控方「如实上报自己的死活」——后者在进程死掉时根本没人上报。
+        expr: up{job="lumo-control-plane"} == 0
+        for: 2m
+        labels:
+          class: instance_down
+          tier: P1
+          severity: critical
+        annotations:
+          summary: "控制面实例无法抓取"
+          description: >-
+            {{ $labels.instance }}（{{ $labels.service }}）已连续 2 分钟抓取失败。
+            注意 /metrics 与 /healthz 不要求控制面令牌（observability/auth.go），
+            所以这里失败一定是进程或网络的问题，不是凭证问题。
+
+      - alert: LumoControlPlaneScrapeTargetMissing
+        # 「所有实例都没了」是另一回事：抓取配置被删掉、job 名被改掉时，
+        # up 序列会整体消失，`up == 0` 因此**一条都不产生**——监控瞎了，
+        # 而所有告警看起来都是绿的。absent() 是唯一能表达这一态的形式。
+        expr: absent(up{job="lumo-control-plane"})
+        for: 5m
+        labels:
+          class: instance_down
+          tier: P1
+          severity: critical
+        annotations:
+          summary: "整个抓取 job 的序列都消失了"
+          description: >-
+            `up{job="lumo-control-plane"}` 已经不存在任何序列。这不是"服务挂了"，
+            而是"Prometheus 不再认识这些目标"——抓取配置被改坏或被删除。
+            此时其余所有告警都不会响，先恢复抓取配置再判断故障范围。
+
+      # ── P2：值班处理 ──────────────────────────────────────────────────────
+
+      - alert: LumoClusterHasNoHealthyNode
+        # 「这个集群还有排队任务，但一个健康节点都没有」——只有这一种形态是可操作的。
+        #
+        # 刻意不做「节点数比之前少」的对比告警：没有声明式的期望容量时，它无法区分
+        # 「掉了一个节点」与「下线了一个节点」，前者要处理、后者是正常运维动作，
+        # 混在一起的告警会被静音，然后连真故障一起被静音。部分掉节点在仪表板上可见，
+        # 不在此处告警。
+        #
+        # max by (cluster_id) 是为了去重：每个副本都报同样的节点数，不去重会一个集群
+        # 告警 N 次（N = 副本数）。顺带让描述里出现的是集群名而不是 pod 名。
+        #
+        # 可用性前提：节点存活信号来自目录。Nacos 目录按心跳判活，成立；Pg 目录
+        # （local-lite）行只增不减，没有任何存活信号，本告警在本机形态下结构性不成立。
+        expr: |
+          max by (cluster_id) (lumo_scheduler_nodes) == 0
+            and on (cluster_id)
+          max by (cluster_id) (lumo_scheduler_tasks{state="PENDING"}) > 0
+        for: 5m
+        labels:
+          class: node_down
+          tier: P2
+          severity: warning
+        annotations:
+          summary: "集群 {{ $labels.cluster_id }} 没有健康节点，但仍有任务在排队"
+          description: >-
+            集群 {{ $labels.cluster_id }} 的目录里健康节点数为 0，同时有 {{ $value }} 个任务处于
+            PENDING。队列不会自己变短——要么节点起回来，要么把这些任务重放置到别的集群。
+
+      - alert: LumoClusterStoppedReporting
+        # 「这个集群已经不再自报」——注册表侧的存活信号。它与上面那条互补而**不重叠**：
+        # 上一条问的是「目录里还有没有健康节点」（节点数），本条问的是「最后一次自报
+        # 是多久以前」。同一场故障里两者会一起响，但各自能单独成立：空转集群的节点一直
+        # 健康而注册表可能已经失联；反过来集群自报正常、节点却全部不健康也是可能的
+        # （进程起来又崩）。只保留一条会让另一种形态完全看不见。
+        #
+        # 传的是**判定结果**而不是拿年龄去比 90：阈值可配置（LUMO_CLUSTER_SUSPECT_MS /
+        # LUMO_CLUSTER_DOWN_MS），告警里再写一遍常数就会与该实例真正在用的阈值漂移——
+        # 那一刻闸门在拒绝放置而告警不响（或反过来），两边看起来都对。
+        #
+        # for: 5m 而不是 0：down 只意味着「超过阈值没自报」，而滚动升级、重建覆盖这类
+        # 完全正常的动作也会让某个集群静默几分钟。秒级抖动不该叫人。
+        #
+        # 注意闸门效应：判定为 down 后调度器**停止向该集群的新放置**（§7.4.1，已有任务
+        # 不动），所以本条通常伴随 LumoQueueBacklog——修复顺序是先让上报恢复，再看队列。
+        #
+        # 另注：读取注册表失败时本轮不替换状态序列（沿用上一轮的值，见
+        # scheduler/internal/server/metrics.go），所以已经响起的本条不会因为「读不到」
+        # 而自动解除。方向是刻意的——读不到更该有人去看——用
+        # lumo_scheduler_cluster_registry_ok == 0 区分「真的 down」与「读不到」。
+        expr: lumo_scheduler_cluster_state{state="down"} == 1
+        for: 5m
+        labels:
+          class: node_down
+          tier: P2
+          severity: warning
+        annotations:
+          summary: "集群 {{ $labels.cluster_id }} 已停止自报"
+          description: >-
+            集群 {{ $labels.cluster_id }} 距最后一次自报已超过下线阈值。调度器已停止向其放置
+            新任务；**已有的活跃任务会在额外宽限期（LUMO_MIGRATE_GRACE_MS，默认 5 分钟）之后
+            被漂回全局队列重放置**（§7.4.1，见 LumoClusterTasksMigrated）。
+            先确认该集群的上报方是否在跑（lumo_scheduler_cluster_age_seconds 可看出是
+            「一直没报」还是「刚刚断」）——若只是上报方在重启，把宽限期调大或尽快恢复上报，
+            都比让一批任务白搬一次家便宜。
+
+      - alert: LumoClusterVersionInconsistent
+        # 「集群之间的组件版本对不上，而闸门开着」——版本一致性前置（§7.4.1）的现场。
+        #
+        # 为什么这条必须存在：版本分叉时闸门会**整体拒绝**全局放置（不挑多数版本），
+        # 而它落地的症状与「集群没有容量」**完全同形**——HTTP 202 + 任务停在 PENDING。
+        # 只看队列长度分不开这两件事，而处置相反：一个去把滚动升级做完（或关掉闸门），
+        # 一个去扩容。所以判据取的是闸门自己的结论，不是队列长度。
+        #
+        # 序列只在闸门打开时导出（metrics.go 的 publishVersionMetrics），所以
+        # 「这条序列存在」已经蕴含「闸门是开的」，表达式不必再乘一个开关。
+        #
+        # 也刻意**不**在 declared==0 时导出 consistent：那是一个空洞的真，会把
+        # 「闸门没有信息」画成「版本一致」。那一档由下面那条 LumoClusterVersionGateInert 管。
+        #
+        # 注意这是**发布流程**信号而不是故障：滚动升级升到一半时它本来就该亮，直到
+        # 新版本铺满或闸门关掉。for: 5m 让一次短暂的版本抖动不至于叫人。
+        expr: lumo_scheduler_cluster_version_consistent == 0
+        for: 5m
+        labels:
+          class: version_skew
+          tier: P2
+          severity: warning
+        annotations:
+          summary: "集群间组件版本不一致，全局放置已被版本闸门拦住"
+          description: >-
+            联邦注册表里至少有两个集群声明了不同的组件版本，而版本一致性前置已开启，
+            因此**所有未指定 cluster_id 的放置都会被转成排队**（§7.4.1「同一组件版本先
+            完成全集群分发才允许全局调度」）。响应码是 202 + PENDING，与「没有容量」
+            一模一样——用 lumo_scheduler_placement_version_blocked_total 区分
+            （它只在被版本闸门拦下时增长）。显式指定 cluster_id 的放置不受影响。
+            处置：把滚动升级做完，或对本次放置显式指定集群，或关掉 LUMO_CLUSTER_VERSION_GATE。
+
+      - alert: LumoClusterVersionGateInert
+        # 「闸门开着，但整个注册表里没有一个集群声明版本」——闸门处于**恒放行**状态。
+        #
+        # 这一档的危险性在于它看起来完全正常：没有告警、没有排队、面板上一切健康，
+        # 而闸门一分钱的作用都没起（判定集合为空 → 「无信息」被判为「一致」→ 放行）。
+        # 与 LumoClusterStoppedReporting 的「判定开着但没人自报」是同一种病，只是换了个闸门。
+        #
+        # 为什么必须靠 declared 这个数而不是靠 consistent：declared==0 时 consistent
+        # 不导出（见上一条的注释），于是「闸门没信息」在图上表现为**序列缺席**——
+        # 缺席本身不会让任何表达式变真，所以需要这条独立的规则去读那个计数。
+        #
+        # P3/info 而不是 P2：它不是故障，是一次「配置没做完」。但也不能不报——
+        # 一个恒放行的准入闸门与一个正常工作的准入闸门，在出事之前长得一模一样。
+        expr: lumo_scheduler_cluster_version_declared == 0
+        for: 10m
+        labels:
+          class: version_skew
+          tier: P3
+          severity: info
+        annotations:
+          summary: "版本闸门已开启，但没有任何集群声明版本（闸门恒放行）"
+          description: >-
+            LUMO_CLUSTER_VERSION_GATE 已开启，而联邦注册表里没有一个集群声明过版本，
+            因此判定集合为空、版本被判定为「一致」，闸门对任何放置都不起作用。
+            声明方是**承载节点**的 LUMO_CLUSTER_VERSION（不是调度器自己的版本）——
+            检查 dsh-node 的上报环境变量，或把闸门关掉以免留下一个看起来在工作的准入闸门。
+            cluster-registry-check.py 对同一组合有一条静态规则（version-gate-without-declarer）。
+
+      - alert: LumoClusterTasksMigrated
+        # 「有任务被从失联集群搬走了」——这是**不可逆动作**的现场记录，不是故障本身。
+        #
+        # 为什么必须单独一条，而不是靠 lumo_scheduler_cluster_state 推断：状态报的是
+        # 「此刻哪些集群失联」，而一次失联过去之后那批任务的搬走**不会改变集群状态**
+        # （集群仍是 down，直到它恢复自报）。于是「任务被搬走了」这件事在状态图上没有
+        # 任何痕迹，只有这个单调计数器记得住。
+        #
+        # 用 increase(...) > 0 而不是看绝对值：计数从进程启动起算，重启归零是正常语义，
+        # 拿绝对值为 0 当「没搬过家」会把「刚重启过」误读成「一切正常」。
+        #
+        # tier P3 / info 而不是 P2：搬家是**系统按设计自动做的**正确动作，不需要值班
+        # 立刻叫醒谁；它需要的是出现在事后复盘与容量记录里（「这个集群这周丢了 3 次自报，
+        # 每次搬走 200 个任务」）。真正的故障由上面那条 LumoClusterStoppedReporting 报。
+        #
+        # 注意 fencing 的边界：搬家**不等于**原节点已停止执行。判据只能确认「目录里没有
+        # 它」，而物理层面的重复副作用由 R2 的 turn 级恢复契约（工具幂等分类）兜底，
+        # 记录层面由新 attempt 兜底（旧节点的终态回报会被拒）。刷到本条时值得去
+        # scheduler_task_migrations 台账看 from_cluster_id / cluster_age_ms。
+        expr: increase(lumo_scheduler_task_migrations_total{outcome="migrated"}[15m]) > 0
+        for: 0m
+        labels:
+          class: node_down
+          tier: P3
+          severity: info
+        annotations:
+          summary: "有任务从失联集群漂移回全局队列"
+          description: >-
+            最近 15 分钟内调度器把失联集群上的活跃任务漂回了全局队列重放置。这是
+            §7.4.1 规定的自动动作（集群 down + 宽限之后触发），本身不是故障。
+            台账 scheduler_task_migrations 记下了每个任务的 from_cluster_id / from_node_id /
+            集群自报年龄 / 决策时的快照年龄——事后追「这批任务为什么换了集群」看它。
+            lumo_scheduler_voided_dispatches_total 若同时上涨，说明还有执行请求差点被投给
+            原节点（已被拦下）。
+
+      - alert: LumoPlacementRunningDegraded
+        # 降级放置**成功了**，这正是它需要一条告警的原因：服务看起来完全正常——
+        # 201、没有错误、任务照常落到节点上——而「此刻没有全局决策者」是读监控的人
+        # 必须知道的一件事。跨集群放置这时是 503，本集群的活照做。
+        #
+        # 取 increase 而不是 > 0：计数是单调的，`> 0` 会在第一次降级之后永远为真，
+        # 于是它从「正在降级」变成「曾经降级过」——而后者不需要值班做任何事。
+        #
+        # tier P2 / warning 而不是 P1：集群本地仍能接活，业务没有停；但**跨集群调度
+        # 已经不可用**，所以要有人去看全局调度为什么选不出 leader（PG 是否可达、
+        # 副本是否都挂了）。真正的「调度器整个没了」由 Prometheus 自己的 up 报。
+        expr: increase(lumo_scheduler_degraded_placements_total[5m]) > 0
+        for: 0m
+        labels:
+          class: instance_down
+          tier: P2
+          severity: warning
+        annotations:
+          summary: "调度器在无全局 leader 的情况下用集群本地租约放行了放置"
+          description: >-
+            最近 5 分钟内至少有一次放置是走**集群本地降级路径**完成的：全局 Scheduler
+            没有 leader，本集群靠自己的本地租约继续受理任务（architecture §7.4.1 的降级曲线）。
+            影响面是**跨集群放置已经 503**——本集群的任务不受影响。去查全局租约为什么没选出来：
+            PG 是否可达、scheduler 副本是否都在、scheduler_leader_lease 的 holder 与 expires_at
+            是什么状态。降级期间放行的响应体会带 "degraded": true，可用它区分单次放置。
+
+      - alert: LumoQueueBacklog
+        # 规范给的门槛是「>5min」，而这里的指标**就是**等待时长，所以 300 是规范门槛
+        # 本身，for: 2m 只是防单次抓取毛刺。
+        #
+        # 用「最久等待」而不是「队列长度」：队列长但流转快不是问题，队列里躺着一个
+        # 20 分钟没动过的任务才是。长度型告警会在一次批量提交时误报。
+        expr: max by (cluster_id) (lumo_scheduler_oldest_pending_seconds) > 300
+        for: 2m
+        labels:
+          class: queue_backlog
+          tier: P2
+          severity: warning
+        annotations:
+          summary: "集群 {{ $labels.cluster_id }} 有任务排队超过 5 分钟"
+          description: >-
+            集群 {{ $labels.cluster_id }} 最早入队的 PENDING 任务已等待 {{ $value }} 秒。
+            检查该集群的节点容量、requires 匹配与 worker 设备目录是否可用。
+
+      - alert: LumoBudgetOverrun
+        # 判据是 domain.StateOfTree(row, 0) == hard，即「不再有新请求时这棵树会不会拒」。
+        # 只报 hard 档：domain.IsAllowed 明确「hard 之外都放行」，透支是"放行且记账"
+        # 而不是拒绝。把 soft/overdraft 也做成告警会制造一类"响了但什么都没坏"的噪声，
+        # 而值班开始忽略告警正是从这类噪声开始的。
+        #
+        # 指标只按 kind 聚合（user/project），不带租户 id：租户数是无限维度，进了指标
+        # 就会把基数预算吃光，而"哪几个租户超了"是排查动作，该去用量分析接口按需查，
+        # 不该由抓取路径承担。
+        #
+        # 可用性前提：budget_trees 由 TS metering 插件建表。未启用计量的部署里这张表
+        # 不存在，序列也不会出现——本告警随之不成立，那是"没有预算这个概念"而不是
+        # "没有租户超预算"。
+        expr: lumo_budget_trees_denied > 0
+        for: 5m
+        labels:
+          class: budget_overrun
+          tier: P2
+          severity: warning
+        annotations:
+          summary: "有 {{ $labels.kind }} 级预算树已进入拒绝档"
+          description: >-
+            有 {{ $value }} 棵 kind={{ $labels.kind }} 的预算树处在 hard 档：新请求会被拒。
+            受影响租户的用量与余额去用量分析接口按 kind 查，不要指望从指标里读出租户 id。
+
+      - alert: LumoGateway5xx
+        # 南北向的网关是所有外部调用的必经之路，它们 5xx 意味着成片的能力不可用，
+        # 所以与其余服务分开、单独给 P2。
+        #
+        # 名单里必须有 **edge-gateway**：C3 落地之后它才是南北流量的最外层入口，
+        # 只列 connector-gateway / llm-gateway 会让「最外层那道门挂了」落到下面
+        # LumoService5xxRateHigh（P3/info）那一档，影响面被系统性低估。
+        # terminal-gateway 同理：终端从外部接入，它是那条链路的入口。
+        #
+        # **正负两张名单必须互补**（见 LumoService5xxRateHigh 的注释）：少写一处
+        # 就是覆盖盲区，多写一处就是同一次故障报两遍。改这里时两张一起改。
+        #
+        # 用 service 标签而不是 job：抓取配置里所有控制面服务共用一个 job 名
+        # （lumo-control-plane），job 维度的告警无法回答"是哪个服务"。service 标签由
+        # prometheus.yml 的 static_configs 打上。
+        #
+        # 分子取 lumo_http_errors_total，不是 lumo_http_requests_total{status=~"5.."}：
+        # 后者曾出现在记录规则里，但那个计数器不带任何标签，按 status 选择永远选不到
+        # 序列，记录出来的比值恒为空。中间件已把 status>=500 计进 errors。
+        expr: |
+          sum by (service) (rate(lumo_http_errors_total{service=~"connector-gateway|llm-gateway|edge-gateway|terminal-gateway"}[5m]))
+            /
+          clamp_min(sum by (service) (rate(lumo_http_requests_total{service=~"connector-gateway|llm-gateway|edge-gateway|terminal-gateway"}[5m])), 1) > 0.05
+        for: 5m
+        labels:
+          class: gateway_5xx
+          tier: P2
+          severity: warning
+        annotations:
+          summary: "网关 {{ $labels.service }} 的 5xx 比例超过 5%"
+          description: >-
+            {{ $labels.service }} 近 5 分钟 5xx 占比超过 5%。先看是上游（连接器/模型提供方）
+            的问题还是本网关的问题：连接器侧的熔断状态见 LumoSeamCircuitOpen。
+
+      - alert: LumoSeamCircuitOpen
+        # **必须同时看 open 与 half-open，只看 open 的告警永远响不了。**
+        #
+        # 熔断器的 open 状态最长只持续 OpenFor（默认 15s），之后 State() 就报 half-open
+        # 去试探上游；上游没好则一次失败重新打开。于是 lumo_connector_breaker_open 这条
+        # 序列以 15s 为周期出现又消失，任何 for >= 15s 的规则都攒不满时间——规则写得
+        # 再"对"也不会触发。把 half-open 也算进来，条件在整个 open↔half-open 循环里
+        # 都成立，for 才有意义。
+        #
+        # or 而不是相加：两侧都可能单独缺失，加法在任一侧为空时整体为空，
+        # 会把"只有半开"这一态吞掉。
+        expr: |
+          (sum(lumo_connector_breaker_open) > 0)
+            or
+          (sum(lumo_connector_breaker_half_open) > 0)
+        for: 5m
+        labels:
+          class: seam_circuit_open
+          tier: P2
+          severity: warning
+        annotations:
+          summary: "有连接器的熔断器未闭合"
+          description: >-
+            至少一个连接器的熔断器处于 open 或 half-open 持续 5 分钟以上，说明上游一直没好
+            （half-open 期一次失败即重新打开）。按 breaker 标签下钻定位是哪个 realm/连接器；
+            熔断是本实例本地的，多个副本可能只有部分命中。
+
+      - alert: LumoSessionControlRealmMismatch
+        # 跨 realm 的控制尝试（§8.4.2「控制权 = realm + role + session 内指定」）。
+        #
+        # 为什么必须单独一条：这类尝试**不进控制面审计表**——realm 隔离的判定在 OPA 之前，
+        # 若它被写进审计，一条被拒的尝试就会把 session 行的 realm 钉死在错误的取值上
+        # （「拒绝即伤害」）。所以审计表里查不到它，`session_control_realm_mismatch_total`
+        # 与 WARN 日志是仅有的两处痕迹，这里必须留下第三处:一条会响的规则。
+        #
+        # 正常运行时它恒为 0：控制面板按会话所在 realm 取人，跨 realm 要么是客户端把
+        # realm 认错了（配置问题），要么是有人拿着本 realm 的身份去试别的 realm 的会话
+        # （越权探测）。两者都该有人看一眼，所以是 P2 而不是知会级。
+        #
+        # 用 increase 而不是直接比大小：这个 gauge 是**进程生命周期累计**（从启动起算，
+        # 重启归零），直接 `> 0` 会在首次事件后永远亮着不放。进程重启时 increase 会按
+        # 计数器重置补偿，可能多报一次——宁多报一次，也不要漏掉一次越权尝试。
+        expr: |
+          increase(lumo_session_control_realm_mismatch_total[15m]) > 0
+        for: 5m
+        labels:
+          class: realm_isolation
+          tier: P2
+          severity: warning
+        annotations:
+          summary: "有跨 realm 的控制指令被拒（{{ $value }} 次/15m）"
+          description: >-
+            近 15 分钟有控制指令因 realm 不匹配被拒。它同时会出现在 session-control 的
+            WARN 日志里（带 sessionRef 与 actor），但**不会**出现在 session_control_audit
+            表：realm 隔离先于 OPA 判定，写审计会把被拒的尝试固化到状态行的 realm 上。
+            先确认是客户端取错了 realm，还是有人在试别的 realm 的会话。
+
+      # ── P3：值班知会，不需要立即动手 ───────────────────────────────────────
+
+      - alert: LumoSessionControlPulseForced
+        # 控制脉冲持有超限被强制接管。它是「同一会话的控制通道被堵过」的**唯一历史证据**：
+        # 队列深度（queue_waiting）只反映抓取那一刻，空转会话的下一条指令可能几分钟后才来，
+        # 而强制接管是一个既成事实。
+        #
+        # 阈值就是「有发生过」而不是某个数量：默认 MaxHold=30s，只有一条脉冲被持有超过
+        # 30 秒才会触发强制接管——正常请求远低于这个量级，所以出现即异常（可能是某个
+        # 实例卡在库锁上，也可能是 MaxHold 配得比 store 的超时还短）。
+        #
+        # 与 LumoSessionControlRealmMismatch 同源：也是进程生命周期累计的 gauge，
+        # 所以同样用 increase 而不是比大小。
+        expr: |
+          increase(lumo_session_control_forced_releases_total[15m]) > 0
+        for: 5m
+        labels:
+          class: queue_backlog
+          tier: P3
+          severity: info
+        annotations:
+          summary: "有会话的控制脉冲被强制接管（{{ $value }} 次/15m）"
+          description: >-
+            近 15 分钟有控制脉冲持有超过 MaxHold 被他人强制接管，同一会话在这一刻的控制
+            通道是被堵住的。对照 session-control 的 WARN 日志（带 sessionRef / correlationId /
+            持有时长）定位是哪个会话；再对照 queue_waiting 看是不是积压。
+            若持续出现，检查 LUMO_SESSION_CONTROL_HOLD 是否小于数据库单语句的耗时。
+
+      - alert: LumoSchedulerQueueDepthHigh
+        # 长度型信号，与 LumoQueueBacklog 的时长型信号互补：一次批量提交会让长度冲高
+        # 但很快消化（不该叫人），持续积压才会同时触发时长型那条。所以这条只到知会级。
+        #
+        # 这里刻意**不**按 cluster_id 分组：lumo_scheduler_pending_tasks 是无标签的全局
+        # gauge（它是外部 autoscaler 直接消费的契约，扩容决策本来就是全局的）。写成
+        # max by (cluster_id) 不会报错，它只会把所有维度聚合掉、并在注解里打印空集群名。
+        # 要按集群下钻请用 LumoQueueBacklog 的 lumo_scheduler_oldest_pending_seconds。
         expr: lumo_scheduler_pending_tasks > 100
         for: 10m
         labels:
-          severity: warning
+          class: queue_backlog
+          tier: P3
+          severity: info
         annotations:
-          summary: "Scheduler pending queue is growing"
-          description: "{{ $labels.instance }} has more than 100 pending tasks for 10 minutes."
+          summary: "全局排队任务数持续偏高"
+          description: >-
+            排队任务总数超过 100 已持续 10 分钟（当前 {{ $value }}）。该指标不带集群维度，
+            定位是哪个集群请查 lumo_scheduler_oldest_pending_seconds（见 LumoQueueBacklog）。
+            若同时伴随 LumoQueueBacklog，说明消化速度跟不上，需要扩容或查放置失败原因。
 
-      - alert: LumoHttpErrorRateHigh
+      - alert: LumoService5xxRateHigh
+        # 与 LumoGateway5xx 的 matcher **互斥**（网关以外的服务），因此不是重复告警而是
+        # 分级：非网关服务的 5xx 影响面通常局限在单一能力上。
+        #
+        # 互斥靠的是「负向名单 == 正向名单的补集」，而 Prometheus 的 matcher 里没有
+        # 变量可以共用，只能靠两处字面量保持同步。这正是最容易腐烂的地方：新增一个网关
+        # 时只改正向名单，它就会同时命中两条规则（同一次故障报两遍、级别还不同）；
+        # 只改负向名单，两边都不覆盖（静默盲区）。改任一侧都要改另一侧。
         expr: |
-          sum by (job) (rate(lumo_http_errors_total[5m]))
+          sum by (service) (rate(lumo_http_errors_total{service!~"connector-gateway|llm-gateway|edge-gateway|terminal-gateway"}[5m]))
             /
-          clamp_min(sum by (job) (rate(lumo_http_requests_total[5m])), 1) > 0.05
-        for: 5m
+          clamp_min(sum by (service) (rate(lumo_http_requests_total{service!~"connector-gateway|llm-gateway|edge-gateway|terminal-gateway"}[5m])), 1) > 0.05
+        for: 10m
         labels:
-          severity: warning
+          class: gateway_5xx
+          tier: P3
+          severity: info
         annotations:
-          summary: "Lumo HTTP error rate is high"
-          description: "{{ $labels.job }} has exceeded 5% HTTP errors for 5 minutes."
+          summary: "服务 {{ $labels.service }} 的 5xx 比例超过 5%"
+          description: "{{ $labels.service }} 近 5 分钟 5xx 占比超过 5%，持续 10 分钟。"
 
       - alert: LumoHttpP95LatencyHigh
+        # 分位数而不是均值：均值会被大量快请求拉平，掩盖长尾。规范在 SLO 行提到 p99，
+        # 但本仓库的直方图桶最粗只到 1s（observability/metrics.go 的七个桶），
+        # 在桶边界上区分 p95/p99 没有额外信息量，所以维持 p95 并显式记录这个取舍。
         expr: |
           histogram_quantile(0.95,
-            sum by (job, le) (rate(lumo_http_request_duration_seconds_bucket[5m]))) > 0.8
-        for: 5m
+            sum by (service, le) (rate(lumo_http_request_duration_seconds_bucket[5m]))) > 0.8
+        for: 10m
         labels:
-          severity: warning
+          class: latency
+          tier: P3
+          severity: info
         annotations:
-          summary: "Lumo HTTP p95 latency is high"
-          description: "{{ $labels.job }} p95 request latency is above 800ms."
+          summary: "服务 {{ $labels.service }} 的 p95 延迟超过 800ms"
+          description: "{{ $labels.service }} 近 5 分钟 p95 请求延迟超过 800ms，持续 10 分钟。"

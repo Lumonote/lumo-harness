@@ -40,11 +40,16 @@ CREATE TABLE IF NOT EXISTS project_artifacts (
 
 -- 知识空间（§5.4.7 协作单元；一个项目可含多个 Space，Space 不跨 realm）
 CREATE TABLE IF NOT EXISTS project_spaces (
-   space_id   TEXT PRIMARY KEY,
+  space_id   TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   realm      TEXT NOT NULL,
   name       TEXT NOT NULL
 );
+-- 同项目内 Space 名唯一。具名唯一索引而不是建表时的内联 UNIQUE：既有库上
+-- CREATE TABLE IF NOT EXISTS 是空操作，内联约束加不上去；而内联 UNIQUE 的自动名
+-- （project_spaces_project_id_name_key）与具名索引并存会让「谁先建表」留下不同的
+-- 索引集。Go 侧 control-plane/projects 与本插件共表（同库、同时在线），两侧逐字相同。
+CREATE UNIQUE INDEX IF NOT EXISTS project_spaces_project_name_uq ON project_spaces (project_id, name);
 
 -- 自动化定义（§8.3 Trigger + §9.2 Flow 的项目侧登记，控制台「自动化」入口）
 CREATE TABLE IF NOT EXISTS project_automations (

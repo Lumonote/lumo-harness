@@ -107,13 +107,18 @@ jobs:
         module:
           - collaborator
           - connector-gateway
+          - edge-gateway
           - flows
           - governance
+          - heartbeat
           - llm-gateway
           - observability
           - projects
+          - ratelimit
           - registry
           - scheduler
+          - session-control
+          - terminal-gateway
           - usage-ledger
     defaults:
       run:
@@ -130,18 +135,94 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # 每个模块都拿到 DSN。此前这里是 contains(fromJSON('["governance","scheduler"]'), ...)
+      # —— 那份名单写于 2026-09-13，当时确实只有这两个模块有活库用例；到 2026-09-15
+      # 已有 9 个模块、12 处 os.Getenv("LUMO_TEST_PG_DSN") 门控，名单没跟着长，于是
+      # 那 7 个模块的活库用例在 CI 里**静默跳过**而 `go test` 照样退出 0 —— 与 D5 修的
+      # 验收脚本是同一个病：退出码不是证据，全 SKIP 与全通过无法从退出码区分。
+      # 门控写在测试文件里，注入就该是全局的；别再收敛回枚举（下面的守卫会拦）。
       - name: Test
         env:
-          LUMO_TEST_PG_DSN: ${{ contains(fromJSON('["governance","scheduler"]'), matrix.module) && 'postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable' || '' }}
+          LUMO_TEST_PG_DSN: postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable
         run: go test ./...
+
+      # 静态守卫：DSN 的注入必须是**无条件**的，且每个 Go 模块都必须在 matrix 里。
+      # 不依赖数据库，所以它在「注入被收窄回枚举」「新模块没进 matrix」时先变红，
+      # 而不是等到某个模块静默跳过之后 —— `go test` 在全部 SKIP 时同样退出 0。
+      # 判据取「每个模块都在」而不是「有活库用例的模块都在」：后者看起来更精确，
+      # 但它抓不到`heartbeat` 那种「整模块缺席」（该模块恰好没有 DSN 门控的用例，
+      # 于是 2026-09-15 新建后一直不在 matrix 里，测试从没在任何 CI 上跑过）。
+      - name: Live-DB gate is wired for every module that has one
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          wf=.github/workflows/ci.yml
+          # 判据限定在本 job 的区块内：`platform` job 里也有一个 LUMO_TEST_PG_DSN
+          # （给 vitest 用的），全文件检索会被它满足，于是把本 job 的注入删掉也照样
+          # 「通过」—— 实测过，这就是为什么这里要先把区块切出来。
+          job="$(awk '/^  control-plane-go:/{f=1;next} /^  [A-Za-z]/{f=0} f' "$wf")"
+          # 两条模式都写成转义形式：这段守卫的源码就在它检查的区块里，直写模式会让它
+          # 命中自己 —— 正向那条会变成恒真（实测：把注入整行删掉它仍然通过），反向那条
+          # 会把真实文件判成条件式。守卫自己也得过反例，否则它只是看起来在工作。
+          # 先判「条件式」再判「有没有」：条件式的值里 `postgres://` 不紧跟冒号，
+          # 反序会让「被改回枚举」误报成「没注入」—— 诊断文案指错地方，比不报还坏。
+          if grep -qE 'LUMO_TEST_PG_DSN: \$[[:space:]]*\{\{' <<<"$job"; then
+            echo "::error::LUMO_TEST_PG_DSN 被写成了条件式 —— 按模块枚举的名单会腐烂，注入必须无条件"
+            exit 1
+          fi
+          if ! grep -qE 'LUMO_TEST_PG_DSN:[[:space:]]+postgres://' <<<"$job"; then
+            echo "::error::control-plane-go 的测试步骤没有注入 LUMO_TEST_PG_DSN —— 活库用例会静默跳过而退出码仍为 0"
+            exit 1
+          fi
+          for d in platform/control-plane/*/; do
+            [ -f "$d/go.mod" ] || continue
+            mod="$(basename "$d")"
+            if ! grep -qE "^[[:space:]]+- ${mod}[[:space:]]*$" <<<"$job"; then
+              echo "::error::模块 $mod 不在 control-plane-go 的 matrix 里 —— 它的测试在 CI 上永远不会跑"
+              exit 1
+            fi
+          done
+          echo "live-DB DSN is unconditional and every Go module is in the matrix"
 
       - name: Vet
         run: go vet ./...
 
+      # 格式门禁。本仓库此前**没有任何 gofmt 门禁**，于是 HEAD 上就带着 7 个未格式化的
+      # 文件（2026-09-17 实测：`git show HEAD:<path> | gofmt -l` 对这 7 个全部非空，
+      # 分属 governance 5 个与 projects / registry 各 1 个）。**没有门禁的规则不是规则，
+      # 是没有被执行的偏好**——它们能一直在，不是被谁破坏了，是从没被强制过。
+      #
+      # 加这一步的前提是那 7 个已一并格式化：门禁要么全绿、要么别加。一个一开始就红的
+      # 门禁，下一个人会把它删掉，而不是去修它——这比不加更坏，因为它看起来像有人管过。
+      #
+      # 判据是 `gofmt -l` 而非 `gofmt -d`：两者的诊断价值一样（`-l` 列出文件，报错文案里
+      # 给出修法），但 `-d` 会在 15 个模块上打印上万行 diff，把 Job 日志里真正有用的部分
+      # 淹掉。本步骤跑在 job 默认的 `working-directory`（模块目录）下，所以是**逐模块**检查，
+      # 哪个模块脏一眼能看出来。
+      #
+      # 工具链一致性：CI 用 `go-version: '1.25.x'`，而开发机上可能是更新的版本，两者的
+      # gofmt 规则**不保证一致**。本步骤落地前已用 go1.25.0 与 go1.26.5 两个 toolchain
+      # 各跑一次 `gofmt -l`，结论都是空 —— 所以它不是「在开发机上绿、在 CI 上红」的那种门禁。
+      # 将来升级 Go 版本时，这一步是最先能发现格式漂移的地方，这正是它该干的活。
+      - name: gofmt
+        run: |
+          set -euo pipefail
+          out="$(gofmt -l .)"
+          if [[ -n "$out" ]]; then
+            echo "::error::以下文件未按 gofmt 格式化（模块 $(basename "$PWD")）："
+            echo "$out"
+            echo "修法：cd platform/control-plane && gofmt -w ."
+            exit 1
+          fi
+          echo "gofmt: clean"
+
   deploy-smoke:
     runs-on: ubuntu-latest
     needs: platform
-    # compose 冒烟需要 Docker：镜像由阶段 1+ 产出后启用
+    # compose 冒烟需要 Docker：镜像由阶段 1+ 产出后启用。
+    # 2026-09-15 复核确认：仍然是 `false`（不是过期记录）。本仓库没有可用的
+    # CI Docker runner，所以 compose 拓扑只有 acceptance-cluster.sh 那条人工路径；
+    # 想启用这一 job 必须先解决镜像产出与 runner 权限两件事，不要只删这行 `if`。
     if: ${{ false }}
 
     steps:
@@ -149,12 +230,87 @@ jobs:
       - name: Start minimal Local-lite
         run: docker compose -f platform/deploy/compose.local.yml up -d && docker compose -f platform/deploy/compose.local.yml down
 
+  alert-rules-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: 'platform/control-plane/*/go.sum'
+      # 一条告警规则可以语法合法、Prometheus 也接受，却因为引用了一个永不写出的
+      # 指标而永远不响（LumoServiceDown 与 lumo:http_error_ratio5m 就这样烂了很久）。
+      # 这个脚本把规则里的指标名与 Go 侧写入点对照，并用 9 个反例自证它还在工作。
+      - name: Alert rules reference metrics that are actually written
+        run: platform/deploy/alerts-verify.sh
+
   production-gates:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - name: Setup Helm
         uses: azure/setup-helm@v5
+      # 边缘路由表的门禁需要跑 Go 自检入口（`edge-gateway-check`），它复用网关自己的
+      # routing 包来做校验 —— 这样门禁与运行期加载用的是同一份逻辑，不会各自漂移。
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: 'platform/control-plane/*/go.sum'
+      # 渲染门禁：断言「被引用的 Secret 要么被渲染、要么在运维自备清单里」「空名不得渲染」
+      # 「集群 profile 的副本数与 LUMO_INSTANCE 绑定符合预期」，并配四条反向用例。
+      # helm template 报成功不是清单合法的证据（它不校验 YAML 语义、不渲染 NOTES.txt），
+      # 所以下面这几条 helm template 不能替代它。
+      - name: Chart render gate
+        run: platform/deploy/helm-verify.sh
+      # 联邦注册表的静态门禁：开了集群失联判定，就必须真的有上报方。判定开关在
+      # scheduler 服务上、上报方在 dsh-node 服务上，**跨文件**的错法谁都不管——2026-09-16
+      # 发现该开关在 compose 与 Helm 里一个都没有，判定在整个可部署拓扑里是关的，
+      # 而代码/测试/指标/告警全都齐全。脚本自带 6 个反向用例，断言到具体文案。
+      - name: Cluster registry has reporters wherever enforcement is on
+        run: platform/deploy/cluster-registry-verify.sh
+      # 边缘网关路由表门禁：被部署的那张表必须真的能被网关加载（并断言它覆盖哪些前缀，
+      # 期望值写死），九种坏法逐个注入、逐个断言报出的是预期那一条。这份表本来只在
+      # **服务启动时**被校验，而「服务起不来」是最不像「配置写错」的症状。
+      - name: Edge route table loads and rejects every broken variant
+        run: platform/deploy/edge-routes-verify.sh
+      # compose 宿主端口冲突门禁：合并后的拓扑里一个宿主端口只能有一个主张方。
+      # 冲突**不是** compose 配置错误 —— `docker compose config` 全能过，失败发生在容器
+      # 启动那一刻（`port is already allocated`）。2026-09-16 实际踩到一次：
+      # terminal-gateway 与可选的设备网关 overlay 都要宿主 18090，而那条合并路径
+      # （`-f compose.cluster.yml -f compose.cluster.devices.yml`）恰恰是最常跑的。
+      - name: Compose host ports do not collide after overlay merge
+        run: platform/deploy/compose-ports-verify.sh
+      # 入口网关 CORS 接线门禁：edge-gateway 上有两层 CORS —— `gate.CORS`（边缘白名单，
+      # 按**请求的 Origin** 裁决）与 observability 中间件（按**配置的来源**写死 ACAO）。
+      # 两层各自都对，错法只在**跨文件对照**上，而症状是「能用」：2026-09-16 实测
+      # compose.cluster.yml / compose.standalone.yml 给 edge-gateway 设的正是中间件读的
+      # 那个变量，于是边缘白名单一直是空的、边缘层根本没在管事，而中间件那一层替它把
+      # preflight 答了（curl 与手测全正常）。判据的两个变量名从 Go 源码推导而不是写死，
+      # 所以代码侧改旗标名会让它报出新名字，而不是继续绿。
+      - name: Gateway CORS wiring matches the variables the binaries read
+        run: platform/deploy/edge-cors-verify.sh
+      # 真集群探针的分类门禁：`probes-cluster.sh` 要区分两类失败 —— 「服务压根没起来」
+      # （curl 传输错误 exit 7/28/6）与「服务起来了但行为不对」（HTTP 2xx/4xx/5xx）。
+      # 这两类在退出码上完全一样（都非零），所以门禁断言的是**报出来的那一条文案**，
+      # 而不是只看退出码。反例用 python3 标准库起假服务造，逐条注入：上游不可达报 502、
+      # 伪造空历史报 2xx、路由表加载了但是空的、presence 面形状变了、被部署的二进制
+      # 没装配这个特性（指标序列不存在）……最后五条守的是**探针集合本身**：目标端从
+      # compose 拓扑派生，服务改名要报「解析不到」而不是静默少跑一条；容器端口挪出
+      # 控制面段要跟着变；新增服务要自动多一条（不许有写死的名单）。
+      # 两条正向里有一条是「正确不止一种形状」：terminal 未配事件源回 503、已配事件源
+      # 在握手处回 400，两种都得放行 —— 只认 503 会让探针在事件源接线落地当天对着一个
+      # 正确的部署报红（实测过），而下一个人遇到假警报通常是把探针改弱。
+      - name: Cluster probes classify absent vs misbehaving and derive their own targets
+        run: platform/deploy/probes-cluster-verify.sh
+      # 每个控制面 Dockerfile 必须 COPY 它 go.mod 里 replace 的全部兄弟模块。2026-09-17
+      # 实测：12 个模块里 9 个漏了，于是 `build.sh --targets images` 只能产出 3 个镜像——
+      # 而那是**发布路径**。这个缺陷要跑到 Docker 里下完依赖、构建到第 5 层才暴露（一次
+      # 十几分钟），而判据只是「两个集合相等」。放在这里是因为它**只在发布时才被踩到**：
+      # 开发者本地不建镜像就永远看不到。
+      - name: Every control-plane image copies the modules its go.mod replaces
+        run: platform/tools/check-dockerfile-modules.py platform/control-plane
       - name: Render default chart (mTLS and controls disabled by default)
         run: helm template lumo platform/deploy/helm/lumo-platform >/dev/null
       - name: Render enforced production controls and Istio mTLS
@@ -177,6 +333,22 @@ jobs:
             --set productionControls.observability.objectStoreBucket=lumo-traces >/dev/null
       - name: Validate acceptance harness and image tag traceability
         run: |
-          bash -n platform/deploy/acceptance-cluster.sh platform/build.sh
+          # 对全部脚本做语法检查，而不是点名几个 —— 点名的清单会腐烂（见上面
+          # LUMO_TEST_PG_DSN 那一段），而 glob 不会漏掉新加的门禁脚本。
+          # `lib/*.sh` 也要扫：那里面是**被 source 的**共享库（`lib/probes.sh`），
+          # 语法错误在 `bash -n` 主脚本时是看不见的 —— 它只在被 source 的那一刻炸。
+          for s in platform/deploy/*.sh platform/deploy/lib/*.sh platform/build.sh; do
+            bash -n "$s"
+          done
+          # `bash -n` 抓不到下面这一类：**全角标点紧贴变量展开**（`"$name：..."`）。
+          # 语法合法，但在 bash 3.2（macOS 自带）里 `$name：` 被当成一个变量名，
+          # `set -u` 下报 unbound variable；而当它落在**函数内部**时，bash 3.2 不让
+          # 脚本退出、也不置非零状态——函数静默返回、脚本继续跑并退 0。
+          # 2026-09-16 实测后果：compose-ports-verify / edge-routes-verify /
+          # cluster-registry-verify 三个「反例自证」门禁在本机跳过了全部反例而退 0
+          # （CI 的 bash 5 正常，所以只有本机结论是假的）。先自证再扫真实文件：
+          # 只扫真实文件的检查在它自己失效之后仍然是绿的。
+          python3 platform/deploy/shell-portability-check.py --self-test
+          python3 platform/deploy/shell-portability-check.py --root .
           test "$(sed -n 's/^  tag: *\"\?\([^\" ]*\).*/\1/p' platform/deploy/helm/lumo-platform/values.yaml | head -1)" != "latest"
           platform/build.sh --dry-run --targets images --registry ghcr.io/lumonote --version "$(sed -n 's/^  \"version\": \"\([^\"]*\)\".*/\1/p' platform/package.json)" >/dev/null

@@ -3,8 +3,23 @@
  *
  * 权限合成规则（评审 N4）：**三层取交集，且项目权限不得提升 realm 权限**。
  * realm 层拒绝即拒绝——否则任何人建一个项目并给自己 owner 就能越权。
+ *
+ * # 本层是**前置**，不是权威
+ *
+ * 权威裁决是控制面里的 OPA（`deploy/policies/session-control.rego`，由 Go 侧
+ * `internal/policy` 评估）。本层的两个作用：
+ *
+ *   1. `RbacControlPolicy`：明显越权的请求当场拒掉，不为一次必然被拒的调用打网络往返；
+ *   2. `OpaControlPolicy`：在本地放行之后再问一次同一个策略包，让中心策略**收窄**本地授权
+ *      （例如临时吊销某个角色）。
+ *
+ * 两者都只回答「本层拦不拦」，**不回答「指令生效了吗」**——那个问题的答案只能来自控制面。
  */
-import type { ControlCommand, ControlDecision, ControlPolicy } from '../../../shared/seam-contracts/control.ts'
+import type {
+  ControlCommand,
+  ControlPolicy,
+  ControlPolicyVerdict,
+} from '../../../shared/seam-contracts/control.ts'
 
 /** realm 层角色 → 允许的控制指令（权限上限，项目层只能收窄不能放宽） */
 export type RoleGrants = Record<string, readonly ControlCommand[]>
@@ -46,7 +61,7 @@ export class RbacControlPolicy implements ControlPolicy {
     role: string
     realm: string
     sessionRef: string
-  }): ControlDecision {
+  }): ControlPolicyVerdict {
     // 第一层：realm RBAC（权限上限）
     const realmAllowed = this.roleGrants[req.role] ?? []
     if (!realmAllowed.includes(req.command)) {
@@ -66,7 +81,28 @@ export class RbacControlPolicy implements ControlPolicy {
   }
 }
 
-/** Central policy can narrow local grants; a missing decision never grants access. */
+/**
+ * 中心策略可以收窄本地授权；**拿不到判定时绝不放行**。
+ *
+ * # 判据与 Go 侧 `internal/policy` 逐条对齐
+ *
+ * 同一个 OPA、同一个策略包，两侧对「什么算拿不到判定」必须给出同一个答案，否则会出现
+ * 「插件说权限不足、控制面说引擎不可用」这种谁也解释不了的组合。Go 侧的判据（见
+ * `session-control/internal/policy/policy.go`）是：
+ *
+ * | 情形 | Go | 本类 |
+ * | --- | --- | --- |
+ * | 未配置地址 | `ErrUnavailable` | 构造期就不装本类（回落纯 RBAC） |
+ * | 连不上 / 超时 | `ErrUnavailable` | `policy-unavailable` |
+ * | 非 2xx | `ErrUnavailable` | `policy-unavailable` |
+ * | 响应读不懂 | `ErrUnavailable` | `policy-unavailable` |
+ * | `result` 缺失或 null | `ErrUnavailable`（**策略包没加载**） | `policy-unavailable` |
+ * | `result` 是 `false` | `Allowed=false`（永久拒绝） | `policy-denied` |
+ *
+ * 最后一档的上一档是这条注释存在的主要理由：`result` 缺失**不能**当成 `allow=false`。
+ * 那会把「策略包没加载」静默成「权限不足」，于是把一次部署事故表现成「全公司突然都没有
+ * 控制权限了」——运维会去查权限配置，而真正的问题在 OPA 的挂载路径上。
+ */
 export class OpaControlPolicy implements ControlPolicy {
   private readonly endpoint: string
 
@@ -78,20 +114,36 @@ export class OpaControlPolicy implements ControlPolicy {
     this.endpoint = `${url.href.replace(/\/+$/, '')}/v1/data/lumo/session_control/allow`
   }
 
-  async evaluate(request: Parameters<ControlPolicy['evaluate']>[0]): Promise<ControlDecision> {
+  async evaluate(request: Parameters<ControlPolicy['evaluate']>[0]): Promise<ControlPolicyVerdict> {
     const local = await this.local.evaluate(request)
     if (!local.allowed) return local
+
+    let response: Response
     try {
-      const response = await fetch(this.endpoint, {
+      response = await fetch(this.endpoint, {
         method: 'POST', redirect: 'error', signal: AbortSignal.timeout(3_000),
         headers: { 'content-type': 'application/json', ...(this.token ? { authorization: `Bearer ${this.token}` } : {}) },
         body: JSON.stringify({ input: request }),
       })
-      if (!response.ok) return { allowed: false, reason: 'policy-denied' }
-      const body = await response.json() as { result?: unknown }
-      return body.result === true ? { allowed: true } : { allowed: false, reason: 'policy-denied' }
     } catch {
-      return { allowed: false, reason: 'policy-denied' }
+      // 网络层失败 = 拿不到判定。**不是**「策略说不行」。
+      return { allowed: false, reason: 'policy-unavailable' }
     }
+    if (!response.ok) {
+      // 5xx 是 OPA 自己出问题，404 是路径写错（策略包没加载）。两种都是「拿不到判定」。
+      return { allowed: false, reason: 'policy-unavailable' }
+    }
+
+    let body: { result?: unknown }
+    try {
+      body = await response.json() as { result?: unknown }
+    } catch {
+      return { allowed: false, reason: 'policy-unavailable' }
+    }
+    // `result` 缺失 / null / 不是布尔：策略包未加载或形状变了。**不能**当成 false。
+    if (typeof body.result !== 'boolean') {
+      return { allowed: false, reason: 'policy-unavailable' }
+    }
+    return body.result ? { allowed: true } : { allowed: false, reason: 'policy-denied' }
   }
 }

@@ -9,12 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/lumo-harness/platform/flows/internal/domain"
+	"github.com/lumo-harness/platform/flows/internal/lineage"
 )
 
 const DDL = `
@@ -122,6 +124,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS flow_trigger_replay_once
   ON flow_trigger_outbox (replay_of_run_id) WHERE replay_of_run_id IS NOT NULL;
 ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS claim_token BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS bindings_prepared BOOLEAN NOT NULL DEFAULT false;
+-- cron 触发与 event 触发的绑定方式不同：event 按 trigger_spec 扇出到所有订阅者，
+-- cron 只投给游标对应的那一个自动化。用 source 把两条路径分开，否则两个自动化写了
+-- 同一个 cron 表达式时，一次定时触发会被两个流程各跑一遍。
+ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'event';
+ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS cron_automation_id TEXT;
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'flow_trigger_outbox'::regclass AND conname = 'flow_trigger_source_known'
+  ) THEN
+    ALTER TABLE flow_trigger_outbox
+      ADD CONSTRAINT flow_trigger_source_known CHECK (source IN ('event','cron'));
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'flow_trigger_outbox'::regclass AND conname = 'flow_trigger_cron_target'
+  ) THEN
+    ALTER TABLE flow_trigger_outbox
+      ADD CONSTRAINT flow_trigger_cron_target CHECK (
+        (source = 'event' AND cron_automation_id IS NULL)
+        OR
+        (source = 'cron' AND cron_automation_id IS NOT NULL)
+      );
+  END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS flow_trigger_bindings (
   trigger_id BIGINT NOT NULL REFERENCES flow_trigger_outbox(id) ON DELETE CASCADE,
   automation_id TEXT NOT NULL,
@@ -129,6 +158,51 @@ CREATE TABLE IF NOT EXISTS flow_trigger_bindings (
   flow_version INT NOT NULL CHECK (flow_version > 0),
   PRIMARY KEY (trigger_id, automation_id)
 );
+
+-- cron 调度游标。cron 表达式由 flows 服务用 Go 解析（SQL 不会算 cron），解析结果与
+-- 推进状态落在这里。last_error 非空表示游标已停滞（表达式非法、或表达式永远不会
+-- 触发）：停滞的游标不进调度，只有 spec 变更或先禁用再启用才会恢复，改好的表达式
+-- 由协调阶段重置游标。
+CREATE TABLE IF NOT EXISTS flow_cron_cursors (
+  automation_id TEXT PRIMARY KEY,
+  realm         TEXT NOT NULL,
+  project_id    TEXT NOT NULL,
+  spec          TEXT NOT NULL,
+  last_fired_at TIMESTAMPTZ NOT NULL,
+  next_fire_at  TIMESTAMPTZ NOT NULL,
+  last_error    TEXT NOT NULL DEFAULT '',
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_flow_cron_due
+  ON flow_cron_cursors (next_fire_at) WHERE last_error = '';
+
+-- 流程血缘 outbox（缺口 C7）。发布版本快照时把 DAG 边落进来（与发布同一事务），
+-- 后台投影器异步搬运到 Nebula（图只是呈现层，见 architecture.md §9.2 / A5）。
+-- 未配置 Nebula 时整体不写此表、不起投影器（绝不伪造成功）。
+-- 唯一约束 (flow_id,version,from_node,to_node,edge_type) 在 PG 层保证幂等：
+-- 同一版本重复发布（极端竞态）不会产生重复边，不只靠客户端自觉。
+CREATE TABLE IF NOT EXISTS flow_lineage_outbox (
+  id              BIGSERIAL PRIMARY KEY,
+  flow_id         TEXT NOT NULL,
+  version         INT NOT NULL,
+  realm           TEXT NOT NULL DEFAULT '',
+  from_node       TEXT NOT NULL,
+  to_node         TEXT NOT NULL,
+  edge_type       TEXT NOT NULL,
+  from_operator   TEXT NOT NULL DEFAULT '',
+  to_operator     TEXT NOT NULL DEFAULT '',
+  attempts        INT NOT NULL DEFAULT 0,
+  last_error      TEXT NOT NULL DEFAULT '',
+  claimed_at      TIMESTAMPTZ,
+  projected_at    TIMESTAMPTZ,
+  next_attempt_at TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (flow_id, version, from_node, to_node, edge_type)
+);
+-- 部分索引：只扫未投影的尾巴，已投影历史不拖慢轮询（与 knowledge_graph_outbox 同思路）。
+CREATE INDEX IF NOT EXISTS idx_flow_lineage_pending
+  ON flow_lineage_outbox (id) WHERE projected_at IS NULL;
 `
 
 var (
@@ -147,6 +221,9 @@ var (
 
 type Store struct {
 	pool *pgxpool.Pool
+	// lineageEnabled 由启动器按 LUMO_FLOW_NEBULA_URL 是否配置设置；运行期不变。
+	// 见 SetLineageEnabled / internal/lineage 包注释（未配置时整体关闭血缘捕获）。
+	lineageEnabled bool
 }
 
 type TriggerRecord struct {
@@ -333,8 +410,11 @@ func (s *Store) RequeueStaleTriggers(ctx context.Context, olderThanMs int64) err
 	return err
 }
 
-// ListEventBindings 读取项目自动化的事件绑定。只允许已发布快照进入运行面；
-// webhook 与 event 共用持久入口，cron 由外部调度器按同一入口投递。
+// ListEventBindings 读取项目自动化的事件绑定。只允许已发布快照进入运行面。
+//
+// webhook 与 event 共用持久入口并按 trigger_spec 扇出；cron 不在这里——它由本服务的
+// 调度生产者按 automation_id 投给唯一一个自动化（见 internal/schedule）。
+// 注意：当前没有任何调用方，绑定真相在 PrepareTriggerBindings（execution.go）。
 func (s *Store) ListEventBindings(ctx context.Context, realm, name string) ([]EventBinding, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT a.automation_id, a.flow_ref, f.version
@@ -628,8 +708,9 @@ func (s *Store) Review(ctx context.Context, id, reviewer string, approve bool, c
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var status string
+	var realm string
 	var def json.RawMessage
-	err = tx.QueryRow(ctx, `SELECT status, definition FROM flows WHERE id = $1 FOR UPDATE`, id).Scan(&status, &def)
+	err = tx.QueryRow(ctx, `SELECT status, definition, realm FROM flows WHERE id = $1 FOR UPDATE`, id).Scan(&status, &def, &realm)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -660,6 +741,25 @@ func (s *Store) Review(ctx context.Context, id, reviewer string, approve bool, c
 			INSERT INTO flow_versions (flow_id, version, definition, reviewer)
 			VALUES ($1, $2, $3, $4)`, id, version, def, reviewer); err != nil {
 			return nil, fmt.Errorf("写发布快照失败: %w", err)
+		}
+		// 把已发布的规范化定义解析成 domain.Definition 供血缘抽取；解析失败只记日志不阻断发布
+		// （def 来自刚写入 flow_versions 的同一字节，理论上必然可解析）。
+		var d domain.Definition
+		if err := json.Unmarshal(def, &d); err != nil {
+			slog.Warn("血缘定义反序列化失败，跳过", "flow_id", id, "version", version, "err", err)
+		}
+		// 血缘写入点：与发布快照同一事务。def 已通过入库校验（防环等），Extract 通常
+		// 不会失败；这里仅把「编译后 DAG」的血缘边落成 outbox 行，Nebula 投影由后台异步完成，
+		// 所以 Nebula 不可用不会让发布变慢或失败。Extract 万一失败（理论不可达）只记日志、
+		// 不阻断发布——血缘缺失比发布失败可接受。
+		if s.lineageEnabled {
+			if edges, eerr := lineage.Extract(&d, id, version, realm); eerr == nil {
+				if werr := s.writeLineageWithinTx(ctx, tx, edges); werr != nil {
+					return nil, fmt.Errorf("写血缘 outbox 失败: %w", werr)
+				}
+			} else {
+				slog.Warn("血缘抽取失败，跳过（发布仍继续）", "flow_id", id, "version", version, "err", eerr)
+			}
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE flows SET status = $2, version = $3, published_at = now(),

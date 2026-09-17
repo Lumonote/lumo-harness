@@ -44,6 +44,13 @@ ALTER TABLE governance_device_commands ADD COLUMN IF NOT EXISTS session_ref TEXT
 CREATE UNIQUE INDEX IF NOT EXISTS governance_device_commands_active_run
  ON governance_device_commands(realm,run_id)
  WHERE action='execute_task' AND run_id<>'' AND state IN ('queued','delivered');
+-- Cancellation is dispatched by a repeating loop, so "one live cancel per run" has
+-- to be an invariant rather than a check the loop remembers to make. Same shape as
+-- the stop above: the moment the row leaves (queued, delivered) -- accepted,
+-- rejected, or interrupted by a reconnect -- a fresh cancel becomes possible again.
+CREATE UNIQUE INDEX IF NOT EXISTS governance_device_commands_active_cancel
+ ON governance_device_commands(realm,run_id)
+ WHERE action='cancel_task' AND run_id<>'' AND state IN ('queued','delivered');
 `
 
 type DeviceArtifact struct {
@@ -65,26 +72,26 @@ type DevicePolicy struct {
 }
 
 type DeviceConnection struct {
-	Realm              string           `json:"realm"`
-	NodeID             string           `json:"node_id"`
-	Owner              string           `json:"owner_user_id"`
-	OS                 string           `json:"os"`
-	Arch               string           `json:"arch"`
-	Status             string           `json:"status"`
-	Revision           int64            `json:"revision"`
-	Policy             DevicePolicy     `json:"policy"`
-	PublicKeyHash      string           `json:"public_key_hash,omitempty"`
-	CertificateSerial  string           `json:"certificate_serial,omitempty"`
-	CertificateExpires *time.Time       `json:"certificate_expires,omitempty"`
-	CertificatePEM     string           `json:"-"`
-	PreviousSerial     string           `json:"-"`
-	RenewalReplayExpires *time.Time      `json:"-"`
-	ConnectionID       string           `json:"-"`
-	ConnectionExpires  *time.Time       `json:"connection_expires,omitempty"`
-	AppliedRevision    int64            `json:"applied_revision"`
-	Installed          []DeviceArtifact `json:"installed"`
-	ReportError        string           `json:"report_error,omitempty"`
-	LastReportAt       *time.Time       `json:"last_report_at,omitempty"`
+	Realm                string           `json:"realm"`
+	NodeID               string           `json:"node_id"`
+	Owner                string           `json:"owner_user_id"`
+	OS                   string           `json:"os"`
+	Arch                 string           `json:"arch"`
+	Status               string           `json:"status"`
+	Revision             int64            `json:"revision"`
+	Policy               DevicePolicy     `json:"policy"`
+	PublicKeyHash        string           `json:"public_key_hash,omitempty"`
+	CertificateSerial    string           `json:"certificate_serial,omitempty"`
+	CertificateExpires   *time.Time       `json:"certificate_expires,omitempty"`
+	CertificatePEM       string           `json:"-"`
+	PreviousSerial       string           `json:"-"`
+	RenewalReplayExpires *time.Time       `json:"-"`
+	ConnectionID         string           `json:"-"`
+	ConnectionExpires    *time.Time       `json:"connection_expires,omitempty"`
+	AppliedRevision      int64            `json:"applied_revision"`
+	Installed            []DeviceArtifact `json:"installed"`
+	ReportError          string           `json:"report_error,omitempty"`
+	LastReportAt         *time.Time       `json:"last_report_at,omitempty"`
 }
 
 type DeviceCommand struct {
@@ -467,15 +474,22 @@ func (s *Store) QueueDeviceCommand(ctx context.Context, realm, id, actor, action
 		return cmd, ErrForbidden
 	}
 	if action != "reconcile" {
-		var selected struct { Name string `json:"name"`; Version string `json:"version"` }
+		var selected struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		}
 		if json.Unmarshal(body, &selected) != nil {
 			return cmd, ErrBadRequest
 		}
 		found := false
 		for _, item := range d.Policy.Artifacts {
-			if item.Name == selected.Name && item.Version == selected.Version { found = true }
+			if item.Name == selected.Name && item.Version == selected.Version {
+				found = true
+			}
 		}
-		if !found { return cmd, ErrBadRequest }
+		if !found {
+			return cmd, ErrBadRequest
+		}
 	}
 	commandID, err := deviceRandom()
 	if err != nil {
@@ -656,6 +670,115 @@ func (s *Store) dispatchDeviceTask(ctx context.Context) (bool, error) {
 	return true, tx.Commit(ctx)
 }
 
+// DispatchDeviceCancellations carries a scheduler cancellation to the device that
+// is running the task.
+//
+// Until this existed the two halves were simply not connected: the scheduler sets
+// CANCELLING, and the device knows how to stop a run, but nothing carried one to
+// the other. A cancelled task therefore kept running on the machine, and -- because
+// the device has exactly one execution slot -- kept the slot occupied as well.
+//
+// Deliberately not folded into dispatchDeviceTask, for one reason: a cancel must
+// not be subject to the per-device in-flight cap. A device holding sixteen commands
+// is precisely the device that cannot be cancelled, and the cap is a delivery
+// budget; being unable to stop work is not a budget question.
+func (s *Store) DispatchDeviceCancellations(ctx context.Context, limit int) (int, error) {
+	if limit < 1 {
+		return 0, nil
+	}
+	if limit > 64 {
+		limit = 64
+	}
+	dispatched := 0
+	for dispatched < limit {
+		ok, err := s.dispatchDeviceCancellation(ctx)
+		if err != nil || !ok {
+			return dispatched, err
+		}
+		dispatched++
+	}
+	return dispatched, nil
+}
+
+func (s *Store) dispatchDeviceCancellation(ctx context.Context) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// The join key is c.run_id = scheduler_tasks.task_id: that is what the run id
+	// on a device command has always meant (dispatchDeviceTask takes it from the
+	// outbox row's task_id), so no new column is needed to find the task a device
+	// is running.
+	//
+	// Only commands that are still live are cancelled. A queued execute_task that
+	// never reached the device has nothing to stop -- interrupting it is the
+	// existing expiry path's job, and sending a cancel for it would only teach the
+	// device to answer "not in flight".
+	var realm, runID, nodeID, taskID, sessionRef, connectionID string
+	var attempt int
+	var revision int64
+	var body json.RawMessage
+	err = tx.QueryRow(ctx, `SELECT c.realm,c.run_id,c.node_id,c.attempt,c.session_ref,c.revision,c.connection_id,c.body,r.task_id
+	  FROM governance_device_commands c
+	  JOIN scheduler_tasks s ON s.task_id=c.run_id
+	  JOIN governance_task_runs r ON r.realm=c.realm AND r.id=c.run_id
+	  WHERE c.action='execute_task' AND c.state IN ('queued','delivered') AND c.expires_at>now()
+	    AND s.state='CANCELLING'
+	    AND NOT EXISTS (SELECT 1 FROM governance_device_commands cancel
+	      WHERE cancel.realm=c.realm AND cancel.run_id=c.run_id AND cancel.action='cancel_task'
+	        AND cancel.state IN ('queued','delivered') AND cancel.expires_at>now())
+	  ORDER BY c.created_at LIMIT 1 FOR UPDATE OF c SKIP LOCKED`).
+		Scan(&realm, &runID, &nodeID, &attempt, &sessionRef, &revision, &connectionID, &body, &taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, tx.Commit(ctx)
+	}
+	if err != nil {
+		return false, err
+	}
+
+	commandID, err := deviceRandom()
+	if err != nil {
+		return false, err
+	}
+	// The body is carried over verbatim rather than rebuilt. It already holds the
+	// envelope the device matched the run on -- including the session_ref that was
+	// derived at dispatch time -- and rebuilding it here would be a second place
+	// that has to agree about how a device task is described.
+	//
+	// Two guards, for two different writers, and they are not redundant:
+	//
+	//   * the NOT EXISTS in the SELECT above is what a single sequential caller
+	//     relies on -- it keeps the loop from even attempting a second insert;
+	//   * ON CONFLICT DO NOTHING + the partial unique index is what protects
+	//     against a *concurrent* caller, which no test here exercises: the
+	//     integration tests drive one dispatcher at a time, so removing the index
+	//     leaves them green (verified by mutation). It is kept because the
+	//     invariant should not depend on there only ever being one process.
+	//
+	// Stated plainly because the alternative is worse: a comment claiming a
+	// guarantee is tested when it is not is how the next person deletes it.
+	tag, err := tx.Exec(ctx, `INSERT INTO governance_device_commands
+	  (id,realm,node_id,actor_id,revision,connection_id,action,body,expires_at,run_id,attempt,session_ref)
+	  VALUES($1,$2,$3,'device-gateway',$4,$5,'cancel_task',$6,now()+interval '5 minutes',$7,$8,$9)
+	  ON CONFLICT DO NOTHING`,
+		commandID, realm, nodeID, revision, connectionID, body, runID, attempt, sessionRef)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		// Another writer got there first. Not an error, and not progress either --
+		// returning true would spin the caller's loop on the same row.
+		return false, tx.Commit(ctx)
+	}
+	detail, _ := json.Marshal(map[string]any{"run_id": runID, "attempt": attempt, "node_id": nodeID, "command_id": commandID, "reason": "scheduler task cancelled"})
+	if err = insertTaskAudit(ctx, tx, taskID, "device_execution_cancel_requested", "device-gateway", detail); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}
+
 func (s *Store) ClaimDeviceCommands(ctx context.Context, realm, id, connection string) ([]DeviceCommand, error) {
 	rows, err := s.pool.Query(ctx, `UPDATE governance_device_commands SET state='delivered',updated_at=now() WHERE id IN (
  SELECT q.id FROM governance_device_commands q JOIN governance_device_connections d ON d.realm=q.realm AND d.node_id=q.node_id
@@ -677,7 +800,9 @@ func (s *Store) ClaimDeviceCommands(ctx context.Context, realm, id, connection s
 		out = append(out, cmd)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].CreatedAt.Equal(out[j].CreatedAt) { return out[i].ID < out[j].ID }
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
 		return out[i].CreatedAt.Before(out[j].CreatedAt)
 	})
 	return out, rows.Err()

@@ -4,7 +4,42 @@ global:
 rule_files:
   - /etc/prometheus/lumo-alerts.yml
 scrape_configs:
+  # 所有控制面服务共用一个 job 名（它们跑的是同一份 observability.Middleware，
+  # 指标形状相同），服务维度靠 static_configs 打上的 service 标签区分。
+  #
+  # 为什么必须有 service 标签：告警要回答"是哪个服务在 5xx"，而 job 维度答不了
+  # ——它只有一个值。没有这个标签时，只能靠 instance（host:port）反推，
+  # 而 instance 会随 Deployment 重建换名，基于它的告警与仪表板都会失效。
   - job_name: lumo-control-plane
     metrics_path: /metrics
     static_configs:
-      - targets: [collaborator-0:8081, collaborator-1:8081, scheduler-0:8083, scheduler-1:8083, registry:8084, connector-gateway:8082, llm-gateway:8088, flows:8087, projects:8086, usage-ledger:8085, governance:8089]
+      - targets: [collaborator-0:8081, collaborator-1:8081]
+        labels: {service: collaborator}
+      - targets: [scheduler-0:8083, scheduler-1:8083, scheduler-cluster-a:8083, scheduler-cluster-b:8083]
+        labels: {service: scheduler}
+      - targets: [registry:8084]
+        labels: {service: registry}
+      - targets: [connector-gateway:8082]
+        labels: {service: connector-gateway}
+      - targets: [llm-gateway:8088]
+        labels: {service: llm-gateway}
+      - targets: [flows:8087]
+        labels: {service: flows}
+      - targets: [projects:8086]
+        labels: {service: projects}
+      - targets: [usage-ledger:8085]
+        labels: {service: usage-ledger}
+      - targets: [governance:8089]
+        labels: {service: governance}
+      # 两个新网关必须在这里与上面同列：漏掉的后果不是「少一个面板」，而是
+      # 告警表达式里的 `service=~"connector-gateway|llm-gateway"` 这类**枚举**会把
+      # 它们排除在外——南北入口出故障时没有任何规则会响，而抓取列表里看不出来。
+      - targets: [edge-gateway:8080]
+        labels: {service: edge-gateway}
+      - targets: [terminal-gateway:8090]
+        labels: {service: terminal-gateway}
+      # session-control 的名字**不**进 prometheus-alerts.yml 里那两张网关名单
+      # （它不是南北向入口，5xx 该落在 LumoService5xxRateHigh 那一档）。但它必须在这里：
+      # 不在抓取列表里 = 那两条非网关规则对它的 `service!~` 补集判定根本无序列可算。
+      - targets: [session-control:8092]
+        labels: {service: session-control}

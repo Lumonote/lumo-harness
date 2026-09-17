@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -48,20 +48,29 @@ describe('local desktop skill and expert assets', () => {
       content: '# Review\n\nCheck the campaign.',
     }, refresh)
     expect(created.status).toBe(201)
-    expect(readFileSync(join(root, 'skills', 'campaign-review', 'SKILL.md'), 'utf8')).toContain('name: campaign-review')
+    const skill = created.body as { id: string; name: string }
+    expect(skill.name).toBe('campaign-review')
+
+    // 落盘位置是 `<skillhubRoot>/lumo-local-<id>/SKILL.md`：目录名用随机 id 而不是用户
+    // 提供的名称，名称不参与路径拼接；正文没有 frontmatter 时由实现补一个
+    // `name: local-<id>`，运行时仍能把它当作可发现的技能。
+    const document = join(root, 'skills', `lumo-local-${skill.id}`, 'SKILL.md')
+    expect(readFileSync(document, 'utf8')).toContain(`name: local-${skill.id.toLowerCase()}`)
 
     const listed = await call('GET', '/lumo/api/governance')
     expect(listed.status).toBe(200)
-    expect(listed.body).toMatchObject({ local: true, catalog: { data: { skills: [{ id: 'campaign-review' }] } } })
+    expect(listed.body).toMatchObject({ local: true, catalog: { data: { skills: [{ id: skill.id }] } } })
 
-    const updated = await call('PATCH', '/lumo/api/governance/skills/campaign-review', {
+    const updated = await call('PATCH', `/lumo/api/governance/skills/${skill.id}`, {
       description: '检查发布计划与风险', content: '# Updated\n\nCheck risks.',
     }, refresh)
     expect(updated.status).toBe(200)
-    expect(readFileSync(join(root, 'skills', 'campaign-review', 'SKILL.md'), 'utf8')).toContain('Check risks.')
+    expect(readFileSync(document, 'utf8')).toContain('Check risks.')
 
-    expect((await call('DELETE', '/lumo/api/governance/skills/campaign-review', undefined, refresh)).status).toBe(204)
+    expect((await call('DELETE', `/lumo/api/governance/skills/${skill.id}`, undefined, refresh)).status).toBe(204)
     expect((await call('GET', '/lumo/api/governance')).body).toMatchObject({ catalog: { data: { skills: [] } } })
+    // 删除必须连带清掉运行时目录，否则运行时的文件系统 provider 会把已删技能重新发现。
+    expect(existsSync(join(root, 'skills', `lumo-local-${skill.id}`))).toBe(false)
     expect(refresh).toHaveBeenCalledTimes(3)
   })
 

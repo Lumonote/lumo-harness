@@ -155,6 +155,44 @@ describe('Lumo native Harness integration', () => {
           { name: 'ppt-master', description: '从主题、文档或现有模板生成、编辑和增强原生可编辑 PPTX。', whenToUse: '适用于演示文稿生成、模板填充和原生 PPTX 编辑。', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 'lumo-creative-skills' },
           { name: 'archify', description: '架构图与数据流的视觉化设计', invocation: { modelInvocable: true, userInvocable: true }, source: 'custom', provider: 'lumo-local-snapshot' },
         ] } :
+        // 协作空间的四个读面。夹具刻意让每一种**会被图读出来的差别**各出现一次：
+        // 一条员工上下游边、一个待审核、一个节点全离线的员工，以及一个有绑定与一个
+        // 没绑定的智能体——它们分别对应图上四种不同的画法。夹具是测试的输入，
+        // **不是实现的形状**：这四个响应就是服务端那四个面真实返回的子集。
+        path === '/lumo/api/users' ? { users: [
+          { id: 'emp-a', display_name: '陈晟', status: 'active' },
+          { id: 'emp-b', display_name: '林悦', status: 'active' },
+          { id: 'emp-c', display_name: '周宁', status: 'active' },
+          { id: 'emp-d', display_name: '陆言', status: 'active' },
+        ] } :
+        // 待审核压过节点离线，所以这两种状态必须落在**不同的人**身上，否则夹具会
+        // 只证明其中一条优先级——而这正是最容易写错的地方。
+        path === '/lumo/api/desktop-nodes' ? { nodes: [
+          { id: 'node-a', owner_user_id: 'emp-a', status: 'ONLINE' },
+          { id: 'node-b', owner_user_id: 'emp-b', status: 'ONLINE' },
+          { id: 'node-c1', owner_user_id: 'emp-c', status: 'OFFLINE' },
+          { id: 'node-c2', owner_user_id: 'emp-c', status: 'REVOKED' },
+          { id: 'node-d', owner_user_id: 'emp-d', status: 'ONLINE' },
+        ] } :
+        path === '/lumo/api/delegations' ? [
+          { id: 'task-1', title: '秋季新品发布', state: 'RUNNING', assignee_user_id: 'emp-a' },
+          { id: 'task-2', title: '产品方案与原型', state: 'RUNNING', assignee_user_id: 'emp-b', intent_contract: { parent_task_id: 'task-1' } },
+          { id: 'task-3', title: '发布内容准备', state: 'QUEUED', assignee_user_id: 'emp-c', intent_contract: { parent_task_id: 'task-2' } },
+          // 没有父任务：它不该产生边，但人要在图上。
+          { id: 'task-4', title: '前端页面开发', state: 'QUEUED', business_state: 'VERIFYING', assignee_user_id: 'emp-d' },
+        ] :
+        path === '/lumo/api/collaboration/teams' ? { teams: [{
+          id: 'team-1', name: '秋季新品发布', topology: 'pipeline',
+          members: [
+            { name: '规划 Agent', role: 'planner', status: 'working', ownerUserId: 'emp-b' },
+            { name: '没有归属的 Agent', status: 'idle' },
+          ],
+          tasks: [
+            { id: 't1', subject: '拆解需求', status: 'completed', assignee: '规划 Agent', dependencies: [] },
+            { id: 't2', subject: '出原型', status: 'pending', assignee: '规划 Agent', dependencies: ['t1'] },
+          ],
+          progress: { total: 2, pending: 1, active: 0, completed: 1, failed: 0, cancelled: 0, ready: [], blocked: ['t2'] },
+        }] } :
         path === '/lumo/api/governance' ? governance :
         init?.method === 'POST' && path === '/lumo/api/registry/plan' ? { root: 'sha256:plan-root', scopes: ['project:read'], shape: { olap: false, graph: false, vector: false, object: false, gpu: false }, items: [{
           name: 'release-flow', version: '1.2.0', kind: 'Flow', publisher: 'lumo-platform', digest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', scopes: ['project:read'],
@@ -202,8 +240,10 @@ describe('Lumo native Harness integration', () => {
 
     render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
     const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
+    // 协作空间在最前：它是这一组里唯一以「目标与协作」为入口的工作区，而侧边栏的顺序
+    // 就是产品的推荐顺序。
     expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual([
-      '资料库', '技能中心', '项目', '更多应用 · 灵感',
+      '协作空间', '资料库', '技能中心', '项目', '更多应用 · 灵感',
     ])
     expect(within(navigation).queryByRole('button', { name: '开放设计' })).toBeNull()
     expect(within(navigation).queryByRole('button', { name: 'PPT 生成' })).toBeNull()
@@ -287,6 +327,100 @@ describe('Lumo native Harness integration', () => {
 
     fireEvent.keyDown(window, { key: 'Escape' })
     await waitFor(() => expect(document.querySelector('.lumo-workbench')).toBeNull())
+  }, 15000)
+
+  // 视图层的渲染证据。规则本身由 collaboration-layout.spec.ts 钉住；这里钉的是另一半：
+  // **那些规则真的被画成了 DOM**。夹具是测试输入（见上面四个 mock），不是实现的形状。
+  it('把员工、上下游与智能体绑定画成节点与光轨', async () => {
+    const registered = mountLumo()
+    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
+    render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
+
+    const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
+    fireEvent.click(within(navigation).getByRole('button', { name: '协作空间' }))
+
+    // 查询限定在画布里：人名在右侧详情面板里也会出现（选中项），全屏查会命中两处。
+    await screen.findByText('林悦')
+    const stage = document.querySelector('.lumo-collaboration-stage') as HTMLElement
+    const node = (name: string) => within(stage).getByText(name).closest('.lumo-collaboration-node') as HTMLElement
+    const text = (name: string) => node(name).textContent ?? ''
+
+    // 四名员工都画出来了；两条委派折出一条上游边（task-4 没有父任务，不该多出边）。
+    for (const name of ['陈晟', '林悦', '周宁', '陆言']) expect(node(name)).toBeTruthy()
+    expect(document.querySelectorAll('.lumo-collaboration-node')).toHaveLength(4)
+    expect(document.querySelectorAll('.lumo-collaboration-rail')).toHaveLength(2)
+
+    // 智能体按 ownerUserId 挂到林悦名下；没有归属的那个进未绑定区，一个都不丢。
+    // 用正则：智能体片里还拼了它的工作状态（「规划 Agent · 工作中」）。
+    expect(within(node('林悦')).getByText(/规划 Agent/)).toBeTruthy()
+    expect(document.querySelectorAll('.lumo-collaboration-unbound')).toHaveLength(1)
+    expect(screen.getByText(/没有归属的 Agent/)).toBeTruthy()
+
+    // 三种状态在同一张图上各出现一次——这正是纯函数规则在真实渲染里的样子。
+    expect(text('陈晟')).toContain('执行中')
+    // 待审核压过离线，所以这两种状态由不同的人承担。
+    expect(text('周宁')).toContain('节点离线')
+    expect(text('陆言')).toContain('等待审核')
+    // 在线节点数是按人名下数的，不是全局的。
+    expect(text('周宁')).toContain('注册节点 0/2 在线')
+    expect(text('陈晟')).toContain('注册节点 1/1 在线')
+  }, 15000)
+
+  it('切到任务流向时画的是任务与依赖，卡住的那条边被标出来', async () => {
+    const registered = mountLumo()
+    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
+    render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
+
+    const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
+    fireEvent.click(within(navigation).getByRole('button', { name: '协作空间' }))
+    fireEvent.click(await screen.findByRole('tab', { name: '任务流向' }))
+
+    // 切过去之后画的是**任务**，不是员工。
+    expect(await screen.findByText('拆解需求')).toBeTruthy()
+    expect(await screen.findByText('出原型')).toBeTruthy()
+    expect(document.querySelectorAll('.lumo-collaboration-node.task')).toHaveLength(2)
+    expect(document.querySelectorAll('.lumo-collaboration-node:not(.task)')).toHaveLength(0)
+
+    // 依赖边只有一条（t1→t2），且因为 t2 在 progress.blocked 里而被标成阻塞。
+    const rails = document.querySelectorAll('.lumo-collaboration-rail')
+    expect(rails).toHaveLength(1)
+    expect(rails[0]?.classList.contains('blocked')).toBe(true)
+
+    // 「可认领」与「阻塞」来自 progress 的派生集合，不是状态字面量：两个任务都是
+    // 终态或 pending，而图上必须能分辨出哪个卡住了。
+    const board = document.querySelector('.lumo-collaboration')!.textContent ?? ''
+    expect(board).toContain('阻塞')
+    expect(screen.getByText('已完成')).toBeTruthy()
+    // 未指派的显示「待认领」，而不是空白。
+    expect(screen.getByText(/t1 · 规划 Agent/)).toBeTruthy()
+  }, 15000)
+
+  it('协作空间的目标输入把文字交给「项目」的表单，并且只交一次', async () => {
+    // 这条钉的是**只有一条创建路径**：协作空间不自己 POST 委派（那会让创建体有两份
+    // 会分叉的契约），而是把文字带过去。同时钉住「取用即清空」——否则手动进「项目」
+    // 会被上一次的目标污染，而那看起来像表单自己记住了什么。
+    const registered = mountLumo()
+    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
+    render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
+
+    const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
+    fireEvent.click(within(navigation).getByRole('button', { name: '协作空间' }))
+    const goal = await screen.findByLabelText('描述目标')
+    fireEvent.change(goal, { target: { value: '跟进华东客户的合同复核' } })
+    fireEvent.click(screen.getByRole('button', { name: '下达目标' }))
+
+    // 落到「项目」，工作意图已经填好。
+    expect(await screen.findByRole('heading', { name: '项目' })).toBeTruthy()
+    const intent = await screen.findByLabelText('工作意图')
+    expect((intent as HTMLTextAreaElement).value).toBe('跟进华东客户的合同复核')
+
+    // 再走一次「协作空间 → 项目」，这次没输入任何东西：意图不该被上一次的目标填上。
+    fireEvent.click(within(navigation).getByRole('button', { name: '协作空间' }))
+    fireEvent.click(await within(navigation).findByRole('button', { name: '项目' }))
+    expect((await screen.findByLabelText('工作意图') as HTMLTextAreaElement).value).toBe('')
   }, 15000)
 
   it('hides 项目/资料库/更多 in the local standalone sidebar', async () => {

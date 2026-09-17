@@ -7,63 +7,11 @@
  *    错判成安全的代价是数据外发，错判成危险的代价只是多一次人工确认。
  */
 import type { Provenance, ToolEffect } from '../../../shared/seam-contracts/provenance.ts'
+import { BUILTIN_EFFECT, BUILTIN_PROVENANCE } from '../../../shared/seam-contracts/tool-profiles.ts'
 
-/**
- * dsh 内置工具的默认来源档位。
- *
- * `read` / `grep` / `glob` / `ls` 暴露的是工作区字节或路径名。即使当前用户选择了
- * 项目，提交者、依赖下载、解压归档、协作者或攻击者仍可能写入其中；把它们标成
- * `internal` 会让恶意仓库文件在模型上下文中绕过能力封闭。故它们一律是 `external`：
- * 读取工作区后，同一 turn 的出平台写必须走人工确认。宁可增加一次确认，也不能把
- * 可写工作区伪装成平台受控数据。
- */
-export const BUILTIN_PROVENANCE: Readonly<Record<string, Provenance>> = Object.freeze({
-  // 工作区内容与路径名可由非受信方写入，见上文
-  read: 'external',
-  glob: 'external',
-  grep: 'external',
-  ls: 'external',
-
-  // 平台内受控数据：只有平台自己写得进去
-  todo_write: 'internal',
-  write: 'internal',
-  edit: 'internal',
-  multi_edit: 'internal',
-  notebook_edit: 'internal',
-
-  // 存在非受信撰写者
-  knowledge_query: 'external',
-  web_search: 'external',
-  web_fetch: 'external',
-
-  // 任意命令：产出内容完全不可控
-  bash: 'external',
-  pwsh: 'external',
-  subprocess: 'external',
-})
-
-/** dsh 内置工具的默认副作用等级 */
-export const BUILTIN_EFFECT: Readonly<Record<string, ToolEffect>> = Object.freeze({
-  read: 'read',
-  glob: 'read',
-  grep: 'read',
-  ls: 'read',
-  knowledge_query: 'read',
-  web_search: 'read',
-  web_fetch: 'read',
-
-  write: 'write-local',
-  edit: 'write-local',
-  multi_edit: 'write-local',
-  notebook_edit: 'write-local',
-  todo_write: 'write-local',
-  knowledge_publish: 'write-local',
-
-  // 可发起任意网络请求 —— 无法静态判断，fail closed
-  bash: 'write-external',
-  pwsh: 'write-external',
-  subprocess: 'write-external',
-})
+// 表体见 shared/seam-contracts/tool-profiles.ts —— 三列（来源 / 副作用 / 幂等）一行一个工具，
+// 与 recovery 插件共用同一份事实。这里再导出一次只是为了保持本插件的公共 API 不变。
+export { BUILTIN_EFFECT, BUILTIN_PROVENANCE }
 
 /** 前缀规则：连接器等统一前缀的工具批量声明 */
 export interface PrefixRule {

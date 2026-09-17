@@ -34,6 +34,18 @@ CREATE TABLE IF NOT EXISTS scheduler_leader_lease (
 INSERT INTO scheduler_leader_lease (id, holder, fencing_token, expires_at)
 SELECT 1, '', 0, 0 WHERE NOT EXISTS (SELECT 1 FROM scheduler_leader_lease WHERE id = 1);
 
+-- 集群作用域的本地租约：全局调度不可用时，每个集群仍要有一个（且只有一个）本地决策者。
+-- 独立成表而不是给上面那张加一个维度：那张表的 id 是整数且被 CHECK 钉死为 1，改类型要在
+-- 已上线的表上做迁移；而两把锁的语义本就不同（跨集群唯一 vs 本集群唯一），放进一张表会让
+-- 「哪些行算 leader」变成一个需要解释的问题。
+-- cluster_id 做主键 → 一个集群至多一个本地决策者；不同集群互不相干，这正是它存在的意义。
+CREATE TABLE IF NOT EXISTS scheduler_cluster_lease (
+  cluster_id    TEXT    PRIMARY KEY,
+  holder        TEXT    NOT NULL,
+  fencing_token BIGINT  NOT NULL,
+  expires_at    BIGINT  NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS scheduler_nodes (
   node_id       TEXT    PRIMARY KEY,
   realm         TEXT    NOT NULL DEFAULT '',
@@ -67,6 +79,18 @@ CREATE TABLE IF NOT EXISTS scheduler_tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_pending
   ON scheduler_tasks (priority DESC, created_at) WHERE state = 'PENDING';
 
+-- EDF 排序的支撑索引。上面的 idx_tasks_pending 是 (priority DESC, created_at)，
+-- 不含 deadline_ms，服务不了 store.go 里那条按
+-- 「CASE WHEN deadline_ms = 0 THEN 1 ELSE 0 END, deadline_ms, priority DESC, created_at」
+-- 排序的取任务查询。
+-- 这一条此前只在 deploy/migrations/003_scheduler_fairness.sql 里 —— 而没有任何
+-- Compose 文件跑 migrate.sh，所以只走服务自带 DDL 的部署**根本没有这个索引**，
+-- 每次 EDF 取任务都退化成全表扫。语句与 003 逐字相同（漂移由
+-- shared/__tests__/ddl-ownership.spec.ts 的迁移↔服务收敛用例看守）。
+CREATE INDEX IF NOT EXISTS idx_scheduler_tasks_pending_edf
+  ON scheduler_tasks (deadline_ms, priority DESC, created_at)
+  WHERE state = 'PENDING';
+
 CREATE TABLE IF NOT EXISTS scheduler_dispatch_outbox (
   id         BIGSERIAL PRIMARY KEY,
   task_id    TEXT    NOT NULL,
@@ -90,9 +114,40 @@ ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS weight INTEGER NOT NULL DEF
 ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS avoid_nodes TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS worker_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS project_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS preferred_clusters TEXT NOT NULL DEFAULT '[]';
 
 CREATE INDEX IF NOT EXISTS idx_outbox_pending
   ON scheduler_dispatch_outbox (node_id, id) WHERE claimed_by IS NULL AND delivered_at IS NULL;
+
+-- 联邦注册表（§7.4.1）。集群以 cluster_id 注册（声明存在）+ 周期性自报（证明还活着）。
+--
+-- **没有 state 列，这是刻意的。** 上报方只能声明「我还活着」，无法声明自己「可疑」
+-- 或「下线」；状态一律由 last_seen_at 的**年龄**派生（domain.EvaluateCluster）。
+-- 加一个 state 列就会让它有两个写入方（上报方写 healthy、判定方写 down），
+-- 谁后写谁赢，而「谁后写」在各副本上并不一致。
+--
+-- 与 lumo_service_heartbeats（heartbeat 包）刻意分开：那张表的语义是「控制面**服务
+-- 实例**存活」，governance 用它求值就绪门禁；把「集群」塞进去等于让一个字段承担两个
+-- 语义——正是 E4/D6 刚花一轮拆开的东西。
+CREATE TABLE IF NOT EXISTS scheduler_clusters (
+  cluster_id    TEXT   PRIMARY KEY,
+  realm         TEXT   NOT NULL DEFAULT '',
+  namespace     TEXT   NOT NULL DEFAULT '',
+  capabilities  TEXT   NOT NULL DEFAULT '[]',  -- JSON 数组文本（payload 类列一律 TEXT）
+  version       TEXT   NOT NULL DEFAULT '',
+  registered_at BIGINT NOT NULL,               -- 首次注册，库端时钟
+  last_seen_at  BIGINT NOT NULL                -- 每次自报刷新，库端时钟
+);
+
+-- 「这条元数据**被声明过**」的显式标记。与值分开存，理由写在 domain.Cluster 上：
+-- 元数据列的口径是「省略即保持原值」，于是「声明了一个空能力集」与「根本没声明」
+-- 在协议上都是缺席——不可区分。两者处置相反，所以必须能分开。
+--
+-- **只有 capabilities 需要它，version 不需要。** 判据是「空值是不是一种有意义的
+-- 声明」：空能力集是（这个集群没有 GPU），空版本号不是。「说没说版本」于是等价于
+-- 「version 列非空」，多存一列反而制造出第二个真值源——第一版就这么错过一次，
+-- 详见 domain.Cluster.Version 的注释。
+ALTER TABLE scheduler_clusters ADD COLUMN IF NOT EXISTS capabilities_declared BOOLEAN NOT NULL DEFAULT false;
 
 -- 对账账本（降级占位语义：只接收 + 去重 + 落账）
 CREATE TABLE IF NOT EXISTS scheduler_reconcile_ledger (
@@ -114,6 +169,55 @@ CREATE TABLE IF NOT EXISTS scheduler_task_attempts (
   updated_at    BIGINT NOT NULL,
   PRIMARY KEY (task_id, attempt)
 );
+
+-- 死信台账：平台主动放弃一个任务的记录。只增不改。
+--
+-- 为什么不只把 state 改成 FAILED 就算完：那样它与「节点如实回报失败」在库里
+-- 完全一样，运维事后分不出「谁放弃了、依据什么」。判据里的节点、停滞时长与
+-- 决策当时的目录快照年龄一并落库，是为了让这个决定可复核——它是在证据不充分
+-- 时做出的（节点只是不在目录里，不是被证明已死）。
+CREATE TABLE IF NOT EXISTS scheduler_dead_letters (
+  task_id     TEXT   NOT NULL,
+  attempt     INTEGER NOT NULL,
+  realm       TEXT   NOT NULL,
+  cluster_id  TEXT   NOT NULL,
+  node_id     TEXT   NOT NULL,
+  reason      TEXT   NOT NULL,
+  stalled_ms  BIGINT NOT NULL,
+  snapshot_ms BIGINT NOT NULL,
+  recorded_at BIGINT NOT NULL,
+  PRIMARY KEY (task_id, attempt)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dead_letters_recorded
+  ON scheduler_dead_letters (recorded_at);
+
+-- 跨集群任务漂移台账：集群 down 之后把它的任务漂回全局队列的记录。只增不改。
+--
+-- 与 scheduler_dead_letters 的关键差别：死信是**终态**（平台放弃了这个任务），
+-- 漂移不是——任务随后会被重新放置、开新 attempt，最终仍可能成功。所以这里回答的
+-- 是「它从哪来、当时依据什么」，而不是「它为什么结束」。
+--
+-- from_cluster_id 尤其不能省：漂移会把 scheduler_tasks.cluster_id 清空（退回
+-- 「任意集群」的退化形态，见 store.MigrateTask），于是**库里再也看不出它原来属于
+-- 哪个集群**。事后追问「这批任务为什么跑到别的集群去了」只能靠这张表。
+--
+-- 主键含 attempt：同一个任务可能被漂移多次（每次都是新的一代）。
+CREATE TABLE IF NOT EXISTS scheduler_task_migrations (
+  task_id         TEXT   NOT NULL,
+  attempt         INTEGER NOT NULL,
+  realm           TEXT   NOT NULL,
+  from_cluster_id TEXT   NOT NULL,
+  from_node_id    TEXT   NOT NULL,
+  reason          TEXT   NOT NULL,
+  cluster_age_ms  BIGINT NOT NULL,
+  snapshot_ms     BIGINT NOT NULL,
+  recorded_at     BIGINT NOT NULL,
+  PRIMARY KEY (task_id, attempt)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_migrations_recorded
+  ON scheduler_task_migrations (recorded_at);
 
 -- Durable control-plane intent. The execution RPC is a delivery attempt, not
 -- the source of truth: retries and failures remain observable after a node or
@@ -219,6 +323,54 @@ func (s *Store) Acquire(ctx context.Context, holder string, ttlMs int64) (*domai
 	return &l, nil
 }
 
+// AcquireCluster 取**本集群**的本地租约——全局调度不可用时的降级决策者。
+//
+// 与全局租约同一条语句、同一套不变式（续租不换 token、易主才 +1、一律库端时钟），
+// 只是键换成 cluster_id、落在独立的一张表上。
+//
+// 为什么降级需要它：没有这把锁就放行，等于「同一集群可能同时有多个实例各自放置」——
+// 而「同一集群只有一个决策者」正是围栏要保护的东西。**降级是换一把更小的锁，不是把锁拿掉。**
+func (s *Store) AcquireCluster(ctx context.Context, clusterID, holder string, ttlMs int64) (*domain.Lease, error) {
+	if clusterID == "" {
+		// 空 cluster_id 会造出一把「所有没有身份的实例」共用的锁：它们会互相认为自己是
+		// 同一个集群的决策者。调用方应先确认自己有集群身份。
+		return nil, domain.ErrNotAcquired
+	}
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO scheduler_cluster_lease (cluster_id, holder, fencing_token, expires_at)
+		VALUES ($1, $2, 1, `+nowMS+` + $3)
+		ON CONFLICT (cluster_id) DO UPDATE SET
+			holder = EXCLUDED.holder,
+			fencing_token = CASE WHEN scheduler_cluster_lease.holder = EXCLUDED.holder
+				THEN scheduler_cluster_lease.fencing_token
+				ELSE scheduler_cluster_lease.fencing_token + 1 END,
+			expires_at = EXCLUDED.expires_at
+		WHERE scheduler_cluster_lease.holder = EXCLUDED.holder
+		   OR scheduler_cluster_lease.expires_at < `+nowMS+`
+		RETURNING holder, fencing_token, expires_at`,
+		clusterID, holder, ttlMs)
+	var l domain.Lease
+	if err := row.Scan(&l.Holder, &l.FencingToken, &l.ExpiresAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrNotAcquired
+		}
+		return nil, fmt.Errorf("scheduler: acquire cluster lease 失败: %w", err)
+	}
+	// 作用域随租约一起带出：checkFencing 靠它选表，调用方无需（也无法）另行声明。
+	l.Scope = clusterID
+	return &l, nil
+}
+
+// ReleaseCluster 与 Release 同理：置过期而非删行，token 高水位不回落。
+func (s *Store) ReleaseCluster(ctx context.Context, clusterID, holder string) error {
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE scheduler_cluster_lease SET expires_at = 0
+		WHERE cluster_id = $1 AND holder = $2`, clusterID, holder); err != nil {
+		return fmt.Errorf("scheduler: release cluster lease 失败: %w", err)
+	}
+	return nil
+}
+
 // Release 令租约立即过期而非删行：token 高水位不回落，删行会让下一个
 // 持有者从 1 重新开始，旧持有者的过期令牌反而「复活」（spec §3 不变式 3）。
 func (s *Store) Release(ctx context.Context, holder string) error {
@@ -247,11 +399,21 @@ func (s *Store) CurrentLease(ctx context.Context) (*domain.Lease, error) {
 // checkFencing 校验本节点仍是当前代 leader：holder、token、租约未过期三者全对。
 // FOR UPDATE 锁租约行——同时把并发放置串行化（槽位闸无竞态的前提，spec §4）。
 func checkFencing(ctx context.Context, tx pgx.Tx, lease *domain.Lease) error {
+	// 按租约**自带的**作用域选表，而不是由调用方另行告知。让调用方传「这是哪把锁」，
+	// 两处就都有机会说错，而说错的后果是拿一把锁的 token 去校验另一把锁——围栏静默失效，
+	// 且两种锁各自的用例仍然全绿。所以交叉反例（全局租约过不了集群表）是本设计里
+	// 最重要的一条测试。
+	table, where := "scheduler_leader_lease", "id = 1"
+	args := []any{lease.Holder}
+	if lease.Scope != "" {
+		table, where = "scheduler_cluster_lease", "cluster_id = $2"
+		args = append(args, lease.Scope)
+	}
 	var token int64
 	err := tx.QueryRow(ctx, `
-		SELECT fencing_token FROM scheduler_leader_lease
-		WHERE id = 1 AND holder = $1 AND expires_at > `+nowMS+`
-		FOR UPDATE`, lease.Holder).Scan(&token)
+		SELECT fencing_token FROM `+table+`
+		WHERE `+where+` AND holder = $1 AND expires_at > `+nowMS+`
+		FOR UPDATE`, args...).Scan(&token)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// holder 已易主，或租约已过期（此刻任何人可接管，本节点已无排他性）
 		return &domain.FencedOutError{Token: lease.FencingToken}
@@ -340,18 +502,23 @@ func (s *Store) PlaceTask(ctx context.Context, lease *domain.Lease, task domain.
 	if err != nil {
 		return domain.Placement{}, fmt.Errorf("scheduler: 序列化反亲和节点失败: %w", err)
 	}
+	preferredJSON, err := json.Marshal(task.PreferredClusters)
+	if err != nil {
+		return domain.Placement{}, fmt.Errorf("scheduler: 序列化集群偏好失败: %w", err)
+	}
 	queue, weight := normalizedQueue(task)
 	if _, err := tx.Exec(ctx, `
 			INSERT INTO scheduler_tasks
-				(task_id, realm, cluster_id, requires, priority, residency, deadline_ms, queue, weight, avoid_nodes, state, attempt, node_id, fencing_token, created_at, updated_at, worker_id, project_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PLACED', $11, $12, $13, `+nowMS+`, `+nowMS+`, $14, $15)
+				(task_id, realm, cluster_id, requires, priority, residency, deadline_ms, queue, weight, avoid_nodes, state, attempt, node_id, fencing_token, created_at, updated_at, worker_id, project_id, preferred_clusters)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PLACED', $11, $12, $13, `+nowMS+`, `+nowMS+`, $14, $15, $16)
 			ON CONFLICT (task_id) DO UPDATE SET
 				state = 'PLACED', attempt = $11, node_id = $12,
 				fencing_token = $13, requires = $4, residency = $6, deadline_ms = $7,
 				queue = $8, weight = $9, avoid_nodes = $10, worker_id = $14, project_id = $15,
+				preferred_clusters = $16,
 				cluster_id = $3, priority = $5, updated_at = `+nowMS+``,
 		task.TaskID, task.Realm, task.ClusterID, string(requiresJSON), task.Priority,
-		task.Residency, task.DeadlineMS, queue, weight, string(avoidNodesJSON), attempt, nodeID, lease.FencingToken, task.WorkerID, task.ProjectID); err != nil {
+		task.Residency, task.DeadlineMS, queue, weight, string(avoidNodesJSON), attempt, nodeID, lease.FencingToken, task.WorkerID, task.ProjectID, string(preferredJSON)); err != nil {
 		return domain.Placement{}, fmt.Errorf("scheduler: 写任务失败: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -409,6 +576,10 @@ func (s *Store) QueueTask(ctx context.Context, lease *domain.Lease, task domain.
 	if err != nil {
 		return "", fmt.Errorf("scheduler: 序列化反亲和节点失败: %w", err)
 	}
+	preferredJSON, err := json.Marshal(task.PreferredClusters)
+	if err != nil {
+		return "", fmt.Errorf("scheduler: 序列化集群偏好失败: %w", err)
+	}
 	queue, weight := normalizedQueue(task)
 
 	var state string
@@ -425,9 +596,10 @@ func (s *Store) QueueTask(ctx context.Context, lease *domain.Lease, task domain.
 				UPDATE scheduler_tasks SET state = 'PENDING', requires = $2, priority = $3,
 					residency = $4, deadline_ms = $5, queue = $6, weight = $7, avoid_nodes = $8,
 					worker_id = $9, project_id = $10, cluster_id = $11, node_id = NULL,
+					preferred_clusters = $12,
 					updated_at = `+nowMS+`
 				WHERE task_id = $1`, task.TaskID, string(requiresJSON), task.Priority,
-				task.Residency, task.DeadlineMS, queue, weight, string(avoidNodesJSON), task.WorkerID, task.ProjectID, task.ClusterID); err != nil {
+				task.Residency, task.DeadlineMS, queue, weight, string(avoidNodesJSON), task.WorkerID, task.ProjectID, task.ClusterID, string(preferredJSON)); err != nil {
 				return "", fmt.Errorf("scheduler: 重置排队失败: %w", err)
 			}
 			state = string(domain.StatePending)
@@ -443,9 +615,9 @@ func (s *Store) QueueTask(ctx context.Context, lease *domain.Lease, task domain.
 
 	if _, err := tx.Exec(ctx, `
 			INSERT INTO scheduler_tasks
-			(task_id, realm, cluster_id, requires, priority, residency, deadline_ms, queue, weight, avoid_nodes, state, attempt, fencing_token, created_at, updated_at, worker_id, project_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING', 0, $11, `+nowMS+`, `+nowMS+`, $12, $13)`,
-		task.TaskID, task.Realm, task.ClusterID, string(requiresJSON), task.Priority, task.Residency, task.DeadlineMS, queue, weight, string(avoidNodesJSON), lease.FencingToken, task.WorkerID, task.ProjectID); err != nil {
+			(task_id, realm, cluster_id, requires, priority, residency, deadline_ms, queue, weight, avoid_nodes, state, attempt, fencing_token, created_at, updated_at, worker_id, project_id, preferred_clusters)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PENDING', 0, $11, `+nowMS+`, `+nowMS+`, $12, $13, $14)`,
+		task.TaskID, task.Realm, task.ClusterID, string(requiresJSON), task.Priority, task.Residency, task.DeadlineMS, queue, weight, string(avoidNodesJSON), lease.FencingToken, task.WorkerID, task.ProjectID, string(preferredJSON)); err != nil {
 		return "", fmt.Errorf("scheduler: 写排队任务失败: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -715,7 +887,7 @@ func (s *Store) GetPlacement(ctx context.Context, taskID string) (domain.Placeme
 // PendingTasks 供 drain loop 取排队任务（priority 高者先，同优先级先到先得）。
 func (s *Store) PendingTasks(ctx context.Context, limit int) ([]domain.Task, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT task_id, realm, cluster_id, requires, priority, residency, deadline_ms, queue, weight, avoid_nodes, created_at, worker_id, project_id FROM scheduler_tasks
+		SELECT task_id, realm, cluster_id, requires, priority, residency, deadline_ms, queue, weight, avoid_nodes, created_at, worker_id, project_id, preferred_clusters FROM scheduler_tasks
 		WHERE state = 'PENDING' ORDER BY CASE WHEN deadline_ms = 0 THEN 1 ELSE 0 END, deadline_ms, priority DESC, created_at LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("scheduler: 取排队任务失败: %w", err)
@@ -726,8 +898,9 @@ func (s *Store) PendingTasks(ctx context.Context, limit int) ([]domain.Task, err
 		var t domain.Task
 		var requires string
 		var avoidNodes string
+		var preferred string
 		var enqueuedAtMS int64
-		if err := rows.Scan(&t.TaskID, &t.Realm, &t.ClusterID, &requires, &t.Priority, &t.Residency, &t.DeadlineMS, &t.Queue, &t.Weight, &avoidNodes, &enqueuedAtMS, &t.WorkerID, &t.ProjectID); err != nil {
+		if err := rows.Scan(&t.TaskID, &t.Realm, &t.ClusterID, &requires, &t.Priority, &t.Residency, &t.DeadlineMS, &t.Queue, &t.Weight, &avoidNodes, &enqueuedAtMS, &t.WorkerID, &t.ProjectID, &preferred); err != nil {
 			return nil, fmt.Errorf("scheduler: 扫描排队任务失败: %w", err)
 		}
 		t.EnqueuedAt = time.UnixMilli(enqueuedAtMS)
@@ -736,6 +909,9 @@ func (s *Store) PendingTasks(ctx context.Context, limit int) ([]domain.Task, err
 		}
 		if err := json.Unmarshal([]byte(avoidNodes), &t.AvoidNodes); err != nil {
 			return nil, fmt.Errorf("scheduler: 解析反亲和节点失败: %w", err)
+		}
+		if err := json.Unmarshal([]byte(preferred), &t.PreferredClusters); err != nil {
+			return nil, fmt.Errorf("scheduler: 解析集群偏好失败: %w", err)
 		}
 		out = append(out, t)
 	}
@@ -781,6 +957,126 @@ func (s *Store) ActiveCounts(ctx context.Context) (map[string]int, error) {
 			return nil, fmt.Errorf("scheduler: 扫描活跃计数失败: %w", err)
 		}
 		out[id] = n
+	}
+	return out, rows.Err()
+}
+
+// ActiveClusterCountsByProjects 按项目统计各集群上的活跃任务数（会话/项目亲和的输入）。
+//
+// 一次查一批项目而不是逐任务查：drain 循环一轮最多取 32 个 PENDING 任务，逐任务查
+// 会把一轮变成 32 次往返，而它们之间本来只需要一条 `= ANY($2)`。
+//
+// 只统计**活跃**状态（PLACED / RUNNING / CANCELLING），与 ActiveCounts 同源：
+// 亲和要回答的是「这个项目的工作现在实际跑在哪」，把已完成的历史算进来会让一个
+// 很久以前在某集群跑过活的项目永远偏好那个集群。
+//
+// 空 projectIDs 直接返回空 map 而不查库：调用方（放置路径）在没有项目归属时
+// 不该产生任何额外往返。
+func (s *Store) ActiveClusterCountsByProjects(ctx context.Context, realm string, projectIDs []string) (map[string]map[string]int, error) {
+	out := make(map[string]map[string]int, len(projectIDs))
+	if len(projectIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT project_id, cluster_id, count(*) FROM scheduler_tasks
+		WHERE realm = $1 AND project_id = ANY($2) AND state IN ('PLACED', 'RUNNING', 'CANCELLING')
+		GROUP BY project_id, cluster_id`, realm, projectIDs)
+	if err != nil {
+		return nil, fmt.Errorf("scheduler: 项目集群活跃计数失败: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var projectID, clusterID string
+		var n int
+		if err := rows.Scan(&projectID, &clusterID, &n); err != nil {
+			return nil, fmt.Errorf("scheduler: 扫描项目集群活跃计数失败: %w", err)
+		}
+		if out[projectID] == nil {
+			out[projectID] = make(map[string]int)
+		}
+		out[projectID][clusterID] = n
+	}
+	return out, rows.Err()
+}
+
+// TaskStateCount 非终态任务数的一行。
+type TaskStateCount struct {
+	State     string
+	ClusterID string
+	Count     int64
+}
+
+// TerminalStates 终态集合，取自 domain 常量而不是 SQL 字面量。
+//
+// 写成 Go 常量而不是把 'COMPLETED' 埋进 SQL 字符串，是因为状态改名时编译器会
+// 报错；埋进字符串只会静默失配，统计口径悄悄变化却没有任何提示。真正的兜底是
+// server 侧那条「domain 里的每个状态都被分类」的用例。
+func TerminalStates() []string {
+	return []string{
+		string(domain.StateCompleted), string(domain.StateFailed), string(domain.StateAborted),
+	}
+}
+
+// NonTerminalStateCounts 非终态任务数，按 (state, cluster_id) 分组。
+//
+// **刻意不统计终态。** 终态行只增不减，全表 GROUP BY 的代价随历史线性增长，
+// 而它对告警没有任何可操作性：没有人会因为「上周完成了 40 万个任务」被叫起来。
+// 非终态集合天然有界（等于当前活着的任务数），因此这条查询可以随抓取周期
+// 反复执行。终态量要统计就该走归档表，而不是让抓取路径去扫主表。
+//
+// 条件是「不是终态」而不是「是某几个已知非终态」：库里出现一个本层没登记的状态
+// 时，前者仍然把它算进来（可见），后者会让它连一条序列都不产生（不可见）。
+//
+// PENDING 命中 idx_tasks_pending 的偏索引；活跃态走的是小集合，不额外建索引。
+func (s *Store) NonTerminalStateCounts(ctx context.Context) ([]TaskStateCount, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT state, cluster_id, count(*)::bigint FROM scheduler_tasks
+		WHERE state <> ALL($1)
+		GROUP BY state, cluster_id`, TerminalStates())
+	if err != nil {
+		return nil, fmt.Errorf("scheduler: 统计非终态任务失败: %w", err)
+	}
+	defer rows.Close()
+	var out []TaskStateCount
+	for rows.Next() {
+		var row TaskStateCount
+		if err := rows.Scan(&row.State, &row.ClusterID, &row.Count); err != nil {
+			return nil, fmt.Errorf("scheduler: 扫描非终态任务失败: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// PendingWait 某集群最久排队时长。
+type PendingWait struct {
+	ClusterID string
+	Seconds   float64
+}
+
+// OldestPendingByCluster 每个集群最早排队任务的等待秒数。
+//
+// 用 max(now - created_at) 而不是 count：队列长但流转快不是问题，队列里躺着
+// 一个 20 分钟没动过的任务才是。等待时长同时是 EDF 排序的输入（created_at 是
+// 入队时刻，与 deadline 无关），所以它度量的是「有没有人卡住」。
+//
+// 时刻一律取自库端 now()：各副本本地时钟不一致时，节点本地时间算出的等待
+// 时长会随抓取方漂移，同一队列在不同副本上读数不同。
+func (s *Store) OldestPendingByCluster(ctx context.Context) ([]PendingWait, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT cluster_id, max((EXTRACT(EPOCH FROM now()) - created_at / 1000.0))::float8
+		FROM scheduler_tasks WHERE state = 'PENDING' GROUP BY cluster_id`)
+	if err != nil {
+		return nil, fmt.Errorf("scheduler: 统计排队时长失败: %w", err)
+	}
+	defer rows.Close()
+	var out []PendingWait
+	for rows.Next() {
+		var row PendingWait
+		if err := rows.Scan(&row.ClusterID, &row.Seconds); err != nil {
+			return nil, fmt.Errorf("scheduler: 扫描排队时长失败: %w", err)
+		}
+		out = append(out, row)
 	}
 	return out, rows.Err()
 }

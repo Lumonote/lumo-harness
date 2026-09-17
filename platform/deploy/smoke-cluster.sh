@@ -90,14 +90,16 @@ wait_http() {
   local url="$2"
   local auth="${3:-no}"
   local attempt
+  # `--noproxy '*'` 的理由同 probe_once：这些都是 127.0.0.1 上的探测，走代理会把
+  # 「服务不在」变成代理的 502，于是 wait_http 报出的失败与真实原因无关。
   for attempt in $(seq 1 30); do
     if [[ "$auth" == "yes" ]]; then
-      if curl --fail --silent --show-error --max-time 3 \
+      if curl --noproxy '*' --fail --silent --show-error --max-time 3 \
         -H "Authorization: Bearer $control_plane_token" "$url" >/dev/null; then
         echo "smoke: $name ok"
         return
       fi
-    elif curl --fail --silent --show-error --max-time 3 "$url" >/dev/null; then
+    elif curl --noproxy '*' --fail --silent --show-error --max-time 3 "$url" >/dev/null; then
       echo "smoke: $name ok"
       return
     fi
@@ -107,18 +109,47 @@ wait_http() {
   return 1
 }
 
-wait_http "scheduler-0 health" "http://127.0.0.1:18083/healthz"
-wait_http "scheduler-1 health" "http://127.0.0.1:18093/healthz"
+# ---------------------------------------------------------------------------
+# 控制面存活探针：**从拓扑派生**，不手写
+# ---------------------------------------------------------------------------
+#
+# 这份名单此前是手写的 10 行，而拓扑里有 13 个控制面服务 —— `edge-gateway`（18080）、
+# `terminal-gateway`（18091）、`session-control`（18092）三个服务没有任何存活探针。
+# 后果不是「少查三条」：这三个容器里的任何一个启动即崩，本脚本照样打印
+# 「cluster acceptance passed」——探针缺失与探针通过，在退出码上是同一件事。
+# 这正是一条**部署级**探针本该抓住而没抓住的东西（C5 的 OPA 绑定地址缺陷就是同类：
+# 服务进程在、配置错，静态门禁全绿，只有真集群探针能看见）。
+#
+# 现在探针集合由 `lib/probes.sh` 从 compose 文本算出：新增一个控制面服务会
+# 自动多一条探针，**漏掉它反而会红**。`probe-coverage-verify.sh` 把这条派生与写死的
+# 期望值对照，所以拓扑变了会强制一次显式的确认。
+#
+# 失败文案必须把「服务不在」与「服务在但答错」分开：两者的处置完全不同（前者去看
+# 容器起没起来 / 端口发没发布，后者去看它自己的日志），而 `curl --fail` 把两者都归成
+# 一个「失败」。`probe_once` / `wait_healthz` / `classify_probe` 都在 lib 里，`probes-cluster.sh`
+# 用同一份——两份实现迟早会在「哪种失败算哪种」上分叉。
+source "$script_dir/lib/probes.sh"
+
+probe_targets="$(derive_probe_targets "$script_dir/compose.cluster.yml")"
+probe_count=0
+while IFS=$'\t' read -r probe_service probe_host probe_container; do
+  [[ -n "$probe_service" ]] || continue
+  if [[ -z "$probe_host" ]]; then
+    echo "smoke: FAIL: ${probe_service}（容器端口 ${probe_container}）的宿主端口静态判定不了" \
+      "—— 探针无法构造。写成不带默认值的变量时，请显式给它一个默认值或钉死端口。" >&2
+    exit 1
+  fi
+  wait_healthz "$probe_service" "$probe_host"
+  probe_count=$((probe_count + 1))
+done <<< "$probe_targets"
+if (( probe_count == 0 )); then
+  echo "smoke: FAIL: 一条控制面探针都没构造出来（派生失效？）" >&2
+  exit 1
+fi
+echo "smoke: 控制面存活探针 ${probe_count} 条（从拓扑派生）"
+
 wait_http "scheduler leader" "http://127.0.0.1:18083/v1/leader" yes
 wait_http "scheduler nodes" "http://127.0.0.1:18083/v1/nodes" yes
-wait_http "collaborator health" "http://127.0.0.1:18081/healthz"
-wait_http "connector gateway health" "http://127.0.0.1:18082/healthz"
-wait_http "registry health" "http://127.0.0.1:18084/healthz"
-wait_http "usage ledger health" "http://127.0.0.1:18085/healthz"
-wait_http "projects health" "http://127.0.0.1:18086/healthz"
-wait_http "flows health" "http://127.0.0.1:18087/healthz"
-wait_http "LLM gateway health" "http://127.0.0.1:18088/healthz"
-wait_http "governance health" "http://127.0.0.1:18089/healthz"
 wait_http "DSH web" "http://127.0.0.1:${LUMO_CONSOLE_PORT:-4173}/"
 wait_http "Prometheus ready" "http://127.0.0.1:${LUMO_PROMETHEUS_PORT:-9090}/-/ready"
 

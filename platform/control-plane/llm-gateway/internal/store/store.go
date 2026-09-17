@@ -27,18 +27,25 @@ CREATE TABLE IF NOT EXISTS llm_providers (
   price_in_per_mtok  NUMERIC(20,6) NOT NULL DEFAULT 0,
   price_out_per_mtok NUMERIC(20,6) NOT NULL DEFAULT 0,
   enabled            BOOLEAN NOT NULL DEFAULT true,
-  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+`
+
+// ddlUpgrade 对**已存在**的表补列。CREATE TABLE IF NOT EXISTS 对已有表什么都不做，
+// 所以列只能靠 ALTER 补上——与 deploy/migrations 里 004 的做法同一套理由。
+const ddlUpgrade = `
+ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
 `
 
 var ErrUnknownModel = errors.New("未知或已停用的模型")
 
 // Provider 一个对外模型的路由与费率。
 type Provider struct {
-	Model          string  `json:"model"`
-	UpstreamBaseURL string `json:"upstreamBaseUrl"`
-	APIKey         string  `json:"-"`
-	PriceInPerMtok float64 `json:"priceInPerMtok"`
+	Model           string  `json:"model"`
+	UpstreamBaseURL string  `json:"upstreamBaseUrl"`
+	APIKey          string  `json:"-"`
+	PriceInPerMtok  float64 `json:"priceInPerMtok"`
 	PriceOutPerMtok float64 `json:"priceOutPerMtok"`
 }
 
@@ -56,6 +63,9 @@ func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 func (s *Store) Init(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, DDL); err != nil {
 		return fmt.Errorf("建 llm_providers 失败: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, ddlUpgrade); err != nil {
+		return fmt.Errorf("升级 llm_providers 失败: %w", err)
 	}
 	return nil
 }

@@ -4,7 +4,34 @@ global:
 rule_files:
   - /etc/prometheus/lumo-alerts.yml
 scrape_configs:
+  # 与 prometheus.yml 同构，只少一个 collaborator 副本（standalone 单实例）。
+  # service 标签的作用与理由见 prometheus.yml 的注释。
   - job_name: lumo-control-plane
     metrics_path: /metrics
     static_configs:
-      - targets: [collaborator:8081, scheduler-0:8083, registry:8084, connector-gateway:8082, llm-gateway:8088, flows:8087, projects:8086, usage-ledger:8085, governance:8089]
+      - targets: [collaborator:8081]
+        labels: {service: collaborator}
+      - targets: [scheduler-0:8083]
+        labels: {service: scheduler}
+      - targets: [registry:8084]
+        labels: {service: registry}
+      - targets: [connector-gateway:8082]
+        labels: {service: connector-gateway}
+      - targets: [llm-gateway:8088]
+        labels: {service: llm-gateway}
+      - targets: [flows:8087]
+        labels: {service: flows}
+      - targets: [projects:8086]
+        labels: {service: projects}
+      - targets: [usage-ledger:8085]
+        labels: {service: usage-ledger}
+      - targets: [governance:8089]
+        labels: {service: governance}
+      # 与 prometheus.yml 保持同构：两个新网关也要在这里。少一处就会出现
+      # 「拓扑 A 有告警、拓扑 B 没有」这种只在某种部署里才暴露的盲区。
+      - targets: [edge-gateway:8080]
+        labels: {service: edge-gateway}
+      - targets: [terminal-gateway:8090]
+        labels: {service: terminal-gateway}
+      - targets: [session-control:8092]
+        labels: {service: session-control}

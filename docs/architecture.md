@@ -361,7 +361,7 @@ spec:
 |--------------|------|------|
 | Registry 元数据 / 权限 / realm | **PostgreSQL** | 强一致、关系建模 |
 | Usage Ledger（明细/计费） | **PostgreSQL** | 计费需准确事务 |
-| Usage Ledger（分析看板） | **Doris** | 海量用量 OLAP |
+| Usage Ledger（分析看板） | **PG 台账直查** | 日粒度分组下推到 PG；台账到千万级前不引入第二引擎 |
 | SessionEvent 日志（热/冷） | **Redis / Doris + MinIO** | 低延迟 replay + 列存检索 + 廉价冷归档 |
 | agentTeams / goals（热/冷） | **Redis / PostgreSQL** | 协同低延迟 + 持久 |
 | 知识库图层级 / 血缘 | **Nebula Graph** | 关系遍历 |
@@ -587,7 +587,7 @@ manifest 格式为 JSON 而非 YAML：签名覆盖的是上传的原始字节，
 
 ### 6.4 计量 UsageLedger（Token 计数 · 归因 · 配额）
 
-> 所有 token 消耗**只在 `ctx.llm` 网关这一道截面被计量**；每笔消耗带从 request 透传到底层的 trace context（user / dept / role / agent / component / session），明细落 PG、聚合进 Doris、限流走 Redis、规则由 Nacos 下发。
+> 所有 token 消耗**只在 `ctx.llm` 网关这一道截面被计量**；每笔消耗带从 request 透传到底层的 trace context（user / dept / role / agent / component / session），明细落 PG、日聚合直接在台账上分组、限流走 Redis、规则由 Nacos 下发。
 
 > **（2026-08-26 修订，评审 B2）** 上一句是 **token 截面**，不是成本模型：它保证「token 消耗有单一真相源」，但 token 成本 ≠ 总成本。连接器出向调用费、Doris/Nebula 查询算力、`ctx.jobs` 后台算力、复制日志存储增长、非 LLM 推理的 GPU 时间全都不在那道截面上。成本归因的目标不是「捕获全部成本」（不可能），而是**每个尖峰都能解释**，且**未捕获的部分显式命名**——未命名的缺口会让读账单的人以为账上就是全部。
 
@@ -627,11 +627,15 @@ manifest 格式为 JSON 而非 YAML：签名覆盖的是上传的原始字节，
 | **平台级溯源** | `usage_ledger`（PG，append-only + 签名）一行串起 request→session→user→dept→role→agent→component→feature→seam→model→token→成本，与连接器审计/session 事件打通 |
 | **限流 + 限额度** | 限流：Redis 令牌桶按 `global/tenant/dept/role/user/feature` 多层级前置拦截；额度：平台→部门→角色→用户的预算树（三态表见上）**+ 项目并行预算树**（**2026-08-26 拍板**，评审 N3 选项 B：一次调用同时扣用户树与项目树，任一超限即拒；双树同事务扣减与拒绝信息带树标识已落地，项目树治理面见 §11.1 实现注记） |
 
-- **存储分工**：明细进 PG（强一致溯源）、聚合进 Doris（看板 cube）、限流/额度走 Redis（TTL 对齐周期）。
+- **存储分工**：明细进 PG（强一致溯源）、**日粒度聚合直接在台账上分组**、限流/额度走 Redis（TTL 对齐周期）。
   **列清单单一真相源**：`platform/shared/manifests/usage-ledger.schema.json`——DDL/INSERT 同源生成
   （Go 消费侧 go:embed 同一文件），加列只改清单，杜绝「schema 第二份」。
-  **聚合投影**：日分区列式 cube（Doris）、PG 单向重建（watermark + 桶级 REPLACE 幂等）、
-  缺失时 `CapabilityUnavailable` 显式拒绝——设计 `docs/superpowers/specs/2026-08-26-doris-aggregation-design.md`。
+  **查询面**：`usage-ledger/internal/analytics` 只读 PG 台账，按 `(day, project, user, cost_type)`
+  分组（报告时区固定 UTC，`[from, toEnd)` 半开区间）。**原先设想的「PG → 列存 cube → 查询」三段式已移除**
+  （2026-09-14）：它要求额外组件、一个投影 worker 与位点，还引入一类只能靠约定维持的一致性
+  （重放不得双计），换来的只是把一次 `GROUP BY` 下推。台账 append-only 且无分区，慢是直白的；
+  在规模真的压垮 PG 之前不引入第二引擎。原设计说明 `docs/superpowers/specs/2026-08-26-doris-aggregation-design.md`
+  已标注被取代，保留作决策痕迹。
 - **异步削峰**：计量事件不留请求路径——`commit`（LLM 截面）与 `emit`（并行成本流）把已校验事件写入 `usage_event_outbox`（**与预算扣减同一事务**，原子配套），由搬运器批量投递入 `usage_ledger`：`event_key` 幂等（至少一次投递不重复入账）、事件时刻保真（`ts` = 发生时刻，非投影时刻）、按序搬运。写穿即见换**有界最终一致**（≤ drain 周期），`reserve`/`balance` 不搬。**Legacy Local-lite = PG 事务 outbox + 进程内调度器**（仅用于历史开发/CI 集成测试）；**Local Desktop 不装配计量控制面**，只保留本地工作台与 SQLite 边界。Standalone+/Cluster = 事件走 RocketMQ `usage-events-<cost_type>` 消费侧（**2026-08-26 修正：原写 `usage.event.*`——RocketMQ topic 合法字符集 `^[%|a-zA-Z0-9_-]+$`，点号非法，由真实 broker 联调首次发现并改此命名**）。**传输已接线（2026-08-26，Standalone 形态实测）**：`platform/control-plane/usage-ledger` Go 服务——publisher（outbox 锁批 FOR UPDATE SKIP LOCKED → broker，整批标记 `published_at`，失败回滚）+ consumer（订阅闭集 topic，校验→`usage_ledger` 幂等落账→Ack，毒丸告警不落库，瞬时失败靠不可见到期重投）；与 TS 侧 `drainOnce` 为**互斥装配**（metering 插件 `ledgerTransport: 'local' | 'rmq'`）——台账单一写入者。设计说明 `docs/superpowers/specs/2026-08-26-metering-outbox-design.md` 与 [`2026-08-26-ledger-rmq-transport-design.md`](./superpowers/specs/2026-08-26-ledger-rmq-transport-design.md)（含 §8 实测补记：proxy 须独立 mqproxy、topic 部署期预建、新消费组重放历史）。Cluster 多实例/HA 随 helm 形态。
 - **调度联动**：Scheduler 放置时读预算余量，预算将尽的任务降优先级/suspend。
 
@@ -706,9 +710,9 @@ pull Task → 在 Slot 挂载 preset(cordis patch, isolate realm) → loop:
   └─ 集群失联 → 判定期(cluster-suspect 30s) → 确认期(cluster-down 90s) → 任务漂回全局 Task Bus 重放置
 ```
 
-- **放置**：候选 = 跨集群的 `requires` 匹配 + `clusterTag/region` 标签偏好（§6.2 打分公式的 factor 扩展），**不用跨集群强一致锁**；同一会话的任务尽可能留在原集群（会话亲和），仅故障时迁移。
+- **放置**：候选 = 跨集群的 `requires` 匹配 + `clusterTag/region` 标签偏好（§6.2 打分公式的 factor 扩展），**不用跨集群强一致锁**；同一会话的任务尽可能留在原集群（会话亲和），仅故障时迁移。**已实现（2026-09-17）**：打分是两项加权和（负载 + 亲和），§6.2 的四项公式被评审 A4 列为 P2（值域/归一化/`affinityGain` 未定义）后按同一条建议逐项定义；**硬约束不参与打分**，仍在候选剪枝里。实现与偏离见 `docs/superpowers/specs/2026-09-15-multicluster-scheduling-design.md` §10.1。
 - **注册**：集群与节点以 `metadata.clusterId` + `kube.role` 标签进 Naming；全局能力视图 = 集群上报的能力列表 + 中心目录，key 为 `{clusterId, seam}`。
-- **版本一致性**：同一 agent/组件版本先完成**全集群分发**才允许全局调度（发布版本经 Provisioner 同步到每个集群的 Registry）。
+- **版本一致性**：同一 agent/组件版本先完成**全集群分发**才允许全局调度（发布版本经 Provisioner 同步到每个集群的 Registry）。**已实现（2026-09-17）**：判定集合 = 放置闸门当下真正允许的集群，版本分叉时**整体拒绝**（含多数版本），只拦未指定 `cluster_id` 的全局放置，默认关且对未知 fail-closed（与存活闸门刻意相反）。声明方是**承载节点**而不是调度器。见同一设计稿 §10.2–§10.5。
 - **容错（两段式判定，严禁秒级切换）**：集群失联先入 `suspect`（30s，**停止向其新放置，已有任务不动**），持续失联再入 `down`（90s）才漂移任务。**理由**：跨集群迁移代价远高于等待——秒级阈值会让一次网络抖动引发全量任务大迁移，反而制造故障。迁移前必须确认 fencing（原集群不可能仍在执行），否则违反 R2 的幂等要求。
 - **执行记录**：一个任务只在**一个集群**执行；全局执行记录（PG 全局 Registry + 复制日志）记录 `{taskId, clusterId, 状态, 尝试次数}`，跨集群重放置产生新 attempt 而非并行执行。
 
@@ -1163,6 +1167,30 @@ docker compose -f compose.cluster.yml up          # 起两个缩微集群
 - **会话日志的迁移必须保序**，且迁移后 `sessionId → 事件序号` 的单调性不被破坏（否则 §4.2 的 resume 与审计链断裂）。
 - 迁移工具是**一等交付物**，随形态支持一同验收，CI 中须有「Standalone → Cluster」端到端演练用例。
 
+#### 13.2.8 集群就绪由健康派生，不由声明决定
+
+`LUMO_CLUSTER_STATUS=ready` 是**操作者意图**（「这个部署是集群」），不是生效状态。生效状态 = 意图 AND 派生健康：
+
+```text
+意图（LUMO_CLUSTER_STATUS）  ─┐
+                              ├─►  生效状态 ──►  管理面门禁（org / 设备 / 技能分发）
+健康（心跳 + 依赖上报）      ─┘
+```
+
+心跳写入 `lumo_service_heartbeats`，由九个控制面服务上报（实例身份取 `LUMO_INSTANCE`，回落 `<hostname>-<pid>`），governance 以**缓存快照**求值——门禁在每个管理请求上被调用，不能变成一次数据库往返。
+
+| 规则 | 理由 |
+|---|---|
+| 必需服务是**闭集**，不从「谁上报了」推导 | 从上报者推导的集合无法表达「这个服务从未启动」，而那正是就绪检查存在的理由。空集按**不就绪**处理 |
+| 过期按数据库的 `now() - observed_at` 判定 | 心跳来自多台主机，用读取方自己的时钟比会有无界偏差 |
+| 一个服务**至少一个副本**在服务即健康；每个副本都留在报告里 | 要求全部副本会在此起彼伏的滚动重启中关门；隐藏安静副本会隐藏故障 |
+| 快照对「查询失败」与「过期」双 fail-closed | 「无法验证」不能保持开门 |
+| 非集群 → 403；已声明就绪但不健康 → **503** + `Retry-After` | 前者是配置事实，后者会自愈；403 会把运维引向改配置，而真正的问题是服务挂了 |
+
+**两个刻意的例外**：OIDC 登录与调度补偿循环只看意图。登录是修复降级集群的入口，补偿循环是恢复机制——把它们也挂到健康上，等于在需要它们的时候先关掉它们。同理 `/healthz` 在降级时仍返回 200（governance 是诊断降级集群的工具，存活探针失败会让它重启循环），且**不提供** `/readyz`（接到负载均衡探针上会在降级期间摘掉登录路径）。
+
+这与 §13.2.6 是同一条原则：**形态差异由数据与装配表达，不由代码分支表达**——这里没有 `if (cluster)`，只有「意图 × 健康」的合取。
+
 ### 13.3 风险与未决项
 
 | 风险 | 缓解 |
@@ -1224,7 +1252,7 @@ docker compose -f compose.cluster.yml up          # 起两个缩微集群
 8. **网关全栈 Go 自研，零 APISIX/Envoy**；通用治理下沉自研边缘网关 + 共享限流库。
 9. **自研语言统一 Go（参考 sub2api）**；Rust 仅局部热点。
 10. **组件绝不直连 DB**，一律走 seam；**Doris 不是事务库**。
-11. **计量只在 `ctx.llm` 单截面**；明细 PG、聚合 Doris、限流 Redis；限流额度前置拦截。
+11. **计量只在 `ctx.llm` 单截面**；明细与日聚合同在 PG、限流 Redis；限流额度前置拦截。
 12. **流程是第五类制品**；创作自由、治理独立（提升/分发必须是独立审批）；audience 定向而非广播。
 13. **凭证永远进 Vault 不进 prompt**；连接器必带限速/熔断/egress 白名单/脱敏/审计。
 14. **终端只存视图、不存业务状态**；多端共享靠事件 fanout；弱网必须有 replay+轮询兜底。
@@ -1448,7 +1476,7 @@ SessionEvent 日志 append-only、每会话单调序号（§8.2）——这让�
 | **Cluster 基线** | CP 3 节点 + 数据节点 N×（16C/32G）；中间件各 1（本地缩微）/HA（生产） | ≤ 200 用户 / ≤ 100 项目 / **1000 并发 turn ≈ 32 数据节点** | 节点线性扩展；控制面每 500 并发 turn 复核一次 |
 | **Cluster 扩展** | 每 +32 并发 turn → +1 数据节点 | 集群规模随负载横向扩 | 队列通量（RocketMQ 计 50% 余量）、PG write 前分离视图关注 |
 
-**数据增长模型**（算给「1T 能用多久」）：每 turn ≈ 台账 0.5KB + 事件日志 3KB；1 万 turn/日 ≈ 35MB/日 ≈ 13GB/年；`usage_ledger` 每月约 30 万行（千万级前 PG 无压力，越线走分区归档——**归档策略当前未设计，列入待补**）。预算树与复制日志按会话量线性；Doris cube 按聚合维度（天×类型×归因），独立于明细。
+**数据增长模型**（算给「1T 能用多久」）：每 turn ≈ 台账 0.5KB + 事件日志 3KB；1 万 turn/日 ≈ 35MB/日 ≈ 13GB/年；`usage_ledger` 每月约 30 万行（千万级前 PG 无压力，越线走分区归档——**归档策略当前未设计，列入待补**）。预算树与复制日志按会话量线性；用量聚合是台账上的一个 `GROUP BY`，不额外占存储。
 
 **成本模型**：平台基础设施费用（控制面+计量+日志，不含 LLM 推理费）**分摊到每 turn ≤ 平台 turn 成本的 2%**（§6.4「已知未计量」控制面算力的回手——目标口径，实测超 2% 需升版）。LLM 单价本身由计费系统决定（§6.4：数据库只落 provider 自报成本，不做费率表）。
 
@@ -1495,7 +1523,7 @@ Deployment/Service、依赖配置、健康探针、可选 DSH 承载节点池和
 - **制品字节不可变**（内容寻址，§6.1）；PG 是索引不是真相源 →「回滚制品」= 改 Nacos 灰度规则切回旧 digest，**字节零搬运**；删除制品需检查依赖图引用完整（唯一包引用）。
 - **配置回滚**：Nacos 配置按版本（灰度规则）；`cordis.patch.yml` overlay 有优先级——回滚 = 切旧版本配置 → 重启插件（插件重载原子性：热加载失败回滚旧配置，review R3 能力清单项）。
 - **回滚四结合**（平台自身）：代码（上一镜像 `latest-N` 标签）、配置（Nacos 版本）、数据（schema 兼容两版、无破坏性变更）、开关（FF flag 下放能力）。**任何变更写清「回滚依赖哪一条」**——只回滚代码而 schema 已破坏 = 没回滚。
-- 备份恢复：PG 每日全备 + WAL；MinIO 版本化桶；Doris 重建式恢复（cube 从明细重算——**Doris 无备份概念，只有重算**，这也是「PG 是明细真相源」的一体两面）。演练季度一次（§21.1 RTO/RPO）。
+- 备份恢复：PG 每日全备 + WAL；MinIO 版本化桶。演练季度一次（§21.1 RTO/RPO）。
 
 ### 22.5 不可逆清单（铺数据前定稿评审，§5.3 特别提示）
 

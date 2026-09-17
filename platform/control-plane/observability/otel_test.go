@@ -48,7 +48,7 @@ func TestUnsampledOTelRootsDoNotPropagateSampled(t *testing.T) {
 		otelMu.Unlock()
 	})
 
-	metrics := &Metrics{gauges: make(map[string]float64)}
+	metrics := &Metrics{}
 	handler := metrics.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	response := httptest.NewRecorder()
@@ -98,5 +98,32 @@ func TestOTLPExporterBuildsTraceAndLowCardinalityMetrics(t *testing.T) {
 	}
 	if !strings.Contains(string(metrics), "lumo.http.server.request.count") {
 		t.Fatalf("missing cumulative request metric: %s", metrics)
+	}
+}
+
+func TestOTLPMetricsPayloadCarriesGaugeLabelsAsDataPointAttributes(t *testing.T) {
+	isolatedDefault(t)
+	SetGaugeWithLabels("lumo_scheduler_pending_tasks", 4, map[string]string{"cluster_id": "cn-north"})
+	exporter := newOTLPExporter("lumo-observability-test", OTelConfig{
+		CollectorURL: "https://collector.example", SampleRatio: 1, MetricCardinalityMax: 8,
+		CostPolicy: OTelCostDetailed, MetricExportInterval: 5 * time.Second,
+	})
+	encoded, err := json.Marshal(exporter.metricsPayload())
+	if err != nil {
+		t.Fatalf("marshal metrics: %v", err)
+	}
+	// 两条导出路径必须看到同一组维度：Prometheus 侧是标签，OTLP 侧是 dataPoint
+	// 属性。只给一边加标签，另一边就会出现多个同名、无从区分的 dataPoint，
+	// 消费者只能合并或覆盖，两条路径就此静默分叉。
+	body := string(encoded)
+	if !strings.Contains(body, `"asDouble":4,"attributes":[{"key":"cluster_id","value":{"stringValue":"cn-north"}}]`) {
+		t.Fatalf("OTLP 侧缺少 dataPoint 属性:\n%s", body)
+	}
+	if !strings.Contains(body, `"name":"lumo_scheduler_pending_tasks"`) {
+		t.Fatalf("带标签的 gauge 未被导出:\n%s", body)
+	}
+	// 无标签的固定指标不应凭空长出空 attributes 数组。
+	if strings.Contains(body, `"name":"lumo.http.server.inflight"`) && strings.Contains(body, `"asDouble":0,"attributes"`) {
+		t.Fatalf("无标签指标不应带 attributes: %s", body)
 	}
 }

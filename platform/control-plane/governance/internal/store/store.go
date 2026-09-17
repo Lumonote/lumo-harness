@@ -470,20 +470,13 @@ CREATE TABLE IF NOT EXISTS governance_task_audit (
 CREATE INDEX IF NOT EXISTS governance_task_audit_task_idx
   ON governance_task_audit (realm, task_id, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS task_reports (
-  id          TEXT PRIMARY KEY,
-  realm       TEXT NOT NULL,
-  task_id     TEXT NOT NULL REFERENCES governance_delegation_tasks(id) ON DELETE CASCADE,
-  run_id      TEXT,
-  sections    JSONB NOT NULL DEFAULT '[]'::jsonb,
-  status      TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','confirmed','archived')),
-  created_by  TEXT NOT NULL,
-  confirmed_by TEXT,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-ALTER TABLE task_reports ADD COLUMN IF NOT EXISTS confirmed_by TEXT;
-CREATE INDEX IF NOT EXISTS task_reports_pending_idx ON task_reports (realm, updated_at DESC) WHERE status = 'draft';
+-- task_reports 的建表**不在这里**。本服务声明过它（还带
+-- REFERENCES governance_delegation_tasks ON DELETE CASCADE），但从不读写——
+-- 读写方只有 platform/control-plane/projects。两个服务同库、同时在线，都用
+-- CREATE TABLE IF NOT EXISTS，于是谁先启动谁定语义：governance 先启动则 projects
+-- 的 INSERT 对任何本服务不认识的 task_id 直接 FK 违约 500，projects 先启动则这里
+-- 声明的级联永不生效。两边都不对，删掉这一份（DDL 归唯一读写方）。
+-- 同款先例见 platform/deploy/migrations/004_service_heartbeats.sql 的注释。
 `
 
 var (

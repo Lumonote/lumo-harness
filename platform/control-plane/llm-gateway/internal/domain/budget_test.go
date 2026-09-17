@@ -23,6 +23,12 @@ func TestBudgetState(t *testing.T) {
 		// 无软限额档：softLimit=0 直接二分
 		{used: 999, lim: BudgetLimits{Budget: 1000, Overdraft: 0}, want: StateSoft},
 		{used: 1000, lim: BudgetLimits{Budget: 1000, Overdraft: 0}, want: StateHard},
+		// 非法配置：负 overdraft 一律 hard。canonical 的 resolveLimits 对负数**抛错**
+		// （budget-policy.spec「负数与非有限值抛错」钉住 `overdraft: -1`），这里把「拒绝」
+		// 译成 hard。若照级联顺序算，`used < budget` 那支会遮住 hard 支 —— 5 < 1000，
+		// 于是这棵把透支额配成负数的树会被判 soft 并放行。
+		{used: 5, lim: BudgetLimits{Budget: 1000, SoftLimit: 800, Overdraft: -10}, want: StateHard},
+		{used: 0, lim: BudgetLimits{Budget: 1000, Overdraft: -1}, want: StateHard},
 	}
 	for _, c := range cases {
 		if got := BudgetState(c.used, c.lim); got != c.want {

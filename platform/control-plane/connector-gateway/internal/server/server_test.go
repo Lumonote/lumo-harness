@@ -59,6 +59,19 @@ func testDSN(t *testing.T) string {
 	return dsn
 }
 
+// redisErr 是 redis.Error 的最小实现（error + 一个 RedisError() 空方法）。
+//
+// 必须用它而不是 `errors.New`：go-redis 判断「脚本未加载」走的是
+// `errors.As(err, &redis.Error)`（v9 的 `HasErrorPrefix`，见依赖的 error.go），
+// 而不是字符串前缀匹配。返回普通 error 时 `Script.Run` 的 NOSCRIPT→EVAL 回退
+// **不会触发**，脚本一次都没执行，`Allow` 直接把错误抛上去 —— 网关那边落到
+// 「限流器不可用，保守拒绝」，于是「第一次应放行」拿到 429。
+// 这个 fake 是按旧版 go-redis（纯字符串前缀）写的，依赖升级后悄悄失效了。
+type redisErr string
+
+func (e redisErr) Error() string { return string(e) }
+func (e redisErr) RedisError()   {}
+
 // fakeScripter 假 redis.Scripter：限流 Lua 走 EVAL（EvalSha 回 NOSCRIPT 让
 // go-redis 落回 EVAL），前 allow 次放行、之后拒绝。不依赖真 Redis。
 type fakeScripter struct {
@@ -107,19 +120,19 @@ func (f *fakeScripter) Eval(ctx context.Context, _ string, _ []string, _ ...any)
 
 func (f *fakeScripter) EvalSha(ctx context.Context, _ string, _ []string, _ ...any) *redis.Cmd {
 	cmd := redis.NewCmd(ctx)
-	cmd.SetErr(errors.New("NOSCRIPT no matching script"))
+	cmd.SetErr(redisErr("NOSCRIPT No matching script"))
 	return cmd
 }
 
 func (f *fakeScripter) EvalRO(ctx context.Context, _ string, _ []string, _ ...any) *redis.Cmd {
 	cmd := redis.NewCmd(ctx)
-	cmd.SetErr(errors.New("NOSCRIPT no matching script"))
+	cmd.SetErr(redisErr("NOSCRIPT No matching script"))
 	return cmd
 }
 
 func (f *fakeScripter) EvalShaRO(ctx context.Context, _ string, _ []string, _ ...any) *redis.Cmd {
 	cmd := redis.NewCmd(ctx)
-	cmd.SetErr(errors.New("NOSCRIPT no matching script"))
+	cmd.SetErr(redisErr("NOSCRIPT No matching script"))
 	return cmd
 }
 
@@ -662,6 +675,8 @@ func TestInvokeMeters(t *testing.T) {
 		ID: "c1", Realm: "r1", Name: "测试连接器", Protocol: domain.ProtocolREST,
 		BaseURL: up.URL,
 		Auth:    domain.Auth{Kind: domain.AuthNone},
+		// 上游是 httptest（明文 http + 环回地址），必须显式声明允许内网（见 validate.go）。
+		Egress: domain.Egress{AllowPrivateNetwork: true},
 		Operations: map[string]domain.Operation{
 			"ping": {Name: "ping", Method: "GET", Path: "/ping"},
 		},
@@ -723,6 +738,9 @@ func TestHighSensitivityInvokeRequiresOneTimeBoundApproval(t *testing.T) {
 	if err := reg.Upsert(context.Background(), domain.Connector{
 		ID: "billing", Realm: "r1", Name: "账单连接器", Protocol: domain.ProtocolREST, BaseURL: up.URL,
 		Auth: domain.Auth{Kind: domain.AuthNone}, Roles: []string{"operator"}, Enabled: true,
+		// 上游是 httptest（明文 http + 环回地址），必须显式声明允许内网：
+		// validate.go 的规则是「https，或 http 且连接器自己 opt-in 内网」。
+		Egress: domain.Egress{AllowPrivateNetwork: true},
 		Operations: map[string]domain.Operation{
 			"refund": {Name: "refund", Method: "POST", Path: "/refund", Write: true, Sensitivity: "high"},
 		},

@@ -243,7 +243,13 @@ func (g *Gateway) Invoke(ctx context.Context, caller domain.Caller, inv domain.I
 		rec.DenyReason = "上游失败: " + callErr.Error()
 		// 传输错误（响应缺失）：审计照记，计量不计（口径见 audit.MeterEvent）
 		g.record(ctx, rec, nil)
-		return domain.Result{}, fmt.Errorf("%w: %s", domain.ErrUpstream, callErr)
+		// 双 %w：既保留「上游失败」这一层，也**保留内层哨兵在错误链里**。
+		// 用 %s 只是把内层字符串化，`classify` 就再也看不见 ErrEgressBlocked /
+		// ErrTooLarge / ErrCircuitOpen / ErrCredential 了 —— 于是「私网被守卫拦下」
+		// 「响应超限」都变成 502 upstream_error，前端与 agent 分不清该重试还是该改配置。
+		// 内层确实是这两个哨兵之一时（见 webCall/call 的缩小逻辑），classify 的
+		// 分支顺序会让更具体的那个胜出。
+		return domain.Result{}, fmt.Errorf("%w: %w", domain.ErrUpstream, callErr)
 	}
 
 	rec.Decision = audit.Allowed
@@ -465,7 +471,13 @@ func (g *Gateway) WebFetch(ctx context.Context, caller domain.Caller, spec domai
 		rec.DenyReason = "上游失败: " + callErr.Error()
 		// 传输错误/超时/截断（响应缺失或无法安全取回）：审计照记，计量不计
 		g.record(ctx, rec, nil)
-		return domain.Result{}, fmt.Errorf("%w: %s", domain.ErrUpstream, callErr)
+		// 双 %w：既保留「上游失败」这一层，也**保留内层哨兵在错误链里**。
+		// 用 %s 只是把内层字符串化，`classify` 就再也看不见 ErrEgressBlocked /
+		// ErrTooLarge / ErrCircuitOpen / ErrCredential 了 —— 于是「私网被守卫拦下」
+		// 「响应超限」都变成 502 upstream_error，前端与 agent 分不清该重试还是该改配置。
+		// 内层确实是这两个哨兵之一时（见 webCall/call 的缩小逻辑），classify 的
+		// 分支顺序会让更具体的那个胜出。
+		return domain.Result{}, fmt.Errorf("%w: %w", domain.ErrUpstream, callErr)
 	}
 
 	rec.Decision = audit.Allowed

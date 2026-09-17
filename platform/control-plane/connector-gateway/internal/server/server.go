@@ -34,6 +34,7 @@ type Server struct {
 	approvals *approval.Store
 	oauth     *oauth.Manager
 	auth      Authenticator
+	audit     auditReader
 	log       *slog.Logger
 	maxBody   int64
 	// AdminRoles 允许注册/停用连接器的角色。
@@ -47,6 +48,7 @@ type Options struct {
 	Approvals   *approval.Store
 	OAuth       *oauth.Manager
 	Auth        Authenticator
+	Audit       auditReader // 未配置时 GET /audit 返回 503：「查不到」与「没配」要能分开
 	Logger      *slog.Logger
 	MaxBodyByte int64
 	AdminRoles  []string
@@ -59,6 +61,11 @@ func New(o Options) *Server {
 	if o.MaxBodyByte <= 0 {
 		o.MaxBodyByte = 4 << 20
 	}
+	if o.Logger == nil {
+		// 调用方漏传 Logger 不该变成运行期 nil 解引用（handler 里有若干处直接
+		// s.log.Info/Error）。丢弃式兜底让「忘记配日志」退化为安静，而不是崩溃。
+		o.Logger = slog.New(slog.DiscardHandler)
+	}
 	if len(o.AdminRoles) == 0 {
 		o.AdminRoles = []string{"admin"}
 	}
@@ -70,7 +77,7 @@ func New(o Options) *Server {
 	}
 	return &Server{
 		gw: o.Gateway, reg: o.Registry, brk: o.Breakers, approvals: o.Approvals, oauth: o.OAuth,
-		auth: o.Auth, log: o.Logger,
+		auth: o.Auth, audit: o.Audit, log: o.Logger,
 		maxBody: o.MaxBodyByte, AdminRoles: o.AdminRoles,
 	}
 }
@@ -78,7 +85,7 @@ func New(o Options) *Server {
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("GET /metrics", handleMetrics)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /connectors", s.handleList)
 	mux.HandleFunc("GET /capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /connectors/{id}/manifest", s.handleManifest)
@@ -94,11 +101,15 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /approvals", s.handleListApprovals)
 	mux.HandleFunc("POST /approvals/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /approvals/{id}/reject", s.handleReject)
+	// 审计查询。刻意用顶层 /audit 而不是 /connectors/audit —— 后者会与
+	// `/connectors/{id}/...` 同族，读起来像「某个叫 audit 的连接器」。
+	mux.HandleFunc("GET /audit", s.handleAudit)
 	mux.HandleFunc("POST /web/fetch", s.handleWebFetch)
 	return mux
 }
 
-func handleMetrics(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	publishBreakerMetrics(s.brk)
 	observability.Handler(w, nil)
 }
 

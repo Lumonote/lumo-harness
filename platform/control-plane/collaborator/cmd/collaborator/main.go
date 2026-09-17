@@ -22,9 +22,11 @@ import (
 	"github.com/lumo-harness/platform/collaborator/internal/crdt"
 	"github.com/lumo-harness/platform/collaborator/internal/domain"
 	"github.com/lumo-harness/platform/collaborator/internal/hub"
+	"github.com/lumo-harness/platform/collaborator/internal/indexing"
 	"github.com/lumo-harness/platform/collaborator/internal/ownership"
 	"github.com/lumo-harness/platform/collaborator/internal/server"
 	"github.com/lumo-harness/platform/collaborator/internal/store"
+	"github.com/lumo-harness/platform/heartbeat"
 	"github.com/lumo-harness/platform/observability"
 )
 
@@ -77,6 +79,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 心跳上报：集群就绪态由心跳新鲜度与自报依赖派生（E4/D6），不再只看
+	// LUMO_CLUSTER_STATUS 这个静态声明。实例名沿用 -instance，与归属哈希同源。
+	heartbeat.StartPg(ctx, st.Pool(), heartbeat.Options{
+		Service: "collaborator", Instance: *instance, Logger: log,
+		Depends: heartbeat.PgDependency(st.Pool()),
+	})
+
 	limits := domain.DefaultLimits()
 	h := hub.New(st, limits)
 
@@ -124,6 +133,33 @@ func main() {
 		Addr:              *listen,
 		Handler:           observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(server.New(h, st, ring, headerAuth{}, log).Routes())),
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	// 发布 → 知识库投影管道（§5.4.3）。未配置 seam 地址时显式记录「已关闭」，
+	// 而不是静默不启动——否则「outbox 一直堆积」会被误判成管道故障。
+	indexer, indexErr := buildIndexer()
+	if indexErr != nil {
+		log.Error("知识库投影配置不合法", "err", indexErr)
+		os.Exit(2)
+	}
+	if indexer == nil {
+		log.Warn("未配置 LUMO_KNOWLEDGE_SEAM_URL，发布 outbox 不会被投影到知识库")
+	} else {
+		dispatcher, dispatchErr := indexing.NewDispatcher(st, indexer, os.Getenv("LUMO_KNOWLEDGE_EMBEDDING_MODEL"))
+		if dispatchErr != nil {
+			log.Error("知识库投影调度器不可用", "err", dispatchErr)
+			os.Exit(2)
+		}
+		dispatcher.SetErrorHandler(func(err error) { log.Error("知识库投影失败", "err", err) })
+		dispatcher.SetCycleHandler(func(r indexing.Report) {
+			if r.Scanned > 0 {
+				log.Info("知识库投影完成一轮", "scanned", r.Scanned, "indexed", r.Indexed,
+					"rejected", r.Rejected, "failed", r.Failed)
+			}
+		})
+		log.Info("知识库投影管道已启动", "seam", os.Getenv("LUMO_KNOWLEDGE_SEAM_URL"),
+			"model", os.Getenv("LUMO_KNOWLEDGE_EMBEDDING_MODEL"))
+		go dispatcher.Run(ctx)
 	}
 
 	// 周期任务：快照落库 + 闲置回收
@@ -186,4 +222,35 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// buildIndexer 按环境变量装配知识库投影下游；未配置 seam 地址时返回 (nil, nil)
+// 表示「投影功能关闭」，配置了但配置不合法时返回错误（调用方必须响亮退出）。
+func buildIndexer() (indexing.Indexer, error) {
+	seamURL := strings.TrimSpace(os.Getenv("LUMO_KNOWLEDGE_SEAM_URL"))
+	if seamURL == "" {
+		return nil, nil
+	}
+	roles := []string{"system"}
+	if configured := strings.TrimSpace(os.Getenv("LUMO_KNOWLEDGE_INDEX_ROLES")); configured != "" {
+		roles = strings.Split(configured, ",")
+		for i := range roles {
+			roles[i] = strings.TrimSpace(roles[i])
+		}
+	}
+	// 身份密钥与 seam host 的 identityAssertionSecret 必须同值。变量名沿用 flows 的
+	// LUMO_IDENTITY_ASSERTION_SECRET（含同样的控制面令牌回落），避免同一个密钥出现
+	// 两个名字；给一个过短的默认值只会把「配置缺失」拖成运行期每一行的 403。
+	indexer, err := indexing.NewSeamIndexer(indexing.SeamConfig{
+		BaseURL:        seamURL,
+		ControlToken:   os.Getenv("LUMO_CONTROL_PLANE_TOKEN"),
+		IdentitySecret: envOr("LUMO_IDENTITY_ASSERTION_SECRET", os.Getenv("LUMO_CONTROL_PLANE_TOKEN")),
+		UserID:         envOr("LUMO_KNOWLEDGE_INDEX_USER", "collaborator-indexer"),
+		Roles:          roles,
+		Component:      "collaborator",
+	})
+	if err != nil {
+		return nil, err
+	}
+	return indexer, nil
 }

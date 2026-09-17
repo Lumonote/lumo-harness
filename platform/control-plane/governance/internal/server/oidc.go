@@ -10,8 +10,12 @@ import (
 	"github.com/lumo-harness/platform/governance/internal/store"
 )
 
+// oidcConfigured answers a configuration question, not a health question: it
+// follows the declared deployment mode so that a degraded cluster still offers
+// the login path an operator needs to fix it.
 func (s *Server) oidcConfigured(realm string) bool {
-	return s.cfg.OIDC.Enabled() && s.cfg.OIDC.Realm == realm && s.cfg.OIDC.Validate() == nil && domain.RequireCluster(s.cfg.DeploymentMode, s.cfg.ClusterStatus) == nil
+	return s.cfg.OIDC.Enabled() && s.cfg.OIDC.Realm == realm && s.cfg.OIDC.Validate() == nil &&
+		domain.IntentIsCluster(s.cfg.DeploymentMode, s.cfg.ClusterStatus)
 }
 
 func (s *Server) authOIDCStatus(w http.ResponseWriter, r *http.Request) {

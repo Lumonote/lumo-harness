@@ -136,6 +136,9 @@ UI 调用委派状态接口把任务写成 `CANCELLED`，后端也只是更新�
 
 - **子 Agent 拓扑是合成的**：`:857` 与 `:897` 两处 `const visible = tasks.slice(0, 8)`，数据源是委派任务列表，不存在父子 Run/child 关系。
 - **插件中心是静态目录**：`lumo-ui/src/base-plugins.ts` 全文 88 行的字面量数组；`:760` 的卡片模板硬编码 `<i>已内置</i>`，可用动作只有「复制安装命令」与「查看上游仓库 ↗」。
+  - **后续处置（已修）**：该静态面板与其目录已整体移除。`lumo-ui/src/base-plugins.ts` 零 importer，已删除；
+    工作台插件目录改由 `data-plane/dsh-node/src/index.ts` 的 `basePluginRows` 提供（按 local/server 形态区分、
+    带 surface 路由与中文名），基线 pin 与版本则由 `shared/manifests/plugin-baseline.manifest.json` 唯一承载。
 - **资料库「查看来源详情 ↗」不可点**：`:670` 它是个 `<span>`，既不是链接也不是按钮，右侧检查面板只回显 docId、源版本和相关度三个已有字段。
 - **用户中心只有三件事**：`:1058-1062` 身份概览、修改密码、退出登录。无会话/设备列表、无登录历史、无 MFA/Passkey。
 - **自动化是只读的**：`:1066` `AutomationSurface` 每个列表项的 `onClick` 都只是 `openSurface('operations')`，无启停、试运行、运行历史。

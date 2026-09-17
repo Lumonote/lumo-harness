@@ -60,11 +60,11 @@ type policy struct {
 	Shape         plan.Shape `json:"shape"`
 }
 type command struct {
-	ID       string `json:"id"`
-	Action   string `json:"action"`
-	Revision int64  `json:"revision"`
-	Body     json.RawMessage `json:"body"`
-	ExpiresAt time.Time `json:"expires_at"`
+	ID        string          `json:"id"`
+	Action    string          `json:"action"`
+	Revision  int64           `json:"revision"`
+	Body      json.RawMessage `json:"body"`
+	ExpiresAt time.Time       `json:"expires_at"`
 }
 
 type runtimeCommandBody struct {
@@ -189,9 +189,26 @@ func createImmutableJSON(path string, value any) error {
 	return nil
 }
 
+// One run occupies **two** files in the task directory, and they must not share a
+// name. `createImmutableJSON` opens with O_EXCL, so the first writer wins and the
+// second always sees ErrExist — and the ErrExist branch is written to mean "this
+// record already exists, accept an identical replay, refuse a different one".
+// Pointed at the wrong record type, that branch reads the inbox JSON as a receipt,
+// finds it different, and reports `task result is immutable` — which is why
+// `finishDeviceTask` used to log and return without ever sending `task_result`.
+//
+// The failure was invisible to both helpers' own tests because each is handed a
+// fresh t.TempDir(): neither ever saw the other's file. See
+// TestReceiptLandsAfterTheInboxRecordInTheSameDirectory, which walks the sequence
+// that actually runs.
+const (
+	taskInboxSuffix   = ".inbox.json"
+	taskReceiptSuffix = ".receipt.json"
+)
+
 func persistTaskInbox(dir string, commandID string, task taskEnvelope) (taskInboxRecord, bool, error) {
 	record := taskInboxRecord{Version: 1, CommandID: commandID, Task: task, CreatedAt: time.Now().UTC()}
-	path := filepath.Join(dir, task.RunID+".json")
+	path := filepath.Join(dir, task.RunID+taskInboxSuffix)
 	err := createImmutableJSON(path, record)
 	if err == nil {
 		return record, true, nil
@@ -216,7 +233,7 @@ func persistTaskInbox(dir string, commandID string, task taskEnvelope) (taskInbo
 }
 
 func persistTaskReceipt(dir string, receipt taskReceipt) error {
-	path := filepath.Join(dir, receipt.Task.RunID+".json")
+	path := filepath.Join(dir, receipt.Task.RunID+taskReceiptSuffix)
 	err := createImmutableJSON(path, receipt)
 	if err == nil || !errors.Is(err, os.ErrExist) {
 		return err
@@ -259,6 +276,15 @@ func runTaskRunner(ctx context.Context, socket, commandID string, task taskEnvel
 		return out, errors.New("desktop-agent: task runner unavailable")
 	}
 	defer conn.Close()
+	// Cancelling has to close the socket, not merely stop this side from waiting:
+	// the deadline below is absolute, so a blocked Decode never observes a
+	// cancelled context. Closing is also the only interruption the runner can
+	// receive at all — the exchange is one request and one response, with no
+	// mid-flight frame by design. Whether the runner actually stops on EOF is
+	// decided on the far side of this socket, which is outside this repository;
+	// see docs/superpowers/specs/2026-09-17-device-cancel-and-recovery-design.md.
+	stopOnCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopOnCancel()
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	if err = json.NewEncoder(conn).Encode(taskRunnerRequest{Type: "execute_task", CommandID: commandID, Task: task}); err != nil {
 		return out, errors.New("desktop-agent: task runner request failed")
@@ -279,6 +305,159 @@ func runTaskRunner(ctx context.Context, socket, commandID string, task taskEnvel
 	}
 	return out, nil
 }
+
+// finishDeviceTask runs one already-accepted task to completion and reports the
+// outcome over the device channel.
+//
+// Ordering is an invariant, not a detail: the receipt is persisted before
+// anything is reported. Reporting an outcome the device keeps no local record of
+// would leave the control plane holding a result that cannot be reconciled
+// against the machine that produced it.
+func finishDeviceTask(ctx context.Context, write func(message) error, socket, nodeID, inbox, commandID string, task taskEnvelope) {
+	resp, err := runTaskRunner(ctx, socket, commandID, task)
+	if err != nil {
+		log.Printf("desktop-agent: task runner failed for %s: %v", task.RunID, err)
+	}
+	// The runner's own diagnostics are not forwarded: a failure summary that
+	// varies with local conditions is not something the control plane can act on.
+	receipt := taskReceipt{
+		Version: 1, CommandID: commandID, Task: task,
+		State: "FAILED", Summary: "device task runner failed", UpdatedAt: time.Now().UTC(),
+	}
+	switch {
+	case errors.Is(ctx.Err(), context.Canceled):
+		// A cancelled run is not a failed one. Reporting FAILED here would write a
+		// false failure into the task ledger for work an operator deliberately
+		// stopped, and FAILED and CANCELLED are not the same state downstream.
+		// Checked before the error, because a cancelled run always has one.
+		receipt.State, receipt.Summary = "CANCELLED", "task cancelled by the control plane"
+	case err == nil:
+		receipt.State, receipt.Summary, receipt.Output = resp.State, resp.Summary, resp.Output
+	}
+	if err = persistTaskReceipt(inbox, receipt); err != nil {
+		log.Printf("desktop-agent: task receipt for %s was not persisted: %v", task.RunID, err)
+		return
+	}
+	payload, err := taskResultPayload(receipt, nodeID)
+	if err != nil {
+		log.Printf("desktop-agent: task result for %s could not be encoded: %v", task.RunID, err)
+		return
+	}
+	if err = write(message{Type: "task_result", CommandID: commandID, Result: payload}); err != nil {
+		log.Printf("desktop-agent: task result for %s was not delivered: %v", task.RunID, err)
+	}
+}
+
+// inflightTask records what the slot token cannot express: which run is executing
+// right now, and how to stop it. The slot only answers "busy or not", so without
+// this a cancel command would have nothing to match against.
+//
+// Keyed by run ID rather than by the original command ID, because a cancellation
+// is about the task; the command that carried it is incidental.
+type inflightTask struct {
+	mu     sync.Mutex
+	runID  string
+	cancel context.CancelFunc
+}
+
+func (f *inflightTask) begin(runID string, cancel context.CancelFunc) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.runID, f.cancel = runID, cancel
+}
+
+func (f *inflightTask) clear(runID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Only the run that still owns the slot may clear it: a cancelled run and its
+	// replacement overlap briefly, and the late finisher must not erase the newer
+	// one's registration.
+	if f.runID == runID {
+		f.runID, f.cancel = "", nil
+	}
+}
+
+// cancelIfRun stops the run identified by runID and reports whether anything was
+// stopped. A cancel that matches nothing is not a failure — it normally means the
+// command arrived after the task finished — but the caller has to know, so it can
+// answer the control plane honestly instead of acknowledging a stop that never
+// happened.
+func (f *inflightTask) cancelIfRun(runID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.runID == "" || f.runID != runID {
+		return false
+	}
+	f.cancel()
+	return true
+}
+
+// recoverTaskInbox reports runs this device accepted but never finished.
+//
+// An inbox record is written before the assignment is acknowledged, and a receipt
+// is written when the run ends — so a record without a receipt means this process
+// died mid-run. The control plane keeps such a run in RUNNING with nothing left
+// able to finish it, which is precisely the failure the result channel exists to
+// remove, and a restart is the one moment it can be repaired.
+//
+// FAILED, not CANCELLED: the device no longer knows how far the run got, and
+// CANCELLED means "the control plane stopped this on purpose". The summary says
+// which one it was, because the two lead to different investigations (the task
+// itself vs. this machine's stability).
+func recoverTaskInbox(dir string, nodeID string, write func(message) error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// A local problem must not become a total outage: failing here would take
+		// the whole device offline over an unreadable directory.
+		log.Printf("desktop-agent: task inbox could not be read: %v", err)
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), taskInboxSuffix) {
+			continue
+		}
+		runID := strings.TrimSuffix(entry.Name(), taskInboxSuffix)
+		receiptPath := filepath.Join(dir, runID+taskReceiptSuffix)
+		if _, err := os.Stat(receiptPath); err == nil {
+			continue // already finished, and reported when it finished
+		} else if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("desktop-agent: task receipt for %s could not be checked: %v", runID, err)
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			log.Printf("desktop-agent: task inbox record for %s could not be read: %v", runID, err)
+			continue
+		}
+		var record taskInboxRecord
+		if json.Unmarshal(raw, &record) != nil || record.Version != 1 || record.Task.RunID != runID {
+			log.Printf("desktop-agent: task inbox record for %s is invalid", runID)
+			continue
+		}
+		// The receipt is persisted before anything is reported, for the same
+		// reason finishDeviceTask does it: reporting an outcome this device keeps
+		// no local record of leaves the control plane holding a result it cannot
+		// reconcile against the machine that produced it.
+		receipt := taskReceipt{
+			Version: 1, CommandID: record.CommandID, Task: record.Task,
+			State: "FAILED", Summary: "device restarted while the task was in flight",
+			UpdatedAt: time.Now().UTC(),
+		}
+		if err := persistTaskReceipt(dir, receipt); err != nil {
+			log.Printf("desktop-agent: recovered receipt for %s was not persisted: %v", runID, err)
+			continue
+		}
+		payload, err := taskResultPayload(receipt, nodeID)
+		if err != nil {
+			log.Printf("desktop-agent: recovered result for %s could not be encoded: %v", runID, err)
+			continue
+		}
+		if err := write(message{Type: "task_result", CommandID: record.CommandID, Result: payload}); err != nil {
+			log.Printf("desktop-agent: recovered result for %s was not delivered: %v", runID, err)
+		}
+	}
+}
+
 type message struct {
 	Type          string          `json:"type"`
 	Revision      int64           `json:"revision,omitempty"`
@@ -295,9 +474,9 @@ type message struct {
 }
 type options struct {
 	gateway, realm, nodeID, stateDir, installDir, caFile, codeFile, clientVersion, allowed, taskRunnerSocket string
-	trustFile, shapeJSON string
-	shape plan.Shape
-	maxRuntime                                                                             time.Duration
+	trustFile, shapeJSON                                                                                     string
+	shape                                                                                                    plan.Shape
+	maxRuntime                                                                                               time.Duration
 }
 
 func main() {
@@ -323,10 +502,17 @@ func run() error {
 	flag.StringVar(&o.taskRunnerSocket, "task-runner-socket", "", "optional absolute mode-0600 Unix socket for the provisioned task runner")
 	flag.DurationVar(&o.maxRuntime, "max-runtime", time.Minute, "maximum lifetime of a locally approved process (up to 5m)")
 	flag.Parse()
-	if !filepath.IsAbs(o.trustFile) { return errors.New("desktop-agent: -trust-file is required") }
-	if _, err := trust.LoadFile(o.trustFile); err != nil { return err }
-	decoder := json.NewDecoder(strings.NewReader(o.shapeJSON)); decoder.DisallowUnknownFields()
-	if decoder.Decode(&o.shape) != nil || decoder.Decode(&struct{}{}) != io.EOF { return errors.New("desktop-agent: invalid -shape") }
+	if !filepath.IsAbs(o.trustFile) {
+		return errors.New("desktop-agent: -trust-file is required")
+	}
+	if _, err := trust.LoadFile(o.trustFile); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(strings.NewReader(o.shapeJSON))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&o.shape) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return errors.New("desktop-agent: invalid -shape")
+	}
 	u, err := url.Parse(o.gateway)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return errors.New("desktop-agent: gateway must be an exact HTTPS origin")
@@ -342,9 +528,11 @@ func run() error {
 	if o.taskRunnerSocket != "" && filepath.Clean(o.taskRunnerSocket) == string(filepath.Separator) {
 		return errors.New("desktop-agent: a dedicated task runner socket is required")
 	}
-	for _, pair := range [][2]string{{o.stateDir,o.installDir},{o.installDir,o.stateDir},{o.installDir,o.trustFile}} {
+	for _, pair := range [][2]string{{o.stateDir, o.installDir}, {o.installDir, o.stateDir}, {o.installDir, o.trustFile}} {
 		rel, err := filepath.Rel(pair[0], pair[1])
-		if err != nil || (rel != ".." && !strings.HasPrefix(rel,".."+string(filepath.Separator))) { return errors.New("desktop-agent: identity, trust and artifact storage must not overlap") }
+		if err != nil || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+			return errors.New("desktop-agent: identity, trust and artifact storage must not overlap")
+		}
 	}
 	if err = os.MkdirAll(o.stateDir, 0o700); err != nil {
 		return err
@@ -587,7 +775,7 @@ func connect(parent context.Context, o options, id identity) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	ws.SetReadLimit(4 << 20)
-	_ = ws.SetReadDeadline(time.Now().Add(30*time.Second))
+	_ = ws.SetReadDeadline(time.Now().Add(30 * time.Second))
 	supervisor := artifactruntime.NewSupervisor(5 * time.Second)
 	defer func() {
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -605,7 +793,12 @@ func connect(parent context.Context, o options, id identity) error {
 	var writeMu, snapshotMu sync.Mutex
 	snapshot := message{Type: "heartbeat", ClientVersion: o.clientVersion, Error: "reconcile_required"}
 	write := func(value message) error {
-		if value.Type == "heartbeat" { value.OS, value.Arch = runtime.GOOS, runtime.GOARCH; if value.OS == "darwin" { value.OS = "macos" } }
+		if value.Type == "heartbeat" {
+			value.OS, value.Arch = runtime.GOOS, runtime.GOARCH
+			if value.OS == "darwin" {
+				value.OS = "macos"
+			}
+		}
 		writeMu.Lock()
 		defer writeMu.Unlock()
 		_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -645,9 +838,11 @@ func connect(parent context.Context, o options, id identity) error {
 			if ws.ReadJSON(&next) != nil {
 				return
 			}
-			_ = ws.SetReadDeadline(time.Now().Add(30*time.Second))
+			_ = ws.SetReadDeadline(time.Now().Add(30 * time.Second))
 			// Lease messages are consumed immediately even during a long download.
-			if next.Type == "status" { continue }
+			if next.Type == "status" {
+				continue
+			}
 			select {
 			case incoming <- next:
 			case <-ctx.Done():
@@ -687,7 +882,10 @@ func connect(parent context.Context, o options, id identity) error {
 		if err != nil || changed {
 			_ = supervisor.StopAll(ctx)
 		}
-		if writeErr := writeSnapshot(&snapshotMu, &snapshot, write); writeErr != nil { cancel(); return writeErr }
+		if writeErr := writeSnapshot(&snapshotMu, &snapshot, write); writeErr != nil {
+			cancel()
+			return writeErr
+		}
 		return err
 	}
 	allowed := map[string]bool{}
@@ -703,6 +901,23 @@ func connect(parent context.Context, o options, id identity) error {
 	if err = os.MkdirAll(journal, 0o700); err != nil {
 		return err
 	}
+	taskInbox := filepath.Join(o.stateDir, "tasks")
+	if err = os.MkdirAll(taskInbox, 0o700); err != nil {
+		return err
+	}
+	// One execution slot per device. The control plane permits up to 16 in-flight
+	// commands per node, but that is a delivery budget, not a claim about how many
+	// tasks this machine can actually run. Over-capacity work is refused rather
+	// than queued: the inbox contract records "received" and has no field for
+	// "waiting", so queueing would have to be invented somewhere else.
+	taskSlot := make(chan struct{}, 1)
+	inflight := &inflightTask{}
+	// Runs this device accepted but never finished are still RUNNING in the control
+	// plane, and nothing else can close them: the assignment was acknowledged, so
+	// the scheduler is waiting for a result this process died before sending. The
+	// socket is up by now, which is the earliest moment that repair can be
+	// reported. write() is mutex-guarded, so this does not race the heartbeat.
+	recoverTaskInbox(taskInbox, o.nodeID, write)
 	for {
 		select {
 		case <-ctx.Done():
@@ -723,8 +938,10 @@ func connect(parent context.Context, o options, id identity) error {
 				desired, revision = next.Policy, next.Revision
 				installer.PinnedDigests = map[string]string{}
 				for _, item := range desired.Artifacts {
-					key := item.Name+"@"+item.Version
-					if _, exists := installer.PinnedDigests[key]; exists { return errors.New("desktop-agent: duplicate approved artifact") }
+					key := item.Name + "@" + item.Version
+					if _, exists := installer.PinnedDigests[key]; exists {
+						return errors.New("desktop-agent: duplicate approved artifact")
+					}
 					installer.PinnedDigests[key] = item.Digest
 				}
 				if err := reconcile(); err != nil {
@@ -761,8 +978,77 @@ func connect(parent context.Context, o options, id identity) error {
 				if closeErr != nil {
 					return closeErr
 				}
+				var acceptedTask taskEnvelope
+				// The per-task context is created at acceptance, not when the
+				// goroutine starts: a cancel can arrive in the window between the
+				// two, and it would have nothing to cancel if registration waited.
+				var acceptedContext context.Context
+				accepted := false
 				if cmd.ExpiresAt.After(time.Now()) && cmd.Revision == revision && desired != nil {
 					switch cmd.Action {
+					case "execute_task":
+						// A device that cannot run tasks must refuse the assignment
+						// rather than accept and then report FAILED. Acceptance is
+						// what moves the task to RUNNING in the control plane, so
+						// accepting work that will never run writes a false
+						// RUNNING into the task ledger.
+						if o.taskRunnerSocket == "" {
+							break
+						}
+						task, taskErr := cmd.taskBody()
+						if taskErr != nil {
+							log.Printf("desktop-agent: execute_task body was refused: %v", taskErr)
+							break
+						}
+						slotFree := false
+						select {
+						case taskSlot <- struct{}{}:
+							slotFree = true
+						default:
+						}
+						if !slotFree {
+							log.Printf("desktop-agent: task %s refused, an execution is already in flight", task.RunID)
+							break
+						}
+						// The assignment must be durable before it is acknowledged:
+						// the control plane treats acceptance as "persisted in the
+						// local task inbox", so acknowledging first would be a lie
+						// it cannot roll back if this process dies.
+						if _, _, inboxErr := persistTaskInbox(taskInbox, cmd.ID, task); inboxErr != nil {
+							<-taskSlot
+							log.Printf("desktop-agent: task %s was not persisted locally: %v", task.RunID, inboxErr)
+							break
+						}
+						taskCtx, taskCancel := context.WithCancel(ctx)
+						inflight.begin(task.RunID, taskCancel)
+						acceptedTask, acceptedContext, accepted = task, taskCtx, true
+						result.State = "completed"
+						result.Result = json.RawMessage(`{"accepted":true}`)
+					case "cancel_task":
+						// Cancelling is not a state change in this process: the run
+						// either stops — and then reports CANCELLED through the ordinary
+						// result path, which owns the receipt, its immutability and its
+						// fencing — or it was never in flight and there is nothing to
+						// report. "Nothing to cancel" is an answer rather than a failure
+						// (the command normally arrived just after the task finished), so
+						// this is acknowledged either way and the flag is what lets the
+						// control plane tell the two apart.
+						//
+						// Gated by Revision like every other command, so the issuer has to
+						// send the revision this connection is on rather than the one the
+						// task was placed under: a policy that changed since placement
+						// must not make a stop unreachable.
+						task, taskErr := cmd.taskBody()
+						if taskErr != nil {
+							log.Printf("desktop-agent: cancel_task body was refused: %v", taskErr)
+							break
+						}
+						stopped := inflight.cancelIfRun(task.RunID)
+						if !stopped {
+							log.Printf("desktop-agent: cancel for %s matched no in-flight run", task.RunID)
+						}
+						result.State = "completed"
+						result.Result, _ = json.Marshal(map[string]bool{"cancelled": stopped})
 					case "reconcile":
 						if reconcile() == nil {
 							result.State = "completed"
@@ -793,7 +1079,9 @@ func connect(parent context.Context, o options, id identity) error {
 										}
 										stop, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 										defer cancel()
-										if current, ok := supervisor.Status(runtimeID); ok && current.StartedAt.Equal(startedAt) { _, _ = supervisor.Stop(stop, runtimeID) }
+										if current, ok := supervisor.Status(runtimeID); ok && current.StartedAt.Equal(startedAt) {
+											_, _ = supervisor.Stop(stop, runtimeID)
+										}
 									}(spec.ID, status.StartedAt)
 								}
 							}
@@ -813,11 +1101,29 @@ func connect(parent context.Context, o options, id identity) error {
 				if write(result) != nil {
 					return errors.New("desktop-agent: result delivery failed")
 				}
+				// Acceptance is on the wire before execution begins. The control
+				// plane refuses a task result for a command it has not already seen
+				// accepted, so this goroutine must not start any earlier -- and it
+				// must not run inline, or a long task would stall the heartbeat.
+				if accepted {
+					go func(commandID string, task taskEnvelope, taskCtx context.Context) {
+						defer func() { <-taskSlot }()
+						// Deregisters before the slot is released, so a cancel that
+						// arrives after the run ends finds nothing rather than
+						// stopping whatever takes the slot next. clear() is keyed by
+						// run ID, so a replacement that already began is untouched.
+						defer inflight.clear(task.RunID)
+						finishDeviceTask(taskCtx, write, o.taskRunnerSocket, o.nodeID, taskInbox, commandID, task)
+					}(cmd.ID, acceptedTask, acceptedContext)
+				}
 			}
 		}
 	}
 }
 
 func writeSnapshot(mu *sync.Mutex, snapshot *message, write func(message) error) error {
-	mu.Lock(); value := *snapshot; mu.Unlock(); return write(value)
+	mu.Lock()
+	value := *snapshot
+	mu.Unlock()
+	return write(value)
 }

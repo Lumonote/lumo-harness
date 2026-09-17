@@ -227,7 +227,10 @@ describe(`回填 —— 对真 PG（需 SESSION_LOG_TEST_DSN，当前${suffix}�
       })
       // 构造期样本：3 种子(seq 0-2)+ 构造器补的 session/end-seed(seq 3)= 4 条,
       // 全部只进 events、无一发布到 session/event
-      expect(session.events.map((e) => e.type)).toEqual(['turn/start', 'step/start', 'turn/start', 'session/end-seed'])
+      // 读法用 `snapshotEvents()`（原 `session.events` 属性）：同步事件读取于上游
+      // `2026-09-09-deprecate-synchronous-session-event-reads` 改成这三个方法，属性已不存在
+      // ——该 Agent Note 明确允许**测试文件**调用它们来检查已发出的事件。
+      expect(session.snapshotEvents().map((e) => e.type)).toEqual(['turn/start', 'step/start', 'turn/start', 'session/end-seed'])
       const rows = await poll(
         () => pg.read(String(session.id)),
         (got) => got.length === 4,

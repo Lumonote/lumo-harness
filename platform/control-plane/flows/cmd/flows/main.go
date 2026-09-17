@@ -17,9 +17,12 @@ import (
 
 	"github.com/lumo-harness/platform/flows/internal/domain"
 	"github.com/lumo-harness/platform/flows/internal/engine"
+	"github.com/lumo-harness/platform/flows/internal/lineage"
+	"github.com/lumo-harness/platform/flows/internal/schedule"
 	"github.com/lumo-harness/platform/flows/internal/server"
 	"github.com/lumo-harness/platform/flows/internal/store"
 	"github.com/lumo-harness/platform/flows/internal/trigger"
+	"github.com/lumo-harness/platform/heartbeat"
 	"github.com/lumo-harness/platform/observability"
 )
 
@@ -123,8 +126,44 @@ func main() {
 	worker.SetErrorHandler(func(err error) { log.Error("flow trigger worker error", "err", err) })
 	go worker.Run(ctx)
 
+	// cron 调度生产者：把 project_automations 里到期的 cron 自动化变成持久触发。
+	// 多个副本同时跑是安全的——推进游标用的是 CAS，抢先的赢、后到的什么都不做，
+	// 所以不需要选主，也不需要额外的 claim 列。
+	cronLocation, cronErr := time.LoadLocation(envOr("LUMO_FLOW_CRON_TZ", "UTC"))
+	if cronErr != nil {
+		log.Error("LUMO_FLOW_CRON_TZ 不是合法时区", "err", cronErr)
+		os.Exit(2)
+	}
+	producer := schedule.NewProducer(st, cronLocation)
+	producer.SetErrorHandler(func(err error) { log.Error("flow cron producer error", "err", err) })
+	log.Info("flows cron 调度启动", "default_tz", cronLocation.String())
+	go producer.Run(ctx)
+
+	// 血缘投影（缺口 C7）：Nebula 仅作呈现层，未配置时整体关闭——不写 outbox、不起投影器、
+	// 启动日志与 /metrics 都说清楚，绝不伪造成功。
+	nebulaURL := os.Getenv("LUMO_FLOW_NEBULA_URL")
+	if nebulaURL == "" {
+		st.SetLineageEnabled(false)
+		observability.SetGaugeWithLabels("lumo_flow_lineage_projector_enabled", 0,
+			map[string]string{"reason": "nebula_not_configured"})
+		log.Warn("flow lineage projector disabled: LUMO_FLOW_NEBULA_URL 未配置；血缘捕获与图投影均未启用",
+			"note", "血缘只读查询面将返回明确的「不可用」原因，不会以空列表冒充无血缘")
+	} else {
+		st.SetLineageEnabled(true)
+		observability.SetGaugeWithLabels("lumo_flow_lineage_projector_enabled", 1, nil)
+		adapter := lineage.NewHTTPAdapter(nebulaURL, os.Getenv("LUMO_FLOW_NEBULA_API_KEY"))
+		projector := lineage.NewProjector(st, adapter, log)
+		projector.SetErrorHandler(func(err error) { log.Error("flow lineage projector error", "err", err) })
+		go projector.Run(ctx)
+		log.Info("flow lineage projector 启动", "nebula", nebulaURL)
+	}
+
 	mux := http.NewServeMux()
 	server.New(st, log, flowEngine).Register(mux)
+
+	// 心跳上报：集群就绪态由心跳新鲜度与自报依赖派生（E4/D6），不再只看
+	// LUMO_CLUSTER_STATUS 这个静态声明。放在初始化之后，避免服务尚不可用就报 ready。
+	heartbeat.StartPg(ctx, pool, heartbeat.Options{Service: "flows", Logger: log, Depends: heartbeat.PgDependency(pool)})
 
 	log.Info("flows 启动", "addr", *listen)
 	httpSrv := &http.Server{Addr: *listen, Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)), ReadHeaderTimeout: 10 * time.Second}

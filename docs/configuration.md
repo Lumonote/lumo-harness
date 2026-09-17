@@ -36,8 +36,15 @@ Compose 和 Helm 是部署层配置，不应把生产密钥提交到仓库。
 | 本地单机 | `LUMO_DEPLOYMENT_MODE=local`、`LUMO_SQLITE_PATH` | Rust 桌面 worker 的 SQLite 文件；local 模式不会读取或连接服务器中间件 |
 | 部署 | `LUMO_MINIO_ROOT_USER`、`LUMO_MINIO_ROOT_PASSWORD` | Compose 对象存储账号；Registry 使用同一组变量 |
 | 部署 | `LUMO_VAULT_TOKEN`、`LUMO_CORS_ORIGIN`、`LUMO_PROMETHEUS_PORT` | 外部凭证、前端来源和观测入口 |
-| 调度 | `LUMO_INSTANCE`、`LUMO_NACOS_ADDR` | 实例身份、Nacos 目录 |
-| 组织治理 | `LUMO_DEPLOYMENT_MODE`、`LUMO_CLUSTER_STATUS` | 仅 `cluster` + `ready` 开启用户/角色/部门、技能分发与桌面节点 API；local/standalone 显式返回 `CLUSTER_ONLY` |
+| 调度 | `LUMO_INSTANCE`、`LUMO_NACOS_ADDR` | 实例身份、Nacos 目录。`LUMO_INSTANCE` 同时是心跳表的实例身份；未设置时回落为 `<hostname>-<pid>`（K8s 下 hostname 即 Pod 名），Compose 各服务显式设置 |
+| 调度（联邦注册表） | `LUMO_SCHEDULER_CLUSTER_ID`、`LUMO_CLUSTER_ENFORCE`、`LUMO_CLUSTER_SUSPECT_MS`、`LUMO_CLUSTER_DOWN_MS` | 本实例代表哪个集群自报存活、是否参与失联判定（三态：未设 = 由身份派生）、两段式阈值（默认 30s / 90s；`suspect < down` 是启动期硬约束，反了拒绝启动）。**没开判定就没有上报方的义务；开了则整个拓扑必须有承载节点自报**，否则闸门恒放行——`platform/deploy/cluster-registry-check.py` 专抓这个组合 |
+| 调度（版本一致性前置） | `LUMO_CLUSTER_VERSION_GATE` | 三态，**默认关**（打错字报错并点名变量）。开启后**未指定 `cluster_id` 的全局放置**只落到「版本可证明一致」的集群；出现两个以上不同版本时**整体拒绝**（含等于多数版本的那些）。唯一输入是集群侧声明的 `LUMO_CLUSTER_VERSION`：无人声明时判为「无信息一致」→ 恒放行，所以开了闸门就必须有人声明 |
+| 调度（偏好打分） | `LUMO_PLACEMENT_LOAD_WEIGHT`、`LUMO_PLACEMENT_AFFINITY_WEIGHT` | 两项权重，默认 `1` / `0.25`；负载项必须 > 0（0 会把放置退化成按亲和硬选）。`亲和/负载` 就是「亲和分最多能翻转多少负载比差」这条不变量的边界值，启动日志会打印。亲和项设为 0 即退回纯负载最小（也是默认权重下与旧行为的等价点） |
+| dsh 节点（版本声明） | `LUMO_CLUSTER_VERSION` | 本集群节点池当前跑的组件版本——版本一致性前置的**声明方**。与存活自报同理必须是**承载节点**（说的是「跑着的那个东西是哪个版本」，调度器自己的版本是另一条发布线）。留空 = 不声明 |
+| 组织治理 | `LUMO_DEPLOYMENT_MODE`、`LUMO_CLUSTER_STATUS` | `LUMO_CLUSTER_STATUS` 是**操作者意图**（「这是集群部署」），不是生效状态。仅当 `cluster` + `ready` **且**派生的健康成立时才开启用户/角色/部门、技能分发与桌面节点 API；local/standalone 返回 `CLUSTER_ONLY`（403），已声明就绪但不健康返回 `CLUSTER_NOT_READY`（503 + `Retry-After`） |
+| 组织治理 | `LUMO_REQUIRED_SERVICES` | 逗号分隔的必需服务闭集，覆盖默认九个（collaborator / connector-gateway / flows / governance / llm-gateway / projects / registry / scheduler / usage-ledger）。空值表示用默认集，**不表示「什么都不要求」**；含空项或重复项会拒绝启动。Helm 由 chart 自动按已启用服务生成 |
+| 组织治理 | `LUMO_HEARTBEAT_MAX_AGE_SECONDS`、`LUMO_HEARTBEAT_REFRESH_SECONDS` | 心跳过期上限（默认 45s）与就绪态重新求值周期（默认 10s）。快照超过 3 × 刷新周期即视为过期并 fail-closed |
+| 组织治理 | `LUMO_HEARTBEAT_PRUNE_SECONDS` | 清理「已消失副本」心跳行的周期（默认 600s）；行按 `(service, instance)` 唯一，实例身份稳定时表是有界的 |
 | 连接器 | `LUMO_OPA_ADDR`、`LUMO_OPA_POLICY`、`LUMO_VAULT_ADDR`、`LUMO_VAULT_TOKEN` | 策略与凭证 Provider |
 | 连接器 OAuth | `LUMO_CONNECTOR_OAUTH_ENABLED`、`LUMO_CONNECTOR_OAUTH_CALLBACK_URL`、`LUMO_CONNECTOR_OAUTH_STATE_KEY` | 显式启用托管授权；精确 HTTPS 回调及 Base64 编码的 32 字节共享 PKCE 派生密钥，所有网关副本必须一致 |
 | 连接器 OAuth | `LUMO_CONNECTOR_OAUTH_VAULT_MOUNT`、`LUMO_CONNECTOR_OAUTH_VAULT_PREFIX`、`LUMO_ADMIN_ROLES` | KV v2 挂载、令牌专用路径前缀、管理角色；默认挂载 `secret`、前缀 `lumo/connector-oauth` |
@@ -61,8 +68,10 @@ Compose 和 Helm 是部署层配置，不应把生产密钥提交到仓库。
 | DSH 出站代理 | `HTTP_PROXY`、`HTTPS_PROXY`（或 `ALL_PROXY`）、`NO_PROXY` | dsh CLI 在首个插件挂载前解析并安装为进程级 undici 代理策略。**只允许放在 Harness home 层 `.env`**（默认 `~/.dsh/.env`），项目目录 `.env` 会被官方拒绝并提示移入 home；`web-fetch` 走代理分支时跳过公网 IP 预检——见下方「fake-ip 代理下的 web_fetch」 |
 
 Scheduler 的 `POST /v1/placements` 支持可选 `deadline_ms`（EDF）、`queue`/`weight`
-（加权公平队列）、`requires[].value`（例如 `gpu=a100`）和 `avoid_nodes`（硬反亲和）。
-不传这些字段时使用兼容默认值；这些字段只影响调度决策，不改变多智能体 fanout 上限，
+（加权公平队列）、`requires[].value`（例如 `gpu=a100`）、`avoid_nodes`（硬反亲和）与
+`preferred_clusters`（集群偏好，软约束：只在**候选排序**里加分，不会让一个不满足
+`requires` 的节点被选中；未指定 `cluster_id` 时它才起作用）。不传这些字段时使用兼容
+默认值；这些字段只影响调度决策，不改变多智能体 fanout 上限，
 fanout 仍由请求/运行时策略决定，节点池由 Nacos + HPA 按容量动态扩展。
 
 ## fake-ip 代理下的 web_fetch（出站代理配置）
@@ -125,6 +134,147 @@ fake-ip 且不在 `fd00::/8` 的客户端。服务器形态（standalone/cluster
 dispatcher），LLM 调用、搜索、MCP over HTTP 同路；需要直连的地址（如内网模型端点、
 服务端内部服务）加入 `NO_PROXY` 即可。该方案是官方启动环境配置面，**升级不丢**；
 相比之下修改 `isPublicIpAddress` 的临时补丁升级即被覆盖，不应采纳。
+
+## 集群就绪（health-derived readiness）
+
+管理面门禁不再只看声明值。`LUMO_CLUSTER_STATUS=ready` 是操作者的**意图**，实际生效状态是
+「意图 AND 派生健康」。健康来自九个控制面服务写进 `lumo_service_heartbeats` 的心跳，
+过期判断用数据库的 `now() - observed_at`（心跳来自多台主机，用读取方自己的时钟比会有
+无界偏差）。必需服务是**闭集**：一个从未启动的服务算「缺失」，不会被静默忽略。
+
+| 情形 | 生效状态 | 管理 API | 说明 |
+|---|---|---|---|
+| 非 cluster 形态 | `not_ready` | 403 `CLUSTER_ONLY` | 配置事实，重试无用 |
+| cluster 但未声明 ready | `not_ready` | 403 `CLUSTER_ONLY` | 同上 |
+| 已声明 ready，但必需服务缺失／心跳过期／依赖不健康 | `degraded` | **503 `CLUSTER_NOT_READY`** + `Retry-After: 15` | 会自愈；响应体带 `message`、`unready_services`、`evaluated_at` |
+| 已声明 ready，且每个必需服务至少一个副本在服务 | `ready` | 放行 | 一个副本在服务即可；滚动重启不会关门 |
+
+两个刻意的例外：**OIDC 登录**与**调度补偿循环**只看声明值。登录是修复降级集群的入口，
+补偿循环是恢复机制——把它们也挂到健康上，等于在需要它们的时候先把它们关掉。
+
+`/healthz` 在集群降级时仍返回 200：governance 正是用来诊断降级集群的服务，让它因存活探针
+失败而重启循环是最糟的结果。集群就绪度通过 `/healthz` 内嵌的 `features` 块与
+`GET /v1/features` 暴露（`cluster_status_declared` / `cluster_status` / `cluster_ready` /
+`cluster_not_ready_reason` / `cluster_unready_services` / `cluster_readiness_evaluated_at`），
+**没有** `/readyz`：把它接到负载均衡探针上会在降级期间把登录路径摘出轮转。
+
+排障顺序：`GET /v1/features` 看 `cluster_unready_services` → 核对对应服务在
+`lumo_service_heartbeats` 里的行是否过期 → 看该行 `dependencies` 的上报。
+若某个服务是有意不部署的，把它从 `LUMO_REQUIRED_SERVICES` 里去掉（Helm 已自动推导）。
+
+**UI 侧门禁仍是声明值，这是刻意的。** `lumo-ui` 的 `clusterStatus` 由启动器按
+`LUMO_DEPLOYMENT_MODE` + `LUMO_CLUSTER_STATUS` 注入，回答的是「这个部署有没有集群功能」
+（形态问题），不是「现在健不健康」。它因此在降级期间**比服务端宽松**：管理入口仍然可见，
+点进去由服务端返回 503 并附带原因——反过来（UI 比服务端更严、把入口藏起来）会让运维
+连出错原因都看不到。UI 永远不是权威，`requireCluster` 才是；`/lumo/api` 的错误路径会
+透传上游状态码与响应体，所以降级原因能显示到页面上。
+
+## LLM provider 注册表管理
+
+`llm-gateway` 的 `llm_providers` 表决定「哪些模型可被路由、往哪转发、按什么费率计费」。
+它此前只能靠运维手写 SQL 维护（E8），现在有管理面接口。**这些接口不豁免控制面鉴权**：
+`cmd/llm-gateway` 把整个 mux 包在 `RequireControlPlaneToken` 里，所以除 `/healthz` 与
+`/metrics` 外一律需要 `Authorization: Bearer $LUMO_CONTROL_PLANE_TOKEN`。
+
+| 方法与路径 | 作用 | 成功 | 失败 |
+|---|---|---|---|
+| `GET /v1/providers` | 列出全部 provider，**含已停用行** | 200 `{"providers":[…]}` | 500 |
+| `GET /v1/providers/{model}` | 读单个 | 200 | 404 `provider_not_found` |
+| `PUT /v1/providers/{model}` | 建或改（幂等） | 200（回读该行） | 400 `invalid_model` / `invalid_body` / `invalid_provider` |
+| `DELETE /v1/providers/{model}` | 物理删除 | 204 | 404 `provider_not_found` |
+
+**写入语义：除 `model` 外每个字段都是可选的，省略 = 保持原值。** 一条规则覆盖全部字段。
+
+- 对 `apiKey` 这是**强制**的：密钥读不回来（响应里只有 `apiKeySet` 布尔），任何
+  「先 GET 再把读到的内容 PUT 回去」的客户端都会把它清掉。显式给 `""` 才会清除——清除有出口。
+- 对 `upstreamBaseUrl` 同样是必需品：摘掉一个模型只需 `{"enabled": false}`，
+  若基址必填这一步就退化成读改写。**省略只在改已有行时成立**，新建行必须给出（列是
+  `NOT NULL`，由库一条语句原子判定，另发存在性查询会引入「查完被删」的竞态）。
+- 路径是模型名的权威来源；body 里若也写了 `model`，必须与路径一致，否则 400。
+- 模型名可以含斜杠（`openai/gpt-4`），路由用多段通配符承载。
+
+```bash
+# 注册一个新模型（含密钥与费率）。:8088 是 llm-gateway 的 LUMO_LISTEN
+curl -X PUT http://llm-gateway:8088/v1/providers/gpt-4o \
+  -H "Authorization: Bearer $LUMO_CONTROL_PLANE_TOKEN" \
+  -d '{"upstreamBaseUrl":"https://api.example.com/v1","apiKey":"sk-…","priceInPerMtok":3,"priceOutPerMtok":15}'
+
+# 摘出路由（保留费率与密钥，可随时恢复）
+curl -X PUT http://llm-gateway:8088/v1/providers/gpt-4o \
+  -H "Authorization: Bearer $LUMO_CONTROL_PLANE_TOKEN" -d '{"enabled":false}'
+```
+
+**为什么停用行必须可见**：看不见就没人能把它重新启用。`enabled` 是响应里的一个字段，
+不是列表的过滤条件。注意路由面读的是「启用行」——停用的模型对 `POST /v1/chat/completions`
+表现为 404 `unknown_model`，与「根本没注册过」不可区分，这是对 OpenAI 兼容客户端的既定契约。
+
+**为什么删除是物理删除、而停用是常规手段**：停用保留费率与启用历史；删除只该用于
+「这行本来就录错了」。删掉行不会让历史账目失去依据（计费事件存 `costUsd` 快照，不是
+指向本表的外键），但会失去「当时按什么费率算的」这个解释——所以删除必须是显式动作。
+
+`upstreamBaseUrl` 校验与 flows 算子上游、dsh-node seam endpoint 同一套判据：必须
+`http`/`https`，不得带 userinfo、查询串或片段（带 userinfo 会把凭据写进日志；
+带 query 说明作者把它当成了完整 URL，而网关是在它后面拼 `/v1/chat/completions` 的）。
+只 trim 首尾空白，不做别的归一：拼接处已经 `TrimRight(BaseURL,"/")`，而 `/v1` 这类
+路径前缀是上游的真实形态，替运维改写会改出错误地址。
+
+## 连接器审计查询
+
+`connector-gateway` 把每一次外部调用（放行与拒绝都写）落在 PG `connector_audit`。
+这张表此前**只有写没有读**（E7）：要回答「这个会话到底对外调了什么」只能上生产 `psql`。
+现在有查询面。与其它管理面一样，整个 mux 包在 `RequireControlPlaneToken` 里。
+
+| 方法与路径 | 作用 |
+|---|---|
+| `GET /audit` | 分页读取审计，按 `id` 倒序（最新在前） |
+
+| 查询参数 | 说明 |
+|---|---|
+| `sessionId` | 按会话过滤（走 `idx_connector_audit_session`） |
+| `connectorId` | 按连接器过滤 |
+| `decision` | `allowed` 或 `denied`；**其它取值一律 400** |
+| `beforeId` | keyset 游标：只取 `id < beforeId`。用上一页返回的 `nextBeforeId` |
+| `limit` | 页大小，缺省 50、上限 200（超上限收敛，不报错） |
+| `all` | `true`/`1` 时看整个 realm，**需要管理员角色** |
+
+```bash
+# 我自己在这个会话里被拒绝的调用
+curl -G http://connector-gateway:8081/audit \
+  -H "Authorization: Bearer $LUMO_CONTROL_PLANE_TOKEN" \
+  -H "X-Lumo-User: u1" -H "X-Lumo-Realm: r1" -H "X-Lumo-Roles: operator" \
+  --data-urlencode sessionId=s1 --data-urlencode decision=denied
+
+# 管理员看整个 realm，并翻到下一页
+curl -G http://connector-gateway:8081/audit \
+  -H "Authorization: Bearer $LUMO_CONTROL_PLANE_TOKEN" \
+  -H "X-Lumo-User: admin" -H "X-Lumo-Realm: r1" -H "X-Lumo-Roles: admin" \
+  --data-urlencode all=true --data-urlencode beforeId=1234
+```
+
+**realm 只来自身份头。** 请求里带 `?realm=` 会被**忽略**，不是被采纳——
+realm 决定能看见哪些调用，自报即越权。这条由测试钉住，避免日后有人「顺手支持」它。
+
+**非管理员缺省只看自己的调用**，`all=true` 需要管理员角色（与 `/approvals` 的
+`approval.List(ctx, realm, requester, all)` 同一约定）。审计行带 `target_host` 与
+`operation`，跨用户可见性属管理能力；越权请求在**触达数据层之前**就被拒。
+
+**未知的 `decision` 报 400，不会退化成「不过滤」。** 这是刻意的：`?decision=denyed`
+若被静默忽略，一次「只看被拒绝的调用」的合规查询会返回全部调用——结果集被悄悄放大，
+比报错危险得多。审计面的过滤值一律 fail-closed。
+
+**排序键与游标键都是 `id`，不是 `created_at`。** `created_at` 取的是事务开始时刻，
+`id` 取的是 INSERT 时刻，并发下两者会不一致（先开始的事务可能后插入）。用一个排序、
+拿另一个翻页会漏行或重行。翻页用 keyset（`beforeId`）而非 offset：这张表只增，
+offset 窗口会被翻页期间的新写入冲掉。
+
+**返回体**：`{"entries":[…],"nextBeforeId":0}`。`nextBeforeId` 为 0 表示已到末页。
+空结果是 `[]` 而不是 `null`（`null` 会让客户端 `.map` 直接抛）。条目**不含请求体与
+响应体**——表里本来就没存（§15 数据最小化），所以这里没有「要不要脱敏」的决策；
+`redactions` 是脱敏**计数**，不是内容。也不含 `projected_at`：那是投影进度簿记，
+而投影器尚未落地（见 `cluster-gap-analysis.md` E7b），此时暴露它只会让人以为时间线已经存在。
+
+**未配置审计读取面时返回 503，不是空列表**——「查不到」与「没配」必须能分开。
+数据层错误只回通用消息，细节进日志：SQL 错误里可能带 realm 与查询条件。
 
 ## 企业 OIDC 登录
 

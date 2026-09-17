@@ -41,7 +41,12 @@ metadata:
   labels:
     lumo.dev/service: {{ $name }}
 spec:
-  replicas: {{ $.Values.replicaCount }}
+  {{- /* Per-service override, because the cluster shape is not uniform: the
+         cluster topology runs scheduler and collaborator in pairs and the
+         rest singly. A single global replicaCount cannot express that, and
+         silently deploying one scheduler would leave the lease/standby path
+         (the thing cluster acceptance exists to exercise) untested. */}}
+  replicas: {{ default $.Values.replicaCount $cfg.replicas }}
   selector:
     matchLabels: { lumo.dev/service: {{ $name }} }
   template:
@@ -86,13 +91,68 @@ spec:
             {{- if eq $name "scheduler" }}
             - name: LUMO_GOVERNANCE_URL
               value: {{ printf "http://%s-governance:%v" (include "lumo-platform.name" $) $.Values.services.governance.port | quote }}
+            {{- /* 集群失联判定开关（cmd/scheduler 的 domain.ResolveClusterEnforcement）。
+                   这个键由 values.cluster.yaml 打开；基础 values.yaml 保持关闭，避免
+                   一次无关的 values 改动把生产上的准入闸门悄悄翻过来。 */}}
+            - name: LUMO_CLUSTER_ENFORCE
+              value: {{ $.Values.services.scheduler.clusterEnforce | default false | quote }}
+            {{- /* 集群身份（本 release 服务哪个集群）。
+                   它给**集群本地放置降级**用：全局调度选不出 leader 时，本集群的任务仍要能
+                   落下去，而「本地」需要身份（见 internal/server 的 degradedPlacement）。
+                   在这里与 dshNode.clusterId 同源派生，省掉一处会配错的地方。
+                   基础 profile 下 dshNode 不开，这里也留空 = 不认领身份，行为完全不变。 */}}
+            - name: LUMO_SCHEDULER_CLUSTER_ID
+              value: {{ if $.Values.dshNode.enabled }}{{ $.Values.dshNode.clusterId | default "default" | quote }}{{ else }}""{{ end }}
+            {{- /* 但**不自报**。这一段是原注释的推理，结论变了、理由没变：
+                   「调度器还在跑」不等于「这个集群还能接放置」——把节点池缩到 0 时调度器
+                   照旧活着，由它自报会让一个空集群一直显示健康，而放置落下去无人执行。
+                   所以存活的上报方仍然是节点池（templates/dsh-node.yaml 带 LUMO_ROLE=node
+                   与 LUMO_SCHEDULER_URL），调度器只判定 + 只做本地放置决策。
+
+                   **两个开关的分离是必须的**：在 domain.ResolveClusterSelfReport 出现之前，
+                   身份一设就自动自报，于是这里只能「两个都不要」——而那样连降级路径也一起
+                   没了（那条判据的第一条就是「本实例有集群身份」）。一个开关承担两件事时，
+                   配置的人只能撒一个谎。 */}}
+            - name: LUMO_CLUSTER_SELF_REPORT
+              value: "false"
+            {{- /* 版本一致性前置（§7.4.1）：全局任务只落到「版本可证明一致」的集群上。
+                   与存活闸门**独立**（可以只开一个），默认关——打开它会让「有人在滚动
+                   升级」变成「全局任务排队」，那是发布流程的决策而不是正确性修复。
+                   它的全部输入是承载节点声明的 LUMO_CLUSTER_VERSION；没人声明时判定为
+                   「无信息一致」→ 恒放行，于是开关看起来生效了而作用为零。所以打开它
+                   必须同时设 dshNode.clusterVersion，cluster-registry-check.py 有一条
+                   静态规则专抓这个组合（闸门开 + 整个拓扑无人声明）。 */}}
+            - name: LUMO_CLUSTER_VERSION_GATE
+              value: {{ $.Values.services.scheduler.clusterVersionGate | default false | quote }}
+            {{- /* 偏好打分的两项权重（§7.4.1 的 clusterTag/region 标签偏好）。默认值与
+                   domain.DefaultPlacementWeights 一致；affinity/load 就是「亲和分最多
+                   能翻转多少负载比差」这条不变量的边界值，启动日志里会打出来。 */}}
+            - name: LUMO_PLACEMENT_LOAD_WEIGHT
+              value: {{ $.Values.services.scheduler.placementLoadWeight | default 1 | quote }}
+            - name: LUMO_PLACEMENT_AFFINITY_WEIGHT
+              value: {{ $.Values.services.scheduler.placementAffinityWeight | default 0.25 | quote }}
             {{- end }}
             - name: LUMO_LISTEN
               value: {{ printf ":%v" $cfg.port | quote }}
+            {{- /* 每个副本都要有唯一实例标识，且必须从 Pod 名注入。
+                   scheduler 的实例名回落链是 LUMO_INSTANCE → 字面量 "scheduler-0"
+                   （cmd/scheduler/main.go:33），不是主机名；缺了这个变量时两个副本
+                   会以同一个 holder 去 Acquire，而 store.go:204-208 在 holder 相同时
+                   **不递增 fencing_token** 且 WHERE 子句照样命中——两个进程各拿到
+                   token=1 的租约，checkFencing 只比 holder+token，于是互相之间
+                   完全没有 fencing，即双 leader。用 Pod 名还顺带让重启后的新进程
+                   拿到更高的 token，把旧进程挡在外面。 */}}
+            - name: LUMO_INSTANCE
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - name: LUMO_CONTROL_PLANE_TOKEN
               valueFrom: { secretKeyRef: { name: {{ $.Values.controlPlaneAuth.tokenSecret }}, key: {{ $.Values.controlPlaneAuth.tokenKey }}, optional: false } }
+            {{- /* 空名字必须整条省略。渲染成 `name: ` 会产出一份非法清单，而
+                   `helm template` 不会报错——它只在 GitOps 同步或 kubectl apply
+                   时才炸，报错位置离真正的原因很远。 */}}
+            {{- if $.Values.vault.tokenSecret }}
             - name: LUMO_VAULT_TOKEN
-              valueFrom: { secretKeyRef: { name: {{ $.Values.vault.tokenSecret }}, key: token, optional: true } }
+              valueFrom: { secretKeyRef: { name: {{ $.Values.vault.tokenSecret }}, key: {{ $.Values.vault.tokenKey }}, optional: true } }
+            {{- end }}
             {{- if eq $name "governance" }}
             - name: LUMO_DESKTOP_GATEWAY_ENABLED
               value: {{ $.Values.deviceGateway.enabled | quote }}
@@ -136,14 +196,55 @@ spec:
             {{- end }}
             {{- end }}
             {{- if eq $name "collaborator" }}
-            - name: LUMO_INSTANCE
-              valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - name: LUMO_NACOS_COLLABORATOR_SERVICE
               value: lumo-collaborator
             - name: LUMO_NODE_ADVERTISE_HOST
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
             - name: LUMO_NACOS_PORT
               value: {{ $cfg.port | quote }}
+            {{- end }}
+            {{- if eq $name "edge-gateway" }}
+            {{- /* 这一条是 pod 级 env 覆盖 envFrom 同名键的用法，不是冗余：
+                   共享 ConfigMap 给**每个**服务注入 `LUMO_CORS_ORIGIN`，而 gate.go:122-124
+                   明确写着部署 edge-gateway 时不应设它 —— observability 中间件会按「配置的
+                   来源」写死 ACAO，边缘层却要按「请求的 Origin」裁决，两套头叠在一个响应上
+                   时行为取决于哪一层写在后面。空串让中间件整条跳过（它判 `!= ""`），
+                   于是 gate.CORS 成为边缘 CORS 的唯一来源。 */}}
+            - name: LUMO_CORS_ORIGIN
+              value: ""
+            - name: LUMO_EDGE_ROUTES
+              value: /etc/lumo/edge-routes.json
+            - name: LUMO_EDGE_REDIS_URL
+              value: {{ default (printf "redis://%s" $.Values.redis.address) $.Values.edgeGateway.redisUrl | quote }}
+            - name: LUMO_EDGE_LIMITER_FAIL_OPEN
+              value: {{ $.Values.edgeGateway.limiterFailOpen | quote }}
+            {{- /* `int` is load-bearing on the three numeric ones, not decoration.
+                   Helm decodes values.yaml numbers as float64, and `quote` of a
+                   float64 uses %v/%g — which switches to scientific notation at
+                   1e6. The default maxBodyBytes (1048576) rendered as
+                   "1.048576e+06", and the gateway parses that with
+                   strconv.ParseInt: it fails, `envOrInt64` falls back to the
+                   built-in default, and the value silently becomes 1<<20 anyway
+                   **because the two happen to agree**. Set maxBodyBytes to
+                   2000000 and the effective limit would stay 1 MiB with nothing
+                   logged. Any future numeric env here needs the same cast. */}}
+            - name: LUMO_EDGE_GLOBAL_RPM
+              value: {{ int $.Values.edgeGateway.globalRpm | quote }}
+            - name: LUMO_EDGE_MAX_BODY_BYTES
+              value: {{ int $.Values.edgeGateway.maxBodyBytes | quote }}
+            - name: LUMO_EDGE_MAX_CONNS
+              value: {{ int $.Values.edgeGateway.maxConns | quote }}
+            - name: LUMO_EDGE_CORS_ORIGINS
+              value: {{ default $.Values.console.corsOrigin (join "," $.Values.edgeGateway.corsOrigins) | quote }}
+            {{- end }}
+            {{- if eq $name "terminal-gateway" }}
+            {{- /* 签名密钥必须有：缺了它二进制不报错，而是把每个敏感动作 fail-closed 拒掉，
+                   日志说「策略引擎/签名不可用」。那是安全的一侧，但症状与「权限不足」长得
+                   像，所以宁可让它在渲染期就把名字要求出来（templates/secret.yaml 亦然）。 */}}
+            - name: LUMO_TERMINAL_SIGNING_SECRET
+              valueFrom: { secretKeyRef: { name: {{ required "terminalGateway.signingSecret must name a Secret holding the terminal action signing key (an empty value makes the terminal fail closed on every sensitive action)" $.Values.terminalGateway.signingSecret | quote }}, key: {{ $.Values.terminalGateway.signingKey | quote }}, optional: false } }
+            - name: LUMO_PRESENCE_TTL
+              value: {{ $.Values.terminalGateway.presenceTtl | quote }}
             {{- end }}
           {{- if eq $name "registry" }}
           volumeMounts:
@@ -158,6 +259,23 @@ spec:
               readOnly: true
             - name: device-issuer
               mountPath: /etc/lumo/device-issuer
+              readOnly: true
+          {{- end }}
+          {{- /* The three `volumeMounts:` blocks (registry / governance / edge-gateway) are
+                 mutually exclusive because $name is a single value. They are written as
+                 separate keys rather than one merged list, so if a fourth service ever needs
+                 a mount, merging is a real edit — two `volumeMounts:` keys in one container
+                 would be duplicate YAML keys, and the API server would silently keep the
+                 last one. */}}
+          {{- if eq $name "edge-gateway" }}
+          volumeMounts:
+            # Mounted as a directory, and deliberately **not** with subPath: a subPath
+            # mount never receives ConfigMap updates, which would make the gateway's
+            # SIGHUP reload path dead (it would re-read the same bytes the pod started
+            # with) and turn every route-table edit into a restart. See
+            # templates/edge-routes.yaml.
+            - name: edge-routes
+              mountPath: /etc/lumo
               readOnly: true
           {{- end }}
           readinessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 5, periodSeconds: 10 }
@@ -182,16 +300,21 @@ spec:
                 path: server.crt
               - key: {{ required "deviceGateway.tlsKeyKey is required" $.Values.deviceGateway.tlsKeyKey | quote }}
                 path: server.key
-        - name: device-issuer
-          secret:
-            secretName: {{ required "deviceGateway.issuerSecret is required" $.Values.deviceGateway.issuerSecret | quote }}
-            optional: false
-            defaultMode: 0440
-            items:
-              - key: {{ required "deviceGateway.issuerCertKey is required" $.Values.deviceGateway.issuerCertKey | quote }}
-                path: issuer.crt
-              - key: {{ required "deviceGateway.issuerKeyKey is required" $.Values.deviceGateway.issuerKeyKey | quote }}
-                path: issuer.key
+            - name: device-issuer
+              secret:
+                secretName: {{ required "deviceGateway.issuerSecret is required" $.Values.deviceGateway.issuerSecret | quote }}
+                optional: false
+                defaultMode: 0440
+                items:
+                  - key: {{ required "deviceGateway.issuerCertKey is required" $.Values.deviceGateway.issuerCertKey | quote }}
+                    path: issuer.crt
+                  - key: {{ required "deviceGateway.issuerKeyKey is required" $.Values.deviceGateway.issuerKeyKey | quote }}
+                    path: issuer.key
+      {{- end }}
+      {{- if eq $name "edge-gateway" }}
+      volumes:
+        - name: edge-routes
+          configMap: { name: {{ include "lumo-platform.name" $ }}-edge-routes }
       {{- end }}
 ---
 {{- end }}

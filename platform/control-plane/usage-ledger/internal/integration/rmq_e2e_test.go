@@ -37,30 +37,75 @@ import (
 // TestMain：e2e 前清空重建闭集 topic。**为什么必须**：broker 保留全部历史，而新
 // 消费组会重放全部保留历史（实测，设计说明 §8.3）——不清则历史随每轮测试单调
 // 累积，新组的重放预算线性膨胀，套件最终必然超时（红过两次才认清）。经 docker
-// exec mqadmin（standalone 拓扑在跑的 broker 容器）；不可用则警告降级（套件变慢
-// 但语义不变）。LUMO_TEST_RMQ_RESET=0 可显式关闭。
+// exec mqadmin（容器由 resolveBrokerContainer 解析：显式变量 > compose 服务标签反查，
+// 见其注释）；不可用则警告降级（套件变慢但语义不变）。LUMO_TEST_RMQ_RESET=0 可显式关闭。
 func TestMain(m *testing.M) {
 	if os.Getenv("LUMO_TEST_RMQ_ENDPOINT") != "" && os.Getenv("LUMO_TEST_RMQ_RESET") != "0" {
-		container := os.Getenv("LUMO_TEST_RMQ_CONTAINER")
-		if container == "" {
-			container = "lumo-platform-standalone-rocketmq-1"
-		}
-		for _, topic := range []string{
-			"usage-events-llm-tokens", "usage-events-connector-call", "usage-events-seam-query",
-			"usage-events-job-compute", "usage-events-storage-bytes", "usage-events-inference-gpu",
-		} {
-			for _, args := range [][]string{
-				{"deleteTopic", "-n", "localhost:9876", "-c", "DefaultCluster", "-t", topic},
-				{"updateTopic", "-n", "localhost:9876", "-c", "DefaultCluster", "-t", topic},
-			} {
-				cmd := exec.Command("docker", append([]string{"exec", container, "sh", "mqadmin"}, args...)...)
-				if out, err := cmd.CombinedOutput(); err != nil {
-					fmt.Fprintf(os.Stderr, "警告: topic 重置失败（%s %s）: %v\n%s", topic, args[0], err, out)
-				}
-			}
+		if container := resolveBrokerContainer(); container == "" {
+			fmt.Fprintln(os.Stderr, "警告: 无法确定 rocketmq broker 容器，跳过 topic 重置"+
+				"（新消费组会重放全部保留历史，套件可能因此超时）；"+
+				"设置 LUMO_TEST_RMQ_CONTAINER 可显式指定")
+		} else {
+			resetTopics(container)
 		}
 	}
 	os.Exit(m.Run())
+}
+
+// resolveBrokerContainer 决定用哪个容器跑 mqadmin。
+//
+// 显式设置 LUMO_TEST_RMQ_CONTAINER 时以它为准。否则按 compose 服务标签反查**正在运行**
+// 的 broker。默认值曾经写死成 standalone 的容器名，而 cluster 拓扑下那是另一个名字——
+// 于是 cluster 验收里重置静默退化成警告，历史照样跨运行累积，套件最终超时（正是上面
+// TestMain 注释说的那个失败形态）。
+//
+// 反查不到（非 compose 部署 / docker 不可用 / broker 未起）返回空串；查到多个则无法从
+// 容器名判断该清哪一个（两个拓扑可能同时起着），同样返回空串并点名候选与变量，不猜。
+func resolveBrokerContainer() string {
+	if explicit := os.Getenv("LUMO_TEST_RMQ_CONTAINER"); explicit != "" {
+		return explicit
+	}
+	out, err := exec.Command("docker", "ps",
+		"--filter", "label=com.docker.compose.service=rocketmq",
+		"--format", "{{.Names}}").Output()
+	if err != nil {
+		return ""
+	}
+	var names []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			names = append(names, name)
+		}
+	}
+	switch len(names) {
+	case 1:
+		return names[0]
+	case 0:
+		return ""
+	default:
+		fmt.Fprintf(os.Stderr,
+			"警告: 发现多个 rocketmq 容器 %v，无法判断该重置哪一个；请设置 LUMO_TEST_RMQ_CONTAINER\n", names)
+		return ""
+	}
+}
+
+// resetTopics 删除并重建闭集 topic。mqadmin 不可用则警告降级（套件变慢但语义不变）。
+func resetTopics(container string) {
+	for _, topic := range []string{
+		"usage-events-llm-tokens", "usage-events-connector-call", "usage-events-seam-query",
+		"usage-events-job-compute", "usage-events-storage-bytes", "usage-events-inference-gpu",
+	} {
+		for _, args := range [][]string{
+			{"deleteTopic", "-n", "localhost:9876", "-c", "DefaultCluster", "-t", topic},
+			{"updateTopic", "-n", "localhost:9876", "-c", "DefaultCluster", "-t", topic},
+		} {
+			cmd := exec.Command("docker", append([]string{"exec", container, "sh", "mqadmin"}, args...)...)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				fmt.Fprintf(os.Stderr, "警告: topic 重置失败（%s %s，容器 %s）: %v\n%s",
+					topic, args[0], container, err, out)
+			}
+		}
+	}
 }
 
 func rmqEndpoint(t *testing.T) string {
@@ -76,7 +121,7 @@ func newProducer(t *testing.T, endpoint string) rmq.Producer {
 	t.Helper()
 	rmq.EnableSsl = false // 本地 proxy TLS permissive；生产 TLS 随 helm 形态
 	p, err := rmq.NewProducer(&rmq.Config{
-		Endpoint: endpoint,
+		Endpoint:    endpoint,
 		Credentials: &credentials.SessionCredentials{AccessKey: "", AccessSecret: ""},
 	}, rmq.WithTopics(mustTopics(t)...))
 	if err != nil {

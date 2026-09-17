@@ -1,0 +1,65 @@
+# 把 cluster 拓扑的基础设施端口暴露到宿主机，供本地 / CI 验收使用。
+#
+# **为什么需要**：`compose.cluster.yml` 刻意只发布 prometheus、dsh-web 与 13 个控制面
+# 服务（18080-18093，其中 18090 留给可选 overlay 的设备网关）。postgres / redis /
+# minio / nacos / milvus / opa / vault / etcd /
+# rocketmq 只在 compose 网络内可达，而 `acceptance-cluster.sh` 必须在宿主机上拿到
+# `LUMO_TEST_PG_DSN`、五个 `LUMO_TEST_*_HEALTH_URL` 与 `LUMO_TEST_RMQ_ENDPOINT`。
+# 没有本文件，验收链路在「直接 up.sh cluster」之后一步都走不了。
+#
+# **仅用于验收环境。** 本文件是 additive 覆盖：不新增也不删除任何服务，只给已有服务加
+# `ports:`。所以 `preflight-deployment.sh` / `smoke-cluster.sh` 无需感知它——它们的
+# `config --services` 结果与本文件无关，仍然逐字相同。
+#
+#   # 默认（生产形态，不暴露基础设施端口）
+#   ./platform/deploy/up.sh cluster -d --build
+#
+#   # 验收形态（暴露基础设施端口）
+#   LUMO_COMPOSE_EXTRA_FILES=platform/deploy/compose.cluster.acceptance.yml \
+#     ./platform/deploy/up.sh cluster -d --build
+#
+#   set -a; . platform/deploy/acceptance.env; set +a
+#   ./platform/deploy/acceptance-cluster.sh
+#
+# **宿主机端口刻意与 `compose.standalone.yml` 保持一致**，这样
+# `acceptance.env.example` 里的值对两种形态都成立，操作者不用记两套。
+# 代价：cluster 与 standalone 不能同时起（会撞端口）。
+#
+# 端口号来源：postgres/redis/minio/nacos/rocketmq 取自 `compose.standalone.yml` 已发布
+# 的映射；milvus 19530 取自 `LUMO_MILVUS_URL=http://milvus:19530`，opa 8181 与 vault 8200
+# 取自 `LUMO_OPA_ADDR` / `LUMO_VAULT_ADDR`（`cluster-runtime.env` 与 Helm values 一致）；
+# milvus 的 9091 是它自己的 healthcheck 端口。**都不是猜的。**
+
+# 与 compose.cluster.yml 同名，避免多文件合并时项目名产生歧义。
+name: lumo-platform-cluster
+
+services:
+  postgres:
+    ports: ["15432:5432"]
+
+  redis:
+    ports: ["16379:6379"]
+
+  minio:
+    ports: ["19000:9000", "19001:9001"]
+
+  nacos:
+    ports: ["18848:8848", "19848:9848"]
+
+  rocketmq-namesrv:
+    ports: ["19876:9876"]
+
+  # 10911 是 broker 端口，8081 是 mqproxy 的 gRPC 端口——`LUMO_TEST_RMQ_ENDPOINT`
+  # 要的是后者（v5 客户端走 gRPC），不是 namesrv 的 9876/19876。
+  rocketmq:
+    ports: ["10911:10911", "10909:10909", "8081:8081"]
+
+  # 19530 是服务端口，9091 是 healthz（`LUMO_TEST_MILVUS_HEALTH_URL` 用后者）。
+  milvus:
+    ports: ["19530:19530", "19091:9091"]
+
+  opa:
+    ports: ["18181:8181"]
+
+  vault:
+    ports: ["18200:8200"]

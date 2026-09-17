@@ -3,6 +3,8 @@ FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY connector-gateway/go.mod connector-gateway/go.sum ./
 COPY observability /observability
+COPY heartbeat /heartbeat
+COPY ratelimit /ratelimit
 RUN go mod download
 COPY connector-gateway .
 # CGO_ENABLED=0：纯 Go，无 FFI 依赖。

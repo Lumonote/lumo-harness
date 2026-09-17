@@ -74,6 +74,21 @@ importers:
         specifier: 4.22.4
         version: 4.22.4
 
+  dsh-plugins/agent-teams:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: link:../../../deepseek-harness/vendor/cordis
+        version: link:../../../deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-tools':
+        specifier: link:../../../deepseek-harness/packages/core/tools
+        version: link:../../../deepseek-harness/packages/core/tools
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../deepseek-harness/vendor/schemastery
+        version: link:../../../deepseek-harness/vendor/schemastery
+      tsx:
+        specifier: 4.22.4
+        version: 4.22.4
+
   dsh-plugins/archify:
     dependencies:
       '@deepseek-ai/cordis':
@@ -128,6 +143,9 @@ importers:
       '@deepseek-ai/dsh-agent':
         specifier: link:../../../deepseek-harness/packages/core/agent
         version: link:../../../deepseek-harness/packages/core/agent
+      '@deepseek-ai/dsh-llm':
+        specifier: link:../../../deepseek-harness/packages/llm/llm
+        version: link:../../../deepseek-harness/packages/llm/llm
       '@deepseek-ai/dsh-session':
         specifier: link:../../../deepseek-harness/packages/core/session
         version: link:../../../deepseek-harness/packages/core/session

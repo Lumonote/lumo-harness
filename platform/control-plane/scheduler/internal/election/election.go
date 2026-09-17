@@ -33,9 +33,14 @@ func (st *State) clear()              { st.current.Store(nil) }
 // onChange(true) 仅在获得（或重获）领导权时回调，续租不回调。
 // 库不可用时保持现状：若本进程是 leader，写路径自会被库端 fencing 拒绝，
 // 无需在选举层伪造降级。
-func Run(ctx context.Context, st *State, s *store.Store, holder string, ttl time.Duration, onChange func(bool)) {
+// acquireFunc 取一次锁。两种作用域共用同一个循环：「acquire + 续租 + 变更回调」这三件事
+// 与锁的大小无关，拆成两个循环只会让两者的续租节奏有机会分叉——而分叉的后果是一把锁
+// 比另一把早过期，症状是「偶尔有人拿不到降级决策权」，且只在压力下出现。
+type acquireFunc func(ctx context.Context, holder string, ttlMs int64) (*domain.Lease, error)
+
+func run(ctx context.Context, st *State, acquire acquireFunc, holder string, ttl time.Duration, onChange func(bool)) {
 	try := func() {
-		l, err := s.Acquire(ctx, holder, ttl.Milliseconds())
+		l, err := acquire(ctx, holder, ttl.Milliseconds())
 		if err != nil && !errors.Is(err, domain.ErrNotAcquired) {
 			return
 		}
@@ -63,4 +68,24 @@ func Run(ctx context.Context, st *State, s *store.Store, holder string, ttl time
 			try()
 		}
 	}
+}
+
+// Run 全局租约：跨集群的唯一放置决策者。
+func Run(ctx context.Context, st *State, s *store.Store, holder string, ttl time.Duration, onChange func(bool)) {
+	run(ctx, st, s.Acquire, holder, ttl, onChange)
+}
+
+// RunCluster 本集群的本地租约：全局调度不可用时的本集群决策者。
+//
+// **只在设了集群身份时才跑。** 一个不知道自己属于哪个集群的实例无从判断「本地」是什么，
+// 让它参与只会造出一把「所有没有身份的实例」共用的锁——它们会互相认为自己是同一个集群的
+// 决策者，而那正是围栏要防的事。这与 store.AcquireCluster 拒绝空 cluster_id 是同一条判据的
+// 两处落点：一处防误用，一处防误启动。
+func RunCluster(ctx context.Context, st *State, s *store.Store, clusterID, holder string, ttl time.Duration, onChange func(bool)) {
+	if clusterID == "" {
+		return
+	}
+	run(ctx, st, func(ctx context.Context, holder string, ttlMs int64) (*domain.Lease, error) {
+		return s.AcquireCluster(ctx, clusterID, holder, ttlMs)
+	}, holder, ttl, onChange)
 }

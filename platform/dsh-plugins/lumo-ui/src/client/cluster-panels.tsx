@@ -377,6 +377,145 @@ export interface AgentPreset {
   max_concurrency: number; trust_level?: string; residency?: string; max_budget_cents: number; timeout_seconds: number; max_delegation_depth: number
 }
 
+// ---------------------------------------------------------------------------
+// 任务执行视图：意图契约 / 子任务进度 / 执行证据
+//
+// 三块面板都只吃任务行本身，不各自再发明一份任务模型：治理面的任务读面
+// （`delegationSelect`）已经把 intent_contract、rationale、标签与技能、评分
+// 快照一起返回，所以「意图契约」不需要额外请求，缺字段时如实说缺，而不是
+// 拿今天的默认值补一个看起来完整的契约。
+//
+// 另外两条读面是分开取的，因为治理面自己就分开了：collaboration 只带子任务
+// 与计数摘要（`has_more` 说明还有没返回的部分），run result 才是结果全文。
+// 面板不做合并展示，否则「摘要里没有」会被读成「执行没有产出」。
+// ---------------------------------------------------------------------------
+
+export interface TaskIntentContract {
+  parent_task_id?: string; objective: string; constraints?: string[]; acceptance_criteria?: string[]; root_objective?: string; depth?: number
+}
+export interface TaskScoreBreakdown {
+  match?: number; confidence?: number; load?: number; quality?: number; cost_norm?: number
+  weighted_total?: number; contributions?: Record<string, number>; effective_weights?: Record<string, number>
+}
+// 只声明面板真正读的字段。治理面的任务行还有更多列，但那不是面板的事。
+export interface TaskIntentFacts {
+  id: string; title: string; intent: string; state: string; business_state?: string
+  project_id?: string; assignee_name?: string; assignee_user_id?: string; assignee_worker_id?: string
+  match_score?: number; confidence_band?: string
+  required_tags?: string[]; required_skills?: string[]; inferred_tags?: string[]; inferred_skills?: string[]; selected_skills?: string[]
+  rationale?: string[]; intent_contract?: TaskIntentContract; score_breakdown?: TaskScoreBreakdown
+  score_weights?: Record<string, number>; schedule?: unknown
+  scheduler_task_id?: string; assigned_node_id?: string; last_error?: string
+}
+export interface TaskRunFacts { id: string; attempt: number; state: string; worker_id?: string; assigned_node_id?: string; last_error?: string }
+export interface TaskResultFacts {
+  task_id?: string; run_id: string; state: string; session_ref?: string; node_id?: string
+  summary?: string; output?: unknown; created_at?: string
+}
+export interface ChildTaskProgress { task: TaskIntentFacts; run?: TaskRunFacts; result?: TaskResultFacts }
+export interface TaskCollaborationSummary {
+  total: number; active: number; awaiting_review: number; accepted: number; needs_attention: number; unresolved: number
+}
+export interface TaskCollaborationFacts {
+  task: TaskIntentFacts; children: ChildTaskProgress[]; summary: TaskCollaborationSummary; has_more: boolean
+}
+
+const confidenceBands: Record<string, string> = { AUTO: '自动分发', SUGGESTED: '建议分发', MANUAL: '人工选择' }
+
+export function TaskIntentContractPanel({ task }: { task: TaskIntentFacts }) {
+  const contract = task.intent_contract
+  const objective = (contract?.objective || task.intent || '').trim()
+  const constraints = contract?.constraints ?? []
+  const criteria = contract?.acceptance_criteria ?? []
+  const rationale = task.rationale ?? []
+  const chipGroups: Array<[string, string[] | undefined]> = [
+    ['必须标签', task.required_tags], ['识别标签', task.inferred_tags],
+    ['必须技能', task.required_skills], ['识别技能', task.inferred_skills],
+    ['已选技能', task.selected_skills],
+  ]
+  const chips = chipGroups.flatMap(([name, values]) => (values ?? []).map(value => ({ name, value })))
+  const numbered = (prefix: string, values: string[]) => values.length
+    ? <div className="lumo-cluster-list">{values.map((value, index) => <div key={`${prefix}:${index}`}><span><b>{`${prefix} ${String(index + 1).padStart(2, '0')}`}</b><small>{value}</small></span></div>)}</div>
+    : <p className="lumo-inline-empty">{`未声明${prefix}。`}</p>
+  return <div className="lumo-cluster-panel">
+    <div className="lumo-section-title"><div><b>意图契约</b><span>{contract ? `委派深度 ${contract.depth ?? 0} · ${contract.parent_task_id ? `父任务 ${contract.parent_task_id}` : '顶层任务'}` : '任务行未携带契约字段，仅显示原始意图'}</span></div></div>
+    <small className="lumo-form-note">交付目标</small>
+    <p className="lumo-cluster-feedback">{objective || '未记录交付目标。'}</p>
+    <div className="lumo-device-facts">
+      <span><small>根目标</small><b>{contract?.root_objective || objective || '未记录'}</b></span>
+      <span><small>分派判定</small><b>{`${task.match_score ?? 0} 分 · ${confidenceBands[task.confidence_band ?? ''] ?? task.confidence_band ?? '未评级'}`}</b></span>
+      <span><small>执行对象</small><b>{task.assignee_name || task.assignee_worker_id || task.assignee_user_id || '未分派'}</b></span>
+    </div>
+    <small className="lumo-form-note">硬约束</small>
+    {numbered('约束', constraints)}
+    <small className="lumo-form-note">验收标准</small>
+    {numbered('标准', criteria)}
+    <small className="lumo-form-note">标签与技能</small>
+    {chips.length ? <div className="lumo-inference">{chips.map(chip => <span key={`${chip.name}:${chip.value}`}>{chip.name} · {chip.value}</span>)}</div> : <p className="lumo-inline-empty">未声明标签或技能约束。</p>}
+    <small className="lumo-form-note">分派理由</small>
+    {numbered('理由', rationale)}
+    {task.score_breakdown ? <details className="lumo-governed-source"><summary>评分快照 · 加权总分 {task.score_breakdown.weighted_total ?? task.match_score ?? 0}</summary><pre>{JSON.stringify(task.score_breakdown, null, 2)}</pre></details> : null}
+    {task.schedule ? <details className="lumo-governed-source"><summary>调度约束快照（重试沿用，不会被悄悄放宽）</summary><pre>{JSON.stringify(task.schedule, null, 2)}</pre></details> : null}
+  </div>
+}
+
+export function TaskCollaborationPanel({ progress, error, label, open }: {
+  progress: TaskCollaborationFacts | null; error: string; label: (state: string) => string; open: (task: TaskIntentFacts) => void
+}) {
+  const summary = progress?.summary
+  const children = progress?.children ?? []
+  const facts: Array<[string, number]> = summary ? [
+    ['活跃', summary.active], ['待审核', summary.awaiting_review], ['已接受', summary.accepted],
+    ['需关注', summary.needs_attention], ['未收敛', summary.unresolved],
+  ] : []
+  return <div className="lumo-cluster-panel">
+    <div className="lumo-section-title"><div><b>子任务进度</b><span>{summary ? `${summary.total} 个子任务 · ${summary.unresolved} 个未收敛` : '未读取'}</span></div></div>
+    {error ? <div className="lumo-cluster-feedback error" role="alert">{error}</div> : null}
+    {summary ? <div className="lumo-device-facts">{facts.map(([name, value]) => <span key={name}><small>{name}</small><b>{value}</b></span>)}</div> : null}
+    {summary && summary.unresolved > 0 ? <div className="lumo-cluster-feedback error" role="alert">{`还有 ${summary.unresolved} 个子任务没有收敛；计数是全量口径，列表可能只列出其中一部分。`}</div> : null}
+    {children.length ? <div className="lumo-cluster-list">{children.map(child => <div key={child.task.id}>
+      <span>
+        <b>{child.task.title || child.task.id}</b>
+        <small>{label(child.task.business_state ?? child.task.state)} · {child.task.assignee_name || child.task.assignee_worker_id || '未分派'}{child.task.last_error ? ` · ${child.task.last_error}` : ''}</small>
+        <small>{child.run ? `Run ${child.run.id} · ${label(child.run.state)} · 尝试 ${child.run.attempt}` : '尚未生成 Run'} · 结果 {child.result ? label(child.result.state) : '未上报'}</small>
+      </span>
+      <Button onClick={() => open(child.task)}>查看执行</Button>
+    </div>)}</div> : <p className="lumo-inline-empty">{error ? '子任务进度读取失败。' : '该任务没有子任务。'}</p>}
+    {progress?.has_more ? <p className="lumo-form-note">子任务数量超过单次读取上限，上面只列出返回的部分；计数摘要仍是全量口径。</p> : null}
+  </div>
+}
+
+// 结果全文的渲染口径。`output` 在治理面是 json.RawMessage，落到客户端可能是
+// 对象、数组、字符串，也可能是 `0` / `false` / `""` —— 「有没有交付物」必须用
+// null/undefined 判断，用真值判断会把数值 0 和布尔 false 显示成没有产出。
+export function readTaskOutput(output: unknown): { present: boolean; text: string } {
+  if (output === undefined || output === null) return { present: false, text: '' }
+  if (typeof output === 'string') return { present: true, text: output }
+  return { present: true, text: JSON.stringify(output, null, 2) ?? '' }
+}
+
+export function TaskEvidencePanel({ runID, result, error, busy, label, close }: {
+  runID: string; result: TaskResultFacts | null; error: string; busy: boolean; label: (state: string) => string; close: () => void
+}) {
+  const { present: hasOutput, text: output } = readTaskOutput(result?.output)
+  return <div className="lumo-cluster-panel">
+    <div className="lumo-section-title"><div><b>执行证据</b><span>{result ? `${label(result.state)} · ${result.run_id}` : runID}</span></div><Button onClick={close}>关闭证据</Button></div>
+    {error ? <div className="lumo-cluster-feedback error" role="alert">{error}</div> : null}
+    {busy ? <p className="lumo-inline-empty">正在读取结果全文。</p> : null}
+    {result ? <>
+      <div className="lumo-device-facts">
+        <span><small>结果状态</small><b>{label(result.state)}</b></span>
+        <span><small>会话引用</small><b>{result.session_ref || '未记录'}</b></span>
+        <span><small>执行节点</small><b>{result.node_id || '未记录'}</b></span>
+      </div>
+      <small className="lumo-form-note">上报摘要</small>
+      <p className="lumo-cluster-feedback">{result.summary?.trim() || '该结果只带结构化交付物，没有文字摘要。'}</p>
+      <details className="lumo-governed-source"><summary>{`交付物全文 · ${hasOutput ? `${output.length} 字符` : '无 output 字段'}`}</summary>{output ? <pre>{output}</pre> : <p>{hasOutput ? '交付物是空字符串。' : '该结果只带摘要，没有结构化交付物。'}</p>}</details>
+      <small className="lumo-form-note">{`上报时间 ${result.created_at ? new Date(result.created_at).toLocaleString('zh-CN') : '未记录'} · 结果行不可变，重放不会覆盖`}</small>
+    </> : null}
+  </div>
+}
+
 interface ManagedFlow {
   id: string; projectId: string; name: string; status: string; version: number; author: string; updatedAt: string
   visibility: string; reviewComment?: string; audience?: { roles?: string[]; depts?: string[]; users?: string[] }

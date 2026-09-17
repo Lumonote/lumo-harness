@@ -17,15 +17,15 @@ import (
 
 // Event 与 TS 侧 CostEvent 同构（字段名按 JSON 传输形态）。
 type Event struct {
-	Context   Attribution `json:"context"`
-	CostType  string      `json:"costType"`
-	Qty       float64     `json:"qty"`
-	Unit      string      `json:"unit"`
-	TraceID   string      `json:"traceId"`
-	Emitter   string      `json:"emitter"`
-	CostUSD   float64     `json:"costUsd"`
-	Tokens    *int64      `json:"tokens,omitempty"`
-	Model     string      `json:"model,omitempty"`
+	Context  Attribution `json:"context"`
+	CostType string      `json:"costType"`
+	Qty      float64     `json:"qty"`
+	Unit     string      `json:"unit"`
+	TraceID  string      `json:"traceId"`
+	Emitter  string      `json:"emitter"`
+	CostUSD  float64     `json:"costUsd"`
+	Tokens   *int64      `json:"tokens,omitempty"`
+	Model    string      `json:"model,omitempty"`
 }
 
 // Attribution 归因维度（与 usage_ledger 列一致，缺一即拒绝）。

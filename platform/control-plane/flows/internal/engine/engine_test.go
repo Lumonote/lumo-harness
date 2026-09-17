@@ -14,14 +14,8 @@ func TestRunUsesDeterministicTopologicalOrder(t *testing.T) {
 		domain.FlowNode{ID: "b", Operator: "identity"},
 		domain.FlowNode{ID: "c", Operator: "identity"})
 	def.Edges = append(def.Edges,
-		struct {
-			From string `json:"from"`
-			To   string `json:"to"`
-		}{From: "a", To: "c"},
-		struct {
-			From string `json:"from"`
-			To   string `json:"to"`
-		}{From: "b", To: "c"})
+		domain.FlowEdge{From: "a", To: "c"},
+		domain.FlowEdge{From: "b", To: "c"})
 	r, err := New().Run(context.Background(), &def, "seed")
 	if err != nil {
 		t.Fatal(err)

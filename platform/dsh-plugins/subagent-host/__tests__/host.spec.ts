@@ -259,7 +259,7 @@ describe('subagent-host —— 承载节点子代理面', () => {
     expect(header.parentSession).toBe(SessionId('parent-sess'))
     expect(header.origin).toBe('subagent')
     expect(header.delegationDepth).toBe(1)
-    expect(child!.session.events.some((event) => event.type === 'subagent/descriptor')).toBe(true)
+    expect(child!.session.snapshotEvents().some((event) => event.type === 'subagent/descriptor')).toBe(true)
     // 运行表结集:完成即从表上摘除(waitUntil —— 回执到表与 finally 摘表之间有毫秒级
     // 窗口,直接断言 0 是竞态;评审 Minor ① 钉死)
     await waitRunDrained(h)
@@ -323,13 +323,16 @@ describe('subagent-host —— 承载节点子代理面', () => {
     expect(reply.status).toBe(200)
 
     // child 正常单 turn 结集(不重投 —— 事件流只留一次)
+    // 读事件用 `snapshotEvents()`：`Session#events` **属性**已随上游
+    // `2026-09-09-deprecate-synchronous-session-event-reads` 删除（运行时实测
+    // `Session.prototype.events === undefined`）；该 Note 明确允许测试文件调用它。
     const deadline = Date.now() + 5000
     const child = () => h.ctx.agents.get(SessionId('child-1'))
-    while (!child()?.session.events.some((event) => event.type === 'turn/end')) {
+    while (!child()?.session.snapshotEvents().some((event) => event.type === 'turn/end')) {
       if (Date.now() > deadline) throw new Error('child 未结集')
       await new Promise((resolve) => setTimeout(resolve, 10))
     }
-    expect(child()!.session.events.filter((event) => event.type === 'assistant/message').length).toBe(1)
+    expect(child()!.session.snapshotEvents().filter((event) => event.type === 'assistant/message').length).toBe(1)
     expect(h.callbackBodies.length).toBe(0)
 
     // host 依然可用:第二个 child 用活回调正常走完

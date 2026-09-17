@@ -47,6 +47,13 @@ export interface InvokeRequest {
   correlationId?: string
   /** 一次性、精确绑定到本次调用的人工审批记录 ID。 */
   approvalId?: string
+  /**
+   * 发起本次调用的 dsh 会话 ref。网关用它写 `connector_audit.session_id`
+   * （`cmd/connector-gateway/main.go` 读 `X-Lumo-Session`），并作为计量事件的
+   * `sessionRef`。**缺省时审计行的 `session_id` 是 NULL** —— 那一行仍然记，
+   * 但再也回不到「哪个会话调的」。
+   */
+  sessionRef?: string
 }
 
 export interface InvokeResult {
@@ -90,6 +97,22 @@ export class GatewayError extends Error {
   }
 }
 
+/**
+ * 会话归属头。
+ *
+ * 网关把同一个头用在两处（`gateway.Invoke` / `gateway.WebFetch` 的
+ * `audit.Record.SessionID`，以及 `buildMeter` 的 `sessionRef`），缺省回落 `"system"`
+ * —— 也就是说**不发这个头不会报错，只会静默丢掉会话归属**。审计表里那一行的
+ * `session_id` 变成 NULL，而 §10.1 要的「外部调用时间线」正是按会话聚合的。
+ *
+ * 空白串按缺省处理：`X-Lumo-Session: ""` 与不发的效果相同（网关两侧都走 `def(...,"system")`），
+ * 但显式发空串会让日志里出现一个看起来「有会话」的头，误导排查。
+ */
+function sessionHeader(sessionRef?: string): Record<string, string> {
+  const value = sessionRef?.trim()
+  return value ? { 'X-Lumo-Session': value } : {}
+}
+
 export class ConnectorClient {
   private readonly base: string
   private readonly timeoutMs: number
@@ -120,7 +143,7 @@ export class ConnectorClient {
   async invoke(req: InvokeRequest): Promise<InvokeResult> {
     const res = await this.fetch(`/connectors/${encodeURIComponent(req.connectorId)}/invoke`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...sessionHeader(req.sessionRef) },
       body: JSON.stringify({
         operation: req.operation,
         pathParams: req.pathParams,
@@ -141,7 +164,7 @@ export class ConnectorClient {
    * 不存在 manifest 可拼装——安全边界由网关闸门链保证）。透传头与网关 allowlist
    * 同谱（content-type/accept），其余头不放行——那是把 PII/凭证带出网关的洞。
    */
-  async webFetch(req: { url: string; headers?: Record<string, string> }, signal?: AbortSignal): Promise<InvokeResult> {
+  async webFetch(req: { url: string; headers?: Record<string, string>; sessionRef?: string }, signal?: AbortSignal): Promise<InvokeResult> {
     const safeHeaders: Record<string, string> = {}
     for (const [k, v] of Object.entries(req.headers ?? {})) {
       const lower = k.toLowerCase()
@@ -149,7 +172,7 @@ export class ConnectorClient {
     }
     const res = await this.fetch('/web/fetch', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...sessionHeader(req.sessionRef) },
       body: JSON.stringify({
         url: req.url,
         ...(Object.keys(safeHeaders).length > 0 ? { headers: safeHeaders } : {}),

@@ -1,6 +1,11 @@
 // Command governance runs the Cluster-only organization, skill, and desktop
-// node control plane. It starts in fail-closed mode unless deployment_mode is
-// explicitly cluster and cluster_status is explicitly ready.
+// node control plane.
+//
+// The management surface is fail-closed. It opens only when the deployment is
+// explicitly a cluster, the operator explicitly declared it ready, and the
+// derived readiness from service heartbeats actually holds. A declaration alone
+// is not enough: it used to be, which meant a cluster whose scheduler had died
+// kept serving its management APIs.
 package main
 
 import (
@@ -22,8 +27,10 @@ import (
 	authcrypto "github.com/lumo-harness/platform/governance/internal/auth"
 	"github.com/lumo-harness/platform/governance/internal/device"
 	"github.com/lumo-harness/platform/governance/internal/domain"
+	"github.com/lumo-harness/platform/governance/internal/readiness"
 	"github.com/lumo-harness/platform/governance/internal/server"
 	"github.com/lumo-harness/platform/governance/internal/store"
+	"github.com/lumo-harness/platform/heartbeat"
 	"github.com/lumo-harness/platform/observability"
 )
 
@@ -134,6 +141,27 @@ func main() {
 		log.Error("initialize governance", "err", err)
 		os.Exit(1)
 	}
+	// The readiness watcher runs regardless of the declared mode. Readiness is
+	// what an operator checks *before* declaring LUMO_CLUSTER_STATUS=ready, so
+	// gating the watcher on that declaration would remove the ability to look.
+	requiredServices, err := heartbeat.ParseRequiredServices(os.Getenv("LUMO_REQUIRED_SERVICES"))
+	if err != nil {
+		log.Error("invalid required service set", "err", err)
+		os.Exit(2)
+	}
+	watcher := heartbeat.NewWatcher(pool, heartbeat.WatcherOptions{
+		Required: requiredServices,
+		MaxAge:   envSeconds("LUMO_HEARTBEAT_MAX_AGE_SECONDS", 45),
+		Refresh:  envSeconds("LUMO_HEARTBEAT_REFRESH_SECONDS", 10),
+		Logger:   log,
+	})
+	// Evaluate before serving, so the startup log states what the cluster is
+	// rather than what an empty cache defaults to.
+	watcher.RefreshOnce(ctx)
+	readinessSource := readiness.New(watcher)
+	go watcher.Run(ctx)
+	go heartbeat.PruneLoop(ctx, pool, envSeconds("LUMO_HEARTBEAT_PRUNE_SECONDS", 600), 0, log)
+
 	bootstrapUsername := strings.TrimSpace(os.Getenv("LUMO_AUTH_BOOTSTRAP_USERNAME"))
 	bootstrapPassword := os.Getenv("LUMO_AUTH_BOOTSTRAP_PASSWORD")
 	if (bootstrapUsername == "") != (bootstrapPassword == "") {
@@ -159,7 +187,10 @@ func main() {
 
 	var deviceGateway *device.Gateway
 	if os.Getenv("LUMO_DESKTOP_GATEWAY_ENABLED") == "true" {
-		if domain.RequireCluster(mode, *clusterStatus) != nil {
+		// The desktop gateway is a cluster-only component, so its startup check is
+		// a configuration check against the declared intent. Per-request access is
+		// still gated on derived health by the server.
+		if !domain.IntentIsCluster(mode, *clusterStatus) {
 			log.Error("desktop gateway requires Cluster ready")
 			os.Exit(2)
 		}
@@ -178,9 +209,16 @@ func main() {
 			}
 		}()
 	}
-	srv := server.New(st, server.Config{
+	// 心跳上报：governance 既是就绪态的使用者，也是必需服务清单里的一项，
+	// 所以它自己也要上报 —— 否则它会把自己算成缺失，集群永远不就绪。
+	heartbeat.StartPg(ctx, pool, heartbeat.Options{
+		Service: "governance", Logger: log, Depends: heartbeat.PgDependency(pool),
+	})
+
+	srv, err := server.New(st, server.Config{
 		DeploymentMode:    mode,
 		ClusterStatus:     *clusterStatus,
+		Health:            readinessSource,
 		SchedulerURL:      envOr("LUMO_SCHEDULER_URL", ""),
 		ClusterID:         envOr("LUMO_CLUSTER_ID", ""),
 		ControlPlaneToken: os.Getenv("LUMO_CONTROL_PLANE_TOKEN"),
@@ -193,13 +231,23 @@ func main() {
 		OIDC:              oidcConfig,
 		DeviceGateway:     deviceGateway,
 	}, log)
+	if err != nil {
+		log.Error("initialize governance server", "err", err)
+		os.Exit(2)
+	}
 	mux := http.NewServeMux()
 	srv.Register(mux)
 	schedulingCtx, cancelScheduling := context.WithCancel(ctx)
 	schedulingDone := make(chan struct{})
 	go func() { defer close(schedulingDone); srv.RunScheduling(schedulingCtx) }()
 	defer func() { cancelScheduling(); <-schedulingDone }()
-	log.Info("governance started", "addr", *listen, "deployment_mode", mode, "cluster_status", *clusterStatus)
+	// Log the resolved gate, not the declaration: "cluster_status=ready" in the
+	// logs must mean the management surface is actually open.
+	gate := domain.ResolveGate(mode, *clusterStatus, readinessSource.Health())
+	log.Info("governance started", "addr", *listen, "deployment_mode", mode,
+		"cluster_status_declared", gate.Intent, "cluster_status", gate.Effective,
+		"cluster_ready", gate.Ready, "cluster_not_ready_reason", gate.Reason,
+		"cluster_unready_services", gate.Unready)
 	httpSrv := &http.Server{Addr: *listen, Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()

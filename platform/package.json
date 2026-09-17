@@ -15,6 +15,11 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -b --noEmit",
+    "typecheck:client": "tsc -p dsh-plugins/lumo-ui/tsconfig.json --noEmit",
+    "codegen:plugin-baseline": "node tools/gen-plugin-baseline.mjs",
+    "check:plugin-baseline": "node tools/gen-plugin-baseline.mjs --check",
+    "codegen:skillhub-seed": "node tools/gen-skillhub-seed.mjs",
+    "check:skillhub-seed": "node tools/gen-skillhub-seed.mjs --check",
     "kb:eval": "tsx dsh-plugins/knowledge/eval/run-eval.ts",
     "skillhub": "node tools/skillhub-sync.mjs",
     "desktop:dev": "cd desktop && cargo tauri dev",
