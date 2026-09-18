@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { applyLumoDshOverrides } from '../apply.mjs'
+import { applyLumoDshOverrides, diagnoseOverlayAnchors, overriddenPackageDirectories } from '../apply.mjs'
 import { brandWebBuild } from '../brand-web.mjs'
 
 /**
@@ -27,7 +27,9 @@ const dshRoot = resolve(repoRoot, 'deepseek-harness')
 const PATCHED = [
   'packages/client/ui-conversation/src/client/apply.ts',
   'packages/client/ui-conversation/src/client/contract/slots.ts',
-  'packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx',
+  // 2026-09（e62587c163）后 hero composer 的渲染点在这里：`ConversationRoot.tsx`
+  // 已退化成转发壳，`heroWorkspaceRow` / `inputBar` 都搬进了本文件。
+  'packages/client/ui-conversation/src/client/skeleton/ConversationContent.tsx',
   'packages/client/ui-sidebar/src/client/index.ts',
   'packages/client/ui-sidebar/src/client/contract/slots.ts',
   'packages/client/ui-sidebar/src/client/SidebarRoot.tsx',
@@ -40,6 +42,8 @@ const PATCHED = [
   'packages/api/gateway/src/stream-server.ts',
   'packages/api/gateway/src/client/remote-stream.ts',
   'packages/api/session-controller/src/client/sessions/session.ts',
+  // LUMO_BEST_EFFORT_BOOT：web 启动壳里可选插件的降级点（补丁顺序的最后一段）。
+  'packages/client/web/src/boot.ts',
 ]
 
 const temporaries: string[] = []
@@ -76,6 +80,13 @@ function read(root: string, relativePath: string): string {
 }
 
 describe('applyLumoDshOverrides', () => {
+  it('全部锚点与上游 HEAD 同步,一次报全漂移点而不是逐个抛错', () => {
+    // 上游一次重构常同时漂移多处，而 replaceExactlyOnce 在第一个失配处就抛错——
+    // 逐个修要跑 N 遍完整桌面构建才知道下一个卡在哪。诊断模式一次报全：返回非空
+    // 即覆盖层落后于上游，失败信息里直接给出文件与锚点文本。
+    expect(diagnoseOverlayAnchors(stagePristineUpstream('diagnose'))).toEqual([])
+  })
+
   it('锚点在当前上游 HEAD 里仍然存在,会话与侧边栏都被打上扩展位', () => {
     const root = stagePristineUpstream('anchors')
     applyLumoDshOverrides(root)
@@ -88,12 +99,19 @@ describe('applyLumoDshOverrides', () => {
     expect(slots).toContain('HeroComposerOwnerProps')
     expect(slots).toContain('LUMO_HERO_INPUT_BRIDGE')
     expect(slots).toContain('readonly inputActions?: InputActions')
-    expect(slots).toContain("| 'conversation.hero.input.left'")
-    expect(slots).toContain("| 'conversation.hero.composer.dock'")
+    // 两个座位要在**两个**声明面都落上：全局 SlotMap（owner 类型）与 factory 的
+    // children（实例内 renderSlot 的类型来源）。上游 2026-09 的重构把后者从
+    // ConversationSlotProps 的 PropsRenderSlots 联合搬进了 SlotFactoryMap。
+    expect(slots).toContain("'conversation.hero.input.left': { kind: 'list'; scope: 'root'; owner: HeroComposerOwnerProps }")
+    expect(slots).toContain("'conversation.hero.composer.dock': { kind: 'list'; scope: 'root'; owner: HeroComposerOwnerProps }")
+    expect(slots).toContain("'conversation.hero.input.left': { kind: 'list'; scope: 'root' }")
+    expect(slots).toContain("'conversation.hero.composer.dock': { kind: 'list'; scope: 'root' }")
 
-    const conversationRoot = read(root, PATCHED[2]!)
-    expect(conversationRoot).toContain("renderSlot('conversation.hero.input.left', { input: inputState, inputActions })")
-    expect(conversationRoot).toContain("renderSlot('conversation.hero.composer.dock', { input: inputState, inputActions })")
+    const conversationContent = read(root, PATCHED[2]!)
+    expect(conversationContent).toContain("renderSlot('conversation.hero.input.left', { input: inputState, inputActions })")
+    expect(conversationContent).toContain("renderSlot('conversation.hero.composer.dock', { input: inputState, inputActions })")
+    // `inputActions` 必须真的解构进来，否则座位收到的是 undefined。
+    expect(conversationContent).toContain('useFactorySlot, inputActions, // LUMO_HERO_INPUT_BRIDGE')
 
     const sidebarApply = read(root, PATCHED[3]!)
     expect(sidebarApply).toContain("'sidebar.navigation': { kind: 'list', scope: 'root' }")
@@ -132,6 +150,41 @@ describe('applyLumoDshOverrides', () => {
 
   })
 
+  it('web 启动壳改为尽力而为:可选插件失败只跳过,首方条目仍然 fail-loud', () => {
+    const root = stagePristineUpstream('best-effort')
+    applyLumoDshOverrides(root)
+    const source = read(root, PATCHED.at(-1)!)
+
+    // 降级策略落在**调用方**（启动壳）里：上游 boot-client.ts 的 assertEntriesActive
+    // 与其单测语义原样保留，所以这里断言的是 try 包住了 bootClient。
+    expect(source).toContain('LUMO_BEST_EFFORT_BOOT')
+    expect(source).toMatch(/try \{\n\s+await bootClient\(\{/u)
+    // 账本记的是每条目的**终态**：loader.await() 之后仍停在 failed/pending 的就是没起来的。
+    expect(source).toContain('const entryStates = new Map<string, string>()')
+    expect(source).toContain('entryStates.set(name, state)')
+    expect(source).toContain(".filter(([, state]) => state === 'failed' || state === 'pending')")
+    // 首方包名是两个前缀（与宿主侧 isOptionalProfilePlugin 同一口径）。
+    expect(source).toContain("name.startsWith('@deepseek-ai/') || name.startsWith('@lumo/')")
+    // 降级条件收窄：点不出失败条目、或有一个属于平台契约，都必须照旧抛出。
+    expect(source).toContain('if (inactive.length === 0 || required.length > 0) throw bootFailure')
+    // 吞掉错误后仍要走到挂载，否则「跳过坏插件」等于换了个地方白屏。
+    expect(source).toMatch(/for \(const name of inactive\)[^]*await mountClient\(ctx, this\.container\)/u)
+  })
+
+  it('覆盖层改过的包都被登记为「要重建」,否则补丁永远不会进产物', () => {
+    // 隔离构建会把 overriddenPackageDirectories 里的包的旧 lib/ 排除在投影之外，
+    // 只让快照自己重编这些包。补丁打在没登记的包上 = 改了源码但产物仍是旧的
+    // （上一轮 ui-sidebar 插槽缺失就是这么安静漏出去的），因此逐个核对。
+    // 根级文件（tsdown.config.ts）不属于任何包，按定义没有可登记的目录。
+    const directories = new Set(PATCHED
+      .map(path => /^(packages\/[^/]+\/[^/]+)\//u.exec(path)?.[1])
+      .filter((directory): directory is string => directory !== undefined))
+    expect(directories.size).toBeGreaterThan(0)
+    for (const directory of directories) {
+      expect(overriddenPackageDirectories, `${directory} 未登记,补丁不会进产物`).toContain(directory)
+    }
+  })
+
   it('首页无会话时 hero 座位只在 hero 模式渲染,会话仍走上游的 input.dock 槽', () => {
     const root = stagePristineUpstream('scope')
     applyLumoDshOverrides(root)
@@ -163,7 +216,7 @@ describe('applyLumoDshOverrides', () => {
     const root = stagePristineUpstream('ambiguous')
     const target = resolve(root, PATCHED[0]!)
     const source = readFileSync(target, 'utf8')
-    const anchor = "      'conversation.hero.agentPreset': { kind: 'single', scope: 'root' },\n"
+    const anchor = "      'conversation.hero.agentPreset': "
     writeFileSync(target, source.replace(anchor, anchor + anchor))
     expect(() => { applyLumoDshOverrides(root) }).toThrow(/contains the upstream anchor more than once/u)
   })

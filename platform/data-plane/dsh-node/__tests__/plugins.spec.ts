@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('node:child_process', () => ({ spawnSync: vi.fn() }))
 
+import { PACKAGED_PROFILE_MODULES } from '../src/generated/plugin-baseline.ts'
 import {
   baselineBundlePackages,
   clearReintroducedPluginQuarantine,
@@ -53,7 +54,7 @@ describe('profile plugin installation', () => {
       '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/knowledge-vault', '@lumo/skill-local',
       '@lumo/web-fetch-fakeip',
       'dshmarket', '@liustack/modlens', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
-      '@linxin666/dsh-client-ui-task-board', 'dsh-univer-office',
+      '@linxin666/dsh-client-ui-task-board',
     ])
     expect(local).toContainEqual({ name: 'dshmarket', spec: 'dshmarket@1.41.0' })
     expect(local).toContainEqual({ name: 'dsh-context', spec: 'dsh-context@0.41.3' })
@@ -192,7 +193,7 @@ describe('baseline bundle reconciliation', () => {
   it('carries the whole pinned baseline', () => {
     expect(baselineBundlePackages()).toEqual([
       'dshmarket', '@liustack/modlens', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
-      '@linxin666/dsh-client-ui-task-board', 'dsh-univer-office',
+      '@linxin666/dsh-client-ui-task-board',
     ])
   })
 
@@ -237,7 +238,6 @@ describe('baseline bundle reconciliation', () => {
       'dsh-cost-meter': '1.0.0',
       'dsh-dream-skin': '1.0.0',
       '@linxin666/dsh-client-ui-task-board': '1.0.0',
-      'dsh-univer-office': '1.0.0',
     })
     // The market resolves presence and activation from the profile's own
     // node_modules, not the shared fallback directory.
@@ -253,6 +253,48 @@ describe('baseline bundle reconciliation', () => {
     })
     expect((JSON.parse(readFileSync(manifestPath, 'utf8')) as { dsh: { profile: { bundles: string[] } } })
       .dsh.profile.bundles).toEqual(bundles)
+  })
+
+  it('links the packaged modules into every directory the plugin tree resolves bare names from', () => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo-packed-modules-'))
+    const runtimeModules = join(root, 'runtime', 'node_modules')
+    for (const name of PACKAGED_PROFILE_MODULES) {
+      mkdirSync(join(runtimeModules, ...name.split('/')), { recursive: true })
+      writeFileSync(join(runtimeModules, ...name.split('/'), 'package.json'), '{"name":"x","version":"1.0.0"}\n')
+    }
+    const dshHome = join(root, 'dsh')
+    const profileDir = join(dshHome, 'profiles', 'web')
+    mkdirSync(profileDir, { recursive: true })
+    writeFileSync(join(profileDir, 'package.json'), `${JSON.stringify({
+      name: 'dsh-profile-web',
+      private: true,
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
+    }, undefined, 2)}\n`)
+
+    ensureProfilePlugins({
+      profile: 'web',
+      platformRoot: root,
+      dshRoot: root,
+      env: {
+        DSH_HOME: dshHome,
+        LUMO_PACKAGED_RUNTIME: '1',
+        LUMO_RUNTIME_NODE_MODULES: runtimeModules,
+      } as NodeJS.ProcessEnv,
+    })
+
+    // 两个锚点缺一不可：bundle 层从 profile 目录解析，而启动器补丁层
+    // （`--patch` 的 insert 条目）从 `DSH_HOME` 解析裸包名（实测
+    // `parentURL = <DSH_HOME>/package.json`）。少了后者时首方插件全部
+    // ERR_MODULE_NOT_FOUND，boot 只报「N entries did not activate」，能力静默消失。
+    for (const name of PACKAGED_PROFILE_MODULES) {
+      const segments = name.split('/')
+      const target = join(runtimeModules, ...segments)
+      for (const anchor of ['node_modules', join('profiles', 'node_modules')]) {
+        const link = join(dshHome, anchor, ...segments)
+        expect(lstatSync(link).isSymbolicLink()).toBe(true)
+        expect(realpathSync(link)).toBe(realpathSync(target))
+      }
+    }
   })
 
   it('does not re-add a quarantined baseline bundle until it is explicitly reintroduced', () => {
@@ -273,17 +315,17 @@ describe('baseline bundle reconciliation', () => {
 
     ensurePackagedBaselineBundles({ profile: 'web', env })
     expect(quarantineProfilePlugins({
-      profile: 'web', packages: ['dsh-univer-office'], env,
-    })).toEqual(['dsh-univer-office'])
+      profile: 'web', packages: ['dsh-dream-skin'], env,
+    })).toEqual(['dsh-dream-skin'])
     ensurePackagedBaselineBundles({ profile: 'web', env })
     let bundles = (JSON.parse(readFileSync(manifestPath, 'utf8')) as { dsh: { profile: { bundles: string[] } } }).dsh.profile.bundles
-    expect(bundles).not.toContain('dsh-univer-office')
+    expect(bundles).not.toContain('dsh-dream-skin')
 
-    bundles.push('dsh-univer-office')
+    bundles.push('dsh-dream-skin')
     writeFileSync(manifestPath, `${JSON.stringify({ dsh: { profile: { bundles } } })}\n`)
     ensurePackagedBaselineBundles({ profile: 'web', env })
     bundles = (JSON.parse(readFileSync(manifestPath, 'utf8')) as { dsh: { profile: { bundles: string[] } } }).dsh.profile.bundles
-    expect(bundles).toContain('dsh-univer-office')
+    expect(bundles).toContain('dsh-dream-skin')
   })
 
   it('leaves a profile it cannot initialize alone instead of writing a partial manifest', () => {

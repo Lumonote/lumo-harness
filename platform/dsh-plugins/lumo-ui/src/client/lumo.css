@@ -963,9 +963,9 @@
 }
 
 /* Product navigation lives above the untouched native workspace/history list. */
-/* Lumo 入口与社区插件注入的 sidebar-entry 同区同位：容器只做行距，
-   不引入额外内边距/分隔线 —— 与任务看板等条目的 x 轴对位与行间距因此一致。 */
-.lumo-sidebar-navigation { display: grid; gap: 6px; padding: 0; border: 0; }
+/* 入口容器照官方侧栏面板块（ui-sidebar .panelList）：只做 4px 行距与 8px 下边距，
+   不引入额外内边距/分隔线 —— 上方官方面板行与下方工作区因此同节奏。 */
+.lumo-sidebar-navigation { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; padding: 0; border: 0; }
 .lumo-project-switcher { position: relative; padding: 10px; border-bottom: 1px solid var(--lumo-line); }
 .lumo-project-current { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 10px; border: 1px solid var(--lumo-line); border-radius: 10px; background: linear-gradient(135deg, var(--lumo-panel), color-mix(in srgb, var(--lumo-mint) 5%, var(--lumo-panel))); color: var(--lumo-ink); cursor: pointer; text-align: left; transition: border-color .18s ease, background .18s ease, transform .18s ease; }
 .lumo-project-current:hover { border-color: color-mix(in srgb, var(--lumo-mint) 38%, var(--lumo-line)); background: linear-gradient(135deg, var(--lumo-panel-raised), color-mix(in srgb, var(--lumo-mint) 8%, var(--lumo-panel))); transform: translateY(-1px); }
@@ -984,21 +984,44 @@
 .lumo-project-menu button > span:nth-child(2) small { color: var(--lumo-faint); font: var(--lumo-fs-xxxs-11) /var(--lumo-lh-tight) var(--lumo-mono); }
 .lumo-project-menu button > i { color: var(--lumo-mint); font-size: var(--lumo-fs-xxs-12); font-style: normal; }
 
-/* 侧栏入口行跟随壳的条目协议：与社区插件 DOM 注入的 sidebar-entry
-   （dsh-task-board 的 .entry 几何）同一行高/间距/描边规格与 --dsw-alias-* token 集，
-   标签不写字号（继承壳字级）——Lumo 入口与已装配插件条目因此字号一致。 */
-.lumo-sidebar-navigation button { position: relative; display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; padding: 0 10px; border: 0; border-radius: 8px; color: var(--dsw-alias-label-secondary, var(--lumo-muted)); background: transparent; cursor: pointer; text-align: left; font-size: var(--lumo-fs-xs-13); white-space: nowrap; transition: background-color .12s ease, color .12s ease; }
-.lumo-sidebar-navigation button:hover { color: var(--dsw-alias-label-primary, var(--lumo-ink)); background: var(--dsw-alias-interactive-bg-hover, var(--lumo-accent-6)); }
-.lumo-sidebar-navigation button.active { color: var(--dsw-alias-label-primary, var(--lumo-ink)); background: var(--dsw-alias-interactive-bg-active, linear-gradient(90deg, var(--lumo-accent-12), var(--lumo-accent-4))); font-weight: var(--lumo-fw-semibold); }
-.lumo-sidebar-navigation button.active::before { position: absolute; left: -12px; width: 3px; height: 20px; border-radius: 0 3px 3px 0; background: var(--lumo-mint); content: ""; }
-/* 与社区条目一致的 24px 图标槽（svg 18px 居中，3px 内衬），保证 x 轴对位。 */
-.lumo-sidebar-navigation .lumo-glyph { width: 18px; height: 18px; flex: none; margin: 3px; }
-.lumo-sidebar-navigation button > span { min-width: 0; overflow: hidden; flex: 1; text-overflow: ellipsis; white-space: nowrap; }
-.lumo-sidebar-navigation button > small { color: var(--lumo-faint); font-size: var(--lumo-fs-xxxs-11); white-space: nowrap; }
-.lumo-sidebar-navigation.rail { padding: 9px 10px; }
-.lumo-sidebar-navigation.rail button { justify-content: center; height: 36px; padding: 0; }
-.lumo-sidebar-navigation.rail .lumo-glyph { margin: 0; }
-.lumo-sidebar-navigation.rail button.active::before { left: -10px; }
+/* 入口行逐项照抄官方侧栏面板行（ui-sidebar/SidebarRoot.module.css 的 .panelRow）：
+   36px 行高、7/8 内边距 + 左右 2px 外边距、12px 圆角、16px 图标槽 + 8px 间距、
+   inherit 字号 / 22px 行高、label-primary 墨色；hover 与选中同为
+   interactive-bg-hover —— 选中不换字重、也不画左侧竖条。 */
+.lumo-sidebar-navigation > button { display: flex; align-items: center; gap: 8px; margin: 0 2px; min-height: 36px; padding: 7px 8px; box-sizing: border-box; border: 0; border-radius: 12px; color: var(--dsw-alias-label-primary, var(--lumo-ink)); background: transparent; cursor: pointer; font: inherit; line-height: 22px; text-align: left; white-space: nowrap; transition: background-color .12s ease; }
+.lumo-sidebar-navigation > button:hover,
+.lumo-sidebar-navigation > button.active { background: var(--dsw-alias-interactive-bg-hover, var(--lumo-accent-6)); }
+.lumo-sidebar-navigation > button:focus-visible { outline: 2px solid var(--dsw-alias-label-primary, var(--lumo-ink)); outline-offset: -2px; }
+/* 官方的图标槽就是 16px 图标本身（.panelGlyph 不加内衬）——24px 槽会把标签右推 8px。 */
+.lumo-sidebar-navigation .lumo-glyph { width: 16px; height: 16px; flex: none; margin: 0; }
+.lumo-sidebar-navigation > button > span { min-width: 0; overflow: hidden; flex: 1; text-overflow: ellipsis; white-space: nowrap; }
+.lumo-sidebar-navigation > button > small { color: var(--lumo-faint); font-size: var(--lumo-fs-xxxs-11); white-space: nowrap; }
+/* rail（折叠栏）照官方 collapsed 规格：36×36 方形、12px 圆角、图标居中、间距 12px；
+   侧内边距由 root（10px）负责，这里不再叠加。 */
+.lumo-sidebar-navigation.rail { gap: 12px; margin-bottom: 12px; padding: 0; }
+.lumo-sidebar-navigation.rail > button { width: 36px; height: 36px; margin: 0; padding: 0; justify-content: center; }
+.lumo-sidebar-navigation.rail .lumo-glyph { width: 18px; height: 18px; }
+
+/* 社区插件经 DOM 注入的入口行（共享注入核心打的 data-dsh-part="sidebar-entry"，
+   如 dsh-task-board 的「任务看板」）没有可注册的槽，行参数写在各自的样式表里，
+   只能在外部归一 —— 同样拉回官方 .panelRow 规格，三个来源因此逐项同参。
+   选择器各多一层权重（html 前缀）：注入顺序不做保证，靠 source order 定胜负会
+   随插件加载顺序翻转。 */
+html [data-dsh-part='sidebar-entry'] { display: flex; align-items: center; gap: 8px; width: auto; margin: 0 2px; min-height: 36px; padding: 7px 8px; box-sizing: border-box; border: 0; border-radius: 12px; background: transparent; color: var(--dsw-alias-label-primary, var(--lumo-ink)); font: inherit; line-height: 22px; text-align: left; cursor: pointer; }
+html [data-dsh-part='sidebar-entry']:hover,
+html [data-dsh-part='sidebar-entry'][data-active] { background: var(--dsw-alias-interactive-bg-hover, var(--lumo-accent-6)); }
+/* 选中只换底色，不加粗（官方 .panelActive 与 hover 同款）。 */
+html [data-dsh-part='sidebar-entry'][data-active] { font-weight: inherit; }
+html [data-dsh-part='sidebar-entry']:focus-visible { outline: 2px solid var(--dsw-alias-label-primary, var(--lumo-ink)); outline-offset: -2px; }
+html [data-dsh-part='sidebar-entry'] > span:first-child { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; }
+html [data-dsh-part='sidebar-entry'] svg { display: block; width: 16px; height: 16px; }
+html [data-dsh-part='sidebar-entry'] > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 折叠栏：官方 collapsed 行是 36×36 方形（12px 圆角），不是圆形。
+   两条选择器压的是插件样式表里那两档折叠规则（[data-sidebar-collapsed] .entry 与
+   [data-dsh-frame][data-sidebar-collapsed] .entry）：当前宿主没有 data-dsh-frame，
+   第二条今天是空转，留着是防上游把它加回来。 */
+html [data-sidebar-collapsed] [data-dsh-part='sidebar-entry'],
+html [data-dsh-frame][data-sidebar-collapsed] [data-dsh-part='sidebar-entry'] { width: 36px; height: 36px; padding: 0; border-radius: 12px; }
 
 /* Keep the native sidebar visible while a feature page owns the main pane. */
 .lumo-click-spark { left: var(--lumo-native-sidebar-width, 0px); width: auto; }

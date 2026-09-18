@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { arch as hostArch, platform as hostPlatform } from 'node:os'
@@ -234,6 +234,7 @@ function refreshIsolatedDshModuleLinks() {
 // complete production dependency closure into the app bundle below.
 const skillhubArchive = prepareSkillHubArchive(resolve(repoRoot, 'platform', '.build', 'skillhub'))
 prepareUpstreamPlugins()
+await assertUpstreamPluginTypertCodecs()
 ensureDshHostDependencies()
 
 // Overridden packages have no projected lib/. Emit each face before tsdown
@@ -897,22 +898,40 @@ function compilePackagedTypeScriptPlugins() {
   }
 }
 
+/** 上一版生成清单里声明的包名。读不到（首次构建、文件损坏）时给空集合，于是必然重装。 */
+function upstreamPluginDeclaredNames() {
+  const manifestPath = resolve(upstreamPluginRoot, 'package.json')
+  if (!existsSync(manifestPath)) return new Set()
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    return new Set(Object.keys(manifest.dependencies ?? {}))
+  } catch {
+    return new Set()
+  }
+}
+
 function prepareUpstreamPlugins() {
   const packageNames = upstreamPluginSpecs.map((spec) => spec.slice(0, spec.lastIndexOf('@')))
   // 只查“目录存在”不够：版本漂移（比如 dshmarket 1.36.0 → 1.41.0）时旧包还躺在
   // 安装目录里，闭包会继续点名旧版。逐包核对已装版本，不匹配就整体重装。
-  const ready = upstreamPluginSpecs.every((spec) => {
-    const at = spec.lastIndexOf('@')
-    const name = spec.slice(0, at)
-    const expected = spec.slice(at + 1)
-    const manifest = resolve(upstreamPluginModulesRoot, ...name.split('/'), 'package.json')
-    if (!existsSync(manifest)) return false
-    try {
-      return JSON.parse(readFileSync(manifest, 'utf8')).version === expected
-    } catch {
-      return false
-    }
-  })
+  // 清单里**删项**同理要靠「逐包相等」才收敛：只比「pin 都装上了」的话，被删掉的包
+  // 会一直留在安装目录，连上一版生成的 package.json 都不会被重写（2026-09-18 移除
+  // dsh-univer-office 时正是这个形态：产品侧已经不带它，开发机上却还留着整包）。
+  const declared = upstreamPluginDeclaredNames()
+  const ready = declared.size === packageNames.length
+    && packageNames.every((name) => declared.has(name))
+    && upstreamPluginSpecs.every((spec) => {
+      const at = spec.lastIndexOf('@')
+      const name = spec.slice(0, at)
+      const expected = spec.slice(at + 1)
+      const manifest = resolve(upstreamPluginModulesRoot, ...name.split('/'), 'package.json')
+      if (!existsSync(manifest)) return false
+      try {
+        return JSON.parse(readFileSync(manifest, 'utf8')).version === expected
+      } catch {
+        return false
+      }
+    })
   if (ready) return
 
   rmSync(upstreamPluginRoot, { recursive: true, force: true })
@@ -943,6 +962,90 @@ function prepareUpstreamPlugins() {
   })
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) throw new Error(`桌面基础插件安装失败：${String(result.status ?? result.signal)}`)
+}
+
+/**
+ * 上游基础插件的 typert 宿主清单必须在构建期按 Loader 的规则验一遍。
+ *
+ * 这类失效发生在启动期的注册阶段，不在 import 阶段：插件只要有一个 strict codec
+ * 不带 `create()` 工厂（dsh e459e32637 起的要求），dsh-typert-loader 就会在
+ * validateTypertManifest 里拒绝它，而这次拒绝会让整个 typert 注册面一起回滚——
+ * 症状于是是「某端点定义已撤回」「其余插件未激活」，与真正的病灶没有字面联系，
+ * 只有装完启动才看得到。清单 policy 要求的「升版前先在 master 上验证」在这里
+ * 落成硬门禁：装完即验，失配直接终止构建并点名包与具体 codec。
+ *
+ * 判定规则镜像 dsh-typert-loader 的 requireStrictCodec / validateTypertManifest。
+ * 上游再改契约时这里会先红——那一刻该更新的是本函数与清单 policy，不是绕过它。
+ */
+async function assertUpstreamPluginTypertCodecs() {
+  const defects = []
+  for (const spec of upstreamPluginSpecs) {
+    const name = spec.slice(0, spec.lastIndexOf('@'))
+    const packageRoot = resolve(upstreamPluginModulesRoot, ...name.split('/'))
+    let manifest
+    try {
+      manifest = JSON.parse(readFileSync(resolve(packageRoot, 'package.json'), 'utf8'))
+    } catch {
+      continue
+    }
+    const target = manifest.exports?.['./typert']
+    const entry = typeof target === 'string' ? target : target?.default
+    if (typeof entry !== 'string') continue
+    let exported
+    try {
+      exported = (await import(pathToFileURL(resolve(packageRoot, entry)).href)).TYPERT
+    } catch (error) {
+      defects.push(`${name}: 导入其 ./typert（${entry}）失败 —— ${error instanceof Error ? error.message : String(error)}`)
+      continue
+    }
+    defects.push(...typertContributionDefects(name, exported))
+  }
+  if (defects.length === 0) return
+  throw new Error(
+    `上游基础插件的 typert 宿主清单与当前 dsh 不兼容（共 ${String(defects.length)} 处）：\n`
+    + defects.map((line) => `  - ${line}`).join('\n')
+    + '\n这些插件会在启动期被 dsh-typert-loader 拒绝，并连带整棵插件树停摆；'
+    + `按 ${baselineManifestPath} 的 policy 升版后再打包。`,
+  )
+}
+
+/** 一个 strict codec 与 Loader 要求的偏差；合规时返回 undefined。 */
+function strictCodecDefect(subject, codec) {
+  if (typeof codec !== 'object' || codec === null) return `${subject}不是对象`
+  if (codec.mode !== 'strict') return `${subject}的 mode 不是 "strict"（${JSON.stringify(codec.mode)}）`
+  if (typeof codec.typeSymbol !== 'string') return `${subject}缺 typeSymbol`
+  if (typeof codec.create !== 'function') return `${subject}没有 create() 工厂`
+  return undefined
+}
+
+/** 按 Loader 的规则列出这份 TYPERT 贡献里全部不合规之处，每行都带包名。 */
+function typertContributionDefects(packageName, exported) {
+  if (typeof exported !== 'object' || exported === null) {
+    return [`${packageName}: 其 ./typert 没有导出 TYPERT 对象`]
+  }
+  const found = []
+  if (exported.package !== packageName) {
+    found.push(`TYPERT.package 为 ${JSON.stringify(exported.package)}，与包名不符`)
+  }
+  if (exported.face !== 'host') found.push(`TYPERT.face 为 ${JSON.stringify(exported.face)}，不是 "host"`)
+  for (const schema of Array.isArray(exported.schemas) ? exported.schemas : []) {
+    if (typeof schema?.create !== 'function') found.push(`schema "${String(schema?.name)}" 没有 create() 工厂`)
+  }
+  for (const invocation of Array.isArray(exported.invocations) ? exported.invocations : []) {
+    const id = String(invocation?.id ?? '<无 id>')
+    const receiver = invocation?.invocation
+    if (receiver?.kind === 'context') {
+      const defect = strictCodecDefect(`invocation "${id}" 的 receiver codec `, receiver.codec)
+      if (defect !== undefined) found.push(defect)
+    }
+    for (const parameter of Array.isArray(invocation?.parameters) ? invocation.parameters : []) {
+      const defect = strictCodecDefect(`invocation "${id}" 的参数 "${String(parameter?.name)}" codec `, parameter?.codec)
+      if (defect !== undefined) found.push(defect)
+    }
+    const defect = strictCodecDefect(`invocation "${id}" 的 result codec `, invocation?.result)
+    if (defect !== undefined) found.push(defect)
+  }
+  return found.map((line) => `${packageName}: ${line}`)
 }
 
 function buildKnowledgeVaultPlugin() {

@@ -1422,7 +1422,6 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       'scwlkq/dsh-task-board',
       'liustack/modlens',
       'NanmiCoder/dsh-agent-teams',
-      'dream-num/dsh-univer-office',
     ],
   })
   // `catalog` queries SkillHub live (falling back to the on-disk cache, then the

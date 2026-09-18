@@ -194,6 +194,12 @@ const LIB_FRESHNESS_PROBES = [
   // 裸 `readonly path?: string` 会被同文件另两个接口满足而漏判；也不能只看 skill
   // 包的 src，它随 master 前进，lib/ 不会。
   ['packages/skill/skill/lib/types/index.d.ts', 'Absolute instruction file path when supplied by the provider'],
+  // 上游把 TypertCodec 的 strict 变体从「静态 schema」改成「懒物化 create()」，
+  // packages/api/gateway/src/index.ts 随即改用 codec.create()。源树 lib/ 停在旧契约
+  // 时，快照里**被覆盖的** gateway host 编译当场 TS2339「Property 'create' does not
+  // exist」——症状落在覆盖层包上，根因却在没被覆盖的 typert/protocol 产物上，很容易
+  // 往补丁方向查错。探针盯住新形态的方法签名行。
+  ['packages/typert/protocol/lib/types/types.d.ts', 'create: () => TypertSchema'],
 ]
 
 export function ensureLibEntriesReexport(sourceRoot) {

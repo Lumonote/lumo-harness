@@ -27,9 +27,9 @@ workspace 链接把编译产物写回 `deepseek-harness/packages`——仓库里
 | `apps/web/public/favicon.svg` | `brand-web.mjs` | 把 `desktop-assets/lumo-logo.png` 拷进 `dist/branding/logo.png` |
 | `apps/web/public/manifest.webmanifest` | `brand-web.mjs` | 改 dist 产物的 `name`/`short_name`/`icons` |
 | `apps/web/tests/pwa-manifest.e2e.ts` | `__tests__/overlay.spec.ts` | 该用例当时被就地改成断言 Lumo 品牌。还原成上游版本后，品牌契约由本目录的用例承担 |
-| `packages/client/ui-conversation/src/client/apply.ts` | `apply.mjs` | 声明 `conversation.hero.input.left` / `conversation.hero.composer.dock` 两个 root 作用域槽 |
-| `packages/client/ui-conversation/src/client/contract/slots.ts` | `apply.mjs` | 两个槽的类型契约 + `HeroComposerOwnerProps` |
-| `packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx` | `apply.mjs` | 无会话时渲染 hero 变体的左槽与 dock |
+| `packages/client/ui-conversation/src/client/apply.ts` | `apply.mjs` | 在 `conversation.content` factory 的 children 里声明 `conversation.hero.input.left` / `conversation.hero.composer.dock` 两个 root 作用域槽 |
+| `packages/client/ui-conversation/src/client/contract/slots.ts` | `apply.mjs` | 两个槽的类型契约（全局 `SlotMap` + factory children 两个面）+ `HeroComposerOwnerProps` |
+| `packages/client/ui-conversation/src/client/skeleton/ConversationContent.tsx` | `apply.mjs` | 无会话时渲染 hero 变体的左槽与 dock。**2026-09（e62587c163）前落点是 `ConversationRoot.tsx`**——那次重构把 `heroWorkspaceRow` / `inputBar` 搬进了本文件，前者退化成 13 行转发壳 |
 | `packages/client/ui-theme/src/client/index.ts`（四套主题） | `platform/dsh-plugins/lumo-ui/src/client/themes.ts` | `ctx.theme.register(definition)` —— 上游原生的公开扩展点 |
 | `packages/client/ui-theme/src/client/index.ts`（主题 cookie） | 同上 `persistLumoTheme()` | 登录页等预壳层读同名 cookie（`user-auth/src/html.ts`） |
 | `packages/client/ui-theme/src/theme-settings.ts` | `lumo-ui/src/theme-catalog.ts` | 产品主题走 localStorage，不进上游 settings 文档，因此不需要扩上游的 `THEME_PREFERENCES` 枚举 |
@@ -38,6 +38,7 @@ workspace 链接把编译产物写回 `deepseek-harness/packages`——仓库里
 | `packages/client/ui-theme/src/client/settings-store.ts` | `lumo-ui/src/theme-catalog.ts` `LUMO_DEFAULT_THEME` | 默认主题 |
 | `packages/client/ui-theme/src/boot-theme.ts` | `lumo-ui/src/boot-theme.ts` | 在 `webserver/index-inject` 事件上再推一条 body 脚本。body 行按 table 顺序拼接，本插件晚于 ui-theme 注册，后写的 DOM 字段赢 |
 | `packages/client/ui-theme/tests/*.spec`（5 个） | —— | 上述上游改动的配套用例，随之还原 |
+| `packages/client/web/src/boot.ts` | `apply.mjs` | 启动壳改为**尽力而为**：`@deepseek-ai/*`、`@lumo/*` 之外的条目激活失败只跳过并告警，首方条目照旧 fail-loud（2026-09-18，dsh-univer-office 0.2.14 曾让整块工作台停摆）。改**调用方**而不是 `boot-client.ts`，上游的 `assertEntriesActive` 与其单测语义原样保留 |
 
 主题 id、标签、配色模式的唯一真相源是 `lumo-ui/src/theme-catalog.ts`：宿主侧的引导脚本
 和浏览器侧的注册都读它。将来加一套浅色主题，引导脚本会自动跟着变，而不是继续硬编码
@@ -68,7 +69,20 @@ node platform/dsh-overrides/assert-pristine.mjs deepseek-harness
 | 类别 | 这次的实例 | 谁兜住 |
 |---|---|---|
 | **锚点漂移** | `InputZone.session` 的类型从 `ConversationSnapshot` 改回 `SessionSnapshot`，把整块当锚的写法失配。改成锚在稳定的 `export interface InputZone {` 声明行上并插到它之前 | `__tests__/overlay.spec.ts`（对着 `git show HEAD:` 的原文跑） |
+| **锚点漂移（座位搬家）** | `e62587c163` 把 hero composer 的渲染点从 `ConversationRoot.tsx` 搬进 `ConversationContent.tsx`（前者退化成 13 行转发壳），同时把 hero 座位从 `ConversationSlotProps` 的 `PropsRenderSlots` 联合挪进 `SlotFactoryMap.children`、把 `hero.agentPreset` 的 scope 从 `root` 改成 `session-maybe` | 同上。**锚点一律只锚座位名、不锚 scope**：带 scope 的整行锚每次 scope 调整都会失配 |
 | **上游删包** | `be531688f3` 移除了整个 `@deepseek-ai/dsh-client-runtime`，`ctx.slots`(`SlotRegistry`) 迁到 `@deepseek-ai/dsh-client-ui-renderer`。lumo-ui 跟着改了 5 个声明面：两处 `ClientContext` 类型导入改走 `import type { Context as ClientContext } from '@deepseek-ai/cordis'`（上游 `ui-theme` 的同款写法）、`package.json` 的 `dependencies` 与 `dsh.client.inject`、`tsconfig.json` 的 `references`、`tsdown.config.ts` 的 `external` | `pnpm test` |
+
+一次重构常同时漂移多处锚点，而 `replaceExactlyOnce` 在第一个失配处就抛错——逐个修要跑
+N 遍完整桌面构建才知道下一个卡在哪。`apply.mjs` 的 `diagnoseOverlayAnchors()` 把清单一次
+报全，`__tests__/overlay.spec.ts` 的第一条用例就是它的常驻版本：
+
+```sh
+corepack pnpm -C platform test dsh-overrides/__tests__/overlay.spec.ts
+```
+
+锚点一漂，这条用例当场红，失败信息里直接给出文件、锚点文本与失配形态（`missing` /
+`ambiguous`），不必等到打桌面包。它跟其余用例一样对着 `git show HEAD:` 的原文跑，所以
+`git pull` 之后先跑它，比 `cargo tauri build` 快几个数量级。
 
 覆盖层本身**零补丁 rebase** —— 这正是第一铁律要证的那一条（`docs/architecture.md` §22.1）。
 

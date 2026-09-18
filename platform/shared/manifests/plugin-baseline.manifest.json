@@ -1,7 +1,7 @@
 {
   "title": "桌面基线插件清单（跨文件单一真相源）",
   "description": "2026-09-14。本文件是「桌面包固定安装哪些上游社区插件、各自钉哪个版本」的数值唯一来源。此前同一份名单存在于两处并靠注释要求手工保持一致：data-plane/dsh-node/src/plugins.ts 的 BASE_PROFILE_PLUGINS 与 PACKAGED_PROFILE_MODULES、desktop/build-runtime.mjs 的 upstreamPluginSpecs。消费方式按「能不能在运行期读仓库文件」分两档：build-runtime.mjs 在构建期、在仓库内运行，直接读本文件（零复制，结构上不可能漂移）；dsh-node 用 tsx 直跑源码、打包后目录布局与仓库不同，运行期读不到本文件，故由 tools/gen-plugin-baseline.mjs 生成 src/generated/plugin-baseline.ts 并提交，由 shared/manifests/__tests__/plugin-baseline.spec.ts 的漂移锁保证与原件一致。改清单 = 改本文件 + 跑 pnpm run codegen:plugin-baseline + 锁绿。语义注释（为什么钉这些版本、为什么排除某几个）写在本文件里，不在消费方重复。",
-  "policy": "每个 pin 必须与当前 dsh master 的公共 API 兼容。dsh-settings 在 0.1.2 移除了 installSettingsSection 与 settingsNamespace（由 SettingsProvider 取代），凡在运行期 import 这两个符号的插件都会让 Loader 拒绝整树启动，因此基线版本随 master 一起上移。升版前先在 master 上验证 import 校验通过，再改本文件。",
+  "policy": "每个 pin 必须与当前 dsh master 的公共 API 兼容。dsh-settings 在 0.1.2 移除了 installSettingsSection 与 settingsNamespace（由 SettingsProvider 取代），凡在运行期 import 这两个符号的插件都会让 Loader 拒绝整树启动，因此基线版本随 master 一起上移。升版前先在 master 上验证 import 校验通过，再改本文件。第二类同样致命：typert strict codec 的宿主形状（e459e32637 起必须带 `create()` 工厂，见 dsh-typert-loader 的 requireStrictCodec）。它发生在**启动期注册阶段**而非 import 阶段，症状会伪装成别的问题——某端点「定义已撤回」、其余插件「未激活」——不要从症状倒推；识别方式是把每个插件的 `./typert` 产物按 loader 的规则离线校验一遍。第三类只出现在**浏览器半边**：带 `dsh.client` 的插件即使宿主侧一切正常，其 lib/client.js 仍可能在 web 启动期激活失败（症状是 boot 页停在「web boot: N entries did not activate」，服务端反而没有 warning），成因同样是宿主版本代差。这类失效构建期无门禁可查——只有真的在浏览器里装配才会撞上——因此客户端启动按 LUMO_BEST_EFFORT_BOOT（见 dsh-overrides/apply.mjs）尽力而为：`@deepseek-ai/*`、`@lumo/*` 之外的条目失败只跳过并告警，不再让一个社区插件把整块工作台拖停摆；发现某个 pin 长期如此就从 baseline 移到 excluded。",
   "baseline": [
     {
       "name": "dshmarket",
@@ -20,8 +20,8 @@
     },
     {
       "name": "dsh-cost-meter",
-      "version": "1.6.7",
-      "note": "费用统计：会话、当日与历史费用，含预算、模型价格与用量。"
+      "version": "1.7.29",
+      "note": "费用统计：会话、当日与历史费用，含预算、模型价格与用量。原钉 1.6.7，因 dsh e459e32637（2026-09-15，perf(typert): materialize generated schemas on first use）把 strict codec 由 `schema` 改成懒物化的 `create()` 工厂，1.6.7 的 16 处 codec 仍是旧形状，被 dsh-typert-loader 的 validateTypertManifest 在启动期拒绝；该拒绝会让 typert 注册面整体回滚，症状表现为 session/list 等端点「定义已撤回」、其余插件连带「未激活」，随 master 升到 1.7.29。"
     },
     {
       "name": "dsh-dream-skin",
@@ -32,11 +32,6 @@
       "name": "@linxin666/dsh-client-ui-task-board",
       "version": "0.3.14",
       "note": "任务看板：dsh web GUI 的 Host 权威任务台帐，替换 Lumo 左侧菜单原「自动化」入口。"
-    },
-    {
-      "name": "dsh-univer-office",
-      "version": "0.2.14",
-      "note": "Univer 办公文档：DSH 与 Univer 的协作网关与查看器，含内联预览、浮动工作台与会话结束审阅。"
     }
   ],
   "excluded": [
@@ -47,6 +42,10 @@
     {
       "name": "@nanmicoder/dsh-agent-teams",
       "reason": "0.1.15 调用了 master 已移除的 ctx.subagents.registerContinuableSetup，Loader 会直接拒绝整树启动。仍可通过 SkillHub 手动安装；dsh-node 的插件隔离会在失败时自动 quarantine 并重试。"
+    },
+    {
+      "name": "dsh-univer-office",
+      "reason": "0.2.14（2026-09-18，最新版）的 peerDependencies 只声明 dsh-attachment/session/settings/llm/tools/skill 的 0.1.1-rc.2 || 0.1.2-rc.1，而 runtime 实际随 master 走 0.1.6-alpha.2（四个 alpha 代差）。失效发生在**浏览器半边**：它的 dsh.client 半边在 web 启动期激活失败，boot 页停在「web boot: 1 entry did not activate / dsh-univer-office: failed」，整块工作台打不开。这类失效构建期查不出来（只有真的在浏览器里装配才会撞上），上游也没有适配版本，故先从桌面基线移除；市场仍可自行安装（那里可以钉与插件同龄的 dsh）。2026-09-18 起客户端启动已改为尽力而为（apply.mjs 的 LUMO_BEST_EFFORT_BOOT），同类插件再坏只会被跳过并告警，不会再拖垮工作台。"
     }
   ],
   "packagedFirstParty": [

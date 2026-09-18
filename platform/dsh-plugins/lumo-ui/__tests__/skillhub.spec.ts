@@ -74,12 +74,11 @@ describe('SkillHub installation and native discovery', () => {
         'scwlkq/dsh-task-board',
         'https://github.com/liustack/modlens',
         'NanmiCoder/dsh-agent-teams',
-        'dream-num/dsh-univer-office.git',
       ],
     }
     expect(buildCatalog(config).installed.plugins.sort()).toEqual([
       'dsh-agent-teams', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
-      'dsh-market', 'dsh-task-board', 'dsh-univer-office', 'modlens',
+      'dsh-market', 'dsh-task-board', 'modlens',
     ])
   })
 

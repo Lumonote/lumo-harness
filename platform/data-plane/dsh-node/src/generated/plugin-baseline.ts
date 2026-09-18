@@ -44,9 +44,9 @@ export const BASELINE_PLUGIN_PINS: readonly BaselinePluginPin[] = [
   },
   {
     name: 'dsh-cost-meter',
-    version: '1.6.7',
-    spec: 'dsh-cost-meter@1.6.7',
-    note: '费用统计：会话、当日与历史费用，含预算、模型价格与用量。',
+    version: '1.7.29',
+    spec: 'dsh-cost-meter@1.7.29',
+    note: '费用统计：会话、当日与历史费用，含预算、模型价格与用量。原钉 1.6.7，因 dsh e459e32637（2026-09-15，perf(typert): materialize generated schemas on first use）把 strict codec 由 `schema` 改成懒物化的 `create()` 工厂，1.6.7 的 16 处 codec 仍是旧形状，被 dsh-typert-loader 的 validateTypertManifest 在启动期拒绝；该拒绝会让 typert 注册面整体回滚，症状表现为 session/list 等端点「定义已撤回」、其余插件连带「未激活」，随 master 升到 1.7.29。',
   },
   {
     name: 'dsh-dream-skin',
@@ -60,12 +60,6 @@ export const BASELINE_PLUGIN_PINS: readonly BaselinePluginPin[] = [
     spec: '@linxin666/dsh-client-ui-task-board@0.3.14',
     note: '任务看板：dsh web GUI 的 Host 权威任务台帐，替换 Lumo 左侧菜单原「自动化」入口。',
   },
-  {
-    name: 'dsh-univer-office',
-    version: '0.2.14',
-    spec: 'dsh-univer-office@0.2.14',
-    note: 'Univer 办公文档：DSH 与 Univer 的协作网关与查看器，含内联预览、浮动工作台与会话结束审阅。',
-  },
 ]
 
 /** 曾被考虑但已移出基线的插件。保留是为了防止有人再把它加回来。 */
@@ -77,6 +71,10 @@ export const BASELINE_EXCLUDED_PLUGINS: readonly { name: string; reason: string 
   {
     name: '@nanmicoder/dsh-agent-teams',
     reason: '0.1.15 调用了 master 已移除的 ctx.subagents.registerContinuableSetup，Loader 会直接拒绝整树启动。仍可通过 SkillHub 手动安装；dsh-node 的插件隔离会在失败时自动 quarantine 并重试。',
+  },
+  {
+    name: 'dsh-univer-office',
+    reason: '0.2.14（2026-09-18，最新版）的 peerDependencies 只声明 dsh-attachment/session/settings/llm/tools/skill 的 0.1.1-rc.2 || 0.1.2-rc.1，而 runtime 实际随 master 走 0.1.6-alpha.2（四个 alpha 代差）。失效发生在**浏览器半边**：它的 dsh.client 半边在 web 启动期激活失败，boot 页停在「web boot: 1 entry did not activate / dsh-univer-office: failed」，整块工作台打不开。这类失效构建期查不出来（只有真的在浏览器里装配才会撞上），上游也没有适配版本，故先从桌面基线移除；市场仍可自行安装（那里可以钉与插件同龄的 dsh）。2026-09-18 起客户端启动已改为尽力而为（apply.mjs 的 LUMO_BEST_EFFORT_BOOT），同类插件再坏只会被跳过并告警，不会再拖垮工作台。',
   },
 ]
 

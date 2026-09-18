@@ -270,8 +270,17 @@ export function ensureProfilePlugins(options: {
 
 /**
  * A packaged runtime cannot invoke pnpm or create links back into the source
- * checkout. Keep the DSH profile's normal parent-walk resolution contract by
- * placing relative-to-the-app package links in its shared fallback directory.
+ * checkout, so the plugin tree is kept resolvable by linking the runtime's own
+ * copies into the two directories it resolves bare names from:
+ *
+ * - `$DSH_HOME/profiles/node_modules` for the bundle layers，their names resolve
+ *   from the dsh installation and then the profile directory;
+ * - `$DSH_HOME/node_modules` for the launcher patch layer (`--patch` inserts).
+ *   Those inserts carry bare names (`@lumo/dsh-platform-ui` …) and resolve with
+ *   `parentURL = <DSH_HOME>/package.json`，so without this directory every
+ *   inserted first-party plugin fails as `ERR_MODULE_NOT_FOUND` and boot only
+ *   warns「N entries did not activate / failed to import」—— 能力静默消失而不是
+ *   启动失败，2026-09-18 实测：知识库、Agent 团队、运营面等 9 项全灭。
  */
 function ensurePackagedProfileModules(profile: string, env: NodeJS.ProcessEnv): void {
   const runtimeModules = env['LUMO_RUNTIME_NODE_MODULES']
@@ -279,8 +288,7 @@ function ensurePackagedProfileModules(profile: string, env: NodeJS.ProcessEnv): 
     throw new Error('dsh-node: packaged runtime is missing LUMO_RUNTIME_NODE_MODULES')
   }
   const dshHome = env['DSH_HOME'] ?? resolve(homedir(), '.dsh')
-  const modulesDir = resolve(dshHome, 'profiles', 'node_modules')
-  mkdirSync(modulesDir, { recursive: true })
+  const linked: Array<[string, string]> = []
   for (const name of PACKAGED_PROFILE_MODULES) {
     const target = resolve(runtimeModules, ...name.split('/'))
     if (!existsSync(resolve(target, 'package.json'))) {
@@ -290,7 +298,11 @@ function ensurePackagedProfileModules(profile: string, env: NodeJS.ProcessEnv): 
       }
       throw new Error(`dsh-node: packaged runtime is missing ${name}`)
     }
-    linkPackagedModule(modulesDir, name, target, true)
+    linked.push([name, target])
+  }
+  for (const modulesDir of [resolve(dshHome, 'profiles', 'node_modules'), resolve(dshHome, 'node_modules')]) {
+    mkdirSync(modulesDir, { recursive: true })
+    for (const [name, target] of linked) linkPackagedModule(modulesDir, name, target, true)
   }
 }
 

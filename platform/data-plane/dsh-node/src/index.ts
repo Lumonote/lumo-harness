@@ -238,7 +238,7 @@ const basePluginRows: PluginSummary[] = [
   { id: 'dsh-dream-skin', label: '梦幻皮肤', description: '8 套高质感主题、弥散光壁纸与每用户强调色', surface: 'market', kind: 'runtime' },
   { id: 'dsh-task-board', label: '任务看板', description: 'Host 权威任务台帐：看板任务、真实 DSH 会话执行与定时调度', surface: 'market', kind: 'runtime' },
   { id: 'dsh-agent-teams', label: '多智能体团队（社区版）', description: '社区插件：自然语言编排船长/成员、带依赖任务与消息，Web 树状监控。基线未收录（依赖 master 已移除的 continuable API），可从市场安装', surface: 'operations', kind: 'runtime' },
-  { id: 'dsh-univer-office', label: 'Univer 办公文档', description: 'DSH × Univer 协作网关与查看器：内联预览、浮动工作台与会话结束审阅', surface: 'market', kind: 'runtime' },
+  { id: 'dsh-univer-office', label: 'Univer 办公文档（社区版）', description: '社区插件：DSH × Univer 协作网关与查看器。基线未收录（客户端半边与 master 代差过大，会在 web 启动期失败），可从市场自行安装', surface: 'market', kind: 'runtime' },
   { id: 'gpt-image-2-style-library', label: '图像风格库', description: 'GPT Image 2 模板、风格标签与工业级提示词', surface: 'skills', kind: 'runtime' },
   { id: 'ppt-master', label: '演示文稿生成', description: '生成、编辑和增强原生可编辑 PPTX', surface: 'skills', kind: 'runtime' },
   { id: 'ruflo-orchestration', label: '多智能体编排', description: '在任务运行内组织 Ruflo 智能体拓扑与分工', surface: 'operations', kind: 'runtime' },

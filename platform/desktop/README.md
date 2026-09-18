@@ -99,14 +99,21 @@ CLI 或设置 `LUMO_SKILLHUB_COMMAND`。构建从 [SkillHub 官方安装源](htt
 | 插件市场 | `dshmarket` | `1.41.0` | 浏览和管理 DSH 插件 |
 | 视觉理解 | `@liustack/modlens` | `3.25.2` | 图片读取、OCR 与视觉证据 |
 | 上下文洞察 | `dsh-context` | `0.41.3` | 上下文组成、趋势与事件 |
-| 费用统计 | `dsh-cost-meter` | `1.6.7` | 会话、预算、价格和历史费用 |
+| 费用统计 | `dsh-cost-meter` | `1.7.29` | 会话、预算、价格和历史费用 |
 | 梦幻皮肤 | `dsh-dream-skin` | `8.30.1` | 8 套高质感主题、弥散光壁纸与每用户强调色（原生 `--dsw-*` 实现） |
 | 任务看板 | `@linxin666/dsh-client-ui-task-board` | `0.3.14` | Host 权威任务台帐：看板任务、真实 DSH 会话执行、定时调度与执行历史（替换左侧菜单原「自动化」入口） |
 | 多智能体团队 | `@nanmicoder/dsh-agent-teams` | `0.1.15` | 自然语言编排多智能体团队：船长/成员、带依赖任务与消息，Web 树状监控 |
-| Univer 办公文档 | `dsh-univer-office` | `0.2.14` | DSH × Univer 协作网关与查看器：内联预览、浮动工作台与会话结束审阅 |
+| Univer 办公文档（社区版） | `dsh-univer-office` | `0.2.14` | 基线未收录：客户端半边与 master 代差过大，会在 web 启动期失败；可从市场自行安装 |
 
 > 浏览器自动化（`@anweat/dsh-browser` 0.1.10）因依赖已被 dsh 现行版本移除的
 > dsh-settings 旧导出，且上游无适配版本，暂不固定进桌面基线——市场页面也不展示。
+>
+> Univer 办公文档（`dsh-univer-office` 0.2.14）的 peer 只声明到 0.1.2-rc.1，而运行时随 master
+> 走 0.1.6-alpha.2。它的**浏览器半边**因此在 web 启动期激活失败，boot 页停在
+> `web boot: 1 entry did not activate / dsh-univer-office: failed`——整块工作台打不开。
+> 这类失效构建期查不出来，故从桌面基线移除（依赖仍留可自行安装）。同时客户端启动已改为
+> 尽力而为：`@deepseek-ai/*`、`@lumo/*` 之外的条目激活失败只跳过并在控制台告警，
+> 不再把一个社区插件升级成整站停摆（见 `dsh-overrides/apply.mjs` 的 `LUMO_BEST_EFFORT_BOOT`）。
 
 ## 创作与多智能体组件
 
