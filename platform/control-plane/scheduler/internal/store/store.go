@@ -961,6 +961,37 @@ func (s *Store) ActiveCounts(ctx context.Context) (map[string]int, error) {
 	return out, rows.Err()
 }
 
+// UnsettledExecutionsByNode 每节点上「还没有结果」的受治理执行数，供孤儿指标使用。
+//
+// **读的是别的模块的表**：`lumo_governed_executions` 由 `@lumo/subagent-host` 插件建
+// （`governed-dispatch.ts`），而「孤儿」这个判断需要两边的知识——「没有结果」在插件侧、
+// 「节点已不在目录里」在本服务的目录快照里。插件没有指标面（它跑在 dsh 进程内，没有
+// `/metrics`），所以这一条只能在这里算。真正的判据在调用方：本函数只出计数，孤儿与否由
+// `orphanedActive` 拿快照去比。
+//
+// 表不存在时返回的 error **必须被调用方吞掉并让序列缺席**，而不是当成 0：没有这张表
+// 意味着这个部署根本不跑受治理执行（`governedWorker` 默认关闭），而 0 会说成「跑了，一个
+// 孤儿都没有」。两者在图上不同形，这里刻意不为后者铺路。
+func (s *Store) UnsettledExecutionsByNode(ctx context.Context) (map[string]int, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT node_id, count(*) FROM lumo_governed_executions
+		WHERE result IS NULL GROUP BY node_id`)
+	if err != nil {
+		return nil, fmt.Errorf("scheduler: 统计未结算执行失败: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]int)
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("scheduler: 扫描未结算执行失败: %w", err)
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
 // ActiveClusterCountsByProjects 按项目统计各集群上的活跃任务数（会话/项目亲和的输入）。
 //
 // 一次查一批项目而不是逐任务查：drain 循环一轮最多取 32 个 PENDING 任务，逐任务查

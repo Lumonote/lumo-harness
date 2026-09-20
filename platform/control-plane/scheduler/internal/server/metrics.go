@@ -39,6 +39,17 @@ const (
 	// MetricOrphanedActive 挂在「目录中已不存在」的节点上的活跃任务数
 	// （task_lost 的来源，也是死信迁移的前置条件）。
 	MetricOrphanedActive = "lumo_scheduler_orphaned_active_tasks"
+	// MetricOrphanedExecutions 「节点已不在目录里、且永远不会再有结果」的受治理执行数。
+	//
+	// 它**不**触发任何自动动作，这是刻意的（见 2026-09-18 的记录）：执行台账里的一张
+	// 回执只能由执行它的那个运行时实例写（`save()` 要求 `instance_id` 匹配），而
+	// `recover()` 的正当性来自「同节点出现新实例」这个**可证事实**。跨节点没有等价物，
+	// 所以控制面替另一个节点写回执会丢掉那份证明——宁可留一个诚实的孤儿行。
+	//
+	// 与 MetricOrphanedActive 的关系：那张表管**任务**，这条管**执行台账**。任务侧在
+	// 节点消失时已经被 task_lost 覆盖、8 小时后被 max_stall 转死信，所以这条的边际价值
+	// 是**台账卫生**：max_stall 收割之后孤儿就不再被任何指标覆盖，而这一条一直数着它。
+	MetricOrphanedExecutions = "lumo_scheduler_orphaned_governed_executions"
 	// MetricLeader 本副本是否持有租约。每副本各报一个值，Prometheus 用 instance
 	// 区分；无 leader 时没有任何副本在排空队列。
 	MetricLeader = "lumo_scheduler_leader"
@@ -257,6 +268,12 @@ func (s *Server) publishSchedulerMetrics(ctx context.Context) {
 	// 孤儿数只在拿到过至少一份目录快照后才谈得上。没有快照时节点集合是
 	// **未知**而不是**空**，把未知当空会让所有活跃任务都变成孤儿。
 	if !snap.at.IsZero() {
+		// 同一条闸门、同一个快照，数另一张表。查询失败时**不发布**（与上面同一条规矩：
+		// 报 0 会让「读不到」与「一个孤儿都没有」变得不可分）。表不存在也走这条路径——
+		// 那意味着这个部署不跑受治理执行，序列缺席正是要说的话。
+		if unsettled, err := s.store.UnsettledExecutionsByNode(ctx); err == nil {
+			observability.SetGauge(MetricOrphanedExecutions, float64(orphanedActive(unsettled, snap.ids)))
+		}
 		if active, err := s.store.ActiveCounts(ctx); err == nil {
 			observability.SetGauge(MetricOrphanedActive, float64(orphanedActive(active, snap.ids)))
 		} else {

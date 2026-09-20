@@ -83,6 +83,39 @@ export interface TeamTask {
   id: string
   subject: string
   description?: string
+  /**
+   * 验收条件：**派发时**由协调者写死、成员可见的「怎样算做完」（§24.1）。
+   *
+   * 为什么写在任务上，而不是留在协调者脑子里：判据必须在派发那一刻落定，成员才可能
+   * 照着它交活，验收也才有据可依 —— 否则验收只剩评判成员的措辞，也就是文章说的
+   * `rubber-stamp weak work`。
+   *
+   * 缺省是**合法**状态（本字段之前的派发都没有它），语义是「无验收条件」而**不是**
+   * 「默认通过」—— 判据见 `acceptanceVerdict`，走 fail-closed。
+   */
+  acceptance?: string
+  /**
+   * 这条任务是否**延续**父级对话（§24.3.1）。缺省 false = 正交任务。
+   *
+   * 正交任务用 `spawn`（独立上下文），延续性任务用 `fork`（带着父级已完成的轮次开工）。
+   * 两者的取舍是**上下文隔离 vs 省一次重新粘贴**，不是成本高低——把它当成成本开关会选错：
+   * fork 的子代理会拿到父的对话历史，正交任务给它是反向的。
+   *
+   * 注意这只在**进程内**执行面上起作用：集群里 `lumo-remote` 胜出后本字段无效果
+   * （`selectDispatchProvider` 的守卫 1）。
+   */
+  continuesContext?: boolean
+  /**
+   * 这条结论的证据：**产生它的子 Run 身份**（§23.4 的「结论 → 证据一级跳转」）。
+   *
+   * 由派发方在写回时带上（`MemberRun.id`），**不是成员自报的**——证据是系统已知的事实，
+   * 让成员在正文里写「证据：…」再解析，既不可靠又给了伪造空间。
+   *
+   * 缺省表示「这次交付没有被记录到证据」：`acceptanceVerdict` 据此判 `no-evidence`，
+   * 于是**该任务不能被自动验收**。这是 fail-closed 的方向——宁可要人看一眼，
+   * 也不要让一段没有出处的结论直接过关。
+   */
+  evidence?: readonly string[]
   status: TaskStatus
   /** 成员名；缺省表示待认领。 */
   assignee?: string
@@ -134,11 +167,24 @@ export type TeamErrorCode =
   | 'DUPLICATE_TEAM'
   /** 非该任务的指派者试图更新它。 */
   | 'NOT_ASSIGNEE'
+  /**
+   * 试图把协调者（船长）登记为成员。
+   *
+   * 与 `NOT_FOUND` 分开是**刻意的**：`NOT_FOUND` 是「查不到」，本条是「查得到也不许」。
+   * 两者在聚合时的意义完全不同——前者多半是调用方传错了名字，后者是有人在试图
+   * 让协调者下场执行（§24.1 S2）。混成一个码，这条越权尝试就会被淹没在
+   * 一大堆拼写错误里，而它恰恰是最该被看见的那一类。
+   */
+  | 'COORDINATOR_IS_NOT_A_MEMBER'
 
 /** 建任务的输入。`dependencies` 可引用同一批次里更早出现的 id。 */
 export interface NewTaskInput {
   subject: string
   description?: string
+  /** 验收条件；见 {@link TeamTask.acceptance}。 */
+  acceptance?: string
+  /** 是否延续父级对话；见 {@link TeamTask.continuesContext}。 */
+  continuesContext?: boolean
   assignee?: string
   dependencies?: readonly string[]
 }
@@ -152,10 +198,35 @@ export function taskById(team: TeamState, taskId: string): TeamTask {
   return task
 }
 
-/** 查找一名成员，缺失即抛。 */
+/**
+ * 这个名字是不是协调者（船长）自己的身份。
+ *
+ * **本判据是 S2「协调者不执行」的唯一来源**（§24.1）。单独成函数、而不是把
+ * `name === team.captainSessionId` 抄在两个地方：抄两处就会漂移，而漂移的方向是
+ * **放行**——一处漏改，协调者就又能下场干活，且没有任何报错。
+ *
+ * 语义注意：协调者**不是**「什么都不能做」。`cancelTask` 的注释写着「船长或指派者」，
+ * 取消任务本来就是协调者的合法动作。S2 的准确表述是**「协调者不是成员」**——
+ * 它能做协调者级操作，但不得持有成员身份、不得占据任务。
+ */
+export function isCoordinatorName(team: TeamState, name: string): boolean {
+  return name !== '' && name === team.captainSessionId
+}
+
+/** 查找一名成员，缺失即抛。协调者是隐式的，查它一律 NOT_FOUND。 */
 export function memberByName(team: TeamState, name: string): TeamMember {
   const member = team.members.find(candidate => candidate.name === name)
   if (member === undefined) {
+    // 协调者走单独一条说明。码仍是 NOT_FOUND（它确实不在名册里，语义没错），
+    // 但措辞必须点明原因 —— 否则现场看到的是一个和拼写错误长得一样的失败，
+    // 而它的成因（有人在让协调者下场）与拼写错误毫无关系。
+    if (isCoordinatorName(team, name)) {
+      throw new TeamError(
+        `${name} 是团队 ${team.id} 的协调者会话，不是成员：协调者只做路由与验收，`
+        + '不下场执行（§24.1 S2）。需要它干活，请把任务派给成员。',
+        'NOT_FOUND',
+      )
+    }
     throw new TeamError(`团队 ${team.id} 没有成员 ${name}`, 'NOT_FOUND')
   }
   return member
@@ -234,6 +305,13 @@ export function addTask(team: TeamState, input: NewTaskInput, now: number): { te
     id: `t${seq}`,
     subject: input.subject,
     ...input.description === undefined ? {} : { description: input.description },
+    // 原样透传、不在这里归一：写入侧的职责是把派发者的判据带到任务上，
+    // 「空串算不算缺省」由验收判据统一裁决（`acceptanceVerdict`），
+    // 免得同一件事在写入与验收两处各有一套口径。
+    ...input.acceptance === undefined ? {} : { acceptance: input.acceptance },
+    // 只在显式 true 时写键：`false` 与缺省同义（正交），写进去只会让存储里多出一堆
+    // 无信息的字段，且让「旧行没有这个键」这件事不再可辨别。
+    ...input.continuesContext === true ? { continuesContext: true } : {},
     status: 'pending',
     ...input.assignee === undefined ? {} : { assignee: input.assignee },
     dependencies: [...(input.dependencies ?? [])],
@@ -259,12 +337,31 @@ export function addTasks(team: TeamState, inputs: readonly NewTaskInput[], now: 
   return { team: current, tasks: created }
 }
 
-/** 加入一名成员。名字重复即抛。 */
+/**
+ * 加入一名成员。名字重复即抛；**协调者身份不可入册**。
+ *
+ * 这里是与 `memberByName` 配套的另一半闸：`memberByName` 挡住「以协调者身份行事」，
+ * `addMember` 挡住「先把协调者变成成员、再名正言顺地行事」。缺了这一半，
+ * 后一半闸绕开只要一步——把 `captainSessionId` 原样填进 `name`。
+ *
+ * 顺带一提：这条守卫一旦成立，`startTask` / `completeTask` / `failTask` **无需**再加判据。
+ * 它们只校验 `task.assignee === memberName`，而 `assignee` 只能由三条路径设置
+ * （`addTask` 校验 assignee、`claimTask`、`reassignTask`），三条都过 `memberByName`——
+ * 于是「指派给协调者」在数据结构上不可达。**这是推断不是假设**：见
+ * `__tests__/coordinator.spec.ts` 里逐条钉住的用例。
+ */
 export function addMember(
   team: TeamState,
   member: Omit<TeamMember, 'status' | 'joinedAt'> & { status?: MemberStatus },
   now: number,
 ): TeamState {
+  if (isCoordinatorName(team, member.name)) {
+    throw new TeamError(
+      `${member.name} 是团队 ${team.id} 的协调者会话，不能登记为成员：`
+      + '协调者只做路由与验收，不下场执行（§24.1 S2）。成员身份必须是执行者自己的名字。',
+      'COORDINATOR_IS_NOT_A_MEMBER',
+    )
+  }
   if (team.members.some(candidate => candidate.name === member.name)) {
     throw new TeamError(`团队 ${team.id} 已有成员 ${member.name}`, 'DUPLICATE_MEMBER')
   }
@@ -367,6 +464,7 @@ export function completeTask(
   output: string,
   now: number,
   attempt?: number,
+  evidence?: readonly string[],
 ): TeamState {
   const task = taskById(team, taskId)
   assertAssignee(task, memberName)
@@ -379,10 +477,16 @@ export function completeTask(
       'BAD_STATE',
     )
   }
+  // 证据与结论同一次写入：分两步写会出现「结论已上板、证据还没到」的窗口，而这个窗口里
+  // 任何一次验收都会判 `no-evidence` —— 拒收一个其实有证据的交付。
+  // 归一到 undefined 而不是空数组：`[]` 与「没有」在验收判据里同义，但存两种形状会让
+  // 每次读都要同时处理两者（与 `RunID` 空串归一成 NULL 同一条纪律）。
+  const normalizedEvidence = (evidence ?? []).filter(item => item.trim() !== '')
   return setMemberStatus(replaceTask(team, {
     ...task,
     status: 'completed',
     output,
+    ...normalizedEvidence.length === 0 ? {} : { evidence: normalizedEvidence },
     updatedAt: now,
   }), memberName, 'idle')
 }

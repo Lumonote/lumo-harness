@@ -64,7 +64,11 @@ func main() {
 	bus := trigger.New()
 	flowEngine := engine.New(engine.RuntimeConfig{
 		LLMURL: os.Getenv("LUMO_LLM_GATEWAY_URL"), ConnectorURL: os.Getenv("LUMO_CONNECTOR_GATEWAY_URL"),
-		KnowledgeURL: os.Getenv("LUMO_KNOWLEDGE_SEAM_URL"), ControlToken: os.Getenv("LUMO_CONTROL_PLANE_TOKEN"),
+		KnowledgeURL: os.Getenv("LUMO_KNOWLEDGE_SEAM_URL"),
+		// 决策固化算子（§24.4 第 5 条）的上游。未配置即该算子 unavailable，用它的流程
+		// 连发布都过不去（ValidateDefinition 拒绝）——默认关闭落在配置上，不落在默认频率上。
+		ProjectsURL:    os.Getenv("LUMO_PROJECTS_URL"),
+		ControlToken:   os.Getenv("LUMO_CONTROL_PLANE_TOKEN"),
 		IdentitySecret: envOr("LUMO_IDENTITY_ASSERTION_SECRET", os.Getenv("LUMO_CONTROL_PLANE_TOKEN")),
 	})
 	bus.Subscribe("*", func(runCtx context.Context, event trigger.Event) error {
@@ -96,7 +100,13 @@ func main() {
 				err = identityErr
 			} else {
 				executionCtx, cancel := context.WithTimeout(runCtx, store.RunTimeout)
-				result, err = flowEngine.Run(engine.WithIdentity(executionCtx, identity), &def, event.Payload)
+				// 这次执行是**被事件叫醒的**，唤醒源就是触发本身（event.ID）。把它交给
+				// 执行面，算子出站时带上 X-Lumo-Trace，网关据此写 usage_ledger.trace_id，
+				// 于是「这次唤醒烧了多少钱」可用一条等值查询回答（§24.9 第 1 条、
+				// domain.WakeTrace 的注释给出查询形状）。
+				result, err = flowEngine.Run(
+					engine.WithWakeTrace(engine.WithIdentity(executionCtx, identity), domain.WakeTrace(event.ID)),
+					&def, event.Payload)
 				cancel()
 			}
 			if err != nil {

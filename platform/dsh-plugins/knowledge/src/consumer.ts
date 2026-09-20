@@ -5,7 +5,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
+import { KNOWLEDGE_TOOL_QUERY, type KnowledgeSeam, type KnowledgeSessionScope } from '../../../shared/seam-contracts/knowledge.ts'
 import { DEFAULT_OVERFETCH_FACTOR, rerankHits, type RerankClient } from './rerank.ts'
 
 export interface KnowledgeToolConfig {
@@ -24,9 +24,22 @@ export function defineKnowledgeTool(
   ctx: Context,
   seam: KnowledgeSeam,
   config: KnowledgeToolConfig,
+  scope: KnowledgeSessionScope,
 ): () => void {
+  /**
+   * 这一次会话允许的空间。读的是 `exec.agent.session.id`——与 `@lumo/control` 读控制状态
+   * 同一个形状，因为工具执行时拿不到 agent 的作用域（`Agent.ctx` 是私有的）。
+   *
+   * 取不到会话（例如 PTC 之类的合成调用）时返回 `undefined` = 不按空间收窄。**这与
+   * 「读不到收窄条件」是同一条语义**：收窄是调用方设的，没设就是不设限——而它不是安全
+   * 边界，realm 才是（见契约里那段）。
+   */
+  const sessionSpaces = (exec: ToolRunContext): readonly string[] | undefined => {
+    const session = (exec as { agent?: { session?: { id?: unknown } } }).agent?.session?.id
+    return session === undefined || session === null ? undefined : scope.spacesFor(String(session))
+  }
   const definition: ToolDefinition = {
-    name: 'knowledge_query',
+    name: KNOWLEDGE_TOOL_QUERY,
     description: '在知识库中检索与问题相关的已发布文档片段，供回答问题时引用。',
     parameters: {
       type: 'object',
@@ -61,7 +74,7 @@ export function defineKnowledgeTool(
     },
     async execute(
       args: unknown,
-      _exec: ToolRunContext,
+      exec: ToolRunContext,
     ): Promise<{ hits: Array<{ docId: string; text: string; score: number }> }> {
       const { question, topK } = args as { question?: string; topK?: number }
       if (!question?.trim()) throw new Error('knowledge_query: question 不能为空')
@@ -74,6 +87,10 @@ export function defineKnowledgeTool(
         text: question,
         topK: k * factor,
         scope: 'published', // 铁律 17：模型只读发布态
+        // 这一次会话的收窄条件（受治理执行按预设设的）。**没设过就是 undefined**，
+        // 而 `spaces: undefined` 与省略同义（不按空间收窄）——契约里那条区分在
+        // Provider 侧实现，这里只负责如实传下去，不在这里替它做判断。
+        spaces: sessionSpaces(exec),
       })
       const hits = await rerankHits(config.rerank, question, candidates, k, (reason) =>
         ctx.logger.warn('knowledge: 重排降级为向量原序: %s', reason),

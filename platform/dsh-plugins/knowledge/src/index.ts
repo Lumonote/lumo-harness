@@ -17,6 +17,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 
 import { PgKnowledgeProvider } from './pg-provider.ts'
 import { defineKnowledgeTool } from './consumer.ts'
+import { createSessionScope } from './session-scope.ts'
 import { TeiClient } from './embedding.ts'
 import { PgGraphProvider } from './graph-provider.ts'
 import { GraphProjector } from './graph-projector.ts'
@@ -181,6 +182,11 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     : undefined
   const overfetchFactor = config.rerank?.overfetchFactor
 
+  // 会话级的知识空间收窄（受治理执行按预设设、工具按会话读）。**provide 出去是为了让
+  // 设它的那一方不必直连本插件的内部状态**——与 `meteringCaps` 同一条理由。
+  const scope = createSessionScope()
+  ctx.provide('knowledgeScope', scope)
+
   // Consumer 1：纯向量 RAG（装配层固定 realm、只读 published —— 铁律 17）
   const unregister = defineKnowledgeTool(ctx, provider, {
     realm: config.realm,
@@ -188,7 +194,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     defaultTopK,
     rerank,
     overfetchFactor,
-  })
+  }, scope)
   // Consumer 2：GraphRAG（向量召回 → 重排 → 图邻域扩展；输出带 provenance 标记，评审 R5）
   const unregisterGraph = defineGraphRagTool(ctx, provider, graph, {
     realm: config.realm,
@@ -198,7 +204,7 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     graphMaxNodes: config.graph?.maxNodes ?? 50,
     rerank,
     overfetchFactor,
-  })
+  }, scope)
   ctx.effect(() => () => {
     unregister()
     unregisterGraph()

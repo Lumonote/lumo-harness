@@ -65,6 +65,87 @@ CREATE TABLE IF NOT EXISTS project_automations (
 export type ProjectRole = 'owner' | 'editor' | 'viewer'
 export type ArtifactKind = 'component' | 'skill' | 'agent' | 'connector' | 'flow'
 
+/**
+ * 决策记忆的 kind 闭集（§24.4 项目决策记忆）。与 Go 侧
+ * `control-plane/projects/internal/domain/decisions.go` 的同名闭集逐字一致——
+ * 两侧漂移由 `__tests__/decision-contract.spec.ts` 现场解析 Go 源码逮住。
+ *
+ * 闭集外的值一律拒绝（不是「未知即跳过」）：一个拼错的 kind 会让决策在按 kind 过滤的
+ * 读面里静默消失，而消失的决策表现为「这条决定从没被记过」——正是这套记忆要防的事故。
+ */
+export const DECISION_KINDS = ['decision', 'boundary', 'ownership', 'trap'] as const
+export type DecisionKind = (typeof DECISION_KINDS)[number]
+
+/**
+ * 索引层行数上限（§24.4 第 2 条）。
+ *
+ * 索引是**常驻上下文**的那一层：膨胀的索引同时损害命中率与上下文预算，所以「有 limit
+ * 参数」还不够——默认值本身就是上限，调用方不传也必须被限住。数值与 Go 侧同源
+ * （`domain.DecisionIndexDefaultLimit` / `DecisionIndexMaxLimit`）。
+ */
+export const DECISION_INDEX_DEFAULT_LIMIT = 50
+export const DECISION_INDEX_MAX_LIMIT = 200
+
+/** 把调用方给的 limit 收敛到 [1, DECISION_INDEX_MAX_LIMIT]（与 Go 侧同判序）。 */
+export function resolveDecisionIndexLimit(requested?: number): number {
+  if (requested === undefined || !Number.isFinite(requested) || requested <= 0) {
+    return DECISION_INDEX_DEFAULT_LIMIT
+  }
+  return Math.min(Math.floor(requested), DECISION_INDEX_MAX_LIMIT)
+}
+
+/**
+ * 索引查询 SQL（导出是为了让契约用例断言它的形状，不是为了让调用方执行它）。
+ *
+ * 三个条件都不是可选的：`realm` 是租户边界（跨 realm 查询得到**空集**，不是错误）、
+ * `superseded_by IS NULL` 是 live 判据（被取代的条目只留在正文层）、`summary` 之外的列
+ * 一律不取——`body` 一进索引，索引就从「命中表」退化成「正文的第二份拷贝」。
+ */
+export function decisionIndexQuery(kind?: DecisionKind): string {
+  // 两种写法分别拼而不是 `($3 = '' OR kind = $3)`：后者会让 PG 用不上
+  // project_decisions_live 这个部分索引的第三列。
+  const filter = kind === undefined ? '' : ' AND kind = $3'
+  const limit = kind === undefined ? '$3' : '$4'
+  return `SELECT id, kind, summary, COALESCE(supersedes, '') AS supersedes, created_at
+    FROM project_decisions
+    WHERE realm = $1 AND project_id = $2 AND superseded_by IS NULL${filter}
+    ORDER BY created_at DESC, id DESC
+    LIMIT ${limit}`
+}
+
+/**
+ * 正文查询 SQL。**不过滤 superseded_by**：被取代的行照样可读——索引层过滤它们是为了
+ * 上下文预算，不是为了隐藏；「当初为什么这么定、后来被什么取代」正是要留下的考古层。
+ */
+export const DECISION_BODY_SQL = `SELECT id, realm, project_id, kind, summary, body,
+    COALESCE(supersedes, '') AS supersedes, COALESCE(superseded_by, '') AS superseded_by,
+    evidence, created_at
+  FROM project_decisions
+  WHERE realm = $1 AND project_id = $2 AND id = $3`
+
+/** 索引行：常量级的一行，**没有 body**。 */
+export interface DecisionIndexRow {
+  id: string
+  kind: DecisionKind
+  summary: string
+  supersedes?: string
+  createdAt: string
+}
+
+/** 决策正文（(session_ref, seq) 证据坐标与任务报告同形，见 §23.4）。 */
+export interface Decision {
+  id: string
+  realm: string
+  projectId: string
+  kind: DecisionKind
+  summary: string
+  body: string
+  supersedes?: string
+  supersededBy?: string
+  evidence?: Array<{ session_ref: string; seq: number }>
+  createdAt: string
+}
+
 export interface Project {
   projectId: string
   realm: string
@@ -85,8 +166,17 @@ export interface ProjectDashboard {
 export class ProjectService {
   private pool: pg.Pool
 
-  constructor(connectionString: string) {
+  /**
+   * 本节点绑定的 realm（装配层固定，与 projectId 同理：模型不可改）。
+   *
+   * 空串是**刻意的失败态**：决策读面全部返回空集，绝不退化成「不带 realm 过滤的全量读」。
+   * 忘了注入 realm 的后果是「读不到」，不是「读到别人的」——fail-closed 的方向只允许这一种。
+   */
+  private realm: string
+
+  constructor(connectionString: string, realm = '') {
     this.pool = new pg.Pool({ connectionString })
+    this.realm = realm
   }
 
   async init(): Promise<void> {
@@ -216,6 +306,59 @@ export class ProjectService {
       },
     }
   }
+
+  /**
+   * 决策记忆索引层（§24.4 第 2 条）：常驻的那一层，**常驻所以必须有界**。
+   *
+   * 参数顺序与 Go 侧 store.ListDecisionIndex 一致（realm 来自装配配置、不在参数里——
+   * 拿不到 realm 的调用方读到的必须是空集）。kind 传闭集外的值直接抛错：静默按
+   * 「没有这类决策」返回空集，会让契约漂移表现成「记忆是空的」。
+   */
+  async decisionIndex(
+    projectId: string,
+    opts: { kind?: DecisionKind; limit?: number } = {},
+  ): Promise<DecisionIndexRow[]> {
+    if (opts.kind !== undefined && !DECISION_KINDS.includes(opts.kind)) {
+      throw new Error(`未知决策 kind ${String(opts.kind)}，合法取值：${DECISION_KINDS.join(' / ')}`)
+    }
+    const bound = resolveDecisionIndexLimit(opts.limit)
+    const params: unknown[] = [this.realm, projectId]
+    if (opts.kind !== undefined) params.push(opts.kind)
+    params.push(bound)
+    const rows = await this.pool.query<{
+      id: string; kind: DecisionKind; summary: string; supersedes: string; created_at: Date
+    }>(decisionIndexQuery(opts.kind), params)
+    return rows.rows.map((r) => ({
+      id: r.id, kind: r.kind, summary: r.summary,
+      supersedes: r.supersedes || undefined,
+      createdAt: r.created_at.toISOString(),
+    }))
+  }
+
+  /** 正文层：命中索引之后再取全文（两级读面的第二级）。被取代的行同样读得到。 */
+  async decisionBody(projectId: string, decisionId: string): Promise<Decision | undefined> {
+    const rows = await this.pool.query<{
+      id: string; realm: string; project_id: string; kind: DecisionKind
+      summary: string; body: string; supersedes: string; superseded_by: string
+      evidence: Decision['evidence'] | null; created_at: Date
+    }>(DECISION_BODY_SQL, [this.realm, projectId, decisionId])
+    const row = rows.rows[0]
+    if (row === undefined) return undefined
+    return {
+      id: row.id, realm: row.realm, projectId: row.project_id, kind: row.kind,
+      summary: row.summary, body: row.body,
+      supersedes: row.supersedes || undefined,
+      supersededBy: row.superseded_by || undefined,
+      evidence: row.evidence ?? undefined,
+      createdAt: row.created_at.toISOString(),
+    }
+  }
+
+  // 决策记忆**没有写入面**（§24.4 第 4 条）。追加与取代必须同一个事务：插新行 +
+  // 只回填旧行的 superseded_by + `AND superseded_by IS NULL` 的 CAS。这份事务在 Go 侧
+  // （store.AppendDecision）只写了一遍；TS 再写一遍，两边迟早有一边漏掉那个 CAS 条件，
+  // 于是同一行被两条新决策同时取代而无人察觉。固化任务（去重/剪枝/矛盾标注）同样只在
+  // Go 侧实现一次——启发式判据有两份实现，等于有两套互相矛盾的结论。
 
   async close(): Promise<void> {
     await this.pool.end()

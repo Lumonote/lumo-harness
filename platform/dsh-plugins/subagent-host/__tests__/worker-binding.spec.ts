@@ -21,7 +21,26 @@ it('binds exactly one installed Agent and never substitutes another Worker', () 
 })
 
 it.each([{ realm: 'other' }, { project_id: 'other' }, { revision: 8 }, { status: 'disabled' },
-  { system_prompt_ref: 'prompt' }, { knowledge_space_ids: ['private'] }, { max_budget_cents: 10 },
+  { system_prompt_ref: 'prompt' },
 ])('rejects uninstalled execution identity or unsupported capabilities: %j', patch => {
   expect(() => assertExecutionPreset(binding, 'realm', { ...preset, ...patch })).toThrow()
+})
+
+// 金额上限与知识空间**已从「一律拒绝」改为接受**——两者的执法面都建好了（前者：计量截面的
+// `ScopeCapSeam`；后者：知识插件的会话作用域 + 两个知识工具按会话读），而这条判据的原话是
+// 「先有执法再开门」。
+//
+// 留**正向**断言而不是把两行从上面的列表里删掉：删掉只会得到两个「没人再管」的空洞，
+// 而下面这两条会在有人把它们重新塞回拒绝列表时立刻红。
+it('accepts a monetary cap now that its enforcement exists', () => {
+  expect(() => assertExecutionPreset(binding, 'realm', { ...preset, max_budget_cents: 1000 })).not.toThrow()
+  // 上限本身仍然要是个合法的非负数——接受不等于不校验。
+  expect(() => assertExecutionPreset(binding, 'realm', { ...preset, max_budget_cents: -1 })).toThrow()
+  expect(() => assertExecutionPreset(binding, 'realm', { ...preset, max_budget_cents: 1.5 })).toThrow()
+})
+
+it('accepts knowledge spaces now that the session scope exists', () => {
+  expect(() => assertExecutionPreset(binding, 'realm', { ...preset, knowledge_space_ids: ['private'] })).not.toThrow()
+  // 字段本身仍必须是数组——接受不等于不校验（写成字符串会在运行期才炸）。
+  expect(() => assertExecutionPreset(binding, 'realm', { ...preset, knowledge_space_ids: 'private' as never })).toThrow()
 })

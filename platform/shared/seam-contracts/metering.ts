@@ -18,7 +18,14 @@ export interface MeterContext {
 
 export interface MeterResult {
   approved: boolean
-  reason?: 'denied-user-budget' | 'denied-project-budget' | 'ok'
+  /**
+   * 拒因是**闭集**，且每一项的处置不同——合成一个「预算不足」会让调用方无法决定该找谁。
+   *
+   * `denied-scope-budget` 与另外两项的区别不只是范围：用户树/项目树是**长期**额度，超了要
+   * 去找管理员充值；而作用域上限是**单次工作**的封顶（例如一次受治理的执行），撞上它通常
+   * 意味着「这次活干不完」，处置是收窄任务或调高那一次的上限。
+   */
+  reason?: 'denied-user-budget' | 'denied-project-budget' | 'denied-scope-budget' | 'ok'
   /** 消费记录引用（后续溯源一行串起 request→session→user→project→feature，§6.4） */
   ledgerRef: string
   /**
@@ -47,7 +54,21 @@ export interface MeterRecord {
   tokens: number
   model: string
   costType: string
-  costUsd: number
+  /**
+   * 这次调用的成本（USD）。**省略 = 请记账方按费率算**（见下）。
+   *
+   * 区分「省略」与「0」是刻意的：前者是「发出方不知道价格」——节点侧的 agent 调用就是
+   * 这一类，它拿不到上游账单，只能由记账方从 `llm_providers` 的费率推；后者是「知道，
+   * 而且就是零元」（免费模型、缓存命中）。把两者合并成一个 0，会让一条**没人算过价的
+   * 账**与一条**价格真的是零的账**在图上一模一样，而前者需要有人去补费率。
+   */
+  costUsd?: number
+  /**
+   * 输入 / 输出分开给，才能各按各的费率算。省略时退回「全部按输入价」的保守下界——
+   * 输入价通常更低，所以那是**低估**而不是高估；宁可低估也不虚报。
+   */
+  inputTokens?: number
+  outputTokens?: number
   /** 归因链：把一次 request 内跨成本类型的多行串起来。缺省时落哨兵值。 */
   traceId?: string
 }
@@ -110,6 +131,45 @@ export interface MeteringSeam {
     opts?: Omit<BudgetLimits, 'budget'>,
   ): Promise<void>
 }
+
+/**
+ * 作用域金额上限：给**一次工作**（目前是一次受治理的执行）封一个金额顶。
+ *
+ * # 为什么不复用 `budget_trees`
+ *
+ * 那一列的**单位是 token**（`commit` 扣的是 `record.tokens`，种子值
+ * `LUMO_DEFAULT_BUDGET=1000000`）；而上限是**钱**（治理面存 `max_budget_cents`、前端标签
+ * 「预算上限（分）」）。把两者塞进同一个 `budget` 列，就是本仓 E4/D6 已经吃过一次亏的那种
+ * 设计——**一个字段承担两个语义**，reads 会按各自的理解解释同一个数。所以这里另起一张表，
+ * 单位写在列名里。
+ *
+ * # 与 `reserve` 的关系
+ *
+ * `reserve` 会**一并**检查它（有行才查，没行 = 不限额，与「无预算记录时的隐性额度」同一条
+ * 语义）。拒因是 `denied-scope-budget`，与另外两项分开——撞上它通常意味着「这次活干不完」，
+ * 而不是「去找管理员充值」。
+ *
+ * # 语义是硬顶，没有三态
+ *
+ * 刻意不做软限额/透支：那三态是为**长期额度**设计的（超了还能继续跑，账记负数），而一次
+ * 工作的封顶没有「下个周期」可言，透支了也没有地方还。简单反而诚实。
+ */
+export interface ScopeCapSeam {
+  /** 设上限（同一 scope+id 重复设即覆盖，并把已花清零——它是**这次工作**的额度）。 */
+  setCap(scope: string, id: string, capCents: number): Promise<void>
+  /** 撤掉上限。撤掉之后不再拦截，已花的钱**不**回退（账是 append-only 的）。 */
+  clearCap(scope: string, id: string): Promise<void>
+  /** 本次工作已花的**分**；没有上限行时返回 `undefined`（不是 0——「没设过」与「花光了」不是一回事）。 */
+  spentCents(scope: string, id: string): Promise<number | undefined>
+}
+
+/**
+ * 受治理执行的上限所挂的 scope 名。
+ *
+ * 写成常量而不是各处散落字面量：它是**跨插件**的键（受治理执行写、计量截面读），
+ * 两边拼错一个字母的症状是「上限设了但从来没生效」——而那与「本来就没超」长得一样。
+ */
+export const SCOPE_GOVERNED_RUN = 'governed-run'
 
 /** 意图：树扣减原子性由上层（RocketMQ 事务消息）保证；本 seam 不引分布式事务（铁律 5） */
 export async function assertMeteringContract(

@@ -2283,7 +2283,14 @@ func (s *Store) RecordTaskAudit(ctx context.Context, realm, taskID, event, actor
 	return nil
 }
 
-func (s *Store) TransitionBusinessTask(ctx context.Context, realm, taskID, event, actor string) (domain.DelegatedTask, error) {
+// TransitionBusinessTask 是业务态迁移的唯一写入口。
+//
+// `gate` 是 §24.7 组合验证闸门的事实（P6c，见 `internal/domain/coordinator.go`），
+// 只在 `complete`（`IN_REVIEW → DONE`）这条边上被读取；其余边上传不传都不影响结果。
+// 零值即「没有证据」，闸门按打回处理——见 `domain.IntegrationGateFacts` 的 fail-closed 说明。
+// 闸门判定为打回时，业务态回 `ROUTING` 而**不是**逐 Run 打回：§24.7 的失败主体是「组合」，
+// 逐 Run 打回会让协调者停在「A 改好、B 又坏」的循环里。
+func (s *Store) TransitionBusinessTask(ctx context.Context, realm, taskID, event, actor string, gate domain.IntegrationGateFacts) (domain.DelegatedTask, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return domain.DelegatedTask{}, err
@@ -2299,7 +2306,7 @@ func (s *Store) TransitionBusinessTask(ctx context.Context, realm, taskID, event
 	if current == "" {
 		return domain.DelegatedTask{}, ErrLegacyTask
 	}
-	next, err := domain.TransitionBusinessTask(current, event)
+	next, verdict, err := domain.TransitionBusinessTaskGated(current, event, gate)
 	if err != nil {
 		return domain.DelegatedTask{}, fmt.Errorf("%w: %v", ErrBadRequest, err)
 	}
@@ -2315,8 +2322,15 @@ func (s *Store) TransitionBusinessTask(ctx context.Context, realm, taskID, event
 			return domain.DelegatedTask{}, fmt.Errorf("%w: stop active executions before closing a task", ErrConflict)
 		}
 	}
+	// 本批的协作摘要只算一次：`complete` 既用它做结构前置条件（子任务未验收即拒绝），
+	// 又用它的 `Total` 当可证的影响面代理写进同一条审计（见下方 `review_impact`）。
+	// 两处各算一次会让「拒绝时看到的孩子数」与「记录时看到的孩子数」来自不同快照，
+	// 而这条审计的全部价值就在于它记的是**当时**的事实。
+	var summary domain.CollaborationSummary
 	if event == "complete" {
-		summary, err := collaborationSummary(ctx, tx, realm, taskID)
+		// 结构前置条件先于闸门：子任务未验收、当前 Run 没有完成结果，这些都是 ErrConflict
+		// （不改状态），与「本批组合验证没过」（改状态、回 ROUTING）是两件事，不能互相掩护。
+		summary, err = collaborationSummary(ctx, tx, realm, taskID)
 		if err != nil {
 			return domain.DelegatedTask{}, err
 		}
@@ -2345,7 +2359,59 @@ func (s *Store) TransitionBusinessTask(ctx context.Context, realm, taskID, event
 	if _, err := tx.Exec(ctx, `UPDATE governance_delegation_tasks SET business_state=$3,updated_at=now() WHERE realm=$1 AND id=$2`, realm, taskID, next); err != nil {
 		return domain.DelegatedTask{}, err
 	}
-	detail, _ := json.Marshal(map[string]any{"from": current, "to": next, "event": event})
+	fields := map[string]any{"from": current, "to": next, "event": event}
+	if event == "complete" {
+		// 闸门结论进审计链：一次「整批打回」必须能在事后被解释成「契约测试/冒烟没过」，
+		// 而不是一条没有理由的 ROUTING。
+		fields["integration_verdict"] = string(verdict)
+
+		// §24.8 规则 1（派发者不验收自己的活）在治理面的落点：**记录，不阻断**。
+		//
+		// 两个身份都是既有事实，**不需要调用方声明**——这正是它不可绕过的原因：
+		//   - dispatcher = 任务的承接人（`assignee_worker_id`，回退 `assignee_user_id`）
+		//   - reviewer   = 本次 `complete` 的操作者（`actor`，签名里本来就有）
+		//
+		// **只记 `self-review`，不记 `homogeneous`。** 后者要求 model / preset / node
+		// 三组事实才能证「不同源」，而治理面没有这三组数据 —— 于是它会在**每一次正常完成**
+		// 上触发，记下来是噪音而不是发现。等那三组事实接进来（见 §14.5），这里再一并记。
+		//
+		// **为什么不阻断**：小团队里同一个人既承接又验收是常态，无条件拒绝会让任务永远完不成。
+		// 设计的处置是「只在影响面 ≥3 时强制」（§14.5 末），而那个阈值的数据源**仍然不存在**
+		// （排除过程见下方 `impact`）。所以这次仍然只记录，但把记录做扎实：不合格理由按闭集
+		// 记、可证的影响面事实一并记、判不出来的那一项如实记为判不出来。
+		dispatcher := task.AssigneeWorkerID
+		if dispatcher == "" {
+			dispatcher = task.AssigneeUserID
+		}
+
+		// 影响面事实：**治理面没有它的生产者**。逐条排除过，不留一条没查过的路：
+		//   * `project_artifacts` / `registry_artifacts` 是项目级、仓库级的注册表，
+		//     没有 task / run 归属——它们答的是「这个项目有哪些制品」，不是「这次改动动了几个」；
+		//   * `governance_task_results.payload.output` 是执行方自报的自由 JSON（受治理执行里
+		//     它就是模型那段文字），自报不是证据：改动少报一个就什么都不剩；
+		//   * 唯一非自报的痕迹是数据面的 `session_log`（append-only、节点侧写入）：它不在本服务
+		//     的库里——读它等于让控制面去读数据面的表；而且它的单位是**文件**，§24.8 刻意把
+		//     单位从「文件」换成了「产出物」。
+		// 于是这里传零值（= 无从证明）。**不发明一个请求参数让调用方声明影响面**：那会让
+		// 调用方永远可以填 0 绕过审查，正是 §14.5 拒绝的形状。
+		impact := domain.ReviewImpact{}
+		facts := domain.ReviewerFacts{Dispatcher: dispatcher, Reviewer: actor}
+		if impact.Proven {
+			// 影响面一旦可证就喂进判据（第 4 条要真的能触发）。判不出来时不喂 0——
+			// 0 在判据里读作「影响面小」，而这里的事实是「没有这个数」。
+			facts.AffectedArtifacts = impact.Artifacts
+		}
+		if v := domain.ReviewerEligibility(facts); !v.Eligible && v.Reason == domain.ReviewerSelfReview {
+			fields["reviewer_self_review"] = true
+			// 闭集里的理由：留着布尔值（§14.5 记的落点就是它）之外再记一份，是为了让
+			// 「本月有多少次审查因为同源被拒」是一次 GROUP BY。将来 model / preset / node
+			// 三组事实进来、理由不再只有 self-review 时，聚合面不必再改一次键名。
+			fields["reviewer_ineligibility"] = string(v.Reason)
+			fields["review_disposition"] = string(domain.ReviewDispositionFor(impact))
+			fields["review_impact"] = reviewImpactRecord(impact, summary)
+		}
+	}
+	detail, _ := json.Marshal(fields)
 	if err := insertTaskAudit(ctx, tx, taskID, event, actor, detail); err != nil {
 		return domain.DelegatedTask{}, err
 	}
@@ -2356,6 +2422,25 @@ func (s *Store) TransitionBusinessTask(ctx context.Context, realm, taskID, event
 		return domain.DelegatedTask{}, err
 	}
 	return s.GetDelegationTask(ctx, realm, taskID)
+}
+
+// reviewImpactRecord 是影响面事实在审计里的形状：阈值入参 + 可证的代理指标。
+//
+// 两个键的来历不同，别读成一回事：
+//   - `artifacts` / `artifacts_proven` 是**阈值入参**（§24.8 规则 3）。`artifacts` 只在
+//     可证时出现：缺键是「没有这个数」，而 0 会被读成「0 个产出物」——这两者的区别正是
+//     这条记录存在的理由。
+//   - `batch_tasks` 是**可证的代理指标**：本批进入 DONE 的任务数（含本任务）。每个进入
+//     DONE 的任务都走过了 `complete` 的结构前置条件（当前 Run 有一条 COMPLETED 的执行
+//     结果），所以它是本批产出物数的**下界**。下界可以记，不能拿来当阈值入参：要么必须
+//     把「只有一个任务」读成影响面小（无证据的假设），要么把每一次单线程完成都判成影响面
+//     未知而强制阻断——后者是 §14.5 已经否掉的那条路（小团队里同一个人既派发又验收）。
+func reviewImpactRecord(impact domain.ReviewImpact, summary domain.CollaborationSummary) map[string]any {
+	record := map[string]any{"artifacts_proven": impact.Proven, "batch_tasks": summary.Total + 1}
+	if impact.Proven {
+		record["artifacts"] = impact.Artifacts
+	}
+	return record
 }
 
 func (s *Store) RecordDispatchOutcome(ctx context.Context, outcome domain.DispatchOutcome) error {

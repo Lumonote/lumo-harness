@@ -35,9 +35,18 @@ it('never reports active when the configured preset cannot be loaded', async () 
   expect(fetch).toHaveBeenCalledTimes(1)
 })
 
+// `{ max_budget_cents: 1 }` **已从本表移除**（2026-09-19）：它此前能过，是因为
+// `assertExecutionPreset` 把「非零预算」一律判为不支持，而**不是**因为「预算被改过」。
+// 金额上限现在有了执法面，那条一律拒绝消失了，于是这一格暴露出它本来就没测到东西。
+//
+// 顺带记下一个**真实的缺口**：撤回的判据是「预设 ≠ 绑定」，而 `WorkerBinding` 里没有预算
+// 字段——所以「预算被中途改了」在这条路径上**检测不到**。当前实现只在开跑前设一次上限
+// （`governed-run`），所以中途改预算**不会生效**，而运行会照常继续。这是已知的，不是本
+// 用例的断言对象；要补的话得让上限可**就地更新**（只改 cap、不清已花），而不是重新 set
+// ——`setCap` 会把已花清零，中途重设等于让上限永远不触发。
 it.each([
   { revision: 8 }, { owner_user_id: 'other' }, { model_ref: 'other' },
-  { connector_ids: ['connector'] }, { max_budget_cents: 1 }, { max_concurrency: 1 },
+  { connector_ids: ['connector'] }, { max_concurrency: 1 },
 ])('withdraws the installed identity when the authority changes: %j', async patch => {
   vi.useFakeTimers()
   let current = structuredClone(preset)

@@ -1,0 +1,2672 @@
+{
+  "source": "platform/shared/seam-contracts/__tests__/release-matrix.spec.ts",
+  "note": "由 TS 权威实现生成、供 Go 双实现逐行对照（§14 判据 12）。不要手工编辑：用 UPDATE_RELEASE_MATRIX=1 重新生成。",
+  "classify": [
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "irreversible"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "irreversible"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "irreversible"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "irreversible"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "irreversible"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "irreversible"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "AUTO",
+      "reason": "read-only"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "AUTO",
+      "reason": "read-only"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "AUTO",
+      "reason": "read-only"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "REVIEW",
+      "reason": "classifier-unavailable"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "REVIEW",
+      "reason": "classifier-unavailable"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "REVIEW",
+      "reason": "classifier-unavailable"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": false,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": false,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "opa-denied"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "irreversible"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "irreversible"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "irreversible"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "irreversible"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "irreversible"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "irreversible"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "AUTO",
+      "reason": "read-only"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "AUTO",
+      "reason": "read-only"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "AUTO",
+      "reason": "read-only"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "REVIEW",
+      "reason": "classifier-review"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "AUTO",
+      "reason": "classifier-allow"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "REVIEW",
+      "reason": "classifier-review"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": false,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": false,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "credentials"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": false,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": false,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": null
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "allow"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    },
+    {
+      "facts": {
+        "sideEffect": true,
+        "reversible": true,
+        "crossRealm": true,
+        "touchesCredentials": true,
+        "opaAllowed": true,
+        "classifierAvailable": true,
+        "classifierVerdict": "review"
+      },
+      "band": "DENY",
+      "reason": "cross-realm"
+    }
+  ],
+  "fallback": [
+    {
+      "deniedStreak": 0,
+      "deniedTotal": 0,
+      "verdict": "keep",
+      "error": false
+    },
+    {
+      "deniedStreak": 0,
+      "deniedTotal": 1,
+      "verdict": "keep",
+      "error": false
+    },
+    {
+      "deniedStreak": 0,
+      "deniedTotal": 19,
+      "verdict": "keep",
+      "error": false
+    },
+    {
+      "deniedStreak": 0,
+      "deniedTotal": 20,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 0,
+      "deniedTotal": 21,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 1,
+      "deniedTotal": 0,
+      "verdict": "keep",
+      "error": false
+    },
+    {
+      "deniedStreak": 1,
+      "deniedTotal": 1,
+      "verdict": "keep",
+      "error": false
+    },
+    {
+      "deniedStreak": 1,
+      "deniedTotal": 19,
+      "verdict": "keep",
+      "error": false
+    },
+    {
+      "deniedStreak": 1,
+      "deniedTotal": 20,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 1,
+      "deniedTotal": 21,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 2,
+      "deniedTotal": 0,
+      "verdict": "keep",
+      "error": false
+    },
+    {
+      "deniedStreak": 2,
+      "deniedTotal": 1,
+      "verdict": "keep",
+      "error": false
+    },
+    {
+      "deniedStreak": 2,
+      "deniedTotal": 19,
+      "verdict": "keep",
+      "error": false
+    },
+    {
+      "deniedStreak": 2,
+      "deniedTotal": 20,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 2,
+      "deniedTotal": 21,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 3,
+      "deniedTotal": 0,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 3,
+      "deniedTotal": 1,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 3,
+      "deniedTotal": 19,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 3,
+      "deniedTotal": 20,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 3,
+      "deniedTotal": 21,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 4,
+      "deniedTotal": 0,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 4,
+      "deniedTotal": 1,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 4,
+      "deniedTotal": 19,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 4,
+      "deniedTotal": 20,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": 4,
+      "deniedTotal": 21,
+      "verdict": "fallback-to-manual",
+      "error": false
+    },
+    {
+      "deniedStreak": -1,
+      "deniedTotal": 0,
+      "verdict": null,
+      "error": true
+    },
+    {
+      "deniedStreak": 0,
+      "deniedTotal": -1,
+      "verdict": null,
+      "error": true
+    },
+    {
+      "deniedStreak": -1,
+      "deniedTotal": -1,
+      "verdict": null,
+      "error": true
+    }
+  ]
+}

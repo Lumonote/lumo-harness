@@ -148,14 +148,31 @@ export function parseTeamState(value: unknown, teamId: string): TeamState {
       throw new TeamRecordError(`团队 ${teamId} 的 tasks[${index}].status 非法：${status}`, teamId)
     }
     const dependencies = Array.isArray(task['dependencies']) ? task['dependencies'] : []
+    // 证据与 dependencies 同形，且同样「脏数据不该让整行读不出来」：非字符串与空白条目
+    // 一律丢弃（`acceptanceVerdict` 也只认非空白，两侧口径一致）。
+    const evidence = Array.isArray(task['evidence'])
+      ? task['evidence'].filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+      : []
     return {
       id: requireString(task['id'], `tasks[${index}].id`, teamId),
       subject: requireString(task['subject'], `tasks[${index}].subject`, teamId),
       ...typeof task['description'] === 'string' ? { description: task['description'] } : {},
+      // 这一段解析漏掉哪个字段，那个字段就会被写进介质、又在读回来的那一刻被无声丢掉。
+      // acceptance 漏掉的症状最隐蔽：任务板看起来完全正常，只是重启后所有任务都变成
+      // 「没有验收条件」，于是验收全线 fail-closed —— 而写入侧一切正常。
+      // `store.spec.ts` 的 acceptance 往返用例钉的就是这里。
+      ...typeof task['acceptance'] === 'string' ? { acceptance: task['acceptance'] } : {},
+      // 只认显式 `true`：旧行没有这个键，脏数据里的字符串 `"true"` / `1` 都不是它。
+      // 漏解析的症状与 `acceptance` 同族但更隐蔽——重启后延续性任务静默退回 spawn，
+      // 一切看起来正常，只是每次少了一截上下文。
+      ...task['continuesContext'] === true ? { continuesContext: true } : {},
       status: status as TeamState['tasks'][number]['status'],
       ...typeof task['assignee'] === 'string' ? { assignee: task['assignee'] } : {},
       dependencies: dependencies.filter((dep): dep is string => typeof dep === 'string'),
       ...typeof task['output'] === 'string' ? { output: task['output'] } : {},
+      // 漏掉这一段，证据会被读成「没有证据」，于是**每一条交付都要人审**。fail-closed 的
+      // 方向没错，但成因会被误判成「成员没交证据」，而真正的问题在读侧——这类错位最难查。
+      ...evidence.length === 0 ? {} : { evidence },
       attempt: typeof task['attempt'] === 'number' ? task['attempt'] : 0,
       createdAt: typeof task['createdAt'] === 'number' ? task['createdAt'] : 0,
       updatedAt: typeof task['updatedAt'] === 'number' ? task['updatedAt'] : 0,

@@ -5,6 +5,7 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 import { defineGraphRagTool } from '../src/graph-rag.ts'
 import type { RerankClient } from '../src/rerank.ts'
+import { createSessionScope } from '../src/session-scope.ts'
 import type {
   KnowledgeHit,
   KnowledgeQuery,
@@ -75,7 +76,7 @@ describe('knowledge_graph_query rerank 接入', () => {
     const { seam: vector, query } = vectorReturning([hit('d1', '甲', 0.9)])
     const { seam: graph } = graphSeam()
     const { ctx, tool } = captureTool()
-    defineGraphRagTool(ctx, vector, graph, { ...BASE, rerank: scoring('甲'), overfetchFactor: 3 })
+    defineGraphRagTool(ctx, vector, graph, { ...BASE, rerank: scoring('甲'), overfetchFactor: 3 }, createSessionScope())
 
     await tool().execute({ question: '问' }, {} as ToolRunContext)
 
@@ -90,7 +91,7 @@ describe('knowledge_graph_query rerank 接入', () => {
     ])
     const { seam: graph, neighborhood } = graphSeam()
     const { ctx, tool } = captureTool()
-    defineGraphRagTool(ctx, vector, graph, { ...BASE, rerank: scoring('丙'), overfetchFactor: 3 })
+    defineGraphRagTool(ctx, vector, graph, { ...BASE, rerank: scoring('丙'), overfetchFactor: 3 }, createSessionScope())
 
     const out = (await tool().execute({ question: '问' }, {} as ToolRunContext)) as Result
 
@@ -114,7 +115,7 @@ describe('knowledge_graph_query rerank 接入', () => {
         throw new Error('tei-rerank 不可达')
       },
     }
-    defineGraphRagTool(ctx, vector, graph, { ...BASE, rerank: broken, overfetchFactor: 3 })
+    defineGraphRagTool(ctx, vector, graph, { ...BASE, rerank: broken, overfetchFactor: 3 }, createSessionScope())
 
     const out = (await tool().execute({ question: '问' }, {} as ToolRunContext)) as Result
 
@@ -127,7 +128,7 @@ describe('knowledge_graph_query rerank 接入', () => {
     const { seam: vector, query } = vectorReturning([hit('d1', '甲', 0.9), hit('d2', '乙', 0.5)])
     const { seam: graph } = graphSeam()
     const { ctx, tool } = captureTool()
-    defineGraphRagTool(ctx, vector, graph, { ...BASE })
+    defineGraphRagTool(ctx, vector, graph, { ...BASE }, createSessionScope())
 
     const out = (await tool().execute({ question: '问' }, {} as ToolRunContext)) as Result
 

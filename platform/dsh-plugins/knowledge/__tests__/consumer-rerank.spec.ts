@@ -5,6 +5,7 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 import { defineKnowledgeTool } from '../src/consumer.ts'
 import type { RerankClient } from '../src/rerank.ts'
+import { createSessionScope } from '../src/session-scope.ts'
 import type {
   KnowledgeHit,
   KnowledgeQuery,
@@ -54,7 +55,7 @@ describe('knowledge_query rerank 接入', () => {
   it('overfetches candidates so the reranker has something to reorder', async () => {
     const { seam, query } = seamReturning([hit('d1', '甲', 0.9)])
     const { ctx, tool } = captureTool()
-    defineKnowledgeTool(ctx, seam, { ...BASE, rerank: scoring('甲'), overfetchFactor: 3 })
+    defineKnowledgeTool(ctx, seam, { ...BASE, rerank: scoring('甲'), overfetchFactor: 3 }, createSessionScope())
 
     await tool().execute({ question: '问' }, {} as ToolRunContext)
 
@@ -66,7 +67,7 @@ describe('knowledge_query rerank 接入', () => {
     const { seam } = seamReturning([hit('d1', '甲', 0.9), hit('d2', '乙', 0.5), hit('d3', '丙', 0.1)])
     const { ctx, tool } = captureTool()
     // 向量序是 d1 > d2 > d3；reranker 认为 d3 最相关。
-    defineKnowledgeTool(ctx, seam, { ...BASE, rerank: scoring('丙'), overfetchFactor: 3 })
+    defineKnowledgeTool(ctx, seam, { ...BASE, rerank: scoring('丙'), overfetchFactor: 3 }, createSessionScope())
 
     const out = (await tool().execute({ question: '问' }, {} as ToolRunContext)) as Hits
 
@@ -82,7 +83,7 @@ describe('knowledge_query rerank 接入', () => {
         throw new Error('tei-rerank 不可达')
       },
     }
-    defineKnowledgeTool(ctx, seam, { ...BASE, rerank: broken, overfetchFactor: 3 })
+    defineKnowledgeTool(ctx, seam, { ...BASE, rerank: broken, overfetchFactor: 3 }, createSessionScope())
 
     const out = (await tool().execute({ question: '问' }, {} as ToolRunContext)) as Hits
 
@@ -95,7 +96,7 @@ describe('knowledge_query rerank 接入', () => {
   it('keeps the pre-rerank behaviour when no reranker is configured', async () => {
     const { seam, query } = seamReturning([hit('d1', '甲', 0.9), hit('d2', '乙', 0.5)])
     const { ctx, tool } = captureTool()
-    defineKnowledgeTool(ctx, seam, { ...BASE })
+    defineKnowledgeTool(ctx, seam, { ...BASE }, createSessionScope())
 
     const out = (await tool().execute({ question: '问' }, {} as ToolRunContext)) as Hits
 

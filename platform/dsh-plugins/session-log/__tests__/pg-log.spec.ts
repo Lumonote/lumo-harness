@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { FencedOutError, LogForkError, type LogRecord } from '../../../shared/seam-contracts/session-log.ts'
 import { PgSessionLog } from '../src/pg-log.ts'
-import { schemaDsn } from './pg-schema.ts'
+import { schemaDsn, truncateSessionLog } from './pg-schema.ts'
 
 /**
  * 复制式 SessionEvent 日志对**真 PG** 跑。
@@ -22,7 +22,7 @@ async function withLog(fn: (log: PgSessionLog) => Promise<void>): Promise<void> 
   const log = new PgSessionLog(await schemaDsn(DSN!, 'session_log_test'))
   try {
     await log.init()
-    await log.raw('TRUNCATE session_log, session_writer_lease')
+    await truncateSessionLog((sql) => log.raw(sql))
     await fn(log)
   } finally {
     await log.close()

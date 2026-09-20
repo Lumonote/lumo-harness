@@ -287,6 +287,13 @@ func (s *Store) EnqueueTrigger(ctx context.Context, realm, name string, payload 
 }
 
 // ClaimTriggers 使用 SKIP LOCKED 支持多个 worker 并行搬运；未 ack 的 claim 可回收。
+//
+// CTE 里的四个 COALESCE **必须显式起别名**：CTE 的输出列名由表达式决定，不写 AS 时
+// PostgreSQL 会给它们起 `coalesce` / `coalesce_1` …，于是外层 `SELECT ... replay_automation_id
+// FROM claimed` 找不到列，直接报 42703。这条 SQL 的失败形状特别隐蔽——worker 每轮都
+// 失败、不 ack、什么都不搬（`SetErrorHandler` 未设时连日志都没有），表现成「事件进得来、
+// 流程永远不被触发」，而不是任何一个看起来像 SQL 错误的现象。2026-09-20 接 TriggerBus
+// 时由真库集成用例暴露（此前的投递测试全用 fake outbox，SQL 的列名解析根本没被执行）。
 func (s *Store) ClaimTriggers(ctx context.Context, worker string, limit int) ([]TriggerRecord, error) {
 	if limit <= 0 {
 		limit = 100
@@ -301,8 +308,10 @@ func (s *Store) ClaimTriggers(ctx context.Context, worker string, limit int) ([]
 				claimed_at = (EXTRACT(EPOCH FROM now()) * 1000)::bigint
 			FROM picked WHERE o.id = picked.id
 			RETURNING o.id, o.claim_token, o.realm, o.event_name, o.payload,
-			COALESCE(o.replay_automation_id, ''), COALESCE(o.replay_flow_id, ''),
-			COALESCE(o.replay_flow_version, 0), COALESCE(o.replay_of_run_id, 0)
+			COALESCE(o.replay_automation_id, '') AS replay_automation_id,
+			COALESCE(o.replay_flow_id, '')       AS replay_flow_id,
+			COALESCE(o.replay_flow_version, 0)   AS replay_flow_version,
+			COALESCE(o.replay_of_run_id, 0)      AS replay_of_run_id
 	)
 		SELECT id, claim_token, realm, event_name, payload, replay_automation_id, replay_flow_id,
 		replay_flow_version, replay_of_run_id FROM claimed ORDER BY id`, worker, limit)

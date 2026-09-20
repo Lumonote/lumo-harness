@@ -8,7 +8,7 @@ import { FencedOutError } from '../../../shared/seam-contracts/session-log.ts'
 import { queueBackfill, type QueueBackfillDeps } from '../src/backfill.ts'
 import { apply } from '../src/index.ts'
 import { PgSessionLog } from '../src/pg-log.ts'
-import { schemaDsn } from './pg-schema.ts'
+import { schemaDsn, truncateSessionLog } from './pg-schema.ts'
 
 /**
  * 构造期事件回填(终审 I1)对**真 PG** 跑 + 队列/令牌/错误形状的纯单测(恒跑)。
@@ -86,7 +86,7 @@ async function withBoot(
   const dsn = await schemaDsn(DSN!, 'session_log_backfill_test')
   const pg = new PgSessionLog(dsn)
   await pg.init()
-  await pg.raw('TRUNCATE session_log, session_writer_lease')
+  await truncateSessionLog((sql) => pg.raw(sql))
   const ctx = new Context()
   ctx.provide('tools', new ToolsStub(ctx))
   await ctx.plugin(SessionStore)

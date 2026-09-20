@@ -15,6 +15,7 @@ import {
   type KnowledgeSourceSummary,
   type KnowledgeSourceWrite,
 } from '../../../shared/seam-contracts/knowledge.ts'
+import { spaceAllowed } from '../../../shared/seam-contracts/knowledge.ts'
 import { forbidden } from '../../../shared/seam-contracts/errors.ts'
 import type { EmbeddingClient } from './embedding.ts'
 import { OUTBOX_DDL, collectProjection } from './graph-projector.ts'
@@ -247,6 +248,10 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
       return hits.filter(hit => {
         const source = current.get(hit.docId)
         return source?.source_version === hit.sourceVersion && source.embedding_model === this.embeddingModel
+          // 空间收窄**在这一层做**：向量投影方（Milvus）可能不认识 `spaces`，而这一层拿到的是
+          // PG 里的权威行。投影侧忽略该字段只会**少召回**（topK 里被过滤掉一部分），不会泄漏
+          // ——这正是把复核放在权威源上的价值。
+          && spaceAllowed(source.space, request.spaces)
           && readChunks(source.chunks).some(chunk => chunk.text === hit.text)
       })
     }
@@ -257,12 +262,20 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
       text: string
       distance: number
     }>(
+      // 空间收窄在**取数之前**（`LIMIT` 之前）生效，所以它与投影那条路不同：这里过滤掉
+      // 的空间根本不占 topK 名额，召回质量不受影响。
+      //
+      // 写法用「参数为 NULL 即不过滤」而不是把条件拼进 SQL 字符串：`undefined` → NULL →
+      // 整条不生效；`[]` → 空数组 → `= ANY('{}')` 恒假 → **零条**。两种输入得到两种结果，
+      // 正是契约里那条「省略 ≠ 空数组」。
       `SELECT doc_id, source_version, text, 1 - (vector <=> $1::vector) AS distance
        FROM knowledge_chunks
        WHERE realm = $2 AND embedding_model = $3 AND vector IS NOT NULL
+         AND ($5::text[] IS NULL OR space = ANY($5::text[]))
        ORDER BY vector <=> $1::vector
        LIMIT $4`,
-      [JSON.stringify(vector), request.realm, this.embeddingModel, request.topK],
+      [JSON.stringify(vector), request.realm, this.embeddingModel, request.topK,
+        request.spaces === undefined ? null : [...request.spaces]],
     )
     return rows.rows.map((r) => ({
       docId: r.doc_id,

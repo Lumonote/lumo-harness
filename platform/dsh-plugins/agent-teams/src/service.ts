@@ -48,8 +48,11 @@ import {
   type TeamState,
   type Topology,
 } from './model.ts'
+import { acceptanceVerdict, hasAcceptance, type AcceptanceVerdict } from './acceptance.ts'
 import {
   dispatchMember,
+  evidenceOfRun,
+  selectDispatchProvider,
   type MemberOutcome,
   type MemberProviderChoice,
   type MemberSeam,
@@ -76,6 +79,17 @@ export interface TaskDispatchResult {
   text: string
   stopReason: string
   diagnostic?: string
+  /**
+   * 这次交付的验收判据结论（§24.1）。
+   *
+   * 放在派发结果里而不是让协调者自己去读任务板，是因为**验收判断必须紧挨着交付发生**：
+   * 判据读的是「任务上的验收条件 + 这次写回带上的证据」，两者都是此刻的现场；
+   * 等到协调者下一轮去读，任务可能已被改派、证据可能已被后来者覆盖。
+   *
+   * 写回被拒（代数不符）时**没有这个字段**——那时任务板上根本没有这次交付，
+   * 给一个基于旧状态的结论等于编。
+   */
+  acceptance?: AcceptanceVerdict
 }
 
 /** 一轮调度的汇总。 */
@@ -371,7 +385,16 @@ export class AgentTeamsService {
     const channel = channelId(team.id, task.id, input.attempt)
     await this.openChannel(channel)
 
-    const outcome = await dispatchMember(surface.seam, surface.provider, {
+    // provider **逐次派发**决定，不是装配期决定（§24.3.1）：延续性任务用 fork 带上父级
+    // 已完成的轮次。守卫与理由全在 `selectDispatchProvider` 里——尤其是「进程外 provider
+    // 一律不动」，否则集群里成员会从承载节点悄悄退回父进程。
+    const provider = selectDispatchProvider({
+      base: surface.provider,
+      available: surface.seam.list(),
+      continuesContext: task.continuesContext === true,
+    })
+
+    const outcome = await dispatchMember(surface.seam, provider, {
       label: `${team.name}/${task.id}`,
       prompt: buildMemberPrompt(team, task.id, member),
       parent: input.parent,
@@ -381,27 +404,40 @@ export class AgentTeamsService {
 
     await this.settleChannel(channel, outcome)
 
-    const result: TaskDispatchResult = {
+    // 写回。代数是硬闸：改了派就作废。
+    //
+    // 证据与结论**同一次写入**：`evidenceOfRun(outcome.runId)` 带上产生这段结论的子 Run
+    // 身份。分开写会出现「结论已上板、证据还没到」的窗口，而那个窗口里任何一次验收都会
+    // 判 `no-evidence` —— 拒收一个其实有证据的交付。
+    let written: TeamState | undefined
+    await this.mutate(input.teamId, (current) => {
+      const next = outcome.ok
+        ? completeTask(current, task.id, member.name, outcome.text, this.now(), input.attempt,
+          [evidenceOfRun(outcome.runId)])
+        : failTask(current, task.id, member.name, outcome.text, this.now(), input.attempt)
+      written = next
+      return next
+    }).catch((error: unknown) => {
+      // 写回被拒（代数不符 / 任务已被取消）不该让整轮调度炸掉，但要留痕。
+      this.warn(`agent-teams: 任务 ${task.id} 的结果写回被拒：${describe(error)}`)
+    })
+
+    // 验收判据在**写回之后**才算：它读的是任务板上的既成事实（验收条件 + 这次带上板的证据）。
+    // 写回被拒时 `written` 为 undefined，此时不给结论 —— 任务板上根本没有这次交付，
+    // 基于旧状态算出来的 `accept` 是编的。
+    const settled = written === undefined
+      ? undefined
+      : written.tasks.find(candidate => candidate.id === task.id)
+
+    return {
       taskId: task.id,
       member: member.name,
       ok: outcome.ok,
       text: outcome.text,
       stopReason: outcome.stopReason,
       ...outcome.diagnostic === undefined ? {} : { diagnostic: outcome.diagnostic },
+      ...settled === undefined ? {} : { acceptance: acceptanceVerdict(settled, settled.evidence ?? []) },
     }
-
-    // 写回。代数是硬闸：改了派就作废。
-    await this.mutate(input.teamId, (current) => {
-      const written = outcome.ok
-        ? completeTask(current, task.id, member.name, outcome.text, this.now(), input.attempt)
-        : failTask(current, task.id, member.name, outcome.text, this.now(), input.attempt)
-      return written
-    }).catch((error: unknown) => {
-      // 写回被拒（代数不符 / 任务已被取消）不该让整轮调度炸掉，但要留痕。
-      this.warn(`agent-teams: 任务 ${task.id} 的结果写回被拒：${describe(error)}`)
-    })
-
-    return result
   }
 
   /** 开通道。失败只告警：会合面是增强，不该让派发本身失败。 */
@@ -610,6 +646,12 @@ export function buildMemberPrompt(team: TeamState, taskId: string, member: TeamM
   if (team.description !== undefined) lines.push(`团队目标：${team.description}`)
   lines.push(`你的任务 ${task.id}：${task.subject}`)
   if (task.description !== undefined) lines.push(`任务说明：${task.description}`)
+  // 验收条件必须随任务一起发给成员（§24.1）：它是**派发时写死**的判据，成员得照着它交活。
+  // 不发的后果不是「少一句话」，而是收活时拿 `acceptanceVerdict` 判 `no-criteria` ——
+  // 成员交的东西与判据从没见过面。判「有没有」用 `hasAcceptance`，与收活侧同一口径。
+  if (hasAcceptance(task)) {
+    lines.push(`验收条件（派发时已定，不可协商；你的结论要能直接对上它）：${task.acceptance!}`)
+  }
 
   const upstream = task.dependencies
     .map(depId => team.tasks.find(candidate => candidate.id === depId))

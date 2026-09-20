@@ -1746,7 +1746,7 @@ body *::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-brand-primar
 }
 .lumo-collaboration-goal input::placeholder { color: var(--lumo-faint); }
 
-/* 视图切换。与 mockup 顶部那三个 tab 同一个位置，但只放真实存在的两个视图——
+/* 视图切换。与 mockup 顶部那三个 tab 同一个位置，但只放真实存在的三个视图——
    一个点了没反应的 tab 比没有这个 tab 更费人的时间。 */
 .lumo-collaboration-views { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--lumo-line); border-radius: 999px; }
 .lumo-collaboration-views button {
@@ -1770,6 +1770,46 @@ body *::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-brand-primar
 
 .lumo-collaboration-detail { display: grid; gap: 8px; min-width: 0; border-inline-start: 1px solid var(--lumo-line); padding-inline-start: 18px; }
 .lumo-collaboration-detail .lumo-cluster-panel { border-top: 0; }
+
+/* ── 线程看板（§24.6 注意力路由）────────────────────────────────────────────
+   五格**并排**，因为它们要同时被看见：这张看板存在的理由就是「待深度审」与「待轻量答」
+   是两件事。一次只显示一格、或把五格竖成一列，等于把分类又还给了读的人——而他正是为了
+   不分类才打开这张看板。
+   顶边的颜色按注意力类型分级，只是辅助：判据在每格的标题与那行小字里，不在颜色里。
+   刻意**不**给「不用管」的两格（执行中 / 已完成）留任何彩色：它们占了五分之二的位置，
+   一上色就会把要人介入的两格淹掉。 */
+.lumo-thread-board { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-top: 12px; align-items: start; }
+.lumo-thread-cell { display: grid; align-content: start; gap: 6px; min-width: 0; padding: 12px; border: 1px solid var(--lumo-line); border-top: 3px solid var(--lumo-line-strong); border-radius: 11px; background: var(--lumo-accent-2); }
+.lumo-thread-cell.deep-review { border-top-color: var(--lumo-mint); }
+.lumo-thread-cell.light-answer { border-top-color: var(--lumo-cyan); }
+.lumo-thread-cell.executing { border-top-color: var(--lumo-line-strong); }
+.lumo-thread-cell.stopped { border-top-color: var(--lumo-warn); }
+.lumo-thread-cell.done { border-top-color: var(--lumo-faint); }
+.lumo-thread-cell > header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.lumo-thread-cell > header b { color: var(--lumo-heading); font-size: var(--lumo-fs-xs-13); }
+.lumo-thread-cell > header span { color: var(--lumo-faint); font: var(--lumo-fs-xxxs-11) var(--lumo-mono); }
+.lumo-thread-cell small { color: var(--lumo-muted); font-size: var(--lumo-fs-xxxs-11); line-height: var(--lumo-lh-body); }
+.lumo-thread-rule { color: var(--lumo-faint); }
+.lumo-thread-empty, .lumo-thread-gap { margin: 0; font-size: var(--lumo-fs-xxxs-11); line-height: var(--lumo-lh-body); }
+.lumo-thread-empty { color: var(--lumo-faint); }
+/* 「读不到」必须与「空」一眼分得开：两者在屏幕上长得一样是这一层最贵的一种错。 */
+.lumo-thread-gap { color: var(--lumo-warn); }
+.lumo-thread-entries { display: grid; gap: 6px; }
+.lumo-thread-entry { display: grid; gap: 3px; padding: 8px 9px; border: 1px solid var(--lumo-line); border-radius: 8px; background: var(--lumo-panel); }
+.lumo-thread-entry b { color: var(--lumo-ink); font-size: var(--lumo-fs-xxs-12); overflow-wrap: anywhere; }
+.lumo-thread-entry em { color: var(--lumo-muted); font: var(--lumo-fs-xxxs-11) var(--lumo-mono); font-style: normal; }
+/* 静默不换格，只换这一行的颜色：它要说的是「还在跑，只是没说话」。 */
+.lumo-thread-entry.silent em { color: var(--lumo-warn); }
+.lumo-thread-entry.expired em { color: var(--lumo-danger); }
+.lumo-thread-outside { margin-top: 12px; }
+.lumo-thread-outside summary { color: var(--lumo-muted); font-size: var(--lumo-fs-xxxs-11); cursor: pointer; }
+
+@media (max-width: 1180px) {
+  .lumo-thread-board { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  .lumo-thread-board { grid-template-columns: minmax(0, 1fr); }
+}
 
 @media (max-width: 1100px) {
   .lumo-collaboration { grid-template-columns: minmax(0, 1fr); }

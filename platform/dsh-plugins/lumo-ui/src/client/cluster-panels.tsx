@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { deriveThreadBoard, type ThreadFacts } from './thread-board.ts'
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 type Capability = { clusterReady: boolean; organization: boolean }
@@ -485,6 +486,73 @@ export function TaskCollaborationPanel({ progress, error, label, open }: {
   </div>
 }
 
+// ---- 线程看板（§24.6 注意力路由）----
+//
+// 判据全在 `thread-board.ts` 的纯函数里（有单测）；这里只负责呈现，外加两件必须说清楚的事：
+//
+// 1. **「读不到」不能长得像「空」**。待轻量答那一格今天没有列表读面，面板就照实写读不到——
+//    把它画成 0 条，读的人会以为「没有人在等我」，而真相是「我看不到谁在等我」。
+// 2. **时长要一直是真的**。静默时长与等待时长都以此刻为基准，所以按分钟级心跳重算：
+//    一个停在「静默 3 分钟」的标签比没有标签更坏，它是一句挂了很久的假话。
+export function ThreadBoardPanel({ threads, error, loading, label, stalledAfterMs, waitTtlMs, controlState }: {
+  threads: readonly ThreadFacts[]
+  error: string
+  loading: boolean
+  /** 状态词的本地化（与 `TaskCollaborationPanel` 同一惯例）；缺省原样显示控制面的词。 */
+  label?: (state: string) => string
+  stalledAfterMs?: number
+  waitTtlMs?: number
+  /** 控制态读面是否接线。缺省 false —— 见 `thread-board.ts` 的 `ThreadBoardOptions`。 */
+  controlState?: boolean
+}) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const board = deriveThreadBoard(threads, {
+    now,
+    ...stalledAfterMs === undefined ? {} : { stalledAfterMs },
+    ...waitTtlMs === undefined ? {} : { waitTtlMs },
+    ...controlState === undefined ? {} : { controlState },
+  })
+  const text = label ?? ((state: string) => state)
+  const duration = (ms: number): string => ms >= 3_600_000
+    ? `${Math.floor(ms / 3_600_000)} 小时`
+    : `${Math.max(1, Math.floor(ms / 60_000))} 分钟`
+  const summarise = (count: number, unreadable?: string): string => unreadable === undefined ? String(count) : '读不到'
+  return <div className="lumo-cluster-panel">
+    <div className="lumo-section-title"><div><b>线程看板</b><span>{loading
+      ? '正在读取线程行'
+      : `${board.placed} 条线程 · ${board.columns.map(column => `${column.label} ${summarise(column.entries.length, column.unreadable)}`).join(' · ')}`}</span></div></div>
+    {error ? <div className="lumo-cluster-feedback error" role="alert">{error}</div> : null}
+    {/* 分格的理由写在面板上，而不是留给读的人猜：一个「为什么不合成一个列表」的答案，
+        决定了这张看板会不会在下一次重构里被顺手合并掉。 */}
+    <p className="lumo-form-note">分格按「要花什么」：待深度审要进入心流，待轻量答只是一次点击。合成一个列表就等于把这两种打断混成一种。</p>
+    {/* 还没读到之前**不画格子**：一张全是「没有线程落在这一格」的空看板是一句结论
+        （「此刻没有人在等我」），而真实情况只是「我还没读到」。 */}
+    {loading ? <p className="lumo-inline-empty">正在读取线程行。</p> : <div className="lumo-thread-board">{board.columns.map(column => <section key={column.id} className={`lumo-thread-cell ${column.id}`}>
+      <header><b>{column.label}</b><span>{column.attention}</span></header>
+      <small className="lumo-thread-rule">{column.rule}</small>
+      {column.unreadable !== undefined
+        ? <p className="lumo-thread-gap">{column.unreadable}</p>
+        : column.entries.length === 0
+          ? <p className="lumo-thread-empty">没有线程落在这一格。</p>
+          : <div className="lumo-thread-entries">{column.entries.map(entry => <div key={entry.id} className={`lumo-thread-entry${entry.silent ? ' silent' : ''}${entry.waitExpired ? ' expired' : ''}`}>
+            <b>{entry.title}</b>
+            <small>{text(entry.state)} · {entry.owner}</small>
+            <small>{entry.reason}</small>
+            {entry.silent && entry.ageMs !== undefined ? <em>{`执行中（静默 ${duration(entry.ageMs)}）`}</em> : null}
+            {entry.waitExpired && entry.ageMs !== undefined ? <em>{`等待超过上限（已等 ${duration(entry.ageMs)}）`}</em> : null}
+          </div>)}</div>}
+    </section>)}</div>}
+    {!loading && board.outside.length > 0 ? <details className="lumo-thread-outside"><summary>{`五格之外 ${board.outside.length} 条（设计只定义了五格，它们不落格，但也不消失）`}</summary>
+      <div className="lumo-cluster-list">{board.outside.map(item => <div key={item.id}><span><b>{item.title}</b><small>{item.reason}</small></span></div>)}</div>
+    </details> : null}
+    {loading ? null : <p className="lumo-form-note">静默与等待时长都以「任务行最后一次变更」为准；等待上限按 {duration(waitTtlMs ?? 30 * 60_000)} 判定（agent-teams 的唤醒默认 TTL）。真实的等待 TTL 由 arm 时决定，舰队读面里没有这个数。</p>}
+  </div>
+}
+
 // 结果全文的渲染口径。`output` 在治理面是 json.RawMessage，落到客户端可能是
 // 对象、数组、字符串，也可能是 `0` / `false` / `""` —— 「有没有交付物」必须用
 // null/undefined 判断，用真值判断会把数值 0 和布尔 false 显示成没有产出。
@@ -684,5 +752,136 @@ export function AgentPresetEditor({ request, presets, refresh }: { request: Requ
         <div className="lumo-user-form-actions"><Button submit disabled={loading || action.busy || Boolean(latest && latest.revision !== editing.revision)}>保存配置</Button><Button disabled={loading || action.busy} onClick={() => setEditing(null)}>取消</Button></div>
       </form>
     </> : <p className="lumo-inline-empty">{presets.length ? '尚未选择 Agent。' : '暂无可管理的 Agent。'}</p>}
+  </section>
+}
+
+// ---- 会话控制面（§8.4.3 Session Console） ----
+//
+// 这个面板是「控制面读投影」的消费方。它刻意**不**自己判断某个指令该不该可点：
+// `available` 列表由控制面的 `state.AvailableCommands` 与写入路径共用同一份判据，
+// 在这里再算一遍就会漂移，而漂移的症状是「按钮亮着但提交被拒」——最难查的一类不一致。
+export interface SessionControlCommandFacts { command: string; available: boolean; no_op: boolean; reason: string }
+export interface SessionControlQueueEntry { correlation_id: string; command: string; enqueued_at: string; started_at: string; position: number }
+export interface SessionControlFacts {
+  session_ref: string
+  /** false = 控制面没有这个会话的状态行（state 为 null），不是「它是 running」。 */
+  registered: boolean
+  state: string | null
+  base_state: string
+  revision: number
+  updated_at?: string
+  last_control?: { command?: string; actor?: string; reason?: string; updated_at?: string }
+  available: SessionControlCommandFacts[]
+  queue: { inflight?: SessionControlQueueEntry | null; waiting?: SessionControlQueueEntry[]; forced?: number } | null
+}
+export interface SessionControlEventFacts {
+  id: number; command: string; outcome: string; from_state: string; to_state: string
+  actor: string; actor_role: string; reason?: string; created_at: string
+}
+interface SessionControlTimeline { events?: SessionControlEventFacts[]; next_after?: number }
+
+const controlStates: Record<string, string> = {
+  running: '运行中', paused: '已暂停', 'awaiting-approval': '等待审批', stopped: '已停止', aborted: '已中止',
+}
+const controlCommands: Record<string, string> = {
+  pause: '暂停', resume: '恢复', stop: '停止', abort: '中止', approve: '批准', reject: '驳回', replay: '重放', degrade: '降级',
+}
+const controlOutcomes: Record<string, string> = {
+  applied: '已生效', noop: '无变化', policy_denied: '策略拒绝', policy_unavailable: '策略引擎不可用',
+  state_rejected: '状态不允许', realm_mismatch: 'Realm 不匹配', conflict: '前提过期', busy: '会话忙',
+}
+export function controlStateLabel(state: string | null): string {
+  if (state === null) return '未登记'
+  return controlStates[state] ?? state
+}
+
+// 按钮的可用性**完全**取自控制面的 `available`/`no_op`，本函数只做呈现决策，不做授权判断。
+//
+// `no_op` 的按钮**保持可点**：控制面的注释写着它「可用但没有效果（终态重复指令等）」，
+// 控制台据此把它渲染成「可点但无变化」。禁用它看起来更保守，实际是把一个可用的指令
+// 藏掉——操作者点不动，会以为是自己权限不够，而不是「这条指令此刻本来就不改变什么」。
+// 真正该禁的只有 `available === false` 那一类（状态机明确不允许）。
+export function controlButtonState(item: SessionControlCommandFacts): { disabled: boolean; label: string } {
+  const base = controlCommands[item.command] ?? item.command
+  return {
+    disabled: !item.available,
+    label: item.no_op ? `${base}（无变化）` : base,
+  }
+}
+
+export function SessionControlPanel({ request, sessionRef, close }: { request: Request; sessionRef: string; close: () => void }) {
+  const [facts, setFacts] = useState<SessionControlFacts | null>(null)
+  const [events, setEvents] = useState<SessionControlEventFacts[]>([])
+  const [cursor, setCursor] = useState(0)
+  const [reason, setReason] = useState('')
+  const [error, setError] = useState('')
+  const path = `/lumo/api/sessions/${encodeURIComponent(sessionRef)}/control`
+
+  const load = useCallback(async () => {
+    setError('')
+    try {
+      const [console_, timeline] = await Promise.all([
+        request<SessionControlFacts>(path),
+        request<SessionControlTimeline>(`${path}/events?limit=20`),
+      ])
+      setFacts(console_)
+      setEvents(timeline.events ?? [])
+      setCursor(timeline.next_after ?? 0)
+    } catch (problem) { setError(message(problem)) }
+  }, [request, path])
+  useEffect(() => { void load() }, [load])
+
+  const action = useAction(load)
+  // 时间线是另一种读：它是「历史上发生过什么」，不随刷新消失，所以单独翻页而不是重取首页。
+  const loadMore = async () => {
+    try {
+      const page = await request<SessionControlTimeline>(`${path}/events?after=${cursor}&limit=20`)
+      setEvents(current => [...current, ...(page.events ?? [])])
+      setCursor(page.next_after ?? 0)
+    } catch (problem) { setError(message(problem)) }
+  }
+
+  const send = (command: string) => action.run(
+    () => request(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command, reason }) }),
+    `已提交「${controlCommands[command] ?? command}」`,
+  )
+
+  return <section className="lumo-section lumo-cluster-panel">
+    <div className="lumo-section-title"><div><b>会话控制</b><span>{sessionRef}</span></div><div className="lumo-form-actions"><Button onClick={close}>关闭</Button></div></div>
+    <Feedback error={error || action.error} notice={action.notice} />
+    {facts === null ? <div className="lumo-cluster-feedback">{error ? '' : '正在读取控制面状态。'}</div> : <>
+      <div className="lumo-device-facts">
+        <div><span>状态</span><b>{controlStateLabel(facts.state)}</b></div>
+        <div><span>修订</span><b>{facts.revision}</b></div>
+        <div><span>最近控制</span><b>{facts.last_control?.command ? `${controlCommands[facts.last_control.command] ?? facts.last_control.command} · ${facts.last_control.actor ?? '未记录'}` : '尚无'}</b></div>
+        <div><span>队列</span><b>{facts.queue === null ? '读取不可用' : `${facts.queue.inflight ? `生效中 ${controlCommands[facts.queue.inflight.command] ?? facts.queue.inflight.command}` : '空闲'} · 等待 ${facts.queue.waiting?.length ?? 0}`}</b></div>
+      </div>
+      {/* 未登记的会话不假装成 running：控制面没有会话注册表，那个 running 会是编出来的，
+          而面板的措辞是一句确定的话，操作者不会怀疑。这里如实说它还没有被控制过。 */}
+      {facts.registered ? null : <div className="lumo-cluster-feedback">控制面还没有这个会话的状态行。第一条指令会以「{controlStateLabel(facts.base_state)}」为起点创建它。</div>}
+      <div className="lumo-form-actions">
+        {facts.available.map(item => {
+          const state = controlButtonState(item)
+          return <Button
+            key={item.command}
+            disabled={state.disabled || action.busy}
+            danger={item.command === 'abort' || item.command === 'stop'}
+            onClick={() => send(item.command)}
+          >{state.label}</Button>
+        })}
+      </div>
+      <div className="lumo-cluster-toolbar"><label>操作理由
+        <input value={reason} maxLength={512} onChange={event => setReason(event.target.value)} placeholder="会写入审计；放行与拒绝都记" />
+      </label></div>
+      <div className="lumo-cluster-list">
+        <header><b>控制时间线</b><span>{events.length} 条</span></header>
+        {events.length ? events.map(event => <div key={event.id}>
+          <span><b>{controlCommands[event.command] ?? event.command} · {controlOutcomes[event.outcome] ?? event.outcome}</b>
+            <small>{event.actor}（{event.actor_role}）· {event.from_state} → {event.to_state}{event.reason ? ` · ${event.reason}` : ''}</small></span>
+          <em>{event.created_at}</em>
+        </div>) : <div className="lumo-cluster-feedback">这个会话还没有任何控制记录（含被拒绝的指令——拒绝也会入账）。</div>}
+        {cursor > 0 ? <Button onClick={() => void loadMore()}>继续读取</Button> : null}
+      </div>
+    </>}
   </section>
 }

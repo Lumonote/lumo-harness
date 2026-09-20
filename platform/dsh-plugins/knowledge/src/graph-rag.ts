@@ -7,7 +7,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
+import { KNOWLEDGE_TOOL_GRAPH, type KnowledgeSeam, type KnowledgeSessionScope } from '../../../shared/seam-contracts/knowledge.ts'
 import type { GraphSeam } from '../../../shared/seam-contracts/graph.ts'
 import { DEFAULT_OVERFETCH_FACTOR, rerankHits, type RerankClient } from './rerank.ts'
 
@@ -30,9 +30,19 @@ export function defineGraphRagTool(
   vector: KnowledgeSeam,
   graph: GraphSeam,
   config: GraphRagConfig,
+  scope: KnowledgeSessionScope,
 ): () => void {
+  /**
+   * 这一次会话允许的空间。**图检索必须与向量检索受同一个收窄**——不然它就是一个洞：
+   * 模型只要改调 `knowledge_graph_query` 就能拿到 `knowledge_query` 被挡掉的那些空间。
+   * 「两个工具读同一份数据、只有一个受约束」是这类收窄最典型的漏法。
+   */
+  const sessionSpaces = (exec: ToolRunContext): readonly string[] | undefined => {
+    const session = (exec as { agent?: { session?: { id?: unknown } } }).agent?.session?.id
+    return session === undefined || session === null ? undefined : scope.spacesFor(String(session))
+  }
   const definition: ToolDefinition = {
-    name: 'knowledge_graph_query',
+    name: KNOWLEDGE_TOOL_GRAPH,
     description:
       '知识库深度检索：先语义召回相关文档，再沿知识图谱扩展关联实体与上下文。'
       + '适用于需要理解实体关系、溯源或跨文档关联的问题。',
@@ -95,7 +105,7 @@ export function defineGraphRagTool(
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
-    async execute(args: unknown, _exec: ToolRunContext): Promise<unknown> {
+    async execute(args: unknown, exec: ToolRunContext): Promise<unknown> {
       const { question, topK, depth } = args as {
         question?: string; topK?: number; depth?: number
       }
@@ -110,6 +120,7 @@ export function defineGraphRagTool(
         text: question,
         topK: k * factor,
         scope: 'published',
+        spaces: sessionSpaces(exec),
       })
 
       // 阶段 1.5：重排必须在扩图之前 —— origins 由 hits 派生，拿未重排的 factor 倍候选

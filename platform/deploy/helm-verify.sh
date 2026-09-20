@@ -242,6 +242,64 @@ if render_ok "cluster profile" "$cluster_render" -f "$cluster_profile"; then
   else
     fail "cluster profile has $session_control_refs dsh workload(s) with LUMO_SESSION_CONTROL_URL=$expected_session_control_url, expected 2"
   fi
+
+  # --- A3: the knowledge projection must name a seam host that exists ------
+  # collaborator pushes its published-document outbox to `POST
+  # /seam/knowledge/ingest` on a seam host. Without the URL it logs a warning and
+  # projects nothing — a green deployment in which published documents never
+  # reach vector search. So the URL is asserted, **and so is the thing it names**:
+  # a URL that points at a Service this chart does not render would render
+  # cleanly, lint cleanly, and fail only as a connection error at ingest time.
+  #
+  # The host is the node pool, not dsh-web: dsh-web also runs a seam host, but its
+  # Service does not publish the seam port, so a URL naming it is unreachable
+  # from another pod.
+  expected_knowledge_seam_url="http://lumo-platform-dsh-node:8090"
+  knowledge_seam_refs="$(grep -A1 '^ *- name: LUMO_KNOWLEDGE_SEAM_URL$' "$cluster_render" | grep -cF "$expected_knowledge_seam_url" || true)"
+  if [[ "$knowledge_seam_refs" == "1" ]]; then
+    pass "cluster profile points the knowledge projection at $expected_knowledge_seam_url"
+  else
+    fail "cluster profile has $knowledge_seam_refs workload(s) with LUMO_KNOWLEDGE_SEAM_URL=$expected_knowledge_seam_url, expected 1"
+  fi
+  # The URL is only half the claim; the other half is that the host and port it
+  # names are actually published by a Service in this same render. A host that
+  # resolves to nothing renders cleanly, lints cleanly, and fails only as a
+  # connection error at ingest time — the deployment looks wired either way.
+  #
+  # This reads the **rendered** URL rather than comparing against the literal
+  # above, and that is the whole point of having both checks. Verified by
+  # counter-case: renaming the host in the template leaves the pinned check
+  # failing on the literal while this one keeps passing — a check anchored to the
+  # literal can only ever confirm the Service exists, never that the URL points at
+  # it. Both are wanted: the pinned one notices the URL drifting, this one notices
+  # an URL that resolves to nothing.
+  rendered_seam_url="$(grep -A1 '^ *- name: LUMO_KNOWLEDGE_SEAM_URL$' "$cluster_render" | grep -o 'http://[^"]*' | head -1 || true)"
+  seam_host="${rendered_seam_url#http://}"
+  seam_port="${seam_host##*:}"
+  seam_host="${seam_host%%:*}"
+  seam_service_block="$(awk -v host="$seam_host" '
+    /^kind: Service$/ { svc = 1 }
+    svc && /^  name: / { cur = $2 }
+    svc && cur == host { if ($0 == "---") exit; print }
+  ' "$cluster_render")"
+  if [[ "$seam_host" == "" || "$seam_port" == "" ]]; then
+    fail "no knowledge seam URL found in the cluster render to resolve"
+  elif grep -q "name: seam" <<<"$seam_service_block" && grep -q "port: $seam_port" <<<"$seam_service_block"; then
+    pass "the rendered knowledge seam URL $rendered_seam_url resolves to a Service port in the same render"
+  else
+    fail "the rendered knowledge seam URL $rendered_seam_url names no Service port in this render"
+  fi
+
+  # Counter-case: with the node pool off there is no seam host at all, and the
+  # variable must be **omitted** rather than rendered as a name that resolves to
+  # nothing. "No seam host" and "a seam host that is never up" look identical in
+  # the ingress log and are fixed by different people.
+  if helm template "$release" "$chart_dir" -f "$cluster_profile" --set dshNode.enabled=false 2>/dev/null \
+    | grep -q "LUMO_KNOWLEDGE_SEAM_URL"; then
+    fail "disabling dshNode still renders LUMO_KNOWLEDGE_SEAM_URL (it must be omitted, not dangling)"
+  else
+    pass "disabling dshNode omits the knowledge seam URL entirely"
+  fi
 fi
 
 # --- chart coverage: the tree is the reference, not the chart ---------------

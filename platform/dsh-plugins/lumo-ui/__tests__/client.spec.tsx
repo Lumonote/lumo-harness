@@ -93,6 +93,10 @@ function mountLumoWithSources(): { registered: Registered[]; sources: SlashSourc
 
 describe('Lumo native Harness integration', () => {
   const calls: string[] = []
+  // 线程看板的夹具**单独加**，不塞进下面那条共用列表：那条列表里的每一行都在被员工视图
+  // 与协作图读着（`employeeState` 的优先级就靠它们各差一处），动一行就可能让另一条用例
+  // 静默变成在测别的规则。缺省为空，只有看板那条用例往这里放行。
+  let threadRows: unknown[] = []
 
   beforeEach(() => {
     const values = new Map<string, string>()
@@ -108,6 +112,7 @@ describe('Lumo native Harness integration', () => {
       value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })),
     })
     calls.length = 0
+    threadRows = []
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const path = typeof input === 'string' ? input : input.toString()
       calls.push(`${init?.method ?? 'GET'} ${path}`)
@@ -180,6 +185,7 @@ describe('Lumo native Harness integration', () => {
           { id: 'task-3', title: '发布内容准备', state: 'QUEUED', assignee_user_id: 'emp-c', intent_contract: { parent_task_id: 'task-2' } },
           // 没有父任务：它不该产生边，但人要在图上。
           { id: 'task-4', title: '前端页面开发', state: 'QUEUED', business_state: 'VERIFYING', assignee_user_id: 'emp-d' },
+          ...threadRows,
         ] :
         path === '/lumo/api/collaboration/teams' ? { teams: [{
           id: 'team-1', name: '秋季新品发布', topology: 'pipeline',
@@ -395,6 +401,56 @@ describe('Lumo native Harness integration', () => {
     expect(screen.getByText('已完成')).toBeTruthy()
     // 未指派的显示「待认领」，而不是空白。
     expect(screen.getByText(/t1 · 规划 Agent/)).toBeTruthy()
+  }, 15000)
+
+  // 线程看板（§24.6 注意力路由）。判据全在 thread-board.spec.ts 里，这条用例钉的是另一半：
+  // 那些格子真的被画成了**五格**，而且「待深度审」与「待轻量答」没有并成一格——
+  // 合成一个「待处理」列表就等于没做这件事，而那种退化在 DOM 上只差一个 class。
+  it('线程看板把等待分成「待深度审」与「待轻量答」两格，并标出静默的执行', async () => {
+    const now = Date.now()
+    threadRows = [
+      { id: 'thread-review', title: '合同复核报告', business_state: 'IN_REVIEW', state: 'COMPLETED', assignee_name: '陆言', updated_at: new Date(now).toISOString() },
+      // 静默 25 分钟：远超 10 分钟的静默阈值。
+      { id: 'thread-quiet', title: '夜间回归', business_state: 'EXECUTING', state: 'RUNNING', assignee_name: '陈晟', updated_at: new Date(now - 25 * 60_000).toISOString() },
+      { id: 'thread-failed', title: '上游对接', business_state: 'EXECUTING', state: 'FAILED', last_error: '节点失联' },
+      { id: 'thread-done', title: '需求拆解', business_state: 'DONE', state: 'COMPLETED' },
+    ]
+    const registered = mountLumo()
+    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
+    render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
+
+    const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
+    fireEvent.click(within(navigation).getByRole('button', { name: '协作空间' }))
+    fireEvent.click(await screen.findByRole('tab', { name: '线程看板' }))
+
+    const cell = (id: string): HTMLElement | null => document.querySelector(`.lumo-thread-cell.${id}`)
+    const textOf = (id: string): string => cell(id)?.textContent ?? ''
+    await waitFor(() => expect(cell('deep-review')).not.toBeNull())
+    // 五格并排：一次只画一格、或把五格竖成一列，等于把分类又还给了读的人。
+    expect(document.querySelectorAll('.lumo-thread-cell')).toHaveLength(5)
+
+    // 两格分开，且互换不了：待深度审里没有「等一次批准」那条线。
+    expect(textOf('deep-review')).toContain('合同复核报告')
+    expect(textOf('deep-review')).toContain('心流')
+    expect(textOf('light-answer')).toContain('点击')
+    expect(textOf('light-answer')).not.toContain('合同复核报告')
+
+    // 待轻量答今天读不到控制态——它必须说「读不到」，而不是画成空的（空是一个结论）。
+    expect(textOf('light-answer')).toContain('读不到')
+    expect(textOf('light-answer')).not.toContain('没有线程落在这一格')
+
+    // 「在跑但没有新消息」要被看懂：仍在执行中格，但标出静默时长。
+    expect(textOf('executing')).toContain('夜间回归')
+    expect(textOf('executing')).toContain('执行中（静默 25 分钟）')
+
+    // 失败归「已停」，交付归「已完成」，理由跟着走（已停的注意力类型是「分类」）。
+    expect(textOf('stopped')).toContain('上游对接')
+    expect(textOf('stopped')).toContain('Run 失败')
+    expect(textOf('done')).toContain('需求拆解')
+
+    // 不落格的行不消失：设计只定义了五格，旧行（没有业务态）带理由出现在「五格之外」。
+    expect(screen.getByText(/五格之外/)).toBeTruthy()
   }, 15000)
 
   it('协作空间的目标输入把文字交给「项目」的表单，并且只交一次', async () => {

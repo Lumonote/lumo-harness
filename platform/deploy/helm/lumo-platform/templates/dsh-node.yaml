@@ -72,6 +72,13 @@ spec:
               value: 0.0.0.0
             - name: LUMO_SEAM_PORT
               value: {{ .Values.dshNode.seamPort | quote }}
+            {{- /* Seam host 的验签密钥。不设时节点回落到控制面令牌，而调用方
+                   （collaborator 的知识库投影）走同一条回落，两侧不会分叉；
+                   设了就必须两侧同值，模板已经从同一处取值。 */}}
+            {{- if .Values.dshNode.identityAssertion.secretName }}
+            - name: LUMO_IDENTITY_ASSERTION_SECRET
+              valueFrom: { secretKeyRef: { name: {{ .Values.dshNode.identityAssertion.secretName }}, key: {{ .Values.dshNode.identityAssertion.secretKey }}, optional: false } }
+            {{- end }}
             - name: LUMO_NODE_ID
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - name: LUMO_NODE_ADVERTISE_HOST

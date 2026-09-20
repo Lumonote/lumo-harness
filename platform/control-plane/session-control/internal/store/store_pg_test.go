@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/lumo-harness/platform/session-control/internal/release"
 	"github.com/lumo-harness/platform/session-control/internal/state"
 )
 
@@ -70,6 +72,299 @@ func applyCommit(sessionRef, realm string, from, to state.State, expected int64)
 		Command: state.CmdPause, ExpectedRevision: expected,
 		ChangeState: true, ToState: to, Outcome: "applied",
 		FromState: from, CorrelationID: "corr-1",
+	}
+}
+
+// ---- 动作放行记录（§24.5 / §11 ③）----
+
+func validReview(id, realm, sessionRef string) release.Record {
+	return release.Record{
+		ID: id, Realm: realm, SessionRef: sessionRef, Action: "bash",
+		Band: release.BandAuto, Decider: release.DeciderClassifier,
+		Reason: "classifier-allow",
+	}
+}
+
+// TestInitIsIdempotentOnActionReviews：「init() 跑两次不报错」是每个新表/新列的必测项
+// （§22.3 规则 1）。多实例同时启动时这条路是**正常路径**而不是竞态。
+func TestInitIsIdempotentOnActionReviews(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	if err := st.Init(ctx); err != nil {
+		t.Fatalf("第二次 Init 必须幂等（CREATE TABLE/INDEX IF NOT EXISTS），实际 %v", err)
+	}
+	if _, _, err := st.RecordActionReview(ctx, validReview("rev-1", "dev", "s1")); err != nil {
+		t.Fatalf("二次 Init 后写入失败（表被重建过？）：%v", err)
+	}
+	got, err := st.ActionReviews(ctx, "dev", "s1", 0)
+	if err != nil {
+		t.Fatalf("读回失败：%v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("二次 Init 不该丢数据，实际 %d 行", len(got))
+	}
+}
+
+// TestActionReviewsSchemaMatchesSection11 把 §11 ③ 的 DDL 钉在**库的实际形状**上
+// （列名 / 类型 / 可空 / 顺序 / 缺省 / 索引），而不是靠读源码。
+//
+// 顺序也断言：列顺序变了说明 DDL 被重排过——本表已定稿，改名与重排都会让设计文档
+// 与实现各说一套，而症状是下一次有人照文档写查询时报 42703。
+func TestActionReviewsSchemaMatchesSection11(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	rows, err := st.pool.Query(ctx, `
+		SELECT column_name, data_type, is_nullable, coalesce(column_default, '')
+		FROM information_schema.columns
+		WHERE table_schema = current_schema() AND table_name = 'action_reviews'
+		ORDER BY ordinal_position`)
+	if err != nil {
+		t.Fatalf("读列定义失败：%v", err)
+	}
+	defer rows.Close()
+
+	type col struct{ name, typ, nullable, def string }
+	var got []col
+	for rows.Next() {
+		var c col
+		if err := rows.Scan(&c.name, &c.typ, &c.nullable, &c.def); err != nil {
+			t.Fatalf("扫列定义失败：%v", err)
+		}
+		got = append(got, c)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("读列定义失败：%v", err)
+	}
+
+	want := []col{
+		{"id", "text", "NO", ""},
+		{"realm", "text", "NO", ""},
+		{"session_ref", "text", "NO", ""},
+		// run_id 可空：NULL = 「不属于任何 Run」（§22.3 规则 2）。
+		{"run_id", "text", "YES", ""},
+		{"action", "text", "NO", ""},
+		{"band", "text", "NO", ""},
+		{"decider", "text", "NO", ""},
+		{"reason", "text", "NO", ""},
+		{"denied_streak", "integer", "NO", "0"},
+		{"denied_total", "integer", "NO", "0"},
+		{"created_at", "timestamp with time zone", "NO", "now()"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("列数不符：期望 %d，实际 %d（%+v）", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("第 %d 列不符：期望 %+v，实际 %+v", i+1, want[i], got[i])
+		}
+	}
+
+	indexes, err := st.pool.Query(ctx,
+		`SELECT indexname, indexdef FROM pg_indexes
+		 WHERE schemaname = current_schema() AND tablename = 'action_reviews'`)
+	if err != nil {
+		t.Fatalf("读索引失败：%v", err)
+	}
+	defer indexes.Close()
+	found := map[string]string{}
+	for indexes.Next() {
+		var name, def string
+		if err := indexes.Scan(&name, &def); err != nil {
+			t.Fatalf("扫索引失败：%v", err)
+		}
+		found[name] = def
+	}
+	def, ok := found["action_reviews_recent"]
+	if !ok {
+		t.Fatalf("缺 action_reviews_recent 索引（读面按它排序）：%+v", found)
+	}
+	// 索引必须覆盖读面的过滤+排序列；少了 realm 就退化成跨租户扫。
+	for _, part := range []string{"realm", "session_ref", "created_at DESC"} {
+		if !strings.Contains(def, part) {
+			t.Fatalf("索引定义缺 %q：%s", part, def)
+		}
+	}
+}
+
+// TestActionReviewsWriteRejectsIllegalValuesAtStoreLevel：判据在**写库前**执行，
+// 绕过 HTTP 的调用方同样写不进脏数据（闭集外的档位一旦落库就擦不掉，表是 append-only）。
+func TestActionReviewsWriteRejectsIllegalValuesAtStoreLevel(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	bad := validReview("rev-1", "dev", "s1")
+	bad.Band = "ALLOW"
+	if _, _, err := st.RecordActionReview(ctx, bad); err == nil {
+		t.Fatal("闭集外的档位必须被拒")
+	} else if !errors.Is(err, release.ErrInvalid) {
+		t.Fatalf("应可被 errors.Is(release.ErrInvalid) 识别，实际 %v", err)
+	}
+
+	bad = validReview("rev-1", "dev", "s1")
+	bad.Decider = "robot"
+	if _, _, err := st.RecordActionReview(ctx, bad); err == nil {
+		t.Fatal("闭集外的判定者必须被拒")
+	}
+
+	bad = validReview("rev-1", "dev", "s1")
+	bad.Reason = ""
+	if _, _, err := st.RecordActionReview(ctx, bad); err == nil {
+		t.Fatal("没有判据的放行记录必须被拒")
+	}
+
+	// 一行都不该落库。
+	got, err := st.ActionReviews(ctx, "dev", "s1", 0)
+	if err != nil {
+		t.Fatalf("读回失败：%v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("被拒的记录不得落库，实际 %d 行", len(got))
+	}
+}
+
+// TestActionReviewsReadIsRealmScopedAndNewestFirst 覆盖读面的三件事：realm 过滤、
+// 最新在前、以及 limit。
+func TestActionReviewsReadIsRealmScopedAndNewestFirst(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	first := validReview("rev-1", "dev", "s1")
+	second := validReview("rev-2", "dev", "s1")
+	second.Action = "write"
+	second.Band = release.BandReview
+	second.Decider = release.DeciderHuman
+	other := validReview("rev-3", "prod", "s1")
+
+	for _, rec := range []release.Record{first, second, other} {
+		if _, _, err := st.RecordActionReview(ctx, rec); err != nil {
+			t.Fatalf("写入 %s 失败：%v", rec.ID, err)
+		}
+		// created_at 由库生成，粒度足够细但仍可能同微秒——插入之间隔开一点，
+		// 让「最新在前」这条断言测的是排序而不是并列时的 id 兜底。
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	got, err := st.ActionReviews(ctx, "dev", "s1", 0)
+	if err != nil {
+		t.Fatalf("读回失败：%v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("dev/s1 应有 2 行（prod 的那行不得混入），实际 %d", len(got))
+	}
+	if got[0].ID != "rev-2" {
+		t.Fatalf("应最新在前，实际首行 %s", got[0].ID)
+	}
+	if got[1].Band != release.BandAuto || got[1].Decider != release.DeciderClassifier {
+		t.Fatalf("闭集字段读回不保真：%+v", got[1])
+	}
+	if got[0].RunID != nil {
+		t.Fatalf("没给 run_id 时应落 NULL，实际 %q", *got[0].RunID)
+	}
+
+	// 跨 realm 查询是**空**，不是错误（也不该是「别人的行」）。
+	cross, err := st.ActionReviews(ctx, "prod", "s1", 0)
+	if err != nil {
+		t.Fatalf("跨 realm 查询不该报错：%v", err)
+	}
+	if len(cross) != 1 || cross[0].ID != "rev-3" {
+		t.Fatalf("realm 过滤失效：prod 应只看到自己的那一行，实际 %+v", cross)
+	}
+	// realm 缺失必须被拒：退化成不过滤就是跨租户读。
+	if _, err := st.ActionReviews(ctx, "", "s1", 0); err == nil {
+		t.Fatal("空 realm 必须被拒，不能退化成不过滤")
+	}
+	// limit 生效（本表随每次工具调用增长，无上限的读面会让内存跟着工具调用次数走）。
+	one, err := st.ActionReviews(ctx, "dev", "s1", 1)
+	if err != nil {
+		t.Fatalf("读回失败：%v", err)
+	}
+	if len(one) != 1 || one[0].ID != "rev-2" {
+		t.Fatalf("limit=1 应只回最新一行，实际 %+v", one)
+	}
+}
+
+// TestActionReviewReplayIsIdempotentAndConflictIsRefused：同 id 的两条路径必须分开。
+//
+// 同内容 = 网络重试（返回既有行，不新增行）；不同内容 = 两个判定抢一个身份（拒绝，
+// 且**不改写**既有行）。把两者混成一个错误会让重试看起来像失败；混成一个成功会让
+// 一次真实的判定从审计里消失。
+func TestActionReviewReplayIsIdempotentAndConflictIsRefused(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	rec := validReview("rev-1", "dev", "s1")
+
+	created, isNew, err := st.RecordActionReview(ctx, rec)
+	if err != nil {
+		t.Fatalf("首次写入失败：%v", err)
+	}
+	if !isNew || created.CreatedAt.IsZero() {
+		t.Fatalf("首次写入应报告 created=true 并带回 created_at：%+v", created)
+	}
+
+	// 同 id 同内容：重放，不新增行。
+	again, isNew, err := st.RecordActionReview(ctx, rec)
+	if err != nil {
+		t.Fatalf("重放不该报错（重试是正常路径）：%v", err)
+	}
+	if isNew {
+		t.Fatal("重放不该被报告成新建（否则对账会以为库里有两行）")
+	}
+	if again.ID != created.ID || !again.CreatedAt.Equal(created.CreatedAt) {
+		t.Fatalf("重放必须返回**既有**那一行：%+v vs %+v", again, created)
+	}
+
+	// 同 id 不同内容：拒绝，且既有行不被改写。
+	conflict := rec
+	conflict.Band = release.BandDeny
+	conflict.Reason = "irreversible"
+	if _, _, err := st.RecordActionReview(ctx, conflict); !errors.Is(err, ErrReviewIDConflict) {
+		t.Fatalf("同 id 不同内容应返回 ErrReviewIDConflict，实际 %v", err)
+	}
+	got, err := st.ActionReviews(ctx, "dev", "s1", 0)
+	if err != nil {
+		t.Fatalf("读回失败：%v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("冲突不该新增行，实际 %d 行", len(got))
+	}
+	if got[0].Band != release.BandAuto || got[0].Reason != "classifier-allow" {
+		t.Fatalf("冲突**不得**改写既有行（append-only）：%+v", got[0])
+	}
+}
+
+// TestActionReviewRunIDNormalizesEmptyToNull：空串与 NULL 不能并存（否则「没有 Run」
+// 有两种存法，而它们读起来一样、比较却不相等）。
+func TestActionReviewRunIDNormalizesEmptyToNull(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+
+	blank := validReview("rev-1", "dev", "s1")
+	blank.RunID = "   "
+	if _, _, err := st.RecordActionReview(ctx, blank); err != nil {
+		t.Fatalf("写入失败：%v", err)
+	}
+	var raw *string
+	if err := st.pool.QueryRow(ctx,
+		`SELECT run_id FROM action_reviews WHERE id = 'rev-1'`).Scan(&raw); err != nil {
+		t.Fatalf("读 run_id 失败：%v", err)
+	}
+	if raw != nil {
+		t.Fatalf("全空白的 run_id 应落 NULL，实际 %q", *raw)
+	}
+
+	withRun := validReview("rev-2", "dev", "s1")
+	withRun.RunID = "run-9"
+	stored, _, err := st.RecordActionReview(ctx, withRun)
+	if err != nil {
+		t.Fatalf("写入失败：%v", err)
+	}
+	if stored.RunID == nil || *stored.RunID != "run-9" {
+		t.Fatalf("run_id 未保真读回：%+v", stored.RunID)
+	}
+	// 有 run 的记录重放比对也要过（nil 与 "run-9" 不是同一条）。
+	if _, isNew, err := st.RecordActionReview(ctx, withRun); err != nil || isNew {
+		t.Fatalf("带 run_id 的重放应识别为既有行，实际 isNew=%v err=%v", isNew, err)
 	}
 }
 

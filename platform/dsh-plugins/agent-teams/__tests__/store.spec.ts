@@ -151,6 +151,69 @@ describe('storage hub 存储', () => {
     expect(member !== undefined && 'ownerUserId' in member).toBe(false)
   })
 
+  // 同一条教训的另一半：字段漏在逐字段解析里，症状是「重启后所有任务都变成没有验收
+  // 条件」——任务板看起来完全正常，而协调者随后的验收会全线 fail-closed。
+  // 写入侧一切正常，所以只能靠这一段读回来的往返把它钉住。
+  it('把任务的 acceptance 原样往返', async () => {
+    const { storage } = fakeStorage()
+    const store = new StorageHubTeamStore(storage)
+    await store.init()
+    const team = sampleTeam()
+    team.tasks[0]!.acceptance = '三条基准数据，误差 <1%'
+    await store.save(team)
+
+    expect((await store.load('demo'))?.tasks[0]?.acceptance).toBe('三条基准数据，误差 <1%')
+    expect(parseTeamState(team, team.id).tasks[0]?.acceptance).toBe('三条基准数据，误差 <1%')
+  })
+
+  // 证据与 acceptance 是同一族风险，且证据这一侧更隐蔽：漏解析之后验收判据会判
+  // `no-evidence`，于是**每一条交付都被人审**。方向是 fail-closed 的，所以没人会觉得
+  // 出了事故——只会觉得大家突然都要看一眼，而真正的问题在读侧。
+  it('把结论的证据原样往返', async () => {
+    const { storage } = fakeStorage()
+    const store = new StorageHubTeamStore(storage)
+    await store.init()
+    const team = sampleTeam()
+    team.tasks[0]!.evidence = ['run:child-7', 'run:child-8']
+    await store.save(team)
+
+    expect((await store.load('demo'))?.tasks[0]?.evidence).toEqual(['run:child-7', 'run:child-8'])
+    expect(parseTeamState(team, team.id).tasks[0]?.evidence).toEqual(['run:child-7', 'run:child-8'])
+  })
+
+  it('没有证据的任务读回来不会多出一个空数组', async () => {
+    // 「没有证据」必须是缺省而不是 `[]`：判据里两者同义，但存两种形状会让每次读都要
+    // 同时处理它们（与 RunID 空串归一成 NULL 同一条纪律）。
+    const { storage } = fakeStorage()
+    const store = new StorageHubTeamStore(storage)
+    await store.init()
+    await store.save(sampleTeam())
+    const task = (await store.load('demo'))?.tasks[0]
+    expect(task !== undefined && 'evidence' in task).toBe(false)
+  })
+
+  it('证据里的空白条目读回来时被丢弃（脏数据不该让整行读不出来）', async () => {
+    const { storage } = fakeStorage()
+    const store = new StorageHubTeamStore(storage)
+    await store.init()
+    const team = sampleTeam()
+    team.tasks[0]!.evidence = ['run:a', '   ', 'run:b']
+    await store.save(team)
+    // 空白条目落库后读回被丢，剩下的非空条目照常保留、顺序不变。
+    expect((await store.load('demo'))?.tasks[0]?.evidence).toEqual(['run:a', 'run:b'])
+  })
+
+  it('没有验收条件的任务读回来不会多出一个空串', async () => {
+    // 「无验收条件」必须是**缺省**而不是空串：判据靠空白判定它，而空串会让两种含义
+    // 相同的写法在数据上分不开 —— 两种写法读起来是完全不同的两句话。
+    const { storage } = fakeStorage()
+    const store = new StorageHubTeamStore(storage)
+    await store.init()
+    await store.save(sampleTeam())
+    const task = (await store.load('demo'))?.tasks[0]
+    expect(task !== undefined && 'acceptance' in task).toBe(false)
+  })
+
   it('打开单元时声明的名字/版本/布局是契约的一部分', async () => {
     const { storage } = fakeStorage()
     const opened: unknown[] = []

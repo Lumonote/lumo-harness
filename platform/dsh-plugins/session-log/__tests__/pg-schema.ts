@@ -49,3 +49,22 @@ async function create(base: string, schema: string): Promise<string> {
   url.searchParams.set('options', `-c search_path=${schema}`)
   return url.toString()
 }
+
+/**
+ * 清空复制日志的三张表。**三张都要，缺一张就会产生「第一次绿、之后永远红」的失败。**
+ *
+ * `session_log_heads` 是已发布水位，`publishHead` 拿它做**令牌比较后交换**
+ * （`... ON CONFLICT DO UPDATE ... WHERE session_log_heads.fencing_token <= EXCLUDED.fencing_token`）。
+ * 只清前两张时，上一轮 `release`+`acquire` 把水位推到的那个更高令牌会留在库里，而新一轮
+ * 的 `acquire` 从 1 重新发号 —— 于是 `publishHead` 被判越权。
+ *
+ * 2026-09-18 实测：`query.spec.ts` 的 `head-report` 残留 `fencing_token=2`，此后每次重跑都红在
+ * `FencedOutError：当前令牌 1，本次携带 1`。**令牌相同却判失效**，读起来像 fencing 实现有
+ * 缺陷，而真相是清库漏了一张表。这类失败比没有测试更坏：它训练人「这条本来就是红的」。
+ *
+ * 收成一处而不是在五个 spec 里各写一遍：五份手写清单里只要有一份漏了，同一个坑就会以
+ * 「只有某个文件偶发红」的形式回来。
+ */
+export async function truncateSessionLog(raw: (sql: string) => Promise<unknown>): Promise<void> {
+  await raw('TRUNCATE session_log, session_writer_lease, session_log_heads')
+}

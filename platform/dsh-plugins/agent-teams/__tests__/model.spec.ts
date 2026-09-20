@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   addMember,
+  addTask,
   addTasks,
   assertDependencyGraph,
   blockersOf,
@@ -98,6 +99,28 @@ describe('DAG 校验', () => {
       { subject: 'ok', dependencies: ['t1'] },
       { subject: 'bad', dependencies: ['nope'] },
     ], NOW)).toThrow(TeamError)
+  })
+})
+
+describe('验收条件', () => {
+  it('建任务时带上验收条件，缺省则任务上干脆不带这个键', () => {
+    const team = fixture('pipeline', ['a'])
+    const created = addTask(team, { subject: '补齐基准', acceptance: '三条基准数据，误差 <1%' }, NOW)
+    expect(created.task.acceptance).toBe('三条基准数据，误差 <1%')
+
+    // 缺省是**合法**状态（本字段之前的派发就没有它），语义是「无验收条件」而**不是**
+    // 「默认通过」。写成空串会让两种含义相同的写法流到下游各猜各的，所以缺省时不带这个键。
+    const bare = addTask(team, { subject: '没有判据的一步' }, NOW)
+    expect('acceptance' in bare.task).toBe(false)
+  })
+
+  it('批量建任务同样透传，且每条各带各的判据', () => {
+    const team = fixture('pipeline', ['a'])
+    const created = addTasks(team, [
+      { subject: 'b', acceptance: '全部用例绿' },
+      { subject: 'c', dependencies: ['t1'] },
+    ], NOW)
+    expect(created.tasks.map(task => task.acceptance)).toEqual(['全部用例绿', undefined])
   })
 })
 

@@ -22,6 +22,15 @@
  *
  * 形态差异只落在 `roster.selectMemberProvider` 一处：按优先级探测 provider，
  * **没有** `if (cluster)` 分支。
+ *
+ * ## 两档成员（§24.2）
+ *
+ * 成员分两档：**Worker** 是本插件既有的 one-shot 派发（不变），**Thread** 是可续跑的
+ * 完整会话（跨 Run、可被事件唤醒）。Thread 档位另提供 `ctx.agentThreads`：
+ * 判据在 `thread.ts`（纯函数）、唤醒接线在 `thread-wake.ts`（走既有 `@lumo/mailbox`）、
+ * 行本身由 `control-plane/collaborator` 持有（它是 `threads` 的唯一写入方）。
+ * Thread 的三件事各有既有落点——续跑是日志、唤醒是 mailbox、配额是预算树——
+ * 本插件**不新建执行机制**，也不引入 continuable 句柄（理由见 `roster.ts`）。
  */
 
 import { Context } from '@deepseek-ai/cordis'
@@ -30,6 +39,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 
 import { createCourier, type MailboxSeamLike, type TeamCourier } from './courier.ts'
 import {
+  dispatchMember,
   selectMemberProvider,
   type MemberRun,
   type MemberSeam,
@@ -37,10 +47,13 @@ import {
 } from './roster.ts'
 import { AgentTeamsService, DEFAULT_MAX_MEMBERS, type MemberSurface } from './service.ts'
 import { createTeamStore, type StorageFacetLike } from './store.ts'
+import { createHttpThreadRegistry, type ThreadRegistryLike } from './thread-registry.ts'
+import { ThreadsRuntime } from './threads.ts'
 import {
   DEFAULT_TOOL_MAX_ROUNDS,
   DEFAULT_TOOL_MAX_WAIT_MS,
   defineAgentTeamsTools,
+  defineAgentThreadTools,
 } from './tools.ts'
 
 /** 会合面 realm：等待项 id 的作用域前缀，跨团队/租户不互相兑现。 */
@@ -62,6 +75,16 @@ export interface AgentTeamsConfig {
   maxWaitMs?: number
   /** 会合面 realm。 */
   realm?: string
+  /** 协作服务基址（`control-plane/collaborator`，线程注册表）。缺省 = 线程面读不到行。 */
+  collaboratorUrl?: string
+  /** 调用协作服务时使用的身份（生产由边缘网关注入，直连时用配置）。 */
+  actingUserId?: string
+  /** 本节点身份（线程亲和判据的输入）。缺省 = 线程面拒绝一切唤醒。 */
+  nodeId?: string
+  /** 本节点工作区根（绝对路径，线程工作目录的解析基准）。缺省 = 工作目录不可解析。 */
+  workspaceRoot?: string
+  /** 线程唤醒等待项的默认有效期（毫秒；仍受 `MAX_WAKE_TTL_MS` 约束）。 */
+  wakeTtlMs?: number
 }
 
 /** Schemastery validation for {@link AgentTeamsConfig} */
@@ -71,11 +94,18 @@ export const Config: z<AgentTeamsConfig> = z.object({
   maxRounds: z.number(),
   maxWaitMs: z.number(),
   realm: z.string(),
+  collaboratorUrl: z.string(),
+  actingUserId: z.string(),
+  nodeId: z.string(),
+  workspaceRoot: z.string(),
+  wakeTtlMs: z.number(),
 })
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
     agentTeams: AgentTeamsService
+    /** 线程档位（§24.2）：注册表 + 唤醒 + 工作目录解析。 */
+    agentThreads: ThreadsRuntime
   }
 }
 
@@ -106,6 +136,81 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * 按配置建线程注册表；配置不全时返回 `undefined` 并**响亮留痕**。
+ *
+ * 为什么不在这里抛：线程面是**加档**（§24.2 的两档成员），它的装配缺陷不该让整个
+ * agent-teams 起不来——任务板、roster、会合面在单机形态下依旧可用。但也不能静默：
+ * 「配了协作服务地址却忘了身份」的症状是线程动作全部拒绝，没有这条日志，现场会先怀疑
+ * 协作服务挂了。
+ */
+function createThreadRegistry(
+  ctx: Context,
+  config: AgentTeamsConfig,
+  realm: string,
+): ThreadRegistryLike | undefined {
+  if (config.collaboratorUrl === undefined || config.collaboratorUrl === '') return undefined
+  if (config.actingUserId === undefined || config.actingUserId === '') {
+    ctx.logger.warn(
+      'agent-teams: 配了 collaboratorUrl 但没有 actingUserId，线程注册表未装配（协作服务按网关注入的身份头授权）',
+    )
+    return undefined
+  }
+  try {
+    return createHttpThreadRegistry({
+      baseUrl: config.collaboratorUrl,
+      userId: config.actingUserId,
+      realm,
+    })
+  } catch (error: unknown) {
+    ctx.logger.error('agent-teams: 线程注册表装配失败，线程面不可用：%s', describe(error))
+    return undefined
+  }
+}
+
+/**
+ * 开一轮线程的 Run：走与成员派发**同一条**执行面（`roster.dispatchMember`）。
+ *
+ * 复用而不是另起一条执行路径，是因为「provider 逐次选择」的三条守卫（§24.3.1 / §24.3.2）
+ * 只在那一处：进程外 provider 一律不动（换 provider 不得改变执行位置）、正交原样、
+ * fork 不可用则回落不抛。线程的一轮与团队的一轮在这三件事上要求完全一致——都是「把一段
+ * 工作放到承载节点上跑」。差别只在**归因**：`label` 带线程 id 与代数，好让这一轮在会话
+ * 列表与成本归因（§14 判据 10）里认得出是哪条线程的第几轮。
+ *
+ * 执行面缺失时**抛**（不是回落）：重派没有第二条路（`requireRunner` 的同一条理由）。
+ */
+async function startThreadRound(
+  surfaceRef: () => MemberSurface | undefined,
+  input: {
+    thread: { id: string; session_ref: string; node_id: string }
+    round: { task_id: string; attempt: number }
+    prompt: string
+    parent: unknown
+    signal: AbortSignal
+  },
+): Promise<{ runId: string }> {
+  const surface = surfaceRef()
+  if (surface === undefined) {
+    throw new Error(
+      'agent-teams: 本节点没有成员执行面（subagents 未挂载/探测失败），线程的这一轮无处执行',
+    )
+  }
+  const outcome = await dispatchMember(surface.seam, surface.provider, {
+    label: `${input.thread.id}#${input.round.attempt}`,
+    prompt: [input.prompt],
+    parent: input.parent,
+    signal: input.signal,
+  })
+  if (!outcome.ok) {
+    // 执行面本身跑起来了但这一轮没跑完（模型/传输失败）：照实抛，让协调者看见「重派也失败了」
+    // ——静默返回一个 runId 会把一次失败的执行记成一次成功的重派。
+    throw new Error(
+      `agent-teams: 线程 ${input.thread.id} 第 ${input.round.attempt} 轮未完成（${outcome.stopReason}）：${outcome.text.slice(0, 300)}`,
+    )
+  }
+  return { runId: outcome.runId }
+}
+
 export function apply(ctx: Context, config: AgentTeamsConfig): void {
   const realm = config.realm ?? DEFAULT_REALM
   const maxMembers = positive('maxMembers', config.maxMembers ?? DEFAULT_MAX_MEMBERS)
@@ -117,6 +222,8 @@ export function apply(ctx: Context, config: AgentTeamsConfig): void {
   let store = createTeamStore(undefined)
   let courier: TeamCourier = createCourier(undefined, realm)
   let surface: MemberSurface | undefined
+  /** 执行面的**按需解析**（`subagents` 的挂载顺序不由本插件决定，见下）。 */
+  const surfaceRef = (): MemberSurface | undefined => surface
 
   const service = new AgentTeamsService({
     resolveStore: () => store,
@@ -128,8 +235,37 @@ export function apply(ctx: Context, config: AgentTeamsConfig): void {
 
   ctx.provide('agentTeams', service)
 
+  // 线程档位（§24.2）：注册表（协作服务）+ 唤醒（会合面）+ 本节点事实（身份、工作区根）+ 执行面。
+  //
+  // 四样都按「缺了就连带的能力一起拒绝」装配，而不是静默降级：缺注册表就读不到行，
+  // 缺节点身份就 arm 出一个没人能兑现的等待项（§8.1 的「永不唤醒」），缺执行面则重派只能
+  // 造出一行永远不动的记录。能力画像在 `agentThreads.capabilities()` 里可查，运维一眼看出
+  // 缺哪一样。
+  //
+  // 注册表按**解析器**传给运行时（而不是快照一个客户端）：地址的来源不由本插件决定
+  // （显式配置 / 将来的服务发现），快照会把「晚一步可用」固化成一个一直报
+  // `registry: false` 的能力画像，现场会先去怀疑协作服务挂了。
+  const threads = new ThreadsRuntime({
+    resolveCourier: () => courier,
+    resolveRegistry: () => createThreadRegistry(ctx, config, realm),
+    nodeId: config.nodeId ?? '',
+    ...config.workspaceRoot === undefined ? {} : { workspaceRoot: config.workspaceRoot },
+    // 重派的一轮 Run 走**同一个成员执行面**（集群里 provider 是 lumo-remote → Scheduler 放置）：
+    // 按需解析（`surface` 在 subagents 挂上之后才有值），缺了就在动作那一刻响亮拒绝——
+    // 同时也让 `capabilities().roundRunner` 如实反映「这台机器现在能不能重派」。
+    resolveRunner: () => (surfaceRef() === undefined ? undefined : {
+      start: input => startThreadRound(surfaceRef, input),
+    }),
+    ...config.wakeTtlMs === undefined ? {} : { defaultWakeTtlMs: config.wakeTtlMs },
+    warn: message => ctx.logger.warn('%s', message),
+  })
+  ctx.provide('agentThreads', threads)
+
   const unregisterTools = defineAgentTeamsTools(ctx, service, {
     ...config.maxRounds === undefined ? {} : { maxRounds: positive('maxRounds', config.maxRounds) },
+    ...config.maxWaitMs === undefined ? {} : { maxWaitMs: positive('maxWaitMs', config.maxWaitMs) },
+  })
+  const unregisterThreadTools = defineAgentThreadTools(ctx, threads, {
     ...config.maxWaitMs === undefined ? {} : { maxWaitMs: positive('maxWaitMs', config.maxWaitMs) },
   })
 
@@ -189,6 +325,7 @@ export function apply(ctx: Context, config: AgentTeamsConfig): void {
 
   ctx.effect(() => async () => {
     unregisterTools()
+    unregisterThreadTools()
     await courier.close()
     await store.store.close()
   })
@@ -207,3 +344,31 @@ export type {
 export { TOPOLOGIES } from './model.ts'
 export type { TeamMember, TeamProgress, TeamState, TeamTask, TaskStatus, Topology } from './model.ts'
 export { TEAM_UNIT_NAME, TEAM_UNIT_VERSION } from './store.ts'
+export { acceptanceVerdict, hasAcceptance } from './acceptance.ts'
+export { FORK_PROVIDER, evidenceOfRun, selectDispatchProvider } from './roster.ts'
+export type { AcceptanceVerdict } from './acceptance.ts'
+// 线程档位（§24.2）：判据在 thread.ts（纯函数），传输在 thread-wake.ts，
+// 注册表客户端在 thread-registry.ts，装配面在 threads.ts。
+export {
+  DEFAULT_WAKE_TTL_MS, MAX_WAKE_TTL_MS, THREAD_STATES, TERMINAL_THREAD_STATES,
+  ThreadRowError, ThreadWakeRefusedError, ThreadWorkspaceError,
+  parseThreadRow, parseNodeLossNotice, resolveWakeTtlMs, resolveThreadWorkspacePath, threadWakeChannel,
+  threadActionDecision, wakePayload, nodeLossPayload, replacementThreadId, nextRoundAfterLoss,
+  planThreadReplacement,
+} from './thread.ts'
+export type {
+  NodeLossNotice, ReplacementRefusal, ThreadAction, ThreadReplacementDecision, ThreadReplacementPlan,
+  ThreadRound, ThreadRow, ThreadState, WakeDecision, WakeRefusal,
+} from './thread.ts'
+export { ThreadWaker } from './thread-wake.ts'
+export type { ThreadReconcileResult, ThreadWakeEntry } from './thread-wake.ts'
+export { ThreadRegistryError, createHttpThreadRegistry } from './thread-registry.ts'
+export type { CreateThreadInput, ThreadRegistryLike } from './thread-registry.ts'
+export {
+  ThreadReassignConflictError, ThreadReassignRefusedError, ThreadsRuntime, ThreadsUnavailableError,
+} from './threads.ts'
+export type {
+  ThreadAwaitOutcome, ThreadReassignResult, ThreadRoundRunner, ThreadsCapabilities, ThreadSuspendResult,
+} from './threads.ts'
+export { defineAgentThreadTools } from './tools.ts'
+export type { AgentThreadToolConfig } from './tools.ts'

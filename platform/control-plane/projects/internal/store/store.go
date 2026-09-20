@@ -90,6 +90,31 @@ CREATE TABLE IF NOT EXISTS task_reports (
 );
 ALTER TABLE task_reports ADD COLUMN IF NOT EXISTS confirmed_by TEXT;
 CREATE INDEX IF NOT EXISTS task_reports_pending_idx ON task_reports (realm, updated_at DESC) WHERE status = 'draft';
+
+-- 项目决策记忆（§24.4 / §11 ①）：append-only，不原地改。
+--   * 表/列/部分索引名逐字照抄设计说明 §11——改名字就是让文档漂移。
+--   * **故意不设 REFERENCES projects(id) ON DELETE CASCADE**（设计说明的 DDL 也没有）：
+--     决策是考古层，项目实体消失不该连带销毁「当初为什么这么定」。与 usage_ledger
+--     的悬空归因行同一条纪律（见 DeleteProject 的注释）。
+--   * kind 的闭集校验在服务层（domain.ValidDecisionKind）而不在 CHECK 里：本表只有一个
+--     写入方（本服务），而 CHECK 会让非法值以 SQLSTATE 23514 的形式泄漏到调用方，
+--     把「契约漂移」报成「数据库故障」。
+--   * 部分索引与索引读面同形（realm, project_id, kind + superseded_by IS NULL），
+--     live 行之外的条目不进索引，读面也就不需要再看它们。
+CREATE TABLE IF NOT EXISTS project_decisions (
+  id            TEXT PRIMARY KEY,
+  realm         TEXT NOT NULL,
+  project_id    TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  summary       TEXT NOT NULL,
+  body          TEXT NOT NULL,
+  supersedes    TEXT,
+  superseded_by TEXT,
+  evidence      JSONB,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS project_decisions_live
+  ON project_decisions (realm, project_id, kind) WHERE superseded_by IS NULL;
 `
 
 // 领域错误（server 层映射 HTTP 状态）。

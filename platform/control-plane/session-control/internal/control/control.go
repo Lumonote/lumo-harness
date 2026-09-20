@@ -34,6 +34,34 @@
 // 未配置 Dispatcher 时（本服务当前就是这样，见 cmd/session-control 的启动日志），
 // 响应里的 `effectuation` 恒为 `recorded`：状态与审计是真的，会话执行面的暂停尚未
 // 接线。**不允许**在这里回落成「已下发」——那会让控制台显示一个没人执行过的动作。
+//
+// # Dispatcher 为什么是 nil：**按构造不可接线**，不是「还没排上」
+//
+// §8.4.2 要求控制指令以 `session/control` 事件「进复制日志」。实测该事件类型**写不进
+// dsh 的会话日志**，四段逐段核过（判据与 E7b 同一条：声明 → 写入 → 持久化 → 重载）：
+//
+//   - **声明**：`session/control` 不在 `KNOWN_SESSION_EVENT_TYPES` 里。那张表由
+//     `gen-persistence-catalog.ts` 扫 `deepseek-harness/packages/*/*/src/**` 生成，
+//     平台插件**按构造**不在其中。
+//   - **写入**：`Session.append(type, data, ...opts)` 的 `opts` 是 `SurfaceIntent`，
+//     只有 `surfaceOp` 与 `sourceEventSeqs` —— **没有 `ignorable` 的槽位**。
+//     `declare module` 只让 TS 通过，改不了运行时的封套。
+//   - **持久化**：`validateStoredEvents` 对「不在表内且 `ignorable !== true`」的事件抛
+//     `SessionFormatUnsupportedError`。
+//   - **重载**：于是整份日志被拒 —— **每一个收到过控制指令的会话都会永久打不开**。
+//
+// 也就是说照字面实现它不是「补一个功能」，是**数据毁伤**。登记成已知类型更坏：那会把
+// 纯信息性事件变成 required-on-read，任何没打该 patch 的构建（含上游桌面）都读不了它，
+// 上游架构笔记已明确否决这条（「按事件名登记」让读取依赖读者的组装方式）。
+//
+// **§8.4.2 的意图由另一条路满足，而且已经满足**：「多端实时可见」与「谁在何时做了什么
+// 可回溯」落在控制面自己的 `session_control_state` + `session_control_audit`（任何终端
+// 都读得到，控制台读面与 §8.4.3 的时间线就是它），而不是会话日志。状态行本身还是
+// **生效通道**：`@lumo/control` 读它并在挂点上执行闸门，所以暂停是真的生效的。
+//
+// 因此不要为「把 Dispatcher 用起来」再动手，也不要把 `Event.Type` 改成一个 dsh 认识的
+// 类型借道落库 —— 那是拿一个语义不对的原生事件夹带平台状态，正是本仓库反复记的
+// 「看起来对、语义错」。
 package control
 
 import (
@@ -107,6 +135,10 @@ type StateStore interface {
 }
 
 // Event 是 §8.4.2 的 `session/control` 载荷。
+//
+// ⚠️ **这个值进不了会话日志**，理由见包注释的「按构造不可接线」一段：它的 Type 不在
+// dsh 的已知事件表里，而 `append` 无法把它标成 ignorable，写进去会让整份日志在重载时
+// 被拒。它保留下来是作为 Dispatcher 契约的形状，不是一条待接线的通路。
 type Event struct {
 	Type          string        `json:"type"`
 	SessionRef    string        `json:"sessionRef"`
@@ -123,7 +155,11 @@ type Event struct {
 	At            time.Time     `json:"at"`
 }
 
-// Dispatcher 把已生效的控制事件送到会话执行面。nil 表示未接线（只记录，见包注释）。
+// Dispatcher 把已生效的控制事件送到会话执行面。nil 表示只记录（见包注释）。
+//
+// **nil 是当前的正确取值，不是待办**：本服务没有一条合法的下发通路 —— 会话日志写不进去
+// （按构造不可实现，见包注释），而生效本身走的是状态行（`@lumo/control` 直接读它）。
+// 接口留着是因为它定义了「下发器欠的是什么」：有了合法通路时，实现它即可，调用点不用动。
 type Dispatcher interface {
 	Dispatch(ctx context.Context, ev Event) error
 }

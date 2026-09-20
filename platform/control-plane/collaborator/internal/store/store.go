@@ -107,6 +107,65 @@ ALTER TABLE collab_space_grants
 
 ALTER TABLE collab_space_grants
   ADD CONSTRAINT collab_space_grants_pkey PRIMARY KEY (realm, space, subject);
+
+-- 线程档位（§24.2 两档成员；设计说明 2026-09-20 §11 的 DDL 逐字照抄）。
+--
+-- 会话状态由 dsh 的会话层持有，本表只登记**协调者需要跨进程看见的三件事**：稳定的
+-- session_ref、承载节点、以及线程自己的生命周期状态。事件的订阅集合**不在这里** ——
+-- 订阅就是 §8.1 的 mailbox 等待项（id 由插件侧按 (线程, Run 代数) 派生，强制带 TTL），
+-- 本表不复制它，也就不会与 mailbox 的真相对账不上。
+--
+-- 本包是 threads 的**唯一建表方与唯一写入方**：状态转移要么在事务里带前置状态做 CAS，
+-- 要么不存在（见 threads.go）。TS 侧（@lumo/agent-teams）只读不写，理由是「承载节点
+-- 亲和」这条不变量需要一个**单点**判定：两个实现各写一遍，迟早有一边把 node_id 一起
+-- 写进 UPDATE，于是节点丢失变成「换台机器接着跑」，而那正是 §24.2.1 禁止的迁移。
+CREATE TABLE IF NOT EXISTS threads (
+  id            TEXT PRIMARY KEY,
+  realm         TEXT NOT NULL,
+  project_id    TEXT NOT NULL,
+  task_id       TEXT NOT NULL,
+  coordinator_session_ref TEXT NOT NULL,
+  session_ref   TEXT NOT NULL,
+  node_id       TEXT NOT NULL,
+  workspace     TEXT NOT NULL,
+  state         TEXT NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 一个会话只能挂一条线程行。挑 UNIQUE INDEX 而不是再加主键，是因为这条约束要表达的是
+-- **跨行**的不变量：同一个 session_ref 出现两行、各自写着不同 node_id，就是「一个线程
+-- 同时活在两个节点上」——那种行一旦存在，线程亲和就无从判定（读侧不知道该信哪一行）。
+CREATE UNIQUE INDEX IF NOT EXISTS threads_session ON threads (realm, session_ref);
+
+-- 节点失联通知（§24.2.3(4)：标记 failed 之后要**通知协调者**）。
+--
+-- 为什么通知是**本服务的一行**而不是 Mailbox 的一次 resolve：mailbox_future 表由
+-- @lumo/mailbox 插件持有，本服务既不是它的建表方也不是它的写入方；从 Go 侧直接写它要
+-- 复制等待项 id 的派生规则、realm 前缀与「首次兑现为准」的条件写语义，任一处漂移都会让
+-- 通知**静默丢失**。于是分工定成：本表只负责**产生可读的通知**（append-only + 单调游标），
+-- 投递由持有 mailbox 的那一侧完成（thread-wake.ts 的 announce）。这与 §8.1 的第三条纪律
+-- 同源：**轮询才是正确性来源**，通知只降低延迟——通知落在这里就不会丢。
+--
+-- 唯一键 (realm, thread_id)：一条线程只能死一次（终态不可复活），所以重复上报结构上
+-- 不可能造出第二条通知。去重靠索引，不靠调用方的自觉。
+CREATE TABLE IF NOT EXISTS thread_node_loss_notices (
+  seq                     BIGSERIAL PRIMARY KEY,
+  realm                   TEXT NOT NULL,
+  thread_id               TEXT NOT NULL,
+  node_id                 TEXT NOT NULL,
+  session_ref             TEXT NOT NULL,
+  coordinator_session_ref TEXT NOT NULL,
+  reason                  TEXT NOT NULL,
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS thread_node_loss_notices_thread
+  ON thread_node_loss_notices (realm, thread_id);
+
+-- 消费方按 (realm, seq) 拉增量：seq 是库端分配的单调值，不会像时间戳那样在同一毫秒里撞。
+CREATE INDEX IF NOT EXISTS thread_node_loss_notices_cursor
+  ON thread_node_loss_notices (realm, seq);
 `
 
 // Store 组合 PG（权威）与 Redis（WAL 热层）。

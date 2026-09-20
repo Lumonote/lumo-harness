@@ -161,13 +161,19 @@ func main() {
 
 	controller := control.New(control.Options{
 		Store: persistence, Auth: auth, Queue: pulses,
-		// Dispatcher 故意留空：会话执行面的下发尚未接线（见本文件包注释）。
+		// Dispatcher 留空是**正确的终态**，不是待办：§8.4.2 要的 `session/control`
+		// 事件写不进 dsh 的会话日志（按构造不可实现，四段判据见 internal/control
+		// 的包注释），而暂停的**生效**通道是状态行本身（`@lumo/control` 读它）。
+		// 换句话说这里没有一条合法的下发通路可接，接一个只会是假的。
 		Logger: log, MaxAttempts: *attempts,
 	})
 
 	srv := server.New(server.Options{
 		Execute: controller.Execute,
 		Store:   persistence,
+		// 同一个 Store 同时当动作放行记录的读写面：`action_reviews` 与本服务的另外两张表
+		// 同族（同一次 Init 建、同一个池读写），没有理由为它另开一条连接。
+		Reviews: persistence,
 		Queue:   pulses,
 		Logger:  log,
 	})

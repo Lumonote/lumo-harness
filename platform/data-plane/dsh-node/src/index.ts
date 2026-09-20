@@ -579,6 +579,8 @@ ${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
         connectorUrl: ${JSON.stringify(process.env['LUMO_CONNECTOR_GATEWAY_URL'] ?? 'http://localhost:8082')}
         governanceUrl: ${JSON.stringify(governanceURL)}
         registryUrl: ${JSON.stringify(process.env['LUMO_REGISTRY_URL'] ?? 'http://localhost:8084')}
+        # Empty means "this deployment has no session-control"; no localhost fallback.
+        sessionControlUrl: ${JSON.stringify(sessionControlURL)}
         realm: ${JSON.stringify(platformRealm)}
         userId: ${JSON.stringify(userID)}
         roles: ${JSON.stringify([userRole])}

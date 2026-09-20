@@ -20,11 +20,13 @@ import {
   worseOf,
   type BudgetState,
 } from '../../../shared/seam-contracts/budget-policy.ts'
-import type {
-  MeterContext,
-  MeterRecord,
-  MeterResult,
-  MeteringSeam,
+import {
+  SCOPE_GOVERNED_RUN,
+  type MeterContext,
+  type MeterRecord,
+  type MeterResult,
+  type MeteringSeam,
+  type ScopeCapSeam,
 } from '../../../shared/seam-contracts/metering.ts'
 
 type LedgerSchema = typeof ledgerSchema & {
@@ -76,6 +78,22 @@ CREATE TABLE IF NOT EXISTS usage_event_outbox (
 -- 部分索引：只扫未投影的尾巴，已投影历史不拖慢轮询（同 knowledge_graph_outbox）
 CREATE INDEX IF NOT EXISTS idx_usage_outbox_pending
   ON usage_event_outbox (seq) WHERE projected_at IS NULL;
+
+-- 作用域金额上限（一次工作的封顶，见 shared/seam-contracts/metering.ts 的 ScopeCapSeam）。
+--
+-- **单位写在列名里**，这是它没并进 budget_trees 的全部理由：那张表的 budget 列是 **token**，
+-- 这里是**分**。同一个列名承担两种单位，读到的人只会按自己那套解释——E4/D6 已经吃过一次
+-- 「一个字段两个语义」的亏，不该再吃第二次。
+--
+-- spent_cents 用 NUMERIC(18,6) 与 usage_ledger.cost_usd 同精度：它是**钱的累加**，
+-- 用浮点会在多次小额调用后漂出可观测的分差。
+CREATE TABLE IF NOT EXISTS budget_scope_caps (
+  scope       TEXT   NOT NULL,
+  id          TEXT   NOT NULL,
+  cap_cents   BIGINT NOT NULL CHECK (cap_cents >= 0),
+  spent_cents NUMERIC(18,6) NOT NULL DEFAULT 0,
+  PRIMARY KEY (scope, id)
+);
 `
 
 /**
@@ -121,13 +139,60 @@ CREATE INDEX IF NOT EXISTS idx_usage_outbox_unpublished
   ON usage_event_outbox (seq) WHERE published_at IS NULL;
 `
 
-export class PgMeteringSeam implements MeteringSeam {
+export class PgMeteringSeam implements MeteringSeam, ScopeCapSeam {
   private pool: pg.Pool
   /** drainOnce 单实例内不并发重入（定时间隔小于一轮搬运时长时的压车），同 GraphProjector */
   private running = false
+  /**
+   * 费率缓存（model → 每百万 token 的输入/输出价）。
+   *
+   * 缓存的理由不是省那次查询，而是**让「没有这个模型」这件事只被抱怨一次**：未知模型会
+   * 一直未知，每次调用都打一行日志会把真正的异常淹掉。因此这里缓存的是 `null`
+   * （「查过了，没有」）而不是只缓存命中项。
+   */
+  private readonly rateCache = new Map<string, { inPerMtok: number; outPerMtok: number } | null>()
+  /** 已经为「查不到费率」抱怨过的模型，避免同一个未知模型刷屏。 */
+  private readonly warnedModels = new Set<string>()
 
   constructor(connectionString: string) {
     this.pool = new pg.Pool({ connectionString })
+  }
+
+  /**
+   * 按模型取费率。**与 llm-gateway 用同一张表、同一个公式**——费率只有一份真相源
+   * （`llm_providers`），两个计价点各查各的，而不是各自抄一份费率表。
+   *
+   * 查不到时返回 `undefined` 并**只抱怨一次**：节点侧的 agent 调用拿不到上游账单，只能
+   * 靠这张表推价，所以「表里没有这个模型」是一条需要有人去补费率的真实信号，不是噪音。
+   */
+  private async ratesFor(model: string): Promise<{ inPerMtok: number; outPerMtok: number } | undefined> {
+    if (this.rateCache.has(model)) return this.rateCache.get(model) ?? undefined
+    let value: { inPerMtok: number; outPerMtok: number } | null = null
+    try {
+      const row = await this.pool.query<{ price_in_per_mtok: string; price_out_per_mtok: string }>(
+        `SELECT price_in_per_mtok, price_out_per_mtok FROM llm_providers WHERE model = $1`, [model],
+      )
+      const hit = row.rows[0]
+      if (hit) value = { inPerMtok: Number(hit.price_in_per_mtok), outPerMtok: Number(hit.price_out_per_mtok) }
+    } catch (error) {
+      // 表不存在（该部署没装 llm-gateway）与查询失败都走这里：两者都不该让计量失败——
+      // 台账本身比成本列更重要，静默降级到「成本未知」并由下面那条 warn 说出来。
+      if (!this.warnedModels.has(model)) {
+        this.warnedModels.add(model)
+        // eslint-disable-next-line no-console
+        console.warn(`metering: 读取 llm_providers 费率失败（模型 ${model}），本次起成本按未计处理：`,
+          error instanceof Error ? error.message : String(error))
+      }
+      return undefined
+    }
+    this.rateCache.set(model, value)
+    if (value === null && !this.warnedModels.has(model)) {
+      this.warnedModels.add(model)
+      // eslint-disable-next-line no-console
+      console.warn(`metering: llm_providers 里没有模型 ${model} 的费率，agent 发起的调用成本将记为 0；` +
+        '补一行费率即可让历史之后的调用恢复计量（已入账的行不改写——台账是 append-only）')
+    }
+    return value ?? undefined
   }
 
   async init(): Promise<void> {
@@ -188,6 +253,25 @@ export class PgMeteringSeam implements MeteringSeam {
         await client.query('ROLLBACK')
         return { approved: false, reason: 'denied-user-budget', ledgerRef: '', state }
       }
+      // 作用域金额上限（一次工作的封顶）。**有行才查**：没有行 = 这次工作没有封顶，
+      // 与「无预算记录时的隐性额度」同一条语义；把它当成「上限是 0」会把每一条没设过
+      // 上限的执行全部拒掉。
+      //
+      // 判据是「**已经花超了**」而不是「这一次会不会超」：预计量是 token，而上限是钱，
+      // 两者在这条路径上没法换算。代价是允许**一次**越界（把它顶过线的那次调用），
+      // 之后每次调用都会被拦。这是拿不到预估时的诚实做法——编一个换算率反而会让上限
+      // 看起来在精确执法。
+      const cap = await client.query<{ cap_cents: string; spent_cents: string }>(
+        `SELECT cap_cents, spent_cents FROM budget_scope_caps WHERE scope = $1 AND id = $2`,
+        [SCOPE_GOVERNED_RUN, ctx.sessionRef],
+      )
+      const capRow = cap.rows[0]
+      if (capRow !== undefined && Number(capRow.spent_cents) >= Number(capRow.cap_cents)) {
+        await client.query('ROLLBACK')
+        // state 报 `hard`：它与 approved 必须自洽（`approved ⟺ state !== 'hard'`），
+        // 而这条拒因本来就是硬顶——没有软限额、没有透支，一次工作没有「下个周期」可言。
+        return { approved: false, reason: 'denied-scope-budget', ledgerRef: '', state: 'hard' }
+      }
       await client.query('COMMIT')
       return { approved: true, reason: 'ok', ledgerRef: '', state }
     } finally {
@@ -195,7 +279,43 @@ export class PgMeteringSeam implements MeteringSeam {
     }
   }
 
+  /**
+   * 按费率推一次调用的成本。公式与 `llm-gateway/internal/server/server.go:222` 的
+   * `cost = (input*PriceIn + output*PriceOut)/1e6` **逐字一致**。
+   *
+   * 费率只有一份真相源（`llm_providers`），公式却写了两遍——一处改而另一处不改时，两边的
+   * 成本会**静默分叉**（同一笔调用在网关侧与节点侧报出不同的价）。各自的测试钉住自己的
+   * 结果，所以这条注释的作用是让人在改任一处时想到另一处。
+   *
+   * 拿不到费率时返回 0，**不猜价**：编一个默认费率会让成本看起来有了，而它是错的，
+   * 且错得没有任何痕迹。「为什么是 0」由 `ratesFor` 只抱怨一次。
+   */
+  private async costOf(record: MeterRecord): Promise<number> {
+    const rates = await this.ratesFor(record.model)
+    if (!rates) return 0
+    const input = record.inputTokens
+    const output = record.outputTokens
+    let cost: number
+    if (input !== undefined && output !== undefined) {
+      cost = (input * rates.inPerMtok + output * rates.outPerMtok) / 1e6
+    } else {
+      // 只知道总数、不知道拆分时，两价取**较高**者计。
+      //
+      // 这是刻意的保守方向：低估会让金额上限**晚响**（超支已经发生），而高估只是让账更
+      // 保守。金额上限是这个成本数唯一的执法用途，所以两个方向的代价不对等。真正的修法
+      // 是调用方把 input/output 分开给（节点侧的 hook 已经这么做）。
+      cost = (record.tokens * Math.max(rates.inPerMtok, rates.outPerMtok)) / 1e6
+    }
+    return Number.isFinite(cost) && cost > 0 ? cost : 0
+  }
+
   async commit(record: MeterRecord): Promise<void> {
+    // 发出方给了价就用它的（网关侧自己算得出）；没给才按费率推。
+    //
+    // **`undefined` 与 `0` 在这里分叉**：省略 = 请本函数算；显式 0 = 免费调用，照收。
+    // 合并两者的后果是「没人算过价的账」在台账里与「价格真的是零的账」长得一样，
+    // 而前者需要有人去补费率。
+    const costUsd = record.costUsd ?? await this.costOf(record)
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
@@ -210,6 +330,19 @@ export class PgMeteringSeam implements MeteringSeam {
       const upd = `UPDATE budget_trees SET budget = budget - $2 WHERE kind = $1 AND id = $3`
       await client.query(upd, ['user', record.tokens, record.context.userId])
       await client.query(upd, ['project', record.tokens, record.context.projectId])
+      // 作用域上限同步扣减（**钱**，与上面两条的 token 不同单位——这也是它单独一张表的
+      // 理由）。没有行时不建行：不限额不等于「上限 0」。
+      //
+      // scope 固定为受治理执行、id 取会话 ref：一次受治理执行的全部花费都记在它自己的
+      // 会话上，所以这个会话里的每一次模型调用都该计入那次执行的上限。将来若出现第二种
+      // 作用域，`MeterRecord` 需要一个显式的 scope 字段——**不要**在这里猜第二套规则。
+      const costCents = costUsd * 100
+      if (costCents > 0) {
+        await client.query(
+          `UPDATE budget_scope_caps SET spent_cents = spent_cents + $3 WHERE scope = $1 AND id = $2`,
+          [SCOPE_GOVERNED_RUN, record.context.sessionRef, costCents],
+        )
+      }
       const event: CostEvent = {
         context: record.context,
         costType: 'llm.tokens',
@@ -220,7 +353,7 @@ export class PgMeteringSeam implements MeteringSeam {
         // 处理方式不同——前者等接线，后者是 bug。
         traceId: record.traceId ?? 'legacy-llm-cross-section',
         emitter: 'metering:llm-cross-section',
-        costUsd: record.costUsd,
+        costUsd,
         tokens: record.tokens,
         model: record.model,
       }
@@ -437,6 +570,36 @@ export class PgMeteringSeam implements MeteringSeam {
        ON CONFLICT (kind, id) DO NOTHING`,
       [kind, id, defaultBudget],
     )
+  }
+
+  /**
+   * 设一次工作的金额上限（`capCents`，单位**分**）。
+   *
+   * 重复设即覆盖，**并把已花清零**：它表达的是「这次工作的额度」。不清零会得到一个很
+   * 隐蔽的形态——重跑一次同样的执行，上限还没开始就被上一轮的账顶满了。
+   */
+  async setCap(scope: string, id: string, capCents: number): Promise<void> {
+    if (!Number.isSafeInteger(capCents) || capCents < 0) {
+      throw new RangeError(`metering: 上限必须是非负整数分，收到 ${capCents}`)
+    }
+    await this.pool.query(
+      `INSERT INTO budget_scope_caps (scope, id, cap_cents, spent_cents) VALUES ($1,$2,$3,0)
+       ON CONFLICT (scope, id) DO UPDATE SET cap_cents = EXCLUDED.cap_cents, spent_cents = 0`,
+      [scope, id, capCents],
+    )
+  }
+
+  async clearCap(scope: string, id: string): Promise<void> {
+    await this.pool.query(`DELETE FROM budget_scope_caps WHERE scope = $1 AND id = $2`, [scope, id])
+  }
+
+  async spentCents(scope: string, id: string): Promise<number | undefined> {
+    const rows = await this.pool.query<{ spent_cents: string }>(
+      `SELECT spent_cents FROM budget_scope_caps WHERE scope = $1 AND id = $2`, [scope, id],
+    )
+    // 没有行返回 `undefined` 而不是 0：「没设过上限」与「设了但一分没花」不是一回事，
+    // 而 0 会把前者说成后者。
+    return rows.rows[0] === undefined ? undefined : Number(rows.rows[0].spent_cents)
   }
 
   async close(): Promise<void> {

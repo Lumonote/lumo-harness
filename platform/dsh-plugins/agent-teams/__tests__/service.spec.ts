@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { channelId, MemoryCourier, type TeamCourier } from '../src/courier.ts'
+import { addTasks } from '../src/model.ts'
 import { buildMemberPrompt, AgentTeamsService, type MemberSurface } from '../src/service.ts'
 import { MemoryTeamStore } from '../src/store.ts'
 import type { MemberProviderChoice, MemberRun, MemberSeam, MemberStartRequest } from '../src/roster.ts'
@@ -10,22 +11,32 @@ const SIGNAL = new AbortController().signal
 
 const PROVIDER: MemberProviderChoice = { provider: 'spawn', kind: 'in-process', reason: 'test' }
 
-/** 记录每次派发的请求，并回一个确定性结果。 */
-function recordingSeam(reply: (request: MemberStartRequest) => { text: string; stopReason?: string } = request => ({ text: `完成 ${request.label}` })): {
+/**
+ * 记录每次派发的请求，并回一个确定性结果。
+ *
+ * `providers` 是 `list()` 报出的可用 provider 名。默认只报装配期那一个；
+ * 传多个是为了覆盖 §24.3.1 的**逐次选择**（延续性任务要走 `fork`）。
+ */
+function recordingSeam(
+  reply: (request: MemberStartRequest) => { text: string; stopReason?: string } = request => ({ text: `完成 ${request.label}` }),
+  providers: readonly string[] = [PROVIDER.provider],
+): {
   seam: MemberSeam
-  calls: { provider: string; request: MemberStartRequest }[]
+  /** `runId` 一并记下来：断言证据时要拿它做**非循环**比对（在测试里重算 seam 的 id 公式
+   *  等于把公式抄了第二份，两边一起改就一起错）。 */
+  calls: { provider: string; request: MemberStartRequest; runId: string }[]
 } {
-  const calls: { provider: string; request: MemberStartRequest }[] = []
+  const calls: { provider: string; request: MemberStartRequest; runId: string }[] = []
   const seam: MemberSeam = {
-    list: () => [PROVIDER.provider],
+    list: () => [...providers],
     start: async (provider, request) => {
-      calls.push({ provider, request })
       const { text, stopReason } = reply(request)
       const run: MemberRun = {
-        id: `child-${calls.length}`,
+        id: `child-${calls.length + 1}`,
         result: Promise.resolve({ output: [{ type: 'text', text }], stopReason: stopReason ?? 'completed' }),
         dispose: async () => {},
       }
+      calls.push({ provider, request, runId: run.id })
       return run
     },
   }
@@ -381,6 +392,133 @@ describe('成员 prompt 构造', () => {
     expect(prompt).toContain('团队目标：把目标拆开做完')
     expect(prompt).toContain('你的任务 t1：取数')
     expect(prompt).toContain('不要复述任务描述')
+  })
+
+  it('验收条件随任务发给成员（§24.1：成员可见）', async () => {
+    const { seam } = recordingSeam()
+    const service = makeService(seam)
+    const id = await teamWith(service, 'pipeline', ['取数'])
+    await service.mutate(id, team =>
+      addTasks(team, [{ subject: '取数', acceptance: 'p95 降到 200ms 以下' }], NOW).team)
+
+    const team = await service.get(id)
+    // `teamWith` 已经种下 t1，所以刚加的是最后一条 —— 不写死 id，免得将来种子任务数变了假红。
+    const target = team.tasks.at(-1)!
+    expect(target.acceptance).toBe('p95 降到 200ms 以下')
+    const prompt = buildMemberPrompt(team, target.id, team.members[0]!).join('\n')
+    expect(prompt).toContain('验收条件')
+    expect(prompt).toContain('p95 降到 200ms 以下')
+  })
+
+  it('没有验收条件时不印这一段（免得成员对着空条件猜）', async () => {
+    const { seam } = recordingSeam()
+    const service = makeService(seam)
+    const id = await teamWith(service, 'pipeline', ['取数'])
+    const team = await service.get(id)
+    const prompt = buildMemberPrompt(team, 't1', team.members[0]!).join('\n')
+    expect(prompt).not.toContain('验收条件')
+  })
+
+  it('延续性任务经 fork 派发，正交任务仍走装配期 provider（§24.3.1 接线）', async () => {
+    // 纯函数单测绿不等于接线对：这条证明 `dispatchClaimed` 真的把 task 上的
+    // `continuesContext` 传给了选择判据，并且真的用了选出来的 provider。
+    const { seam, calls } = recordingSeam(undefined, ['spawn', 'fork'])
+    const service = makeService(seam)
+    const id = await teamWith(service, 'pipeline', ['取数'])
+    await service.mutate(id, team => addTasks(team, [
+      { subject: '延续任务', continuesContext: true },
+      { subject: '正交任务' },
+    ], NOW).team)
+
+    const team = await service.get(id)
+    const continuation = team.tasks.find(task => task.continuesContext === true)!
+    const orthogonal = team.tasks.find(task => task.subject === '正交任务')!
+
+    await service.claim(id, continuation.id, 'alice')
+    await service.dispatchClaimed({
+      teamId: id, taskId: continuation.id, member: 'alice',
+      attempt: (await service.get(id)).tasks.find(t => t.id === continuation.id)!.attempt,
+      parent: {}, signal: SIGNAL,
+    })
+    expect(calls.at(-1)!.provider).toBe('fork')
+
+    await service.claim(id, orthogonal.id, 'alice')
+    await service.dispatchClaimed({
+      teamId: id, taskId: orthogonal.id, member: 'alice',
+      attempt: (await service.get(id)).tasks.find(t => t.id === orthogonal.id)!.attempt,
+      parent: {}, signal: SIGNAL,
+    })
+    expect(calls.at(-1)!.provider).toBe('spawn')
+  })
+
+  it('空白验收条件与缺省同待遇（口径与收活判据一致）', async () => {
+    // 这条守的是 §24.2 之后的双消费者一致性：prompt 印了、收活判 no-criteria，
+    // 是这类判据最典型的自相矛盾。
+    const { seam } = recordingSeam()
+    const service = makeService(seam)
+    const id = await teamWith(service, 'pipeline', ['取数'])
+    await service.mutate(id, team =>
+      addTasks(team, [{ subject: '取数', acceptance: '   ' }], NOW).team)
+
+    const team = await service.get(id)
+    const target = team.tasks.at(-1)!
+    expect(target.acceptance).toBe('   ')
+    const prompt = buildMemberPrompt(team, target.id, team.members[0]!).join('\n')
+    expect(prompt).not.toContain('验收条件')
+  })
+})
+
+describe('证据与验收判据的接线（§24.1 / §23.4）', () => {
+  it('派发写回时把子 Run 身份作为证据带上板', async () => {
+    const { seam, calls } = recordingSeam()
+    const service = makeService(seam)
+    const id = await teamWith(service, 'pipeline', ['取数'])
+    await service.mutate(id, team => addTasks(team, [{ subject: '取数', acceptance: '有结论' }], NOW).team)
+
+    const round = await service.runRound({ teamId: id, parent: {}, signal: SIGNAL })
+    const target = (await service.get(id)).tasks.at(-1)!
+    // 证据是**系统已知**的（派发方拿着 MemberRun.id），不是成员自报的。
+    expect(target.evidence).toEqual([`run:${calls.at(-1)!.runId}`])
+    // 有验收条件 + 有证据 → 可以自动验收。这条走通了，才说明 §14 判据 4 的前提成立。
+    expect(round.dispatched.at(-1)!.acceptance).toEqual({ accept: true })
+  })
+
+  it('没有验收条件的交付判 no-criteria，即使证据齐全', async () => {
+    // 反例方向很重要：证据齐全不该「顺手」让它过关——验收条件缺失是**派发方**的缺陷，
+    // 而证据齐全只是执行方做对了。两者混在一起，派发方就永远学不到要写验收条件。
+    const { seam, calls } = recordingSeam()
+    const service = makeService(seam)
+    const id = await teamWith(service, 'pipeline', ['取数'])
+    const round = await service.runRound({ teamId: id, parent: {}, signal: SIGNAL })
+    const target = (await service.get(id)).tasks[0]!
+    expect(target.evidence).toEqual([`run:${calls[0]!.runId}`])
+    expect(round.dispatched[0]!.acceptance).toEqual({ accept: false, reason: 'no-criteria' })
+  })
+
+  it('失败的派发不写证据（没跑完就没有「结论的出处」）', async () => {
+    const { seam } = recordingSeam(() => ({ text: '炸了', stopReason: 'error' }))
+    const service = makeService(seam)
+    const id = await teamWith(service, 'pipeline', ['取数'])
+    await service.runRound({ teamId: id, parent: {}, signal: SIGNAL })
+    const target = (await service.get(id)).tasks[0]!
+    expect(target.status).toBe('failed')
+    expect(target !== undefined && 'evidence' in target).toBe(false)
+  })
+
+  it('写回被拒时不给验收结论（不给基于旧状态编出来的结论）', async () => {
+    // 代数不符：写回作废，任务板上没有这次交付。此时若还回一个 accept，
+    // 协调者会以为「这次交付被验过了」——而它根本没上板。
+    const { seam } = recordingSeam()
+    const service = makeService(seam)
+    const id = await teamWith(service, 'pipeline', ['取数'])
+    await service.claim(id, 't1', 'alice')
+    await service.reassign(id, 't1', 'bob')          // 代数 +1，alice 的写回随之作废
+
+    const stale = await service.dispatchClaimed({
+      teamId: id, taskId: 't1', member: 'bob', attempt: 1, parent: {}, signal: SIGNAL,
+    })
+    expect(stale.ok).toBe(true)
+    expect(stale.acceptance).toBeUndefined()
   })
 })
 

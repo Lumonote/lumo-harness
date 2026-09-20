@@ -86,6 +86,8 @@ export interface Config {
   connectorUrl: string
   governanceUrl: string
   registryUrl: string
+  /** 会话控制面（§8.4.3 的 Session Console 后端）。空串 = 本部署没接线，控制台面返回 503。 */
+  sessionControlUrl: string
   realm: string
   userId: string
   roles: string[]
@@ -117,6 +119,11 @@ export interface Config {
 
 export const Config: z<Config> = z.object({
   schedulerUrl: z.string(), projectsUrl: z.string(), flowsUrl: z.string(), connectorUrl: z.string(), governanceUrl: z.string(), registryUrl: z.string().default(''),
+  // 有缺省（空串）**不是**给 localhost 兜底：空串是「本部署没有这个服务」的显式标记，
+  // 路由据此回 503。若这里放一个 http://127.0.0.1:8092 之类的值，一个没接线的部署会去
+  // 连本机端口，症状变成「控制面连不上」——排查方向指向网络，而真实原因是这个部署没接线。
+  // 同一条规矩见 `dsh-plugins/control` 的 LUMO_SESSION_CONTROL_URL。
+  sessionControlUrl: z.string().default(''),
   realm: z.string(), userId: z.string(), roles: z.array(z.string()), projectId: z.string(), deptId: z.string(), controlPlaneToken: z.string(), identityAssertionSecret: z.string().default(''),
   timeoutMs: z.number().default(5000),
   deploymentMode: z.union(['local', 'standalone', 'cluster'] as const).default('standalone'),
@@ -137,7 +144,7 @@ export const Config: z<Config> = z.object({
   skillhubSnapshotFile: z.string().default('.lumo/skill-snapshot.json'),
 })
 
-type ServiceName = 'scheduler' | 'projects' | 'flows' | 'connector' | 'governance' | 'registry'
+type ServiceName = 'scheduler' | 'projects' | 'flows' | 'connector' | 'governance' | 'registry' | 'session-control'
 interface UpstreamResult { ok: boolean; status: number; data: unknown; error?: string }
 
 interface PluginSummary {
@@ -156,6 +163,7 @@ function base(config: Config, service: ServiceName): string {
     connector: config.connectorUrl,
     governance: config.governanceUrl,
     registry: config.registryUrl,
+    'session-control': config.sessionControlUrl,
   }[service].replace(/\/+$/u, '')
 }
 
@@ -275,6 +283,18 @@ function safeID(value: string | undefined): string | undefined {
 
 function isRealmAdmin(identity: RequestIdentity): boolean {
   return identity.roles.some(role => role === 'platform_admin' || role === 'realm_admin' || role === 'admin')
+}
+
+// 控制面认的角色是**闭集**，写在 `platform/deploy/policies/session-control.rego` 的
+// `commands` 表里：platform_admin / realm_admin / admin / approver / operator。
+//
+// 按权限从高到低取第一个被认出的角色，而不是 `identity.roles[0]`：只主张一个角色，
+// 取到的若是治理侧的 `owner`，控制面会回「角色未被授予该指令」，而这个人其实还持有
+// `realm_admin`——一个本可放行的指令被角色**顺序**挡掉，症状是「同一个人有时能按有时不能」。
+// admin 同时包含 operator 与 approver 的全部指令，所以它排在两者之前。
+const CONTROL_ROLES = ['platform_admin', 'realm_admin', 'admin', 'approver', 'operator'] as const
+function controlRole(identity: RequestIdentity): string | undefined {
+  return CONTROL_ROLES.find(role => identity.roles.includes(role))
 }
 
 function requireClusterReady(config: Config, res: ServerResponse): boolean {
@@ -1095,6 +1115,49 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     const runID = safeID(taskRunResult[2])
     if (taskID === undefined || runID === undefined) { writeJson(res, 400, { error: 'invalid task or run id' }); return }
     writeUpstream(res, await upstream(config, identity, 'governance', `/v1/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/result`, req))
+    return
+  }
+
+  // ---- 会话控制面（§8.4.3 的 Session Console 后端） ----
+  //
+  // 三条路径：读面（状态 + 按钮可用性 + 队列现场）、时间线、写面（一条控制指令）。
+  //
+  // **realm / role / actor 由代理按已验证会话覆盖，浏览器不能自报。** 控制面只认共享令牌，
+  // 它自己的注释写着身份是「调用方主张 + OPA 判定」——也就是说，谁转发请求体谁就在主张身份。
+  // 代理这一层是整条链上唯一知道真实身份的地方（cluster-management.md：浏览器不提供可信身份），
+  // 所以主张必须在这里落地，而不是把它当作客户端的输入转发过去。
+  const sessionControlEvents = pathname.match(/^\/lumo\/api\/sessions\/([^/]+)\/control\/events$/u)
+  if (req.method === 'GET' && sessionControlEvents !== null) {
+    const sessionRef = safeID(sessionControlEvents[1])
+    if (sessionRef === undefined) { writeJson(res, 400, { error: 'invalid session ref' }); return }
+    // 游标与 limit 原样透传：控制面自己校验并回 400（`after` 非负、`limit` 正整数并夹到 500）。
+    // 在这里再抄一份校验等于同一个契约面的第二份实现——漂移后症状是「某条查询被静默改写」。
+    const query = new URL(req.url ?? '/', 'http://lumo.local').search
+    writeUpstream(res, await upstream(config, identity, 'session-control', `/v1/sessions/${encodeURIComponent(sessionRef)}/control/events${query}`, req))
+    return
+  }
+
+  const sessionControl = pathname.match(/^\/lumo\/api\/sessions\/([^/]+)\/control$/u)
+  if (sessionControl !== null) {
+    const sessionRef = safeID(sessionControl[1])
+    if (sessionRef === undefined) { writeJson(res, 400, { error: 'invalid session ref' }); return }
+    if (req.method === 'GET') {
+      writeUpstream(res, await upstream(config, identity, 'session-control', `/v1/sessions/${encodeURIComponent(sessionRef)}/control`, req))
+      return
+    }
+    if (req.method === 'POST') {
+      const role = controlRole(identity)
+      // 认不出角色时**不转发**：把治理侧的 `owner`/`editor` 原样发过去会得到
+      // 「角色未被授予该指令」，读起来像「你权限不够」，而事实是「这个面不认识你的角色」。
+      // 两种拒绝该找的人不同——前者找管理员授权，后者是部署没有把治理角色映射到控制角色。
+      if (role === undefined) { writeJson(res, 403, { error: 'no_control_role', detail: '当前身份在控制面上没有可用角色（需要 platform_admin / realm_admin / admin / approver / operator 之一）' }); return }
+      let body: Record<string, unknown>
+      try { body = await readJson(req) } catch (error) { writeJson(res, error instanceof RangeError ? 413 : 400, { error: error instanceof Error ? error.message : 'invalid request body' }); return }
+      const forwarded = { ...body, realm: identity.realm, role, actor: identity.userId }
+      writeUpstream(res, await upstream(config, identity, 'session-control', `/v1/sessions/${encodeURIComponent(sessionRef)}/control`, req, 'POST', Buffer.from(JSON.stringify(forwarded), 'utf8')))
+      return
+    }
+    writeJson(res, 405, { error: 'method_not_allowed' })
     return
   }
 

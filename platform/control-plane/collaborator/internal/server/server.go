@@ -71,6 +71,20 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /docs/{docID}/publish", s.handlePublish)
 	mux.HandleFunc("GET /docs/{docID}/comments", s.handleComments)
 	mux.HandleFunc("POST /docs/{docID}/comments", s.handleAddComment)
+
+	// 线程档位（§24.2）：本服务是 `threads` 的唯一写入方，见 internal/server/threads.go。
+	// 路由挂在协作服务上而不是新起一个服务：线程的读面（看板、协调者）与文档的读面是
+	// 同一批调用方，多一个必须被发现的地址只会多一处可能配错的地方。
+	mux.HandleFunc("POST /threads", s.handleCreateThread)
+	mux.HandleFunc("GET /threads", s.handleListThreads)
+	mux.HandleFunc("GET /threads/{threadID}", s.handleGetThread)
+	mux.HandleFunc("POST /threads/{threadID}/state", s.handleThreadState)
+	mux.HandleFunc("POST /threads/{threadID}/node-loss", s.handleThreadNodeLoss)
+	// 按节点上报失联 + 通知的读面（§24.2.3(4) 的信号链：心跳侧上报 → 标记 failed →
+	// 通知协调者）。注意与上面那条的路径形状不同：本条的 `node-loss` 是**集合**上的动作
+	// （该节点上的全部线程），上面那条是单条线程上的动作。
+	mux.HandleFunc("POST /threads/node-loss", s.handleNodeLoss)
+	mux.HandleFunc("GET /threads/node-loss-notices", s.handleNodeLossNotices)
 	return mux
 }
 

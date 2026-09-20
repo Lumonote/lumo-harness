@@ -115,6 +115,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/tasks/{taskID}/report", s.createTaskReport)
 	mux.HandleFunc("POST /v1/tasks/{taskID}/report/confirm", s.confirmTaskReport)
 	mux.HandleFunc("POST /v1/reports/{reportID}/confirm", s.confirmReportByID)
+	s.registerDecisionRoutes(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})

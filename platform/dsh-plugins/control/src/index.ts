@@ -40,6 +40,8 @@ import type {} from '@deepseek-ai/dsh-tools'
 
 import { DEFAULT_DISPATCH_TIMEOUT_MS, PgControlSeam } from './pg-control.ts'
 import { controlActuation, controlGate } from './gate.ts'
+import { toolRelease, type ReleaseClassifier } from './release.ts'
+import { releaseClassifierOf, type ClassifierRules } from './classifier.ts'
 import {
   actuationStep,
   cancelSession,
@@ -76,11 +78,28 @@ export interface ControlConfig {
    * （local 形态）可以关掉：状态永远是 `running`，这一轮询是纯开销。
    */
   actuationPollMs?: number
+  /**
+   * 动作放行分类器（§24.5）的名单。**省略 = 不注册服务**。
+   *
+   * 这条可选性是本切片唯一的安全性质：没配时 `ctx.get('releaseClassifier')` 是
+   * `undefined`，闸门走 fail-closed 分支，行为与接线前**逐字节一致**；配了即是一次
+   * **显式**取舍——承认名单内的副作用工具在只读档下可以不等人的。
+   *
+   * 实现形态见 `classifier.ts` 的文件头：它是一次落地，是可替换件，换掉它不需要动闸门。
+   */
+  classifier?: ClassifierRules
 }
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
     sessionControl: ControlSeam
+    /**
+     * 动作放行分类器（§24.5）。**可选服务**：闸门只认接口，实现形态仍是可替换件
+     * （§24 风险 R2）。本插件带一个最小实现（`classifier.ts` 的前缀名单），但**默认不装配**
+     * ——没配 `classifier` 就不 provide，缺席时 `toolRelease` 走 fail-closed 分支，
+     * 行为与接线前逐字节一致。
+     */
+    releaseClassifier?: ReleaseClassifier
   }
 }
 
@@ -95,6 +114,9 @@ export const Config: z<ControlConfig> = z.object({
   controlPlaneToken: z.string(),
   dispatchTimeoutMs: z.number(),
   actuationPollMs: z.number(),
+  classifier: z.object({
+    allowPrefixes: z.array(z.string()),
+  }),
 }) as unknown as z<ControlConfig>
 
 /**
@@ -104,10 +126,17 @@ export const Config: z<ControlConfig> = z.object({
  */
 export const DEFAULT_ACTUATION_POLL_MS = 1_000
 
-/** 暂停态下一律拒绝的工具前缀（外部写副作用；与 R2 幂等要求同源） */
-const SIDE_EFFECT_TOOL_PREFIXES = ['bash', 'pwsh', 'write', 'edit', 'connector_', 'knowledge_publish']
-
 export { controlGate, controlActuation, type ControlGate, type ControlActuation } from './gate.ts'
+export {
+  DEFAULT_TOOL_FACTS, SIDE_EFFECT_TOOL_PREFIXES, isSideEffectTool, toolRelease,
+  type ReleaseClassifier, type ToolFacts, type ToolRelease,
+} from './release.ts'
+// 分类器是**可替换件**（§24 风险 R2）：本插件提供一个最小实现并把它导出，是为了让
+// 换掉它成为一次显式动作（换实现 + 换装配行），而不是一次对 `release.ts` 的修改。
+export {
+  AllowlistClassifier, classifyByAllowlist, releaseClassifierOf,
+  type ClassifierRules,
+} from './classifier.ts'
 export {
   actuationStep, cancelSession, claimedTarget, hasPendingWork, preStepDecision,
   restoreClaimed, wakeSession,
@@ -142,6 +171,24 @@ export function apply(ctx: Context, config: ControlConfig): void {
 
   ctx.provide('sessionControl', seam)
   void seam.init()
+
+  // 动作放行分类器（§24.5）：**可选**装配，判据在 `classifier.ts` 的 `releaseClassifierOf`。
+  // 没配 = 不 provide，闸门走 fail-closed 分支（只读档下副作用工具一律人审）——「默认装配
+  // 不改变既有行为」这条性质的全部实现就是下面这个分支，它由 `classifier.spec.ts` 钉住。
+  const classifier = releaseClassifierOf(config.classifier)
+  if (classifier === undefined) {
+    ctx.logger.info(
+      'lumo/control: 未装配动作放行分类器（§24.5）—— 只读档下的副作用工具一律进人审（fail-closed）',
+    )
+  } else {
+    ctx.provide('releaseClassifier', classifier)
+    // 装配了就要说出来：与上面那条「未配置控制面」同一理由——现场必须能看出这一次
+    // 放行是「名单命中」还是「压根没分类器」。
+    ctx.logger.info(
+      'lumo/control: 已装配动作放行分类器（%d 条前缀名单）—— 名单内的副作用工具在只读档下可直接放行',
+      config.classifier?.allowPrefixes.length ?? 0,
+    )
+  }
 
   /** 会话状态缓存（避免每个工具调用打一次 DB；控制指令生效延迟 ≤ ttl） */
   const stateCache = new Map<string, { state: SessionControlState; at: number }>()
@@ -207,26 +254,40 @@ export function apply(ctx: Context, config: ControlConfig): void {
   })
 
   // 挂点 3：工具执行前置闸（瀑布，必须 next()）。这是真正的执行闸门。
+  //
+  // 判据全部在 `release.ts` 的 `toolRelease` 里（§24.5 的「唯一判据来源」），挂点只做
+  // 「读状态 → 调它 → 记日志 / 抛错」三件事。
   ctx.on('tools/pre-execute', async function (exec, next) {
     const sessionRef = refOf(exec)
     if (sessionRef === undefined) return next()
 
     const state = await currentState(sessionRef)
-    const gate = controlGate(state)
     const toolName = String((exec as { name?: string }).name ?? '')
 
-    if (gate === 'allow') return next()
+    // 分类器是**可选**装配：本插件只在配置里给了 `classifier` 时才 provide 自己那个最小
+    // 实现（形态仍是可替换件，§24 风险 R2），否则这里拿到的是 undefined。没有它时
+    // `toolRelease` 走 fail-closed 分支，行为与接线前逐字节一致——这条性质由
+    // `release.spec.ts` 的接线前用例与 `classifier.spec.ts` 的装配判据共同锁住。
+    const classifier = ctx.get('releaseClassifier') as ReleaseClassifier | undefined
+    const release = await toolRelease(state, toolName, classifier)
 
-    if (gate === 'deny') {
-      ctx.logger.warn('lumo/control: 会话 %s 状态 %s —— 拒绝工具 %s', sessionRef, state, toolName)
-      throw new Error(`lumo/control: 会话处于 ${state} —— 拒绝工具执行`)
+    if (release.allow) {
+      // 分类挡位放行的记录。**只记放行**：拒绝路径本来就有控制面的审计行，
+      // 而「分类器替人放行了什么」此前没有任何地方能看到——这正是 §24.5 要求可审计的那一半。
+      if (release.band !== null) {
+        ctx.logger.info(
+          'lumo/control: 会话 %s 状态 %s —— 分类器放行副作用工具 %s（档 %s，理由 %s）',
+          sessionRef, state, toolName, release.band, release.reason,
+        )
+      }
+      return next()
     }
 
-    // read-only：只拒外部副作用，只读工具放行（便于暂停期间检视现场）
-    if (SIDE_EFFECT_TOOL_PREFIXES.some((p) => toolName.startsWith(p))) {
-      throw new Error(`lumo/control: 会话处于 ${state} —— 拒绝副作用工具 ${toolName}`)
-    }
-    return next()
+    ctx.logger.warn(
+      'lumo/control: 会话 %s 状态 %s —— 拒绝工具 %s（%s）',
+      sessionRef, state, toolName, release.reason,
+    )
+    throw new Error(`lumo/control: 会话处于 ${state} —— 拒绝工具 ${toolName}（${release.reason}）`)
   })
 
   // 挂点 4：主动生效轮询。补上两个「没人触发就不会发生」的动作。

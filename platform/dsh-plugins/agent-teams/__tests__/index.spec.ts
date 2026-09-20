@@ -18,6 +18,7 @@ import { describe, expect, it } from 'vitest'
 import { apply } from '../src/index.ts'
 import type { AgentTeamsService } from '../src/service.ts'
 import type { KvUnitLike, StorageFacetLike } from '../src/store.ts'
+import type { ThreadsRuntime } from '../src/threads.ts'
 
 /** 让 cordis 的 fiber 通知跑完（provide → notify 是异步收敛的）。 */
 const flush = (): Promise<void> => new Promise((resolve) => { setTimeout(resolve, 0) })
@@ -123,7 +124,12 @@ function boot(config: Parameters<typeof apply>[1] = {}, preset: { subagents?: st
 describe('装配', () => {
   it('只有 tools 也能装起来：工具面注册齐全，能力画像为「不能派发」', async () => {
     const { ctx, tools, service } = boot()
-    expect(tools.names).toHaveLength(11)
+    // 11 个团队工具 + 6 个线程工具（§24.2：建/查/推进/暂停/等/重派）。
+    expect(tools.names).toHaveLength(17)
+    expect(tools.names.filter(name => name.startsWith('agent_threads_'))).toEqual([
+      'agent_threads_create', 'agent_threads_status', 'agent_threads_advance',
+      'agent_threads_pause', 'agent_threads_await', 'agent_threads_reassign',
+    ])
     await flush()
     expect(service().capabilitiesOrNull()).toBeNull()
     // 只读用法仍然成立 —— 这才是 capabilitiesOrNull 存在的理由。
@@ -216,11 +222,61 @@ describe('装配', () => {
     await ctx.fiber.dispose()
   })
 
+  it('线程档位：agentThreads 始终提供，缺装配时能力画像如实反映', async () => {
+    // 线程面是**加档**（§24.2 的两档成员）：缺装配不该让整个插件起不来，但也不能
+    // 静默——能力画像让运维一眼看出缺的是注册表、节点身份还是工作区根。
+    const { ctx } = boot()
+    await flush()
+    const threads = ctx.get('agentThreads') as ThreadsRuntime
+    expect(threads.capabilities()).toEqual({
+      registry: false, durableWake: false, nodeIdentity: false, workspace: false, roundRunner: false,
+    })
+    // 缺注册表时动作响亮拒绝，而不是「什么也没发生」。
+    expect(() => threads.getThread('t-1')).toThrow(/注册表未装配/)
+    await ctx.fiber.dispose()
+  })
+
+  it('线程档位：配了协作服务地址但漏了身份时响亮留痕，线程面仍可用但不带注册表', async () => {
+    // 症状是「线程动作全部拒绝」，没有这条日志，现场会先怀疑协作服务挂了。
+    const ctx = new Context()
+    const lines = capture(ctx)
+    ctx.provide('tools', toolsSpy())
+    apply(ctx, { collaboratorUrl: 'http://collaborator:8081', nodeId: 'node-a' })
+    await flush()
+
+    const threads = ctx.get('agentThreads') as ThreadsRuntime
+    expect(threads.capabilities()).toMatchObject({ registry: false, nodeIdentity: true })
+    expect(lines.some(line => line.includes('没有 actingUserId'))).toBe(true)
+    await ctx.fiber.dispose()
+  })
+
+  it('线程档位：配置齐全时注册表与工作区根都装配上，mailbox 晚挂仍能升级为持久唤醒', async () => {
+    const ctx = new Context()
+    ctx.provide('tools', toolsSpy())
+    apply(ctx, {
+      collaboratorUrl: 'http://collaborator:8081',
+      actingUserId: 'u-1',
+      nodeId: 'node-a',
+      workspaceRoot: '/srv/lumo/ws',
+    })
+    await flush()
+
+    const threads = ctx.get('agentThreads') as ThreadsRuntime
+    expect(threads.capabilities()).toEqual({
+      registry: true, durableWake: false, nodeIdentity: true, workspace: true, roundRunner: false,
+    })
+    // 会合面是现取的：mailbox 晚一步挂上时，唤醒立刻升级为持久（等待项不再重启即丢）。
+    ctx.provide('mailbox', mailboxSpy())
+    await flush()
+    expect(threads.capabilities().durableWake).toBe(true)
+    await ctx.fiber.dispose()
+  })
+
   it('销毁时注销全部工具', async () => {
     const { ctx, tools, service } = boot({}, { subagents: ['spawn'] })
     await flush()
     await service().create({ id: 'demo', name: '演示', topology: 'pipeline', subjects: ['a'], captainSessionId: 's' })
-    expect(tools.live()).toBe(11)
+    expect(tools.live()).toBe(17)
 
     await ctx.fiber.dispose()
 

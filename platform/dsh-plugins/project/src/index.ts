@@ -33,7 +33,8 @@ export const Config: z<ProjectConfig> = z.object({
 })
 
 export function apply(ctx: Context, config: ProjectConfig): void {
-  const service = new ProjectService(config.connectionString)
+  // realm 随装配注入：决策记忆的读面（§24.4）强制 realm 过滤，而 realm 不可由模型指定。
+  const service = new ProjectService(config.connectionString, config.realm)
 
   ctx.effect(() => () => {
     void service.close()
@@ -115,4 +116,12 @@ export function apply(ctx: Context, config: ProjectConfig): void {
 
 export default apply
 export { ProjectService }
-export type { Project, ProjectDashboard, ProjectRole, ArtifactKind } from './service.ts'
+export type {
+  Project, ProjectDashboard, ProjectRole, ArtifactKind,
+  // 决策记忆（§24.4）：闭集、有界读面与两级投影
+  Decision, DecisionIndexRow, DecisionKind,
+} from './service.ts'
+export {
+  DECISION_KINDS, DECISION_INDEX_DEFAULT_LIMIT, DECISION_INDEX_MAX_LIMIT,
+  resolveDecisionIndexLimit,
+} from './service.ts'

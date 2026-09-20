@@ -80,9 +80,13 @@ func main() {
 		signSecret  = flag.String("sign-secret", envOr("LUMO_TERMINAL_SIGNING_SECRET", ""), "敏感动作签名密钥（空=未配置→fail-closed）")
 		presenceTTL = flag.Duration("presence-ttl", envOrDuration("LUMO_PRESENCE_TTL", 30*time.Second), "presence 过期时长（靠时间判定，不靠断开回调）")
 		maxFrame    = flag.Int("max-frame", envOrInt("LUMO_WS_MAX_FRAME", 1<<20), "单帧 payload 硬上限（字节）")
-		// 历史事件源：本进程默认无真实来源，必须显式开启；未开启则 WS 接入返回 503（诚实）。
-		// 只提供内存实现用于演示/测试；生产应接线真实来源（PG / 消息总线）。
-		memEvents = flag.Bool("mem-events", envOr("LUMO_TERMINAL_MEM_EVENTS", "") == "true", "启用内存事件源（仅测试/演示；生产应当接线真实来源）")
+		// 历史事件源：默认是复制式会话日志（PG）。`--mem-events` 换成内存实现，只用于
+		// 测试/演示（进程重启即丢，不持久化）。
+		memEvents = flag.Bool("mem-events", envOr("LUMO_TERMINAL_MEM_EVENTS", "") == "true", "改用内存事件源（仅测试/演示；生产用 PG 会话日志）")
+		// 实时推送的轮询周期。轮询而不是引入消息总线是刻意的：代价是一个周期的延迟，
+		// 换来的是不必再维护第二个必须与日志保持一致的真相源。0 或负值由 events 包
+		// 夹到 1s（它会自己兜底，不在这里复制一遍默认值）。
+		pollInterval = flag.Duration("poll-interval", envOrDuration("LUMO_TERMINAL_POLL_INTERVAL", time.Second), "实时事件轮询周期")
 	)
 	flag.Parse()
 
@@ -101,13 +105,30 @@ func main() {
 	}
 	defer pool.Close()
 
-	// 历史事件源：未配置真实来源时保持 nil，让 WS 接入诚实返回 503，绝不伪造空历史。
+	// 历史事件源 = 复制式会话日志（`session_log`，PG 是真相源）。
+	//
+	// 读它是**只读**的，因此不违反那张表的单写者 + fencing 约束：约束管的是写侧（外部
+	// 进程直插会撞 `(session_ref, seq)` 主键并把日志变成分叉），而 SELECT 既不取租约也
+	// 不写任何行，任意多个网关实例可以同时读。把这两件事混为一谈，会得出「终端必须由
+	// 承载节点自己代理」这个不必要的结论。
+	//
+	// 仍未配置来源时保持 nil，让 WS 接入诚实返回 503 —— 但那个分支现在只剩一个入口
+	// （`--mem-events` 之外还有池都建不起来的情况），不再是默认形态。
 	var source events.EventSource
-	if *memEvents {
+	switch {
+	case *memEvents:
 		source = events.NewMemory()
-		log.Warn("使用内存事件源（演示/测试用；生产应当接线真实 session/event 来源）")
-	} else {
-		log.Warn("未配置 session/event 历史源：终端网关将返回 503 直至部署接线（不伪造空历史）")
+		log.Warn("使用内存事件源（演示/测试用；生产应当用 PG 会话日志）")
+	default:
+		pgSource, err := events.NewPg(events.Options{Pool: pool, Interval: *pollInterval, Logger: log})
+		if err != nil {
+			// 走到这里说明连接池不可用，而上文刚用它建过池 —— 属于不可能的形态，
+			// 所以不当场降级：降级会得到一个「进程健康但永远 503」的部署。
+			log.Error("构造 PG 事件源失败", "err", err)
+			os.Exit(1)
+		}
+		source = pgSource
+		log.Info("事件源：PG 会话日志", "interval", pollInterval.String())
 	}
 
 	pres := presence.NewStore(*presenceTTL, nil)

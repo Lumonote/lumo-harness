@@ -6,7 +6,7 @@ import type { LogRecord } from '../../../shared/seam-contracts/session-log.ts'
 import { RedisHotLog } from '../src/hot-log.ts'
 import { apply } from '../src/index.ts'
 import { PgSessionLog } from '../src/pg-log.ts'
-import { schemaDsn } from './pg-schema.ts'
+import { schemaDsn, truncateSessionLog } from './pg-schema.ts'
 
 /**
  * 热层对**真 PG + 真 Redis** 跑。
@@ -66,7 +66,7 @@ async function withLog(fn: (log: PgSessionLog) => Promise<void>): Promise<void> 
   const log = new PgSessionLog(await schemaDsn(DSN!, 'session_log_hot_test'))
   try {
     await log.init()
-    await log.raw('TRUNCATE session_log, session_writer_lease')
+    await truncateSessionLog((sql) => log.raw(sql))
     await fn(log)
   } finally {
     await log.close()
@@ -88,7 +88,7 @@ async function withAssembly(
   const dsn = await schemaDsn(DSN!, 'session_log_hot_test')
   const pg = new PgSessionLog(dsn)
   await pg.init()
-  await pg.raw('TRUNCATE session_log, session_writer_lease')
+  await truncateSessionLog((sql) => pg.raw(sql))
   const ctx = new Context()
   ctx.provide('tools', new ToolsStub(ctx))
   apply(ctx, {

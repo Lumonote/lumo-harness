@@ -25,7 +25,8 @@ import './lumo.css'
 import { employeeFlowEdges, layoutCollaboration, type AgentInput, type EmployeeInput, type EmployeeState, type FlowTaskInput } from './collaboration-layout.ts'
 // 任务板与员工视图共用同一套几何常量，所以切换视图时同一件事不会跳到别处。
 import { layoutTaskBoard, type BoardTaskInput, type BoardTaskState, type TeamProgressInput } from './collaboration-board.ts'
-import { ClusterNodesPanel, SkillAccessPanel, ProjectMembersPanel, ConnectorManifestPanel, AgentPresetEditor, FlowManagementPanel, TaskIntentContractPanel, TaskCollaborationPanel, TaskEvidencePanel, type AgentPreset, type ProjectMember, type TaskIntentFacts, type TaskIntentContract, type TaskScoreBreakdown, type TaskResultFacts, type TaskCollaborationFacts } from './cluster-panels.tsx'
+import { ClusterNodesPanel, SkillAccessPanel, ProjectMembersPanel, ConnectorManifestPanel, AgentPresetEditor, FlowManagementPanel, TaskIntentContractPanel, TaskCollaborationPanel, TaskEvidencePanel, SessionControlPanel, ThreadBoardPanel, type AgentPreset, type ProjectMember, type TaskIntentFacts, type TaskIntentContract, type TaskScoreBreakdown, type TaskResultFacts, type TaskCollaborationFacts } from './cluster-panels.tsx'
+import type { ThreadFacts } from './thread-board.ts'
 
 // A desktop WebView can evaluate more than one copy of this bundle while the
 // native shell is recovering from a loader replay. Keep the root-scoped mount
@@ -2078,17 +2079,27 @@ interface CollabTeam {
   progress?: TeamProgressInput
 }
 
+/**
+ * `/lumo/api/delegations` 的行：协作图与线程看板读的是**同一批行**，只是两份切片。
+ *
+ * 分开声明而不是各拿一个宽类型：图要的是承担者与父子关系，看板要的是时间戳与节点
+ * （静默时长、等待上限都落在 `updated_at` 上）。合成一个类型之后，两边会开始互相以为
+ * 对方已经读过自己要的字段——而「看板把没有时间戳的行当成刚有动静」这类错不会报错。
+ */
+type DelegationRow = FlowTaskInput & ThreadFacts
+
 function CollaborationSurface() {
   const [users, setUsers] = useState<CollabUser[] | null>(null)
   const [nodes, setNodes] = useState<CollabNode[] | null>(null)
-  const [delegations, setDelegations] = useState<FlowTaskInput[] | null>(null)
+  const [delegations, setDelegations] = useState<DelegationRow[] | null>(null)
   const [teams, setTeams] = useState<CollabTeam[] | null>(null)
   const [absent, setAbsent] = useState<string[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [zoom, setZoom] = useState(0.8)
-  // 两个视图共用同一套几何常量，所以切换时同一件事不会跳到别处：
-  //   'people' 答「谁在等谁」，'board' 答「哪一条卡住了」。
-  const [view, setView] = useState<'people' | 'board'>('people')
+  // 三个视图共用同一批读面，切换时同一件事不会跳到别处：
+  //   'people' 答「谁在等谁」，'board' 答「哪一条卡住了」，
+  //   'threads' 答「现在该我做什么」——而且是分格回答：要进入心流的审，与只要一次点击的答。
+  const [view, setView] = useState<'people' | 'board' | 'threads'>('people')
   const [teamId, setTeamId] = useState<string | null>(null)
   const [goal, setGoal] = useState('')
 
@@ -2098,7 +2109,7 @@ function CollaborationSurface() {
     const [userFace, nodeFace, delegationFace, teamFace] = await Promise.allSettled([
       api<{ users?: CollabUser[] }>('/lumo/api/users'),
       api<{ nodes?: CollabNode[] }>('/lumo/api/desktop-nodes'),
-      api<FlowTaskInput[]>('/lumo/api/delegations'),
+      api<DelegationRow[]>('/lumo/api/delegations'),
       api<{ teams?: CollabTeam[] }>('/lumo/api/collaboration/teams'),
     ])
     const missing: string[] = []
@@ -2161,12 +2172,17 @@ function CollaborationSurface() {
     <div className="lumo-collaboration-stage">
       <div className="lumo-collaboration-toolbar">
         <button type="button" className="lumo-secondary lumo-small" onClick={() => void load()}>重新读取</button>
-        <button type="button" className="lumo-secondary lumo-small" onClick={() => setZoom(value => Math.max(0.4, Number((value - 0.1).toFixed(2))))}>−</button>
-        <span>空间缩放 {Math.round(zoom * 100)}%</span>
-        <button type="button" className="lumo-secondary lumo-small" onClick={() => setZoom(value => Math.min(1.6, Number((value + 0.1).toFixed(2))))}>＋</button>
+        {/* 缩放只对两张空间图有意义；看板是一列一列的字，给它留个缩放按钮只会让人点一下
+            然后发现什么也没发生。 */}
+        {view === 'threads' ? null : <>
+          <button type="button" className="lumo-secondary lumo-small" onClick={() => setZoom(value => Math.max(0.4, Number((value - 0.1).toFixed(2))))}>−</button>
+          <span>空间缩放 {Math.round(zoom * 100)}%</span>
+          <button type="button" className="lumo-secondary lumo-small" onClick={() => setZoom(value => Math.min(1.6, Number((value + 0.1).toFixed(2))))}>＋</button>
+        </>}
         <span className="lumo-collaboration-views" role="tablist" aria-label="协作视图">
           <button type="button" role="tab" aria-selected={view === 'people'} className={view === 'people' ? 'active' : ''} onClick={() => setView('people')}>协作空间</button>
           <button type="button" role="tab" aria-selected={view === 'board'} className={view === 'board' ? 'active' : ''} onClick={() => setView('board')}>任务流向</button>
+          <button type="button" role="tab" aria-selected={view === 'threads'} className={view === 'threads' ? 'active' : ''} onClick={() => setView('threads')}>线程看板</button>
         </span>
         {view === 'board' && teams !== null && teams.length > 0
           ? <label className="lumo-collaboration-team-filter">团队
@@ -2177,14 +2193,28 @@ function CollaborationSurface() {
           : null}
         <span className="lumo-collaboration-focus">{view === 'people'
           ? `${graph.placed.length} 名员工 · ${graph.edges.length} 条上下游 · ${graph.unbound.length} 个未绑定智能体`
-          : board === null
-            ? '还没有可显示的团队'
-            : `${board.placed.length} 条任务 · ${board.edges.length} 条依赖 · 阻塞 ${board.placed.filter(node => node.state === 'blocked').length} · 可认领 ${board.placed.filter(node => node.state === 'ready').length}`}</span>
+          : view === 'threads'
+            ? `${delegations?.length ?? 0} 条线程 · 按注意力分五格`
+            : board === null
+              ? '还没有可显示的团队'
+              : `${board.placed.length} 条任务 · ${board.edges.length} 条依赖 · 阻塞 ${board.placed.filter(node => node.state === 'blocked').length} · 可认领 ${board.placed.filter(node => node.state === 'ready').length}`}</span>
       </div>
       {absent.length > 0 ? <div className="lumo-cluster-feedback" role="status">
         以下读面这次没读到，图上对应部分为空：{absent.join('、')}。**空白不等于没有**——它只说明这一面没拿到。
       </div> : null}
-      {view === 'board'
+      {view === 'threads'
+        // 看板吃的是**同一个** `/lumo/api/delegations` 读面（`load` 里那次 allSettled 的
+        // 「委派任务」那一面），所以它不需要单独的请求，也不会与协作图说出两个版本的事实。
+        // `controlState` 显式传 false：控制态没有列表读面，所以「待轻量答」这一格
+        // 目前读不到——看板会照实说明缺什么，而不是把那格画成空的（见 thread-board.ts）。
+        ? <ThreadBoardPanel
+          threads={delegations ?? []}
+          loading={delegations === null && !absent.includes('委派任务')}
+          error={absent.includes('委派任务') ? '委派任务这一面这次没读到：看板为空只说明这一面没拿到，不说明没有线程。' : ''}
+          label={localizedTaskState}
+          controlState={false}
+        />
+        : view === 'board'
         ? (board === null || board.placed.length === 0
           ? <Empty>这个团队还没有任务。任务板按团队取——任务属于某个团队，不跨团队存在。</Empty>
           : <div className="lumo-collaboration-space">
@@ -2308,6 +2338,9 @@ function OperationsSurface() {
 	const [runEvidence, setRunEvidence] = useState<{ runID: string; result: TaskResultFacts | null } | null>(null)
 	const [evidenceError, setEvidenceError] = useState('')
 	const [evidenceBusy, setEvidenceBusy] = useState('')
+	// 会话控制台按 Run 打开：Run 是运维面唯一能拿到的、指向某个具体会话的句柄
+	// （`TaskRun.session_ref`）。没有它就无从知道该控制哪个会话，所以入口挂在 Run 行上。
+	const [controlSession, setControlSession] = useState('')
 	const [flowVersionDiff, setFlowVersionDiff] = useState<FlowVersionDiff | null>(null)
   const [selectedAssignee, setSelectedAssignee] = useState('')
   const [assignmentMode, setAssignmentMode] = useState<AssignmentMode>('auto')
@@ -2453,7 +2486,7 @@ function OperationsSurface() {
 		if (!full) { setNotice('该子任务不在当前可见的任务列表里，无法打开它的执行视图。'); return }
 		void showTaskRuns(full)
 	}
-	const closeTaskRuns = () => { setRunsTask(null); setTaskRuns([]); setTaskAudit([]); setTaskCollaboration(null); setCollaborationError(''); closeEvidence() }
+	const closeTaskRuns = () => { setRunsTask(null); setTaskRuns([]); setTaskAudit([]); setTaskCollaboration(null); setCollaborationError(''); setControlSession(''); closeEvidence() }
   const saveProfileTags = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); if (!profileUserID) return
     setProfileBusy(true); setProfileNotice('')
@@ -2507,8 +2540,9 @@ function OperationsSurface() {
     {runsTask ? <Section title={`执行详情 · ${runsTask.title}`} meta={`${taskRuns.length} 次不可变 Run · ${taskCollaboration?.summary.total ?? 0} 个子任务`} actions={<BusyButton className="lumo-secondary lumo-small" onClick={closeTaskRuns}>关闭</BusyButton>}>
       <TaskIntentContractPanel task={taskCollaboration?.task ?? runsTask} />
       <TaskCollaborationPanel progress={taskCollaboration} error={collaborationError} label={localizedTaskState} open={openChildTask} />
-      <div className="lumo-compact-list">{taskRuns.length ? taskRuns.map(run => <div key={run.id}><span><b>尝试 {run.attempt} · {localizedTaskState(run.state)}</b><small>{run.worker_id} · {run.assigned_node_id ?? '等待节点'}{run.last_error ? ` · ${run.last_error}` : ''}</small></span><em>{run.ended_at ? `结束 ${formatSync(run.ended_at)}` : run.started_at ? `开始 ${formatSync(run.started_at)}` : formatSync(run.created_at)}</em><BusyButton className="lumo-secondary lumo-small" busy={evidenceBusy === run.id} onClick={() => void loadRunEvidence(runsTask, run.id)}>查看证据</BusyButton></div>) : <Empty>该任务尚未生成 Run；创建新尝试时会保留旧调度记录。</Empty>}</div>
+      <div className="lumo-compact-list">{taskRuns.length ? taskRuns.map(run => <div key={run.id}><span><b>尝试 {run.attempt} · {localizedTaskState(run.state)}</b><small>{run.worker_id} · {run.assigned_node_id ?? '等待节点'}{run.last_error ? ` · ${run.last_error}` : ''}</small></span><em>{run.ended_at ? `结束 ${formatSync(run.ended_at)}` : run.started_at ? `开始 ${formatSync(run.started_at)}` : formatSync(run.created_at)}</em>{run.session_ref ? <BusyButton className="lumo-secondary lumo-small" onClick={() => setControlSession(current => current === run.session_ref ? '' : (run.session_ref ?? ''))}>会话控制</BusyButton> : null}<BusyButton className="lumo-secondary lumo-small" busy={evidenceBusy === run.id} onClick={() => void loadRunEvidence(runsTask, run.id)}>查看证据</BusyButton></div>) : <Empty>该任务尚未生成 Run；创建新尝试时会保留旧调度记录。</Empty>}</div>
       {runEvidence ? <TaskEvidencePanel runID={runEvidence.runID} result={runEvidence.result} error={evidenceError} busy={evidenceBusy !== ''} label={localizedTaskState} close={closeEvidence} /> : null}
+      {controlSession ? <SessionControlPanel request={api} sessionRef={controlSession} close={() => setControlSession('')} /> : null}
       <div className="lumo-compact-list"><header><b>操作审计</b><span>{taskAudit.length} 条</span></header>{taskAudit.length ? taskAudit.map(event => <div key={event.id}><span><b>{event.event}</b><small>{event.actor} · {Object.entries(event.detail).map(([key, value]) => `${key}=${String(value)}`).join(' · ') || '无额外详情'}</small></span><em>{formatSync(event.created_at)}</em></div>) : <Empty>尚无可显示的控制操作。</Empty>}</div>
     </Section> : null}
     {dashboard ? <DashboardSheet data={dashboard} clusterReady={data.deployment.clusterReady} close={() => setDashboard(null)} refresh={refreshDashboard} lifecycle={projectLifecycle} /> : null}

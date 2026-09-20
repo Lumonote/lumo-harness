@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   assertKnowledgeContract,
+  spaceAllowed,
   type KnowledgeDoc,
   type KnowledgeSeam,
 } from '../knowledge.ts'
@@ -22,6 +23,9 @@ class MemoryKnowledgeSeam implements KnowledgeSeam {
     const { realm, text } = req
     const hits = [...this.docs.entries()]
       .filter(([, v]) => v.doc.realm === realm) // realm 过滤：Provider 层强制
+      // 空间收窄走契约里的单点判据，而不是在这里另写一个 `spaces?.length`——后者会把
+      // `[]` 与省略合并成同一支，而契约专门断言两者产出不同结果（零条 vs 全部）。
+      .filter(([, v]) => spaceAllowed(v.doc.space, req.spaces))
       .filter(([, v]) => v.text.includes(text))
       .sort(([, a], [, b]) => (a.text === b.text ? 0 : b.text.length - a.text.length))
       .slice(0, req.topK)

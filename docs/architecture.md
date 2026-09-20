@@ -694,6 +694,11 @@ pull Task → 在 Slot 挂载 preset(cordis patch, isolate realm) → loop:
 | 流水线 Pipeline | 阶段串接 | subtask 间 `deps[]` 串联 |
 | 议会 Deliberation | 需多视角权衡（评审） | 多 agent 向同一 mailbox 发观点，planner 收敛 |
 
+> **协调者语义与两档成员见 §24**（`2026-09-20-cluster-multi-agent-coordinator-fleet-design.md`）：
+> 上表的 planner 是**分解者**；§24.1 另行定义**协调者**（只收汇报不看步骤、不执行故永不被阻塞、
+> 低 effort 高响应），并给成员分两档——**Worker**（本节的 one-shot，不变）与
+> **Thread**（可续跑完整会话，续跑即 §7.1 的跨节点 resume，**不引入 continuable 句柄**）。
+
 **高并发专项**：批处理网关、Backpressure 前置（Gateway 429 + Seam 熔断）、Redis 缓存工具结果/记忆、并行子代理 fan-out、数据/队友亲和。
 
 ### 7.4 多集群调度与执行监控
@@ -804,6 +809,11 @@ dsh 原生即异步友好（日志 durable 可 replay、`agent.inject()` 异步�
 | **reject/approve** | HITL 点 | 审批/否决（工具调用、发布、外部写等）；拒绝时回退到注入点 | §6.3 agent/turn-stopping + OPA HITL；§10.3（外部写默认 HITL） |
 | **replay** | 会话 | 从任意 session 事件点重放（构造场景、问题复现、竞态调试） | §4.2 复制日志 replay |
 | **degrade / limit** | 会话/群组 | 降级：模型切换、工具白名单收窄、并发限流（预算紧张时） | §6.4 限流/预算前置拦截；OPA scope 收窄 |
+
+> **指令闭集不扩（§24.5）**：上表八条指令是闭集，§24 不新增任何一条。§24 只改一件事——
+> **`approve` 可以由风险分类器行使**，且行使记录必须可审计（`feature=session/control`）。
+> 分类器**只能收窄不能放宽**：OPA 判否即否；分类器不可用时 fail-closed **回落到全人工**，
+> 绝不回落自动放行。动作放行三档（`AUTO` / `REVIEW` / `DENY`）的定义与兜底防自旋阈值见 §24.5。
 
 #### 8.4.2 权限与共享控制
 

@@ -13,6 +13,7 @@ import type {} from '@deepseek-ai/dsh-token-meter'
 import { Context } from '@deepseek-ai/cordis'
 
 import { PgMeteringSeam } from './pg-meter.ts'
+import type { MeterContext, MeterRecord } from '../../../shared/seam-contracts/metering.ts'
 
 export interface MeteringConfig {
   connectionString: string
@@ -52,6 +53,12 @@ export function shouldRunLocalDrain(config: MeteringConfig): boolean {
 
 export function apply(ctx: Context, config: MeteringConfig): void {
   const meter = new PgMeteringSeam(config.connectionString)
+
+  // 作用域金额上限的写入口（`ScopeCapSeam`）。**为什么要 provide**：设上限的是**调用方**
+  // ——受治理执行在开跑前给它那一次执行封顶——而配额本身由这里执法。没有这个服务，调用方
+  // 唯一的办法是直连 PG 写本插件的表，那就等于把 schema 复制一份出去（本仓明确反对：
+  // 「各自直连 PG 写台账就会有 N 份 schema 副本，必然漂移」）。
+  ctx.provide('meteringCaps', meter)
 
   const drainIntervalMs = Math.max(config.drainIntervalMs ?? 1000, 100)
   const drainBatchSize = config.drainBatchSize ?? 100
@@ -107,7 +114,11 @@ export function apply(ctx: Context, config: MeteringConfig): void {
     const stream = next()
     const sessionRef = (options as { session?: { id?: string } }).session?.id ?? 'system'
     const sessCtx = { ...context, sessionRef }
-    let tokens = 0
+    // 输入 / 输出**分开累计**：费率表给的是两个价（每百万 token），合并成一个数就没法
+    // 按各自的价格算。这里少记一个变量，下游就得拿「较高的那个价」去兜（见 pg-meter 的
+    // costOf），而兜出来的数比真实成本高——账是 append-only 的，写进去就改不回来了。
+    let inputTokens = 0
+    let outputTokens = 0
     let model = (options as { model?: string }).model ?? 'unknown'
     const delegatingStream = (async function* () {
       // 前置拦截：首 token 发出前预检双树预算（§6.4 限流前置语义）
@@ -119,15 +130,20 @@ export function apply(ctx: Context, config: MeteringConfig): void {
         const usage = (chunk as { usage?: Record<string, unknown> }).usage
         if (usage) {
           const u = usage as { input_tokens?: number; output_tokens?: number; prompt_tokens?: number; completion_tokens?: number }
-          tokens = (u.input_tokens ?? u.prompt_tokens ?? 0) + (u.output_tokens ?? u.completion_tokens ?? 0)
+          inputTokens = u.input_tokens ?? u.prompt_tokens ?? 0
+          outputTokens = u.output_tokens ?? u.completion_tokens ?? 0
         }
         yield chunk
       }
       // 流结束：扣账（明细 + 双树扣减）
+      //
+      // **不给 `costUsd`**：节点侧拿不到上游账单，价格只能由记账方从 `llm_providers`
+      // 的费率推（与网关侧同一个公式）。此前这里写死 `costUsd: 0`，于是 **agent 发起的
+      // 调用在台账里完全没有成本**——`usage_ledger.cost_usd` 恒为 0，分析读面的
+      // `SUM(cost_usd)` 一直少算这一路。网关侧那条路（南北向入口）不受影响，它自己算。
+      const tokens = inputTokens + outputTokens
       if (tokens > 0) {
-        void meter.commit({
-          context: sessCtx, tokens, model, costType: 'llm', costUsd: 0,
-        })
+        void meter.commit(meterRecordOf(sessCtx, inputTokens, outputTokens, model))
       }
     })()
     return delegatingStream
@@ -137,6 +153,34 @@ export function apply(ctx: Context, config: MeteringConfig): void {
   ctx.effect(() => () => {
     void meter.close()
   })
+}
+
+/**
+ * 组装一次 LLM 调用的记账记录。
+ *
+ * **导出是为了能单独钉住「不带 `costUsd`」这一条**——它正是最容易悄悄改回去的一行：
+ * 这里此前写的是 `costUsd: 0`，于是 agent 发起的调用在台账里完全没有成本。而这条改动
+ * 的失败形态是**静默的**（台账照样一行行入账，只是成本列恒为 0），所以它值得一条断言，
+ * 而不是靠读代码时注意到。
+ *
+ * 调用方（hook）只知道 token 数，不知道价格——那正是**省略**而非填 0 的理由：省略 =
+ * 「请记账方按费率推」，0 = 「知道，而且就是零元」。两者在台账里是同一个数字、不同的
+ * 事实，而只有前者需要有人去补费率。
+ */
+export function meterRecordOf(
+  context: MeterContext,
+  inputTokens: number,
+  outputTokens: number,
+  model: string,
+): MeterRecord {
+  return {
+    context,
+    tokens: inputTokens + outputTokens,
+    inputTokens,
+    outputTokens,
+    model,
+    costType: 'llm',
+  }
 }
 
 export default apply

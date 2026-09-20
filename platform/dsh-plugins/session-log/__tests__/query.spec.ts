@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest'
 import type { LogRecord } from '../../../shared/seam-contracts/session-log.ts'
 import { SeamError, seamErrorCode } from '../../../shared/seam-contracts/errors.ts'
 import { apply, PgSessionLog } from '../src/index.ts'
-import { schemaDsn } from './pg-schema.ts'
+import { schemaDsn, truncateSessionLog } from './pg-schema.ts'
 
 const DSN = process.env['SESSION_LOG_TEST_DSN'] ?? process.env['METERING_TEST_DSN']
 const t = DSN ? it : it.skip
@@ -34,7 +34,7 @@ async function withBoot(
   const seeder = new PgSessionLog(dsn)
   try {
     await seeder.init()
-    await seeder.raw('TRUNCATE session_log, session_writer_lease')
+    await truncateSessionLog((sql) => seeder.raw(sql))
     await fn(ctx, seeder)
   } finally {
     await ctx.fiber.dispose()

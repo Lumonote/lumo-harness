@@ -202,6 +202,23 @@ spec:
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
             - name: LUMO_NACOS_PORT
               value: {{ $cfg.port | quote }}
+            {{- /* 已发布文档 → 知识库的投影下游。宿主就是节点池：它以 `role=node`
+                   推导出 seam host 模式，Service 也把 seam 端口暴露出来，而 dsh-web
+                   虽然也跑 host 模式，它的 Service 并不暴露那个端口。
+                   地址从 chart 事实派生而不是写死：同一 namespace 里可以装两个 release
+                   （`lumo` 与 `lumo-b`，见 edge-routes.yaml 的同一段理由），写死的
+                   `<name>-dsh-node:8090` 会让第二个 release 把文档投影到**第一个**
+                   release 的节点池里——两个集群都看起来在正常工作。
+                   dshNode 关闭时整条省略：没有 seam host 就没有下游地址，让 collaborator
+                   按「未配置」如实打 warn，而不是指向一个不存在的名字。 */}}
+            {{- if $.Values.dshNode.enabled }}
+            - name: LUMO_KNOWLEDGE_SEAM_URL
+              value: {{ printf "http://%s-dsh-node:%v" (include "lumo-platform.name" $) $.Values.dshNode.seamPort | quote }}
+            {{- end }}
+            {{- if $.Values.dshNode.identityAssertion.secretName }}
+            - name: LUMO_IDENTITY_ASSERTION_SECRET
+              valueFrom: { secretKeyRef: { name: {{ $.Values.dshNode.identityAssertion.secretName }}, key: {{ $.Values.dshNode.identityAssertion.secretKey }}, optional: false } }
+            {{- end }}
             {{- end }}
             {{- if eq $name "edge-gateway" }}
             {{- /* 这一条是 pod 级 env 覆盖 envFrom 同名键的用法，不是冗余：

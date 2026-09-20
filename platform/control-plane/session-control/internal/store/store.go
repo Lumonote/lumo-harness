@@ -1,12 +1,16 @@
-// Package store 是共享执行控制（§8.4）的持久层：**状态行 + 审计表**。
+// Package store 是共享执行控制（§8.4）的持久层：**状态行 + 审计表 + 动作放行记录**。
 //
-// # 两张表的分工（不要合并）
+// # 三张表的分工（不要合并）
 //
 //   - `session_control_state`：每会话一行，回答「现在是 paused 还是 running」。它是
 //     **可变的当前值**，因此必须能被行锁住——跨实例仲裁靠它，不靠进程内的队列。
 //   - `session_control_audit`：只追加，回答「谁在什么时候想做什么、结果如何」。
 //     **放行与拒绝都写**（同 connector-gateway/internal/audit 的口径：只记成功的审计
 //     等于没有审计）。它同时是控制台时间线的读面。
+//   - `action_reviews`（§24.5，实现见 action_reviews.go）：只追加，回答「分类器替人
+//     放行了哪个动作、凭什么」。粒度是**逐个动作**而不是逐条指令——一次工具调用一行，
+//     所以它的读面必须带上限。它补的是审计缺的那一半：`approve` 可以由分类器行使之后，
+//     被拒的路径有记录而放行的路径没有，等于只记「谁被拦住」、答不出「谁被放过去」。
 //
 // 把审计折进状态行（比如「状态行上存最近 N 条事件」）会让「谁拒过」随着后来的写入
 // 消失，而权限事故的排查恰恰是从「被拒的那些次」开始的。
@@ -196,9 +200,20 @@ type Store struct{ pool *pgxpool.Pool }
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 // Init 建表（幂等）。
+//
+// 分成两条 Exec 而不是拼成一个字符串：失败信息要指名是哪一族表没建成。拼在一起时
+// 「启动失败」这条日志不会告诉运维断在哪张表上，而两张表的成因（权限 / 既有同名的
+// 异构表 / 迁移走过一半）完全不同。
+//
+// 幂等由 `CREATE TABLE IF NOT EXISTS` + 索引的 `IF NOT EXISTS` 保证（§22.3 规则 5），
+// 因此 `init()` 跑两次不报错——这几张表可能同时被多个实例启动时建，而「谁先启动谁建」
+// 是正常路径不是竞态。
 func (s *Store) Init(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, DDL); err != nil {
 		return fmt.Errorf("建 session_control 表失败: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, actionReviewDDL); err != nil {
+		return fmt.Errorf("建 action_reviews 表失败: %w", err)
 	}
 	return nil
 }

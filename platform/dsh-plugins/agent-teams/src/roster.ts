@@ -177,6 +177,17 @@ export interface MemberOutcome {
   ok: boolean
   /** 折叠出的纯文本结果，直接写回任务 `output`。 */
   text: string
+  /**
+   * 承载本次执行的子 Run 身份（`MemberRun.id`）。
+   *
+   * **它是「结论 → 证据」的一级跳转目标**（§23.4 把这条定为 P0 唯一不可妥协的品质线）：
+   * 成员交回一段结论，这段结论是在哪个子代理、哪次执行里产生的，靠这个 id 能跳回去。
+   *
+   * 关键点：**证据是系统已知的，不需要成员自报**。派发方本来就拿着 `MemberRun.id`，
+   * 只是在折叠结局时把它丢了 —— 补回它，比让成员在正文里写一段「证据：…」再由正则
+   * 解析可靠得多，也不给成员伪造证据的空间。
+   */
+  runId: string
   /** 非完成时的诊断。 */
   diagnostic?: string
   stopReason: string
@@ -200,11 +211,18 @@ export function foldMemberOutput(output: readonly unknown[]): string {
   return parts.join('\n').trim()
 }
 
-/** 把一次派发结果折叠成任务可写回的结局。 */
-export function foldMemberResult(result: MemberResult): MemberOutcome {
+/**
+ * 把一次派发结果折叠成任务可写回的结局。
+ *
+ * `runId` 由调用方传入而不是从 `result` 取：它属于**运行句柄**（`MemberRun`）而不属于
+ * **结果载荷**（`MemberResult`）。从 result 里找它是找不到的——上游的 result 只有输出与
+ * 停止原因，句柄在 `dispose` 之后就没了，所以必须在这里接住。
+ */
+export function foldMemberResult(result: MemberResult, runId: string): MemberOutcome {
   return {
     ok: result.stopReason === 'completed',
     text: foldMemberOutput(result.output),
+    runId,
     ...result.diagnostic === undefined ? {} : { diagnostic: result.diagnostic },
     stopReason: result.stopReason,
   }
@@ -224,7 +242,10 @@ export async function dispatchMember(
 ): Promise<MemberOutcome> {
   const run = await seam.start(choice.provider, request)
   try {
-    return foldMemberResult(await run.result)
+    // `run.id` 必须在 `dispose()` 之前取出来带进结局：句柄一旦释放，这个 id 就只存在于
+    // 我们手里这一份了（子代理侧的运行表会被清掉）。丢掉它的后果不是报错，而是任务板上
+    // 每个结论都**没有可跳转的证据**，而 §23.4 把那条链定为品质线。
+    return foldMemberResult(await run.result, run.id)
   } finally {
     await run.dispose()
   }
@@ -232,3 +253,78 @@ export async function dispatchMember(
 
 /** 成员在名册里的初始状态（新建即 `idle`，等待被派发）。 */
 export const INITIAL_MEMBER_STATUS: MemberStatus = 'idle'
+
+/**
+ * 子 Run 身份的证据记号。
+ *
+ * **带前缀是刻意的**：证据是一个会被长期读的字段，而它将来可能有别的形态
+ * （§23.4 原本的 `(session_ref, seq)`、或别的执行面给出的句柄）。前缀让它自描述，
+ * 读的人不必去猜 `abc123` 是会话还是 Run —— 与「`worker_id` 带类型前缀」同一条约定。
+ */
+export function evidenceOfRun(runId: string): string {
+  return `run:${runId}`
+}
+
+/** 能做上下文延续的 provider 名。见 {@link selectDispatchProvider} 的说明。 */
+export const FORK_PROVIDER = 'fork'
+
+/**
+ * 按任务性质在既有执行面上选 provider（§24.3.1）。
+ *
+ * # 为什么不是「全局优先级」而是「逐次派发」
+ *
+ * `MEMBERS_PROVIDER_PREFERENCE` 那套探测是**装配期**的一次性决定，它回答的是
+ * 「本节点能用哪种执行面」。而这里回答的是另一个问题——**这一次派发要不要父级的上下文**。
+ * 两个问题混在一个优先级列表里，就会变成「要么全用 fork，要么全用 spawn」，而实际需要
+ * 的是逐任务区分：正交并行的子任务用 `spawn`（独立上下文），**延续性**的子任务用 `fork`
+ * （带着父级已完成的轮次开工，不必重新粘贴上下文）。
+ *
+ * # 三条守卫，顺序即优先级
+ *
+ * 1. **`base` 不是进程内 provider 时，原样返回。** 这是最重要的一条：集群形态下
+ *    `base` 会是 `lumo-remote`，而 `fork` 是**进程内** provider（见下）。此时若「聪明地」
+ *    换成 `fork`，成员会从承载节点悄悄退回父进程执行——负载全压在一个节点上，
+ *    且**没有任何报错**。换 provider 绝不能改变执行位置。
+ * 2. **非延续性任务原样返回。** 正交并行要的是上下文隔离，给它父级历史是反向的。
+ * 3. `fork` 不可用时原样返回并说明。**不抛**：延续性是**优化**（少粘贴一次上下文），
+ *    不是正确性要求——为了它让派发失败，是把优化做成了单点。
+ *
+ * # 为什么集群里拿不到 fork（**已证伪的假设，留证在此**）
+ *
+ * 设计初稿假设跨节点 fork 可以把 seed 传成一个引用 `(parentSessionRef, upToSeq)`，
+ * 因为日志本身是复制的。**该假设已证伪**：上游 `subagent-fork-in-process` 的实现是
+ * `completedTurnPrefix(request.parent)` → `request.parent.session.snapshotEvents()`——
+ * 它要的是**活的进程内 `Agent` 对象**，承载节点上没有它（`shared/seam-contracts/
+ * subagent-host.ts` 的 `ChildParentDescriptor` 注释早就写过这一点：`start` 收的
+ * `parent: Agent` 跨节点不可序列化）。
+ *
+ * 于是「集群里做 fork」要自己写一个 provider，从复制日志读出 `[0..upToSeq]` 前缀
+ * 再经 `startInProcessRun(request, { seed })` 起子代理——**那是另一件工程**，
+ * 不是本切片。本切片只做「能选的时候选对」。
+ */
+export function selectDispatchProvider(input: {
+  base: MemberProviderChoice
+  available: readonly string[]
+  /** 这条任务是否延续父级对话（`TeamTask.continuesContext`）。 */
+  continuesContext: boolean
+}): MemberProviderChoice {
+  // 守卫 1：进程外 provider 一律不动。改 provider 不得改变执行位置。
+  if (input.base.kind !== 'in-process') return input.base
+
+  // 守卫 2：正交任务要的就是独立上下文。
+  if (!input.continuesContext) return input.base
+
+  // 守卫 3：fork 不可用时不抛，原样回落。
+  if (!input.available.includes(FORK_PROVIDER)) {
+    return {
+      ...input.base,
+      reason: `${input.base.reason}；延续性任务本可用 fork，但本节点未挂载该 provider`,
+    }
+  }
+
+  return {
+    provider: FORK_PROVIDER,
+    kind: 'in-process',
+    reason: '延续性任务：用 fork 带上父级已完成的轮次，省去重新粘贴上下文',
+  }
+}

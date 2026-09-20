@@ -131,6 +131,15 @@ dshNode:
   replicas: 2
   port: 8091
   seamPort: 8090
+  # Seam host 用它验证调用方（例如 collaborator 的知识库投影）出示的身份断言。
+  # **必须与那些调用方同值**，否则每一条投影都会 403。留空 = 回落控制面令牌
+  # （`data-plane/dsh-node/src/index.ts` 的 `|| controlPlaneToken`），而那正是
+  # collaborator 侧的同一回落——两边从同一份输入派生，所以不可能被配成两个值。
+  # 需要独立密钥时在这里给名字，并且**同时**给 collaborator 同一份（本 chart 的模板
+  # 已经从同一处取值，不需要手工保持一致）。
+  identityAssertion:
+    secretName: ""
+    secretKey: secret
   clusterId: default
   realm: dev
   # 本集群池当前跑的组件版本，用于版本一致性前置（§7.4.1「同一 agent/组件版本先完成

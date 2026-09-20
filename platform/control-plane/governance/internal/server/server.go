@@ -1335,6 +1335,14 @@ func (s *Server) taskParticipant(w http.ResponseWriter, r *http.Request, c calle
 
 type taskTransitionRequest struct {
 	Event string `json:"event"`
+	// §24.7 组合验证闸门的事实（P6c，判据在 domain/coordinator.go）。
+	//
+	// 两个字段都是普通 bool，**缺省即 false 即整批打回**：不设三态、不设 omitempty。
+	// 「没跑验证」与「验证没过」在判定上必须同归打回，否则漏填一个字段就等于静默放行；
+	// 而三态会让这两种情形在日志里长得一样，运维分不出是漏填还是真没过。
+	// 只有 `event == "complete"` 这条边读它们（IN_REVIEW → DONE）。
+	ContractTestsPass bool `json:"contract_tests_pass"`
+	SmokePass         bool `json:"smoke_pass"`
 }
 
 func (s *Server) transitionTask(w http.ResponseWriter, r *http.Request) {
@@ -1357,7 +1365,10 @@ func (s *Server) transitionTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden", "requester review is required")
 		return
 	}
-	task, err := s.store.TransitionBusinessTask(r.Context(), c.realm, r.PathValue("taskID"), strings.TrimSpace(req.Event), c.userID)
+	// 闸门事实随请求进来，而不是在 store 里回查：本切片不新增 PG 表，批级的验证结论
+	// 没有落脚点可存，只能由发起验收的协调者当场给出（缺省即打回，见请求结构体注释）。
+	task, err := s.store.TransitionBusinessTask(r.Context(), c.realm, r.PathValue("taskID"), strings.TrimSpace(req.Event), c.userID,
+		domain.IntegrationGateFacts{ContractTestsPass: req.ContractTestsPass, SmokePass: req.SmokePass})
 	if err != nil {
 		if errors.Is(err, store.ErrLegacyTask) {
 			writeError(w, http.StatusConflict, "legacy_task", err.Error())
@@ -1464,7 +1475,9 @@ func (s *Server) createTaskRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if event := strings.TrimSpace(req.BusinessEvent); event != "" {
-		if _, err := s.store.TransitionBusinessTask(r.Context(), c.realm, task.ID, event, c.userID); err != nil {
+		// 执行面上报只允许 start/verify/submit_review（见 executionBusinessEvent），
+		// 到不了 complete 那条边，闸门不适用；零值即「无证据」，若将来放开也会 fail-closed。
+		if _, err := s.store.TransitionBusinessTask(r.Context(), c.realm, task.ID, event, c.userID, domain.IntegrationGateFacts{}); err != nil {
 			s.respondStoreError(w, err)
 			return
 		}
@@ -1502,7 +1515,8 @@ func (s *Server) updateTaskRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if event := strings.TrimSpace(req.BusinessEvent); event != "" {
-		if _, err := s.store.TransitionBusinessTask(r.Context(), c.realm, r.PathValue("taskID"), event, c.userID); err != nil {
+		// 同 createTaskRun：执行面上报到不了 complete 那条边，闸门不适用。
+		if _, err := s.store.TransitionBusinessTask(r.Context(), c.realm, r.PathValue("taskID"), event, c.userID, domain.IntegrationGateFacts{}); err != nil {
 			s.respondStoreError(w, err)
 			return
 		}

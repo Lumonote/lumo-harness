@@ -22,6 +22,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 import { PgSessionLog } from './pg-log.ts'
+import { restoreSession, type RestoreHeaderHints } from './restore.ts'
 import { PgColdLogArchiver } from './cold-log.ts'
 import { RedisHotLog } from './hot-log.ts'
 import { queueBackfill } from './backfill.ts'
@@ -146,6 +147,16 @@ export function apply(ctx: Context, config: SessionLogConfig): void {
    * 复制抖动（回填队列在途的几条事件），避免无意义的 stale 抖动。
    */
   const DEFAULT_QUERY_MAX_LAG = 8
+
+  // 重建面：把复制日志变成一个**活的**本地会话（跨节点 resume 的平台侧落点）。
+  //
+  // **读的是 `log`（PG 真相源）而不是 `ctx.sessionLog`（热层加速器）**：热层按 MAXLEN
+  // 裁剪，从它读到的是一段窗口，而重建要求「从 seq 0 起连续」——拿窗口去重建会被连续性
+  // 检查判为断裂（响亮的失败，不是静默的错误结果），但那是一次**用错了来源**造成的失败。
+  // 真相源在这里没有替代品。
+  ctx.provide('sessionRestore', {
+    restore: (sessionRef: string, hints?: RestoreHeaderHints) => restoreSession(ctx, log, sessionRef, hints),
+  })
 
   // 读面（行 3）：查询永远查「已复制到本地」的段。replicaHead 恒取 PG read() 的
   // 最大 seq——PG 是真相源、读面与 resume 同源；热层窗口是加速器，不作判别基准。

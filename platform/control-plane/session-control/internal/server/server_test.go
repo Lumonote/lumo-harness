@@ -13,6 +13,7 @@ import (
 
 	"github.com/lumo-harness/platform/session-control/internal/control"
 	"github.com/lumo-harness/platform/session-control/internal/queue"
+	"github.com/lumo-harness/platform/session-control/internal/release"
 	"github.com/lumo-harness/platform/session-control/internal/state"
 	"github.com/lumo-harness/platform/session-control/internal/store"
 )
@@ -380,5 +381,321 @@ func TestHealthzAndMetricsAreExposed(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("healthz 期望 200，实际 %d", res.StatusCode)
+	}
+}
+
+// ---- 动作放行面（§24.5 / action_reviews）----
+
+// fakeReviews 是 ReviewStore 的测试替身。它**刻意不做校验**：于是「非法值没有到达存储
+// 层」这件事只能由 HTTP 层自己保证，用例的断言才有意义（替身顺手拦掉的话，测的是替身）。
+type fakeReviews struct {
+	recorded   []release.Record
+	created    bool
+	recordErr  error
+	rows       []store.ActionReview
+	queryErr   error
+	gotRealm   string
+	gotSession string
+	gotLimit   int
+}
+
+func (f *fakeReviews) RecordActionReview(_ context.Context, in release.Record) (store.ActionReview, bool, error) {
+	if f.recordErr != nil {
+		return store.ActionReview{}, false, f.recordErr
+	}
+	f.recorded = append(f.recorded, in)
+	return store.ActionReview{
+		ID: in.ID, Realm: in.Realm, SessionRef: in.SessionRef, Action: in.Action,
+		Band: in.Band, Decider: in.Decider, Reason: in.Reason,
+		DeniedStreak: in.DeniedStreak, DeniedTotal: in.DeniedTotal, CreatedAt: time.Now(),
+	}, f.created, nil
+}
+
+func (f *fakeReviews) ActionReviews(_ context.Context, realm, sessionRef string, limit int) ([]store.ActionReview, error) {
+	f.gotRealm, f.gotSession, f.gotLimit = realm, sessionRef, limit
+	if f.queryErr != nil {
+		return nil, f.queryErr
+	}
+	return f.rows, nil
+}
+
+func newReviewServer(t *testing.T, store StateReader, reviews ReviewStore) *httptest.Server {
+	t.Helper()
+	srv := New(Options{Store: store, Reviews: reviews, Queue: fakeQueueView{}})
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func legalReviewBody() string {
+	return `{"id":"rev-1","realm":"dev","run_id":"run-9","action":"bash",` +
+		`"band":"AUTO","decider":"classifier","reason":"classifier-allow","denied_streak":0,"denied_total":0}`
+}
+
+// TestActionReviewWriteCarriesPathSessionAndClosedSetValues：写入面的三件事一起钉住——
+// sessionRef 取自**路径**（且解码）、两个闭集字段以类型化值透传、创建返回 201。
+func TestActionReviewWriteCarriesPathSessionAndClosedSetValues(t *testing.T) {
+	fake := &fakeReviews{created: true}
+	ts := newReviewServer(t, &fakeReader{}, fake)
+
+	res, body := doJSON(t, ts, http.MethodPost, "/v1/sessions/sess%2F1/action-reviews", legalReviewBody())
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("新建应回 201，实际 %d（%v）", res.StatusCode, body)
+	}
+	if body["created"] != true {
+		t.Fatalf("created 应为 true，实际 %v", body["created"])
+	}
+	if len(fake.recorded) != 1 {
+		t.Fatalf("应恰好写入一条，实际 %d 条", len(fake.recorded))
+	}
+	got := fake.recorded[0]
+	if got.SessionRef != "sess/1" {
+		t.Fatalf("sessionRef 必须来自路径并解码，实际 %q", got.SessionRef)
+	}
+	if got.Band != release.BandAuto || got.Decider != release.DeciderClassifier {
+		t.Fatalf("闭集字段未按类型透传：%q / %q", got.Band, got.Decider)
+	}
+	if got.ID != "rev-1" || got.Realm != "dev" || got.RunID != "run-9" || got.Action != "bash" {
+		t.Fatalf("字段未原样传递：%+v", got)
+	}
+	// 响应回带落库后的行（含 created_at），调用方可据此对账。
+	review, _ := body["review"].(map[string]any)
+	if review == nil || review["id"] != "rev-1" || review["band"] != "AUTO" {
+		t.Fatalf("响应里应带回落库的行，实际 %v", body["review"])
+	}
+}
+
+// TestActionReviewWriteRejectsIllegalClosedSetBeforeStore 是本片最重要的一条：
+// 闭集外的档位/判定者必须在**到达存储层之前**被拒。
+//
+// 断言「存储层一条都没收到」而不是只看状态码：状态码对了但写库了，症状会是库里多一行
+// `band=ALLOW` —— 而本表是 append-only，那一行擦不掉，之后按档位聚合的查询会把它算成
+// 一个新档。替身不校验，所以这条断言真的在测 HTTP 层。
+func TestActionReviewWriteRejectsIllegalClosedSetBeforeStore(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		wantCode string
+	}{
+		{
+			name:     "小写档位（拼写变体）",
+			body:     `{"id":"rev-1","realm":"dev","action":"bash","band":"auto","decider":"classifier","reason":"r"}`,
+			wantCode: "invalid_band",
+		},
+		{
+			name:     "档位不在闭集里",
+			body:     `{"id":"rev-1","realm":"dev","action":"bash","band":"ALLOW","decider":"classifier","reason":"r"}`,
+			wantCode: "invalid_band",
+		},
+		{
+			name:     "档位为空",
+			body:     `{"id":"rev-1","realm":"dev","action":"bash","decider":"classifier","reason":"r"}`,
+			wantCode: "invalid_band",
+		},
+		{
+			name:     "判定者不在闭集里",
+			body:     `{"id":"rev-1","realm":"dev","action":"bash","band":"AUTO","decider":"robot","reason":"r"}`,
+			wantCode: "invalid_decider",
+		},
+		{
+			name:     "把档位写进了判定者字段",
+			body:     `{"id":"rev-1","realm":"dev","action":"bash","band":"AUTO","decider":"AUTO","reason":"r"}`,
+			wantCode: "invalid_decider",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeReviews{created: true}
+			ts := newReviewServer(t, &fakeReader{}, fake)
+			res, body := doJSON(t, ts, http.MethodPost, "/v1/sessions/s1/action-reviews", tc.body)
+			if res.StatusCode != http.StatusBadRequest {
+				t.Fatalf("非法值应回 400，实际 %d（%v）", res.StatusCode, body)
+			}
+			if body["error"] != tc.wantCode {
+				t.Fatalf("期望 error=%q，实际 %v", tc.wantCode, body["error"])
+			}
+			if len(fake.recorded) != 0 {
+				t.Fatalf("非法值**不得**到达存储层，实际写入 %d 条", len(fake.recorded))
+			}
+		})
+	}
+}
+
+// TestActionReviewWriteRejectsIncompleteRecords：必填字段缺任一即 400，且不落库。
+func TestActionReviewWriteRejectsIncompleteRecords(t *testing.T) {
+	cases := map[string]string{
+		"缺 id":     `{"realm":"dev","action":"bash","band":"AUTO","decider":"classifier","reason":"r"}`,
+		"缺 realm":  `{"id":"rev-1","action":"bash","band":"AUTO","decider":"classifier","reason":"r"}`,
+		"缺 action": `{"id":"rev-1","realm":"dev","band":"AUTO","decider":"classifier","reason":"r"}`,
+		"缺 reason": `{"id":"rev-1","realm":"dev","action":"bash","band":"AUTO","decider":"classifier"}`,
+		"负计数":      `{"id":"rev-1","realm":"dev","action":"bash","band":"REVIEW","decider":"fallback","reason":"r","denied_streak":-1}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeReviews{created: true}
+			ts := newReviewServer(t, &fakeReader{}, fake)
+			res, decoded := doJSON(t, ts, http.MethodPost, "/v1/sessions/s1/action-reviews", body)
+			if res.StatusCode != http.StatusBadRequest || decoded["error"] != "invalid_request" {
+				t.Fatalf("应回 400 invalid_request，实际 %d（%v）", res.StatusCode, decoded)
+			}
+			if len(fake.recorded) != 0 {
+				t.Fatalf("不完整的记录不得落库，实际写入 %d 条", len(fake.recorded))
+			}
+		})
+	}
+}
+
+// TestActionReviewWriteIgnoresBodySessionRef：会话**只能**来自路径。
+//
+// 若请求体里的 session_ref 也被认，调用方就能把一条记录写到 A 会话的路径上、却归属成 B：
+// 审计里那次放行会挂到别的会话名下，而这正是本表要防的东西。字段不存在于请求体结构里，
+// 这条用例把它钉成行为而不是巧合。
+func TestActionReviewWriteIgnoresBodySessionRef(t *testing.T) {
+	fake := &fakeReviews{created: true}
+	ts := newReviewServer(t, &fakeReader{}, fake)
+	body := `{"id":"rev-1","realm":"dev","action":"bash","band":"AUTO","decider":"classifier",` +
+		`"reason":"r","session_ref":"s2"}`
+	res, decoded := doJSON(t, ts, http.MethodPost, "/v1/sessions/s1/action-reviews", body)
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("期望 201，实际 %d（%v）", res.StatusCode, decoded)
+	}
+	if len(fake.recorded) != 1 || fake.recorded[0].SessionRef != "s1" {
+		t.Fatalf("会话必须取自路径，实际 %+v", fake.recorded)
+	}
+}
+
+// TestActionReviewWriteRetryIs200AndDistinguishableFromCreate：重试（同 id 同内容）
+// 也是成功，但**必须**能与新建区分——两者都回 200 会让对账的人以为库里有两行。
+func TestActionReviewWriteRetryIs200AndDistinguishableFromCreate(t *testing.T) {
+	fake := &fakeReviews{created: false}
+	ts := newReviewServer(t, &fakeReader{}, fake)
+
+	res, body := doJSON(t, ts, http.MethodPost, "/v1/sessions/s1/action-reviews", legalReviewBody())
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("重试应回 200，实际 %d", res.StatusCode)
+	}
+	if body["created"] != false {
+		t.Fatalf("重试的 created 应为 false，实际 %v", body["created"])
+	}
+}
+
+// TestActionReviewWriteIDConflictIs409：同 id 不同内容是**冲突**而不是重试，
+// 不能静默覆盖，也不能报成 400（请求本身是完整的，冲突在于库里已有的那一行）。
+func TestActionReviewWriteIDConflictIs409(t *testing.T) {
+	fake := &fakeReviews{recordErr: store.ErrReviewIDConflict}
+	ts := newReviewServer(t, &fakeReader{}, fake)
+
+	res, body := doJSON(t, ts, http.MethodPost, "/v1/sessions/s1/action-reviews", legalReviewBody())
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("同 id 不同内容应回 409，实际 %d（%v）", res.StatusCode, body)
+	}
+	if body["error"] != "review_id_conflict" {
+		t.Fatalf("错误码不符：%v", body["error"])
+	}
+}
+
+// TestActionReviewWriteStoreFailureIs503：基础设施失败＝**没有结论**，不能回 200。
+func TestActionReviewWriteStoreFailureIs503(t *testing.T) {
+	fake := &fakeReviews{recordErr: errors.New("库连不上")}
+	ts := newReviewServer(t, &fakeReader{}, fake)
+
+	res, body := doJSON(t, ts, http.MethodPost, "/v1/sessions/s1/action-reviews", legalReviewBody())
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("写失败应回 503（可重试），实际 %d（%v）", res.StatusCode, body)
+	}
+}
+
+// TestActionReviewQueryRequiresRealm：realm 缺了直接 400，**不退化成不过滤**。
+//
+// 这是本读面的安全边界：本表跨租户共表，把「没给 realm」当成「全部 realm」就是把每个
+// 租户的动作面（工具名 + 判据）交给任意调用方。
+func TestActionReviewQueryRequiresRealm(t *testing.T) {
+	fake := &fakeReviews{}
+	ts := newReviewServer(t, &fakeReader{}, fake)
+
+	res, body := doJSON(t, ts, http.MethodGet, "/v1/sessions/s1/action-reviews", "")
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("缺 realm 应回 400，实际 %d（%v）", res.StatusCode, body)
+	}
+	if body["error"] != "invalid_realm" {
+		t.Fatalf("错误码不符：%v", body["error"])
+	}
+	if fake.gotRealm != "" || fake.gotLimit != 0 {
+		t.Fatal("非法查询不该到达存储层（否则过滤条件由存储层解释，边界就转移了）")
+	}
+	// 全空白等同于没给。
+	res, _ = doJSON(t, ts, http.MethodGet, "/v1/sessions/s1/action-reviews?realm=%20%20", "")
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("全空白 realm 也应回 400，实际 %d", res.StatusCode)
+	}
+}
+
+// TestActionReviewQueryCrossRealmIsEmptyNotError：跨 realm 查询返回空列表，不是错误。
+//
+// 报 403/404 会泄露「别的 realm 里存在这个会话」；空列表与「本 realm 里还没有记录」
+// 给出同一个回答。同时断言 realm 被**透传**到存储层——过滤必须发生在 SQL 里，
+// 不能靠调用方自觉。
+func TestActionReviewQueryCrossRealmIsEmptyNotError(t *testing.T) {
+	fake := &fakeReviews{rows: []store.ActionReview{}}
+	ts := newReviewServer(t, &fakeReader{}, fake)
+
+	res, body := doJSON(t, ts, http.MethodGet, "/v1/sessions/s1/action-reviews?realm=other", "")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("跨 realm 查询应是空结果而不是错误，实际 %d（%v）", res.StatusCode, body)
+	}
+	if fake.gotRealm != "other" || fake.gotSession != "s1" {
+		t.Fatalf("realm/sessionRef 未透传到存储层：%q / %q", fake.gotRealm, fake.gotSession)
+	}
+	reviews, ok := body["reviews"].([]any)
+	if !ok || len(reviews) != 0 {
+		t.Fatalf("跨 realm 应回空数组（不是 null、不是错误），实际 %v", body["reviews"])
+	}
+	if body["realm"] != "other" {
+		t.Fatalf("响应应回显生效的 realm，实际 %v", body["realm"])
+	}
+}
+
+// TestActionReviewQueryLimitDefaultAndClamp：本表随每次工具调用增长，读面**必须**有上限。
+func TestActionReviewQueryLimitDefaultAndClamp(t *testing.T) {
+	fake := &fakeReviews{rows: []store.ActionReview{}}
+	ts := newReviewServer(t, &fakeReader{}, fake)
+
+	_, _ = doJSON(t, ts, http.MethodGet, "/v1/sessions/s1/action-reviews?realm=dev", "")
+	if fake.gotLimit != defaultActionReviewLimit {
+		t.Fatalf("缺省 limit 应为 %d，实际 %d", defaultActionReviewLimit, fake.gotLimit)
+	}
+	_, _ = doJSON(t, ts, http.MethodGet, "/v1/sessions/s1/action-reviews?realm=dev&limit=10000000", "")
+	if fake.gotLimit != maxActionReviewLimit {
+		t.Fatalf("limit 应被夹到 %d，实际 %d", maxActionReviewLimit, fake.gotLimit)
+	}
+	for _, q := range []string{"limit=0", "limit=-3", "limit=abc"} {
+		res, body := doJSON(t, ts, http.MethodGet, "/v1/sessions/s1/action-reviews?realm=dev&"+q, "")
+		if res.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s 应为 400（坏 limit 不能被静默换成缺省值），实际 %d（%v）", q, res.StatusCode, body)
+		}
+	}
+}
+
+func TestActionReviewQueryWithoutStoreIs503(t *testing.T) {
+	ts := newReviewServer(t, &fakeReader{}, nil)
+	res, body := doJSON(t, ts, http.MethodGet, "/v1/sessions/s1/action-reviews?realm=dev", "")
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("未装配读面应诚实 503，实际 %d（%v）", res.StatusCode, body)
+	}
+	res, body = doJSON(t, ts, http.MethodPost, "/v1/sessions/s1/action-reviews", legalReviewBody())
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("未装配写面时**不得**接受写入，实际 %d（%v）", res.StatusCode, body)
+	}
+}
+
+func TestActionReviewRoutingRejectsOtherMethods(t *testing.T) {
+	ts := newReviewServer(t, &fakeReader{}, &fakeReviews{})
+	for _, method := range []string{http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		res, _ := doJSON(t, ts, method, "/v1/sessions/s1/action-reviews", "")
+		if res.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("%s 应回 405，实际 %d", method, res.StatusCode)
+		}
 	}
 }
