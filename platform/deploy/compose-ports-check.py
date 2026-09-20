@@ -31,6 +31,12 @@ overlay `compose.cluster.devices.yml` 早已把 18090 给了 governance 容器�
   否则「无法判定」与「没有映射」在输出上长得一样。
 * 解析不出来的条目（例如长语法 `target:`/`published:`）**必须报错**，不能跳过：
   门禁的价值全在「发现冲突」，任何解析盲区都会让它退化成「没有冲突」。
+* 服务名**允许跟行内注释**（`  postgres:      # pgvector 一处同理…`，本仓库很常见）。
+  2026-09-20 修：首版的正则要求行尾没有别的东西，于是带行内注释的服务名不被识别，
+  它的整段 `ports:` 被当成「不在服务区内」跳过 —— **方向是 fail-open**：真冲突会被放行。
+  `compose.standalone.yml` 里当时有 8 个这样的服务（postgres / redis / minio / rocketmq /
+  nacos / collaborator / connector-gateway / scheduler-0），而 cluster 一个都没有，
+  所以这个盲区在本机只对 standalone 生效。反向用例见 `compose-ports-verify.sh`。
 
 ## 用法
 
@@ -43,7 +49,7 @@ import argparse
 import re
 import sys
 
-SERVICE_RE = re.compile(r"^  ([a-z0-9][a-z0-9-]*):\s*$")
+SERVICE_RE = re.compile(r"^  ([a-z0-9][a-z0-9-]*):\s*(?:#.*)?$")
 PORTS_KEY_RE = re.compile(r"^(\s*)ports:\s*(.*)$")
 TOPLEVEL_RE = re.compile(r"^[a-z]")
 DIGITS_RE = re.compile(r"(\d+)")

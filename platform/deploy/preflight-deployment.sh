@@ -115,7 +115,7 @@ if command -v docker >/dev/null 2>&1 && [[ -r "$compose_file" ]]; then
     # 刻意排除 `profiles: [provisioner]` 的 provisioner / artifact-runtime：默认
     # `config --services` 不渲染 profiled 服务，列进来会让每一次默认部署都误报。
     shared_services=(
-      postgres redis minio rocketmq-namesrv rocketmq rocketmq-topic-init nacos prometheus
+      postgres redis minio rocketmq-namesrv rocketmq nacos prometheus
     )
     # 这份名单**必须与 topology 里的默认控制面服务逐字相等**。2026-09-16 复核发现它少了
     # 三个：`edge-gateway` / `terminal-gateway`（C3/C4 落地时进了 compose 但没进这里）

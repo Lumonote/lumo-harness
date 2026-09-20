@@ -4,6 +4,572 @@
 
 > 集群模式下**代码与装配层面**的功能缺口清单见 [`cluster-gap-analysis.md`](./cluster-gap-analysis.md)（首版 2026-09-08，**2026-09-14 逐项复核、2026-09-15 再复核、2026-09-16 修正计数并复核 C 组、2026-09-17 改判 E7b**：现合计 34 项 = **28 已闭合 / 3 部分闭合 / 0 仍未闭合 / 3 非缺口**。首版 A/B 两组已全部闭合；E2 与 E3 经再复核**改判为误读**，不是缺口；C8 于 2026-09-16 闭合；**C7 流程血缘同样于 2026-09-16 判为已闭合**（血缘事实落 PG outbox、Nebula 降为可选呈现层）；**C3 边缘网关 / C4 终端网关为部分闭合**——代码与两种 compose 形态早已落地，是清单没跟上；那次逐点核对接线面还发现二者**不在 Helm chart 的 `services` 里**，所以当时是「已实现但没接线」。**这两个服务当天就补进了 chart**（路由表由模板从 release 名与各服务端口派生、以目录挂载；入口层的 Service 类型保持 ClusterIP、需要暴露时按服务覆盖），于是它们的残留换成了同一条：**真集群端到端验收**——`acceptance-cluster.sh` 对 C3/C4/C7 三者零探针）。**计数以缺口清单文末的表为准**——此处此前写的 18/2/11 与那份表自相矛盾（把 C 组的「部分闭合」当成「未闭合」多加了一次），凡引用请回去加一遍；**2026-09-17 又发现同一处第四次分叉**：E6 的行早在 09-16 就写着「已闭合」而表没跟改，与 E7b 一起从「仍未闭合」移出，故由 26/3/2/3 变为 28/3/0/3。**「以表为准」这条规则本身是有条件的**——那一次是**表错、行对**（行带行号与用例名，表只有一个数字），冲突时先看哪一边带了证据。本文记录的是外部集成边界与生产验收事项，两者互补。
 
+## 2026-09-20 实施：minio 换源、两处 fail-open 解析盲区、以及 rocketmq topic 预建并入容器
+
+**起因**：`./platform/deploy/up.sh standalone -d --build` 在 `✘ minio Error` 处停，
+`pull access denied for minio/minio, repository does not exist or may require 'docker login'`。
+
+### 一、根因判断被推翻：不是标签没了，是仓库没了
+
+09-16 那次记的是「Docker Hub 已不为 `minio/minio` 提供 `latest` 标签」，于是两处 compose
+都改成钉具体版本 `RELEASE.2025-04-22T22-12-26Z`。**这次同一个版本号也不可拉**，两条独立证据：
+
+- `hub.docker.com/v2/repositories/minio/minio/` → **404**（tag 端点同样 404）；
+- `docker pull minio/minio:RELEASE.2025-04-22T22-12-26Z` → 同样的 `pull access denied`。
+
+所以那次只是把故障**推迟了四天**：钉的版本号属于同一个已下线的仓库。**报错文本里的
+`<repo>` 指的是仓库，不是标签**——按「换 tag」去修等于没修。
+
+改法：改用 MinIO 自己的分发源，**版本号不变**，两处 compose 同步
+`quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z`（`compose.standalone.yml` / `compose.cluster.yml`）。
+实测（不只是看 tag 存在）：`docker pull` 成功；镜像内 `minio --version` 与原来**同一构建**，
+`mc` 仍在 `/usr/bin/mc`，所以 cluster 的 `["CMD","mc","ready","local"]` healthcheck 不受影响；
+`up -d minio` 后 `mc ready local` 返回 `The cluster 'local' is ready`、
+`/minio/health/live` 返回 200。同步更正 `test-local-pg.sh` 头注释与本文件的口径差异表。
+
+### 二、新增门禁 `compose-images-verify.sh`（含 11 条反例/边界）
+
+判据两条：**同名服务跨形态必须同源**、**不得出现浮动 tag**（`latest` 或无 tag；`:dev` 不算，
+那是本仓库自建镜像的本地 tag；带 `@sha256:` 摘要天然钉死）。**为什么必须做成门禁**：
+`docker compose config` 与 `up --dry-run` 全能过，失败只在容器真去拉的那一刻，没有任何
+静态检查会拦住它——而这里已经连踩两次。
+
+**自己解析文本而不是调 `docker compose config`**：同 `compose-ports-check.py` 的理由，
+且 `config` 的结果受 `profiles:` 与环境变量影响（实测 standalone 的 `provisioner` /
+`artifact-runtime` 在带 profile 时不出现在 `config --services` 里），门禁要的是「文件里写了
+什么」，不是「当前环境会起什么」。
+
+**反例 4 专门钉住一个解析盲区**：cluster 里 vault 是行内 flow 写法
+`vault: { image: "...", ... }`，行级 grep 与「按缩进取 `image:`」的朴素解析**都看不见它**——
+本次排查中 `hashicorp/vault:latest` 两次被漏掉就是这个原因。另有边界两条（注释掉的
+`#   image: ...:latest` 不算引用；只在单个形态里存在的服务改版本不算「分歧」——少了这条，
+门禁会逼人把形态差异也强行统一，比漏报更坏）。
+
+**顺带修掉的两处**：
+
+- **`redis` 跨形态漂移**：standalone/local 是 `redis:7-alpine`，cluster 是 `redis:7`。查提交
+  历史是各写各的（`redis:7` 来自最初的 scaffold，alpine 来自后来的 standalone 拓扑），
+  不是取舍。统一为 `redis:7-alpine`。
+- **`hashicorp/vault:latest` 钉为 `2.1.1`**。这是**逐字节冻结现状**而不是换版本：实测
+  `:latest`、`:2.1`、`:2.1.1` 三者 amd64 摘要同为
+  `sha256:8af37ae9d45e4a0fac48ab700e0d99efc4c2d6cd84354a869f2147f1d3abab46`。
+  钉它的理由与同文件里 opa 那条同源：`latest` 已漂到 2.1.1，相对仓库开发期的 1.x 是**跨大版本**，
+  而凭证后端的语义漂移不报错，只会让「验过的挂载与 token 路径」和「在跑的引擎」不再对应同一件事。
+
+### 三、写这个门禁时发现的一个**既有门禁的 fail-open 漏洞**（已修）
+
+`compose-ports-check.py` 的服务名正则要求**行尾没有别的东西**，于是
+`  postgres:      # pgvector 一处同理…` 这种带行内注释的服务名**不被识别为服务**，它的整段
+`ports:` 被当成「不在服务区内」处理。方向是 **fail-open**：冲突的另一方成了唯一主张者，
+于是**真冲突被放行**（已构造实例验证：`postgres` 带行内注释 + `nacos` 同时主张宿主 15432，
+修复前退出码 0，修复后报 `port-collision: 宿主端口 15432`）。
+
+影响面不对称：`compose.standalone.yml` 里当时有 8 个这样的服务名，`compose.cluster.yml`
+一个都没有——**盲区只对 standalone 生效，而 standalone 恰是最常起的那一个**。量化：
+standalone 的端口条目采集数 20 → 24。已修正则并补一条反向用例（用新增的整行匹配
+`sub-line` 操作注入；裸字符串替换不行，`  postgres:` 在文件里出现 17 次，全是子串命中）。
+
+**验证**：`compose-images-verify.sh` 12/0、`compose-ports-verify.sh` 10/0（含新反例）、
+`shell-portability-check.py --self-test` 与全仓扫描（22 个脚本）通过、`platform/deploy/*.sh`
+的 `bash -n` 通过。两条门禁都已接进 `.github/workflows/ci.yml` 的 `production-gates`。
+
+### 四、同一个盲区在**集群侧**又有一处：`cluster-registry-check.py`（已修）
+
+上面那条修完就顺着全仓扫了一遍「缩进两格的键 + `\s*$`」形状的解析器，`cluster-registry-check.py`
+的 `SERVICE_KEY_RE` 是同一个写法——而它是**集群侧**的检查器（守的是 `LUMO_CLUSTER_ENFORCE`
+开着时「谁在自报」）。
+
+方向同样是 **fail-open**，且后果正好落在该检查器存在的理由上。已构造实例验证（夹具：cluster-b
+**唯一**的承载节点缺 `LUMO_CONTROL_PLANE_TOKEN`，即真缺陷）：
+
+| 夹具 | 结果 |
+| --- | --- |
+| 服务名不带行内注释 | `FAIL: cluster-without-reporter: 集群 cluster-b 没有可用的上报方`（exit 1）✓ |
+| 只加一个行内注释 | `通过（5 项检查）`（exit 0）✗ |
+
+机制：`parse_compose` 的 `current` 游标认不出该服务键，于是它整段 `environment` **并进前一个
+服务**（不是丢掉）——被污染的宿主节点继承了 `LUMO_ROLE=node` 与**前一个服务的令牌**，替
+cluster-b 假冒了一个上报方；连 `LUMO_CLUSTER_ID` 都被覆盖，所以「谁属于谁」也一起错了。
+露出马脚的是计数：`解析出 3 个服务` → `解析出 2 个服务`。
+
+影响面同样不对称：`compose.standalone.yml` 里 8 个这样的服务名，`compose.cluster.yml` **0 个**。
+量化：standalone 解析到的服务数 **14 → 22**、带 `LUMO_*` 的服务 **12 → 14**；cluster 35 → 35
+（不受影响）。修法与其他三处统一为 `(?:#.*)?$`，并在 `cluster-registry-verify.sh` 补两条用例
+（19 → 21）：一条**对照**（同一夹具去掉注释，证明缺陷本身成立）与一条回归（加注释后仍必须
+报出同一条，且服务数必须是 3）。**反例自证**：把旧正则临时放回去跑，新用例确实失败
+（21/0 → 20/1，失败的就是回归那条）。
+
+**顺带排除的**：`compose-images-check.py` / `edge-cors-check.py` 里 flow 写法
+（`  vault: { image: "...", ... }`）的正则不接受行尾注释，看着像同一处——实测**不是**盲区：
+镜像值取到第一个逗号为止，在行尾追加 `# 注释` 之后 `latest` 照样被抓到（`FAIL: floating-tag`），
+且全仓库只有 1 处 flow 服务行、无行尾注释。**没有改动**，理由记在这里免得下次再查一遍。
+
+### 五、`rocketmq-topic-init` 并入 rocketmq 容器，并补上它缺失的门禁
+
+原形状：一次性容器 `rocketmq-topic-init` 建 6 个计量 topic，`depends_on: rocketmq:
+service_healthy`，而 `usage-ledger` 又 `depends_on: rocketmq-topic-init:
+service_completed_successfully`。三个问题：
+
+1. topic 名单在 standalone / cluster 两份 compose 里各写一遍（还多一个容器）；
+2. **一个真实的竞态窗口**：rocketmq 的 healthcheck 只探 10911+8081，而 proxy 在 broker 绑端口
+   之后就起来了，于是「healthy」期间 topic 可能还没建完——任何没走 `depends_on` 的消费方
+   （或单独 `docker compose up rocketmq`）都能钻进去；
+3. v5 producer 启动期的路由查询**不等** `autoCreateTopicEnable`（实测，设计说明 §8），
+   所以钻进去的后果不是「慢一点」，是 producer 起不来。
+
+改法：把「注册断言 + 建 topic」移进 `rocketmq-entrypoint.sh`，并**排在 `sh mqproxy` 之前**——
+于是「8081 在监听」蕴含「topic 已就绪」，healthcheck 天然成了闸门。两份 compose 删掉该服务、
+`usage-ledger` 的依赖改成 `rocketmq: { condition: service_healthy }`，`preflight-deployment.sh`
+的必需服务名单去掉它（cluster 34 / standalone 20，实测 `required == rendered` 逐字相等），
+`smoke-cluster.sh` 去掉「一次性容器应 exited 0」的特例（连带删掉已成死代码的 `exit_code`）。
+**顺序即契约**，而顺序是后续改动里最容易被动掉的东西：挪到 `sh mqproxy` 之后一切照常工作，
+只是闸门没了——所以新增门禁 `rocketmq-entrypoint-verify.sh`（15 项）钉它：用
+`mqbroker` / `mqproxy` / `mqadmin` 替身，由一个共享事件文件读**真实发生顺序**（入口脚本把
+`mqadmin` 的输出重定向掉了，顺序只能从副作用侧读），断言「proxy 排在全部 topic 之后」，
+并有一条**反例**把顺序倒过来跑，证明这条断言不是恒真。topic 名单从入口脚本里抽，不重抄。
+
+两处踩坑记下来：
+
+- **`mapfile` 是 bash 4+，本机 `/usr/bin/env bash` 是 3.2**（CI 是 bash 5）。首版用了它，
+  本机直接炸——正是 `shell-portability-check.py` 记录的那类「CI 绿、本机炸」分叉。改用
+  `while read`。
+- **入口脚本里的注册断言刻意不写成 `mqadmin ... | grep -q`**：脚本带 `set -o pipefail`，
+  而 `grep -q` 命中即退出。实测（本机，3MB 输出）：写入方是 `cat` 时管道写法 **rc=141**、
+  落变量写法 rc=0；写入方是 bash 内建 `echo` 时两者**都** rc=0（bash 把 EPIPE 当写错误吞掉
+  继续跑完）。也就是说这条管道**取决于写入方**，内建命令不受影响、真实进程会死；`mqadmin`
+  每次探针 fork 一个 JVM（见 `compose.cluster.yml` 注释），故取与写入方无关的写法。
+  **不做「一定会炸」的断言**——`clusterList` 正常只有几行，管道缓冲能吞下时本来也不会触发。
+
+**验证**：全量 9 条部署门禁 `alerts-verify` / `helm-verify` / `cluster-registry-verify`
+（21/0）/ `rocketmq-entrypoint-verify`（15/0）/ `edge-routes-verify` / `compose-ports-verify`
+（10/0）/ `compose-images-verify`（12/0）/ `edge-cors-verify` / `probes-cluster-verify` 全绿；
+`shell-portability-check.py` 全仓扫描 23 个脚本通过；`preflight-deployment.sh` 两种形态通过；
+`ci.yml` 经 YAML 解析校验。新增门禁已接进 `production-gates`。
+
+## 2026-09-18 实施：第 2 档接线三件套（C5 控制台 UI / C4 事件源 / A3 投影装配）与一件「按构造不可接线」
+
+**范围**：`cluster-gap-analysis.md` 排期里「已写好、缺最后一跳」的那一类。三件做成了，
+**一件被证明做不成**——后者与前三件同等重要，因为它把一个会反复被排期的条目关掉了。
+
+### 一、C5 Session Console UI：控制台能按了（§8.4.3）
+
+后端读投影（状态 / 按钮可用性 / 时间线 / 队列现场）早就就绪，`lumo-ui/src` 里 `sessionControl`
+**零命中**——没有任何消费方。现已接通三层：
+
+- **代理层**（`lumo-ui/src/index.ts`）：三条路由 —— 读面、时间线、写面（`POST`）。
+  **`realm` / `role` / `actor` 由代理按已验证会话覆盖注入，浏览器不能自报。** 控制面自己的
+  注释写着身份是「调用方主张 + OPA 判定」：谁转发请求体谁就在主张身份，而代理是整条链上
+  唯一知道真实身份的地方（身份来自认证代理签发的 HMAC 断言，`identity.ts` 验签后返回）。
+  角色按控制面那张**闭集**词表（`platform_admin` / `realm_admin` / `admin` / `approver` /
+  `operator`，见 `policies/session-control.rego`）从高到低取第一个被认出的；**一个都认不出
+  时不转发**——把治理侧的 `owner` 原样送过去会得到「角色未被授予该指令」，读起来像权限不足，
+  而事实是这个面不认识你的角色，两种拒绝该找的人不同。
+- **面板**（`cluster-panels.tsx` 的 `SessionControlPanel`）：挂在 Run 行上，因为
+  `TaskRun.session_ref` 是运维面唯一指向具体会话的句柄。
+- **装配**：`dsh-node` 把 `LUMO_SESSION_CONTROL_URL` 传给 lumo-ui 的 config；
+  **刻意不给 localhost 回落**（空串 = 本部署没接这个服务，路由据此回 503），与
+  `dsh-plugins/control` 的同名变量同一条判据。
+
+**一处写错又改回来的**：`no_op` 的指令我原本禁用了按钮，而控制面的注释明说应渲染成
+**「可点但无变化」**。禁用一个**可用**的指令，操作者点不动只会以为是自己权限不够。
+已照契约改（`controlButtonState` 是对这条判断的显式化）。
+
+验证：12 条新用例（7 代理 + 5 面板），**两条反向用例各红在对的那一条上**——拿掉身份覆盖
+→ 安全用例红（`expected {...} to deeply equal`，diff 里看得见 `realm-other`）；给 `no_op`
+加禁用 → 契约用例红。lumo-ui 全量 **21 个 spec 文件 111 条全绿**，客户端 `tsc --noEmit`
+0 行输出，dsh-node 44 条全绿。
+
+### 二、C4 终端网关事件源：接上复制式会话日志
+
+`Source` 此前恒为 nil → WS 接入诚实回 503，但功能不可用。现新增
+`internal/events/pg.go` 的 `PgEventSource`，装配为**默认来源**（`--mem-events` 仍用于演示）。
+
+三条设计判断，每条都写在包注释里：
+
+1. **只读消费不违反单写者 + fencing**。那条约束管的是**写**侧（外部进程直插会撞
+   `(session_ref, seq)` 主键并把日志变成分叉）；本类型只发 SELECT，既不取租约也不写任何行，
+   任意多个网关实例可以同时读。把这两件事混为一谈会得出「终端必须由承载节点自己代理」
+   这个不必要的结论。用例 `TestPgReadsDoNotTouchTheWriteSide` 把它变成断言：跑完一轮读之后
+   行数与租约逐字段不变。
+2. **游标取 `max(seq)` 而不是 `session_log_heads.seq`**。heads 是**已发布水位**，可以领先于
+   已落盘的行；用它会跳过一个还没落盘的位置，那之后补上的事件**永远读不到**——终端上表现为
+   「会话里少了一段」且没有任何错误。
+3. **超限报错而不是静默截断**。不设上限是内存放大；静默截断更坏，终端会把「只回放了前 N 条」
+   显示成「这个会话就这么多」，与 §8.2 禁止的「伪造空历史」是同一类谎。
+
+验证：**7 条活库用例在真 PG 上全过、0 跳过**（`LUMO_TEST_PG_DSN` 指向本机
+`postgres://lumo:lumo@127.0.0.1:15432/lumo`，由 `compose.standalone.yml` 起）。两条反向用例：
+改成静默截断 → 上限用例红；让 Subscribe 从 0 开始 → 增量用例红并打印「实得 1（历史被重推了？）」。
+**真二进制实测**：`terminal-gateway` 跑在本机 18091（与 compose 一致），启动日志打出
+「事件源：PG 会话日志」，非 WS 的 GET 从 `503 no_event_source` 变为 `400 缺少或错误的
+Upgrade: websocket 头`——正是 2026-09-16 写探针时**预先**判为通过的第二种形态，所以那条
+探针不会对着一个正确的部署报红。`probes-cluster.sh` 实跑：**探针 3 OK**，其余失败全是
+`probe-service-absent`（本机没跑那些服务）。
+
+### 三、A3 知识库投影的部署装配：从「任何拓扑里都是关的」到接上
+
+`LUMO_KNOWLEDGE_SEAM_URL` 此前在**所有**部署文件里零命中，于是 collaborator 每次启动都打
+「发布 outbox 不会被投影到知识库」——代码完整、有集成判据，而链路从未打开过（与 C1 自报链路同族）。
+
+- **compose.cluster.yml**：两个 collaborator 都接上 `http://dsh-web:8090` + 同源派生的身份密钥。
+  宿主选 dsh-web 是因为集群里**只有它显式声明** `LUMO_SEAM_MODE=host` 且带
+  `LUMO_IDENTITY_ASSERTION_SECRET`（`cluster-{a,b}-dsh-1` 靠 `role=node` 推导出 host，
+  没有那个密钥）。
+- **Helm**：地址**从 chart 事实派生**（`http://<release>-dsh-node:<seamPort>`），不写死——
+  同一 namespace 可以装两个 release（`lumo` 与 `lumo-b`），写死会让第二个把已发布文档投影进
+  **第一个** release 的节点池，而两个集群看起来都在正常工作。`dshNode` 关闭时**整条省略**，
+  让 collaborator 如实按「未配置」打 warn，而不是指向一个不存在的名字。
+- **身份密钥对称**：两侧从同一处取值（dsh-node 无该变量时回落控制面令牌，collaborator 同一条
+  回落），所以**不可能被配成两个不同的值**。这正是「跨服务保持两个值一致」这类必然配错的
+  失败模式的消解方式。
+
+**新增渲染门禁**（`helm-verify.sh`，两条臂 + 一条反向）：
+① 期望值写死（防 URL 漂移）；② 从**渲染结果**里取真实 URL，再验证它指向的 Service 端口在
+**同一次渲染**里存在；③ `dshNode` 关闭时该变量必须整条消失。
+
+第 ② 条是被反向用例逼出来的：第一版它比对写死的字面量，我把模板里的主机名改成不存在的服务时
+**它照样绿**——一个锚在字面量上的检查只能确认「那个 Service 存在」，永远确认不了「URL 指向它」。
+三条反向用例（改主机名 / 改端口 / 关闭 dshNode）全部红在对的理由上。
+
+### 四、C5 `control.Dispatcher`：**按构造不可接线**，不是「还没排上」
+
+这一条**没有做**，而且不应该做。§8.4.2 要求控制指令以 `session/control` 事件「进复制日志」，
+四段逐段核过（判据同 E7b）：
+
+| 段 | 事实 | 证据 |
+| --- | --- | --- |
+| 声明 | `session/control` **不在** `KNOWN_SESSION_EVENT_TYPES` 里；该表由 `gen-persistence-catalog.ts` 扫 `packages/*/*/src/**` 生成，平台插件**按构造**不在其中 | `deepseek-harness/packages/core/session/src/known-event-types.ts:21-80` |
+| 写入 | `Session.append(type, data, ...opts)` 的 `opts` 是 `SurfaceIntent`，只有 `surfaceOp` 与 `sourceEventSeqs`——**没有 `ignorable` 的槽位** | `packages/core/session/src/index.ts:710-727` |
+| 持久化 | `validateStoredEvents` 对「不在表内且 `ignorable !== true`」抛 `SessionFormatUnsupportedError` | `packages/session/session-persistence/src/storage-contract.ts:75-82` |
+| 重载 | 于是**整份日志被拒**——每一个收到过控制指令的会话都会永久打不开 | 由上一段直接推得 |
+
+即：照字面实现它不是「补一个功能」，是**数据毁伤**。登记成已知类型更坏（把信息性事件变成
+required-on-read，没打该 patch 的构建读不了它，上游架构笔记已否决）。**也不要**把
+`Event.Type` 改成一个 dsh 认识的原生类型借道落库——那是拿一个语义不对的事件夹带平台状态，
+正是本仓库反复记的「看起来对、语义错」。
+
+**§8.4.2 的意图已由另一条路满足**：「多端实时可见」与「谁在何时做了什么可回溯」落在控制面自己的
+`session_control_state` + `session_control_audit`（任何终端都读得到，§8.4.3 的时间线就是它），
+而**生效通道是状态行本身**（`@lumo/control` 读它并在挂点上执行闸门，暂停是真的生效的）。
+`effectuation` 恒为 `recorded` 因此是一个**诚实的终态**，不是缺口。
+
+代码侧已把措辞改对（`internal/control/control.go` 包注释 + `Event`/`Dispatcher` 类型注释 +
+`cmd/session-control/main.go`）：原文是「尚未接线」，读起来像待办；现在是「按构造不可接线」
+并附四段判据。**「有意不做」与「还没做」必须用不同措辞**——这是本仓库自己的教训。
+
+`gofmt` / `go build` / `go vet` / `go test ./...` 全绿（6 个包）。
+
+### 五、第 3 档（恢复语义）的可行性结论：**跨节点会话重建四段全通**
+
+第 3 档开工前先做了一轮四段验证（本仓的硬性动作，E7b 的教训）。结论是**它可行**——
+与 E7b 那种「按构造不可能」不同——依据是下面这条已经跑绿的实验。
+
+**关键事实**：`resumeSessionId` 在**全平台零命中**。dsh 提供了一条公开、零侵入的续跑通路
+（`AgentLoopConfig.agents[].resumeSessionId`，注释写着「a resumed session's constructor seed
+**is its full stored log**」），而平台从未用过它。平台刻意不把 `ctx.sessionPersistence` 过网
+（`remotability.ts` 定级 `needs-design`：「跨节点问题是**复制与一致性**，不是调用转发」），
+所以跨节点续跑的正解是**从复制日志重建**——这条路此前无人验过。
+
+**实验**（`dsh-plugins/session-log/__tests__/reconstruct.spec.ts`，5 条全绿，无需外部依赖）：
+用真 dsh `SessionStore` 在一个容器里造出会话与日志，销毁它，再在**另一个容器**（零共享对象）
+里用那份日志把会话立起来。断言：
+
+| 段 | 结论 |
+| --- | --- |
+| 声明→写入→持久化 | 日志来自 `session_log`（既有能力，`@lumo/session-log` 已在做） |
+| **重载** | **通过**：`ctx.sessions.create(id, {seed: log, meta, eventState:'detached'})` 逐条收养原事件，且重建出的会话**可以继续追加、seq 严格接续** |
+
+**实验中被推翻的两个写法**（都留在实验文件的注释里，因为它们看起来都对）：
+
+1. **「重建出来的日志应与原来逐条相同」——错的断言，不是错的实现。** dsh 的构造函数在
+   「传了 seed 且日志末尾不是 `session/end-seed`」时**补一条标记**（`core/session/src/index.ts:617`），
+   两种 mode 都会。这是设计：dsh 把「恢复」定义成「构造种子 = 完整存量日志」，末尾补标记正是
+   它的形状。**先按直觉写断言、让它红，再读实现**——比先读注释再写结论可靠。
+2. **把「恢复」与「fork」当成两件需要区分的事。** 实际差别不在标记（两者都会补），而在
+   `firstLiveSeq`/`inheritedEventCount` 落在哪——那是**进程内构造事实**，恢复方真正要读的是日志本身。
+
+**已写下的固有损失**：header **不在日志里**，所以 `createdAt`（会话创建时刻）**无法还原**，
+最好只能取首个事件的时间去近似。它的失败模式是静默的：拿 `Date.now()` 顶上去不报错，只让一个
+三天前的会话显示成刚创建。重建实现必须自己想办法拿到 header 并写明这一点。
+
+**仍未做**：3c 永久节点失联 / 3d 异 node ID 替代（见下一节，已按「只补可观测」处置）。
+
+### 六之二、3c/3d（永久节点失联 / 异 node ID 替代）：判定为「只补可观测，不写回执」
+
+这两项落在 `lumo_governed_executions` 这张**执行台账**上，与 dsh 无关。查清后的结论是
+**不该由控制面收尾**，依据是它与既有两条通路的差别：
+
+- **任务侧已经被兜住了**：节点消失时 `LumoTaskLost`（P1）已经在报，8 小时后 `max_stall`
+  会把任务转死信，用户可重试。真正缺的只是执行台账那一行。
+- **`recover()` 的正当性不可移植**。它现在只在 `h.node_id = e.node_id`（同节点出现新实例）
+  时动手——那个条件**可证**：旧进程已经不在了。跨节点（3d）或节点永久消失（3c）都没有
+  等价物：A 节点凭什么判定 B 节点的在途执行已丢失？而 `save()` 要求 `instance_id` 匹配，
+  也就是说**只有执行的属主能写回执**，替另一个节点写必须显式开一条新路。
+- **写错的代价不对称**：一张假的「结果未知」终态回执会**赢过**后来到达的真实结果
+  （`save()` 的条件是 `result IS NULL OR result = $4`）。一次超过宽限期的网络分区，
+  就能把一个其实还活着的 run 变成终态。
+
+因此采用：**指标 + 只在「新增」时响的告警**，不驱动任何自动动作。
+
+- `lumo_scheduler_orphaned_governed_executions`（`scheduler/internal/server/metrics.go`）：
+  无结果的执行数中，节点**已不在目录快照里**的那些。复用既有纯函数 `orphanedActive`
+  与**同一份快照**（没有快照时节点集合是「未知」而不是「空」——把未知当空会让所有行都
+  变成孤儿）。
+- 取数 `store.UnsettledExecutionsByNode`：**这是调度器读别的模块的表**（`lumo_governed_executions`
+  由 `@lumo/subagent-host` 插件建，插件没有指标面），所以「表不存在」必须**报错**而不是
+  返回空——`governedWorker` 默认关闭，「这个部署不跑受治理执行」是常态，而 0 会说成
+  「跑了，一个孤儿都没有」。表不存在时调用方跳过发布，**序列缺席**正是要说的话。
+- 告警 `LumoGovernedExecutionsOrphaned`（P3/info，`prometheus-alerts.yml`）：用
+  **`delta(...[15m]) > 0`** 而不是 `> 0`——孤儿**不会自愈**（回执只能由原实例写），按绝对值
+  写是一条**永远响**的规则，而永远响的规则训练人忽略它。也不用 `increase()`：那是给单调
+  计数器的，本指标是每次刷新整体重置的 gauge。与 `LumoTaskLost` 的分工写在规则注释里。
+
+验证：`governed_orphans_test.go` 两条活库用例（表不存在必须报错、只数未结算行），
+**两条反向用例各红在对的那一条上**（把缺表吞成空结果 → 第一条红；去掉 `result IS NULL`
+过滤 → 第二条红）。scheduler 全模块 6 包通过，integration **44 条 0 跳过**；
+`alerts-verify.sh` 通过（真实文件无问题 + 11 条反例全被抓住），说明新指标名确有写入点。
+
+### 六、会话重建已落地（`@lumo/session-log` 的 `ctx.sessionRestore`）
+
+把上面那条已证实的通路接进了插件：`src/restore.ts` 的 `restoreSession()` + `ctx.provide('sessionRestore', …)`。
+
+**走 `prepare` + `enter` + `announce`，不是 `create`** —— 这不是风格选择：`create()` 的参数类型
+是 `CreateSessionOptions`，**它的联合里没有 `eventState`**；「收养一份存量日志」只能由 `prepare` 走
+（`PrepareSessionOptions = (CreateSessionOptions & {eventState?: undefined}) | RestoredSessionOptions`）。
+拿 `create` 硬塞 `eventState` 会被类型挡下，而绕过类型的写法（`as never`）会让它被**静默忽略**后落到
+seed 分支——两者都成功、都返回一个会话。四段验证的初版就踩了这个坑。
+
+**读的是 `log`（PG 真相源）而不是 `ctx.sessionLog`（热层）**：热层按 MAXLEN 裁剪，从窗口读到的段
+会被「必须从 seq 0 连续」的检查判为断裂——那是一次用错来源造成的失败。
+
+**四处固有损失写在文件头**（header 不在日志里：`createdAt` 只能近似、`cwd`/`parentSession`/
+`delegationDepth`/`agentPreset` 只能由调用方以 hints 给；`isSeeded`/`inheritedEventCount` 从标记反推；
+末尾会补一条 `session/end-seed`）。
+
+验证：`restore.spec.ts` **8 条全绿**（真 PG），端到端那条是「节点 A 写下日志并**死掉**、节点 B 从库里
+把会话立起来**并继续追加**」。三条反向用例各红在对的那一条上（拿掉连续性检查、把 `inherited` 判据改回
+真值判断、空日志不返回 `undefined`）。
+
+> **一条反向验证换来的真发现**：第三条反向用例造出的假会话，经 `announce` 触发了本插件的复制，
+> **假事件进了持久日志**——于是下一轮跑时，一个「不存在的会话」在库里有了历史。所以「空日志不伪造」
+> 不是省一次操作，它挡住的是**伪造会变成事实**。该用例现在除断言返回值外，还断言「库里仍然一条都没有」。
+
+### 七、顺带修掉一个「第一次绿、之后永远红」的测试缺陷
+
+`query.spec.ts` 的 `uses the fenced writer head…` 在本机真库上一直红（`FencedOutError：当前令牌 1，
+本次携带 1`——**令牌相同却判失效**，读起来像 fencing 实现有缺陷）。根因是**清库漏了一张表**：
+五个 spec 都写 `TRUNCATE session_log, session_writer_lease`，而 `session_log_heads` 是
+`publishHead` 做**令牌比较后交换**的那张表。上一轮 `release`+`acquire` 把水位推到 2，新一轮的
+`acquire` 从 1 重新发号，于是 `WHERE fencing_token <= EXCLUDED.fencing_token` 不成立 → 判越权。
+
+**因果是双向证过的**：把清库还原成两表**连跑两次** → 第 1 次过、**第 2 次红**（2 处 FencedOutError）；
+改回三表连跑两次 → 都过。修法收在 `pg-schema.ts` 的 `truncateSessionLog()` 一处，而不是在五个 spec
+里各补一行——五份手写清单里只要有一份漏了，同一个坑就会以「只有某个文件偶发红」的形式回来。
+
+修完 `session-log` 全套 **57 passed / 7 skipped / 0 failed**（跳过的那 7 条需要 MinIO）。
+
+> **一处环境事实**：`query.spec.ts` 的 `uses the fenced writer head…` 在本机真库上失败
+> （`FencedOutError`，令牌 1 vs 1）。**已用「把我的新文件移开后重跑」确认它与本轮改动无关**——
+> 是这台机器上该 spec 的既有测试隔离问题，不是本次引入。同理 `hot-log.spec.ts` 的 5 条
+> 需要 Redis，起 `compose.standalone.yml` 的 redis（16379）后全过。
+
+### 八、第 4 档第一步：截面开始按费率计价（金额上限的前置，同时补掉一个既有缺口）
+
+受治理执行的四项能力（工具/资产/预算/系统提示）里，按决策先做**预算**。动手前的侦察发现
+这件事比「加一个字段」深一层，而且撞上一个**既有的**缺口：
+
+- 治理面把 `max_budget_cents` 存成 `BIGINT`、前端标签是「预算上限（分）」——端到端是**钱**；
+- 而执法面（`budget_trees`）扣的是 `record.tokens`，种子值 `LUMO_DEFAULT_BUDGET=1000000`
+  ——是 **token**；
+- **`metering` 的 llm/stream 钩子把 `costUsd` 写死成 0**（`src/index.ts:129`），于是
+  **agent 发起的 LLM 调用在台账里完全没有成本**，而分析读面是 `SUM(cost_usd)`。
+
+所以要建金额上限，必须先让截面**知道价格**。本轮做掉的就是这一步。
+
+**先排除了一个看起来像「双记」的嫌疑**：网关侧（`llm-gateway/server.go:222`）也按费率算成本。
+查清后确认那是**另一条路**——网关经边缘网关暴露为南北向入口（`/v1/chat/`、`/v1/providers`），
+而**没有任何部署把 dsh 节点的 `ctx.llm` 指向它**（`LUMO_LLM_GATEWAY_URL` 全仓零命中）。
+两条路各自记账，不重叠。
+
+**改动**：
+
+1. `MeterRecord.costUsd` 由必填改为**可省略**，并新增可选 `inputTokens`/`outputTokens`。
+   **区分「省略」与「0」是刻意的**：前者是「发出方不知道价格」（节点侧就是这样），后者是
+   「知道，而且就是零元」（免费模型）。合并成一个 0，会让**没人算过价的账**与**价格真的是零
+   的账**在图上长得一样，而只有前者需要有人去补费率。
+2. `PgMeteringSeam` 新增 `ratesFor`（读 `llm_providers`，**与网关同一个公式、同一张表**——
+   费率只有一份真相源）与 `costOf`；`commit` 在 `costUsd === undefined` 时才推价。
+3. hook 把输入/输出**分开累计**（此前合并成一个 `tokens`，而费率表给的是两个价）；记录
+   组装抽成导出的纯函数 `meterRecordOf`，**专门用来钉住「省略而不是填 0」那一行**。
+
+**两条写下来的取舍**：
+
+- **拿不到费率时记 0，不猜价**，并**只抱怨一次**（`warnedModels`）。编一个默认费率会让成本
+  看起来有了而它是错的；每次都刷屏会把真正的异常淹掉。费率缓存也缓存 `null`（「查过了，
+  没有」），理由同上。
+- **只知道总数、不知道拆分时，两价取较高者计**。这是**方向选择**而非「更准」：低估会让
+  金额上限晚响（超支已经发生），高估只是让账更保守，而金额上限是这个数唯一的执法用途。
+  真正的修法是调用方分开给——hook 已经这么做。
+
+验证：`pg-cost.spec.ts` **6 条全绿**（对真 PG），其中第一条走完整条路
+**commit → outbox → drain → `usage_ledger`**（成本算对了但搬丢了，症状与分析读面看到的
+完全一样）。**三条反向用例各红在对的那一条上**：把 hook 改回 `costUsd: 0`（这正是原缺陷）
+→ 纯函数那条红；`commit` 忽略费率 → 计价那条红；无拆分时改用输入价 → 保守方向那条红。
+metering 全量 5 文件 **37 条通过**；契约只有本插件在用，改成可选字段无其他消费方。
+
+> **仍未做**：作用域金额上限本身（一张与 `budget_trees` 分开的表，避免在同一个 `budget`
+> 列里混两种单位，加上 `reserve`/`commit` 的两处分支），以及 `assertExecutionPreset` 放开
+> `max_budget_cents`。它们才是「金额上限生效」那一步；本轮做的是它成立的前提。
+
+### 八之二、金额上限生效：从预设一路走到计量截面
+
+接上一节。四件事：
+
+1. **`ScopeCapSeam` + 新表 `budget_scope_caps`**（`shared/seam-contracts/metering.ts`、
+   `pg-meter.ts` 的 DDL）。**另起一张表而不是复用 `budget_trees`**：那张表的 `budget` 列是
+   **token**，上限是**钱**，同一个列名承担两种单位正是 E4/D6 已经吃过一次亏的设计。新表的
+   单位写在列名里（`cap_cents` / `spent_cents`），`spent_cents` 用 `NUMERIC(18,6)` 与
+   `usage_ledger.cost_usd` 同精度——它是钱的累加，浮点会在多次小额调用后漂出可观测的分差。
+2. **`reserve` 一并检查它，`commit` 按钱扣减**。语义是**硬顶**（没有软限额/透支）：三态是
+   为长期额度设计的，而一次工作没有「下个周期」可言，透支了也没有地方还。
+   **拒因 `denied-scope-budget` 与前两项分开**——撞上它通常意味着「这次活干不完」，而不是
+   「去找管理员充值」。
+3. **计量插件 `ctx.provide('meteringCaps', …)`**：设上限的是**调用方**，而配额由插件执法。
+   没有这个服务，调用方唯一的办法是直连 PG 写本插件的表——那就是把 schema 复制一份出去。
+4. **受治理执行接线**（`governed-run.ts`）：开跑前按 `max_budget_cents` 封顶；
+   **拿不到执法面就拒绝开跑**，且这个拒绝是**说清原因的结果**而不是 throw——throw 会被
+   该函数的 catch 吞成一句笼统的「inspect its session log」，把一次**开跑前的拒绝**报成
+   一次执行失败，排查的人会去翻会话日志，而真相是「这个节点没装执法面」。
+   `worker-binding` 的 `assertExecutionPreset` 相应放开 `max_budget_cents`（并收紧为
+   「必须是合法的非负数」），其余三项仍拒绝。
+
+**三条写下来的取舍**：
+
+- **判据是「已经花超」而不是「这一次会不会超」**：预计量是 token、上限是钱，这条路径上
+  没法换算。代价是允许**一次**越界（把它顶过线的那次调用）——拿不到预估时，编一个换算率
+  反而会让上限看起来在精确执法。
+- **`setCap` 重设即清零已花**：它表达的是「这次工作的额度」。不清零会得到一个很隐蔽的
+  形态——重跑一次同样的执行，上限还没开始就被上一轮的账顶满了。
+- **没有行 = 不限额，不是「上限 0」**。把「查不到行」当 0，会把**每一条没设过上限的执行**
+  全部拒掉，症状是「受治理执行一启动就报预算不足」，看起来像额度用完。
+
+验证：`pg-scope-cap.spec.ts` **7 条全绿**（真 PG，含扣减按分而非 token、作用域隔离、
+重设清零、非法值拒绝）；`governed-run.spec.ts` 新增 3 条（拒绝开跑且不创建 Agent、
+上限以会话 ref 为键设上去、无上限时不动执法面）。**七条反向用例各红在对的那一条上**
+（没有行当上限 0 / 扣 token / reserve 不查 / setCap 不清零 / 照跑不拒绝 / 设了不设上去 /
+没有上限也去设 0）。metering **44 条**、subagent-host **76 条**全绿。
+
+**两处沿路修正的既有断言**（都是**它们本来就没测到东西**，不是被我改坏的）：
+
+- `worker-binding.spec.ts` 把 `{ max_budget_cents: 10 }` 放在「不支持的 capability」表里。
+  现在该能力有执法面了，所以那格改为一条**正向**断言（接受非零预算、但仍拒绝负数与非整数）
+  ——直接删掉会留下一个没人再管它的空洞。
+- `runtime-report.spec.ts` 把 `{ max_budget_cents: 1 }` 放在「授权变更 → 撤回身份」表里。
+  它此前能过，是因为 `assertExecutionPreset` 把非零预算一律判为不支持，**而不是**因为
+  「预算被改过」。移出时顺带记下一个**真实缺口**：撤回的判据是「预设 ≠ 绑定」，而
+  `WorkerBinding` 里没有预算字段，所以「预算被中途改了」在这条路径上**检测不到**；当前
+  实现只在开跑前设一次上限，中途改**不会生效**而运行会照常继续。要补得让上限可**就地更新**
+  （只改 cap、不清已花）——直接用 `setCap` 重设会把已花清零，等于让上限永远不触发。
+
+### 九、第 4 档第二步：检索路径可以按知识空间收窄（工具与执行器接线是下一步）
+
+按风险从低到高，接着做**知识空间**（只读）。动手前先查「按 space 收窄」表达得出来吗，
+答案是**今天表达不出来**：
+
+- `knowledge_query` / `knowledge_graph_query` 的入参只有 `{question, topK, depth}`——
+  **没有 space**，收窄靠的是**注册时**固定的 `config.realm`/`config.roles`；
+- seam 侧 `KnowledgeQuery` 是 `{realm, roles, text, topK, scope}`——**也没有 space**；
+- 而 `space` 只出现在**写入侧**（`KnowledgeIngest.doc.space`），并且 PG 的 `knowledge_chunks`
+  与 `knowledge_sources` **都存了这一列**。
+
+也就是说这个预设字段点名了检索路径不支持的维度。本轮补的是**这条路**（执法面），
+工具与执行器的接线留作下一步——先把「能不能按空间收窄」变成事实。
+
+**改动**：
+
+1. **契约**（`shared/seam-contracts/knowledge.ts`）：`KnowledgeQuery.spaces?: readonly string[]`
+   + 单点判据 `spaceAllowed(space, spaces)`。三态语义：**省略 = 不收窄、非空 = 只召回列出的、
+   `[]` = 一个都不许**。
+2. **PG Provider 两条路都收窄**。原生向量那条在 `LIMIT` **之前**过滤（不占 topK 名额，
+   召回质量不受影响），写法是「参数为 NULL 即不过滤」——`undefined` → NULL → 整条不生效，
+   `[]` → 空数组 → `= ANY('{}')` 恒假 → 零条。向量投影那条在 **PG 复核层**过滤。
+3. **Milvus 不需要改**：`index.ts` 是 `remote ? ctx.knowledge : new PgKnowledgeProvider({…,
+   vectorProjection})`——它**只**作为 PG 内部的投影被用到，而投影侧的召回本来就要过 PG 权威行
+   的复核。所以它忽略 `spaces` 只会**少召回**（topK 里被过滤掉一部分），不会泄漏。
+4. **remote 路径自动透传**：代理是 `client.call('knowledge','query',[request])` 整体转发，
+   host 侧校验器只**读取**已知字段做授权、不裁剪也不拒绝未知字段，原对象直接进 `seam.query`。
+   （这一点是查过的，不是推的——若 host 会裁剪，remote 模式下就会静默失去过滤。）
+
+**两处刻意的语义选择**：
+
+- **「省略即不收窄」而不是「省略即全拒」**：必须与治理面对 `knowledge_space_ids` 的既有语义
+  一致——那一侧 `length === 0` 表示「该预设不限制空间」（`assertExecutionPreset` 正是按
+  length 判的）。两处取不同默认值，会让「没配空间」的预设在一侧不受限、在另一侧什么都查不到。
+- **它是收窄，不是授权**。授权在 `realm` + `roles` 上（Provider 强制注入，§5.4.1）；传一个
+  调用方本无权访问的空间名不会因此拿到内容——那一步在 realm 过滤时就被挡掉了。写下来是因为
+  「多了一个过滤字段」很容易被读成「多了一道安全边界」。
+
+**验证**：契约套件（`knowledge.contract.spec.ts`）新增**三态断言**——这是强制机制：任何真实
+Provider 必须通过同一套契约，所以「新字段加了但某家没实现」会在它自己的契约测试上红，而不是
+在很久以后表现为一次跨空间召回。另加 `pg-space-scope.spec.ts` **4 条活库用例**（真 PG），
+补的正是「契约套件跑的是内存 stub，证明不了 PG provider 实现了它」那一半。
+**四条反向用例各红在对的那一条上**：`spaces?.length` 的写法 → 空数组那条红（它造成的正是
+那个 bug）；完全忽略新字段 → 收窄那条红；SQL 不做过滤 → 收窄与空数组两条红。
+
+> **沿路记下的一条环境事实**：knowledge 此前**没有**任何活库测试，而它是第一个需要 pgvector
+> 的。踩到两件事，都写进了 `knowledge/__tests__/pg-schema.ts`：① `schemaDsn` 是**替换**
+> `search_path` 而不是追加，而 `vector` 类型装在 `public` 里，所以只带自己的 schema 时报
+> `type "vector" does not exist`（看起来像扩展没装）——改为 `<schema>,public`，与 PostgreSQL
+> 的默认形状一致；② `doc_id` 是**跨 realm 全局主键**，所以「每次运行换一个 realm」不足以隔离
+> ——同一个 docId 换个 realm 重新 ingest 会被 `assertOwner` 拒为「属于另一个 realm」。
+
+### 十、第 4 档第三步：知识空间从预设走到检索（工具与执行器接线）
+
+接上一节。上一轮把「检索路径能按空间收窄」变成事实，这一轮把**预设 → 执行器 → 会话作用域 →
+两个知识工具 → seam**这条链接完。
+
+**机制**：`KnowledgeSessionScope`（接口在**契约**里，实现在知识插件）——按 `sessionRef`
+回答「这次执行允许落在哪些空间」。
+
+- **为什么不是「作用域上的值」**：最自然的想法是把允许的空间挂在 agent 作用域上，工具从同一个
+  作用域读。那条路走不通——**`Agent` 不公开它的 `ctx`**（`agent-loop` 里是
+  `private readonly runtime: { ctx }`），而工具在**插件自己的 ctx** 上注册、执行时只拿到
+  `ToolRunContext`。所以只能按会话键查表，与 `@lumo/control` 按 `exec.agent.session.id` 读
+  控制状态是同一个形状。
+- **接口住在契约里而不是插件内部**：设它的是受治理执行、读它的是两个知识工具，三方跨两个包；
+  让设置方 import 知识插件的内部模块，等于依赖一个包的内部结构。
+- **两个工具都收窄**。只给 `knowledge_query` 加收窄就是一个绕过口——模型改调
+  `knowledge_graph_query` 即可。这条单独有测试。
+- **工具名做成契约常量，注册方引用它**：白名单里写错一个名字时 `tools.restrict` 会**抛错**，
+  症状是「受治理执行一开跑就崩」而不是「少了点东西」。第一版把名单写在契约、注册时仍用字面量
+  ——那两边可以漂移，所以拆成 `KNOWLEDGE_TOOL_QUERY` / `KNOWLEDGE_TOOL_GRAPH` 两个单名，
+  由注册方直接引用。
+
+**一处刻意的方向相反**（写在代码注释里）：授权层把「预设**列出**了空间」当作允许读知识的
+证据，**留空读作不授予**；而契约层对 `spaces` 的语义是「省略 = 不收窄」。两者相反是刻意的
+——授权与收窄不是同一件事，授权层的默认必须是关的（少给一次权限只是功能没开，多给一次就是
+一个没人打算开的读取面）。将来若要表达「全部空间」，需要的是一份**显式**清单或独立开关，
+而不是把「留空」重新解释一遍。
+
+**两处拒绝开跑的守卫**（与预算那条同形，且都是**说清原因的结果**而不是 throw——throw 会被
+catch 吞成笼统的「inspect its session log」，把开跑前的拒绝报成执行失败）：
+预设设了金额上限而节点没有计量上限、预设列了知识空间而节点没有注册表，都拒绝开跑。
+结束时**必须清**作用域：受治理执行的会话 id 从 run_id 确定性派生，同一个 run 重试会算出同一个
+`sessionRef`，不清就会读到上一次执行留下的空间清单。
+
+验证：`session-scope.spec.ts` 9 条（注册表三态语义与拷贝语义 + 两个工具按会话传参 + 图工具
+受同一收窄）、`governed-run.spec.ts` 新增 3 条（无注册表拒绝开跑且不创建 Agent、按预设设并
+在结束时清、留空时不动）。**七条反向用例各红在对的那一条上**（没设过返回 `[]` / set 不拷贝 /
+图工具不带收窄 / 拿不到注册表也照跑 / 设了不设上去 / 结束时不清 / 留空也去设）。
+knowledge **47 条**、subagent-host **79 条**、seam-contracts **237 条**全绿。
+
+> **两处沿路修正**：① `worker-binding.spec.ts` 里 `{ knowledge_space_ids: ['private'] }` 那条
+> 既有断言（与 `max_budget_cents` 同一种处理：改为正向断言 + 仍校验类型）；② 书写 `restrict`
+> 的白名单时我一度断言「scope 与工具同出自一个插件，有其一必有其二」——那个不变式在**生产**
+> 成立（同一个 `apply` 里先 provide 再注册），但**测试里手搓的假 scope 破坏了它**，用例以
+> 「restrict 报未知工具」失败。修法是给测试补两个同名桩工具让 ctx 形状与生产一致，而不是放松
+> 那句断言。
+
 ## 2026-09-17 实施：生效面接线——「pause」从「拒工具」变成「真的停在 turn 边界」
 
 **一句话**：`pause` 此前的实际效果只有「拒掉副作用工具」，**turn 照跑**——agent 继续调模型、
@@ -424,8 +990,13 @@ RocketMQ 3 条（`usage-ledger/integration`）—— 这三样本机确实没有
 
 ### 五、可排期的剩余清单（分组，组间有依赖）
 
-1. **接线类（不需要新设计，都是「已写好、缺最后一跳」）**：C5 下发器、C5 控制台 UI、
-   C4 事件源、A3 seam URL 部署装配。四者互相独立，可并行。
+1. ~~**接线类（不需要新设计，都是「已写好、缺最后一跳」）**：C5 下发器、C5 控制台 UI、
+   C4 事件源、A3 seam URL 部署装配。四者互相独立，可并行。~~
+   **2026-09-18 全部处置**：其中**三件已闭合**（C5 控制台 UI、C4 事件源、A3 部署装配，见
+   本文顶部 2026-09-18 一节），**第四件改判为「按构造不可接线」并因此从排期里消失**
+   （C5 下发器：`session/control` 写不进 dsh 的会话日志，四段判据见同一节）。
+   **这一格的教训**：它把四件事并成一行排期，而其中一件根本不是「缺一跳」——
+   「已写好、缺最后一跳」这个说法**预设了那条路是通的**，而这个预设当时没人验过。
 2. **跨设备链路（#12 收尾）**：取消/中断、重启恢复、真端到端脚本。**依赖 1 完成与否无关**，
    但 e2e 脚本要先有「怎么起 governance + registry + 模拟 Agent」的夹具，这是本组的前置。
 3. **需要真集群才能验收（本机只能 SKIP）**：C3/C4/C7 的端到端探针、C1 迁移的**目标端**

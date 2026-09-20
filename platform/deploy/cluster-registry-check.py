@@ -61,7 +61,15 @@ FALSE_WORDS = {"false", "0", "no"}
 VALID_ENFORCE = TRUE_WORDS | FALSE_WORDS
 
 SCHEDULER_MODE_KEYS = ("LUMO_SCHEDULER_URL", "LUMO_SCHEDULER_API_URL")
-SERVICE_KEY_RE = re.compile(r"^  ([a-z0-9][a-z0-9_-]*):\s*$")
+# 服务名后面**允许**跟行内注释。首版写成 `:\s*$`，于是 `  cluster-b-dsh-0:   # 承载节点`
+# 不被认成服务键——而它的整段 environment 会被并进**前一个**服务（见 parse_compose 的
+# `current` 游标），不是被丢掉。方向是 fail-open，且后果正好落在本检查器存在的理由上：
+# 实测同一份拓扑（cluster-b 唯一承载节点缺 LUMO_CONTROL_PLANE_TOKEN）去掉行内注释报
+# `cluster-without-reporter`，加上行内注释就**通过**——被污染的宿主节点继承了
+# LUMO_ROLE=node 与前一个服务的令牌，替 cluster-b 假冒了一个上报方。
+# `edge-cors-check.py` / `compose-ports-check.py` / `compose-images-check.py` 都已收敛到
+# 这个写法；本条是同一个盲区在集群侧的最后一处。
+SERVICE_KEY_RE = re.compile(r"^  ([a-z0-9][a-z0-9_-]*):\s*(?:#.*)?$")
 ENV_ASSIGN_RE = re.compile(r"^\s*-\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 # compose 里两种写法都要认：裸的 `- K=V` 与带引号的 `- "K=V"`。只认前者会让
 # `- "LUMO_CONTROL_PLANE_TOKEN=${...}"` 静默消失，于是检查器把「配了令牌」读成

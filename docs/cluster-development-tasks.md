@@ -677,9 +677,22 @@ Was ten hardcoded names; omitted `connector-gateway`, `llm-gateway`, `flows`,
 `tei`, `tei-rerank`, `rocketmq-namesrv`, `rocketmq-topic-init`. The static check
 passed even when those were absent.
 
-Now shape-aware and exact: cluster 33 services, standalone 21. Verified by
+Now shape-aware and exact: cluster 34 services, standalone 20. Verified by
 extracting the arrays from the script and diffing against the compose
-default-render sets — zero missing, zero extra in both shapes. Two details:
+default-render sets — zero missing, zero extra in both shapes. Two corrections
+to the numbers that stood here before:
+
+- Both counts dropped by one on 2026-09-20, when the one-shot
+  `rocketmq-topic-init` service was merged into the `rocketmq` entrypoint and
+  therefore stopped being a topology entry.
+- The cluster figure was stated as 33 and had **never** matched the topology:
+  re-diffing on 2026-09-20 (after the merge) gives 34 required == 34 rendered,
+  so before the merge the true pair was 35/21, not 33/21. Only the standalone
+  figure was accurate. The invariant that carries the check is
+  `required == rendered`, not the number itself — `preflight` prints the count
+  it actually compared, so read that line rather than this paragraph.
+
+Two details:
 
 - `provisioner` and `artifact-runtime` are behind `profiles: [provisioner]`, so
   `docker compose config --services` does not render them by default. Requiring

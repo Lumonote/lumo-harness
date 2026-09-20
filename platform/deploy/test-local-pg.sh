@@ -23,19 +23,23 @@
 #   ./test-local-pg.sh scheduler flows   # 只跑这些 Go 模块（TS 步骤照跑）
 #   LUMO_LOCAL_SERVICES=postgres,redis,minio ./test-local-pg.sh
 #                                        # 额外起 MinIO，解封对象存储/冷层用例（见下）
-#   LUMO_LOCAL_MINIO_IMAGE=minio/minio:RELEASE.<其他版本> ./test-local-pg.sh
+#   LUMO_LOCAL_MINIO_IMAGE=quay.io/minio/minio:RELEASE.<其他版本> ./test-local-pg.sh
 #                                        # 试别的 MinIO 版本时临时覆盖 image
 #   LUMO_LOCAL_SERVICES=postgres ...     # 只起 PG：Redis 相关 spec 会被**排除并列出**
 #   LUMO_LOCAL_KEEP_DB=1 ...             # 保留测试库与报告目录，便于事后查看
 #   LUMO_LOCAL_DOWN=1 ...                # 跑完把 compose 服务停掉
 #
-# MinIO 的版本必须钉死，且两个 compose 文件里的版本要一致。原先两处都写
-# `minio/minio:latest`，而 Docker Hub 已不为该仓库提供 `latest` 标签（实测
-# 2026-09-16：`pull access denied for minio/minio`）—— compose 解析镜像名时不发探测
-# 请求，所以这个错误只在 `up` 时才暴露，表现得像「对象存储起不来」而不是「镜像写错了」。
-# 2026-09-16 起 compose 已钉 `RELEASE.2025-04-22T22-12-26Z`，因此
-# `LUMO_LOCAL_SERVICES=…,minio` 直接可用；`LUMO_LOCAL_MINIO_IMAGE` 现在只用于**试别的
-# 版本**，它用一个覆盖文件临时替换 image，不改 compose。
+# MinIO 必须钉死具体版本、且两个 compose 文件同源。这里连踩过两次，值得记住：
+#   2026-09-16 两处都写 `minio/minio:latest` 拉不到，于是改成钉具体版本
+#              `RELEASE.2025-04-22T22-12-26Z` —— 但**钉的还是 Docker Hub 那个仓库**；
+#   2026-09-20 整个 `minio/minio` 仓库在 Docker Hub 下线（仓库 API 与 `docker pull`
+#              双双 404），于是连同一个版本号也不可拉了。
+# 结论：**换 registry 才是修，换 tag 不是**。现在两处都指向
+# `quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z`（实测可拉；镜像内容一致，内含
+# cluster healthcheck 依赖的 `mc`）。
+# 这类错误只在 `up` 时才暴露，因为 compose 解析镜像名时不发探测请求——表现得像
+# 「对象存储起不来」，而不是「镜像写错了」。
+# `LUMO_LOCAL_MINIO_IMAGE` 仍用于**试别的版本**：它用一个覆盖文件临时替换 image，不改 compose。
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

@@ -64,6 +64,18 @@ if op == "sub":
         print(f"锚点未命中: {anchor!r}", file=sys.stderr)
         sys.exit(1)
     text = text.replace(anchor, replacement)
+elif op == "sub-line":
+    # **整行**匹配的替换。`sub` 用裸字符串替换，而服务名那类锚点在文件里到处都是子串
+    # （`      postgres: { condition: service_healthy }` 就含 `  postgres:`，实测 17 处），
+    # 于是 `sub` 会改出一堆不相干的行。服务名要按整行锚定。
+    import re
+    anchor, replacement = extra
+    pattern = re.compile(r"^" + re.escape(anchor) + r"$", re.M)
+    hits = len(pattern.findall(text))
+    if hits != 1:
+        print(f"整行锚点命中 {hits} 次（要求恰好 1 次）: {anchor!r}", file=sys.stderr)
+        sys.exit(1)
+    text = pattern.sub(lambda _: replacement, text, count=1)
 elif op == "rename-ports-key":
     # 让解析器一个 `ports:` 键都看不到，验证「什么都没采集到」会失败而不是安静通过。
     text = text.replace("ports:", "portz:")
@@ -162,6 +174,25 @@ if grep -q '"18089:8090"' "$WORK/dup-in-file.yml"; then
     "port-collision: 宿主端口 18089" --file "$WORK/dup-in-file.yml"
 else
   fail "单文件撞车用例：锚点失效"
+fi
+
+# --- 反向 2b：服务名带**行内注释**时，它的 ports 不能被漏掉 ---------------------------
+# 2026-09-20 修：首版的服务名正则要求行尾没有别的东西，于是 `  postgres:   # 注释` 不被
+# 识别为服务，它的整段 `ports:` 被当成「不在服务区内」处理。**方向是 fail-open**：冲突的
+# 另一方成了唯一主张者，于是**真冲突被放行**（实测过，退出码 0）。而本仓库
+# `compose.standalone.yml` 里有 8 个带行内注释的服务名，cluster 一个都没有 ——
+# 也就是说这个盲区在本机只对 standalone 生效，而 standalone 恰是最常起的那一个。
+mutate sub-line "$CLUSTER" "$WORK/inline-a.yml" \
+  '  postgres:' '  postgres:   # 行内注释
+    ports: ["15432:5432"]'
+mutate sub-line "$WORK/inline-a.yml" "$WORK/inline-comment.yml" \
+  '  nacos:' '  nacos:
+    ports: ["15432:8848"]'
+if grep -q '"15432:8848"' "$WORK/inline-comment.yml"; then
+  expect_fail "回归：服务名带行内注释时，真冲突仍必须被抓到（fail-open 盲区）" \
+    "port-collision: 宿主端口 15432" --file "$WORK/inline-comment.yml"
+else
+  fail "行内注释用例：锚点失效（postgres / nacos 的服务名写法变了？）"
 fi
 
 # --- 反向 3：一个 ports 条目都解析不出来（解析器失效 / 拓扑被删空）------------------

@@ -46,20 +46,7 @@ while true; do
     fi
 
     status="$(docker inspect --format '{{.State.Status}}' "$container_id")"
-    exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$container_id")"
     health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id")"
-
-    if [[ "$service" == "rocketmq-topic-init" ]]; then
-      if [[ "$status" == "exited" && "$exit_code" == "0" ]]; then
-        continue
-      fi
-      if [[ "$status" == "exited" || "$status" == "dead" ]]; then
-        failed="$failed $service"
-      else
-        pending="$pending $service"
-      fi
-      continue
-    fi
 
     if [[ "$status" == "exited" || "$status" == "dead" ]]; then
       failed="$failed $service"

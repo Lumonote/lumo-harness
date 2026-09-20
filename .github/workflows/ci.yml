@@ -282,6 +282,25 @@ jobs:
       # （`-f compose.cluster.yml -f compose.cluster.devices.yml`）恰恰是最常跑的。
       - name: Compose host ports do not collide after overlay merge
         run: platform/deploy/compose-ports-verify.sh
+      # compose 镜像引用的门禁：同名服务跨形态必须同源，且不得出现浮动 tag。
+      # 拉不到镜像**不是** compose 配置错误 —— `docker compose config` 与 `up --dry-run`
+      # 都能过，失败只在容器真去拉的那一刻（`pull access denied`）。2026-09-16 与 09-20
+      # 连踩同一个位置两次：先「把 latest 换成具体版本」，再发现**整个 minio/minio 仓库
+      # 从 Docker Hub 下线了**——镜像引用有两个自由度（registry 与 tag），只钉一个等于没钉。
+      # 另一半守的是两份 compose 各写各的版本（`redis:7` vs `redis:7-alpine`），而
+      # `hashicorp/vault:latest` 是**行内 flow 写法**，行级 grep 与朴素缩进解析都看不见它。
+      # 脚本自带 11 条反例/边界用例，断言到具体文案。
+      - name: Compose images are pinned and identical across shapes
+        run: platform/deploy/compose-images-verify.sh
+      # RocketMQ 入口脚本的 topic 预建契约：**topic 必须先于 proxy 存在**。
+      # 2026-09-20 把独立的一次性容器 `rocketmq-topic-init` 并进入口脚本，于是「8081 在
+      # 监听」才蕴含「topic 已建完」——而这个蕴含**只由顺序保证**：把建 topic 挪到
+      # `sh mqproxy` 之后，一切照常工作，只是闸门没了、竞态窗口回来了（v5 producer 启动期
+      # 的路由查询不等 autoCreateTopicEnable，撞上就是起不来）。
+      # 脚本用 mqbroker / mqproxy / mqadmin 替身读**真实发生顺序**（stdout 被重定向掉了，
+      # 顺序只能从副作用侧读），并有一条把顺序倒过来的反例证明断言不是恒真。
+      - name: RocketMQ entrypoint creates usage topics before starting the proxy
+        run: platform/deploy/rocketmq-entrypoint-verify.sh
       # 入口网关 CORS 接线门禁：edge-gateway 上有两层 CORS —— `gate.CORS`（边缘白名单，
       # 按**请求的 Origin** 裁决）与 observability 中间件（按**配置的来源**写死 ACAO）。
       # 两层各自都对，错法只在**跨文件对照**上，而症状是「能用」：2026-09-16 实测

@@ -107,8 +107,8 @@ pnpm --dir platform desktop:dev
 ./platform/deploy/up.sh cluster -d --build
 ```
 
-Cluster 全部容器启动后执行统一冒烟验收；脚本会等待长期服务进入 running/healthy、
-确认 `rocketmq-topic-init` 成功退出，并检查双 Scheduler、控制面、DSH Web 与 Prometheus：
+Cluster 全部容器启动后执行统一冒烟验收；脚本会等待全部服务进入 running/healthy，并检查
+双 Scheduler、控制面、DSH Web 与 Prometheus：
 
 ```sh
 ./platform/deploy/smoke-cluster.sh
@@ -257,7 +257,7 @@ JSON 对象边界，优先从完整备份恢复；主备都损坏时将原文件
 
 ```sh
 ./platform/deploy/up.sh cluster -d --build --force-recreate \
-  rocketmq-namesrv rocketmq rocketmq-topic-init usage-ledger
+  rocketmq-namesrv rocketmq usage-ledger
 ```
 
 若仍失败，优先取 NameServer 和 Broker 的健康检查输出与日志：
@@ -265,7 +265,7 @@ JSON 对象边界，优先从完整备份恢复；主备都损坏时将原文件
 ```sh
 docker inspect --format '{{json .State.Health}}' lumo-platform-cluster-rocketmq-namesrv-1
 docker compose -f platform/deploy/compose.cluster.yml logs --tail=150 \
-  rocketmq-namesrv rocketmq rocketmq-topic-init
+  rocketmq-namesrv rocketmq
 ```
 
 **topic 命名注意**：RocketMQ 合法字符集 `^[%|a-zA-Z0-9_-]+$`，点号非法；本项目的
@@ -627,5 +627,23 @@ Scheduler 的两个开关：
 ## 约定
 
 - **同一套镜像与应用配置，只换编排清单**；禁止「本地专用镜像」或「本地专用配置项」。
+- **镜像引用有两个自由度（registry 与 tag），两个都要钉**。只钉 tag 会踩「仓库整体下线」
+  （2026-09-16→09-20 的 `minio/minio`：先换 tag 只撑了四天，因为整个仓库从 Docker Hub 下架，
+  现已改用 `quay.io/minio/minio`）；只钉 registry 会踩 `latest` 漂移。**两份 compose 的同名
+  服务必须同源**——否则 standalone 能起的拓扑在 cluster 里起不来，反之亦然。门禁
+  `./platform/deploy/compose-images-verify.sh`（含 11 条反例/边界）。
 - 中间件在缩微集群中一律单实例（不验证中间件自身的 HA，那是它们各自的事）。
+- **计量闭集 topic 的预建在 rocketmq 入口脚本里，不在独立容器里**（2026-09-20 合并；原先是
+  一次性容器 `rocketmq-topic-init`）。顺序即契约：注册断言 → 建 topic → 才 `sh mqproxy`，
+  于是「8081 在监听」蕴含「topic 已就绪」，healthcheck 天然成了闸门。别把这个顺序挪掉——
+  挪到 `sh mqproxy` 之后一切照常工作，只是闸门没了、竞态窗口回来（v5 producer 启动期的
+  路由查询不等 `autoCreateTopicEnable`，撞上就是起不来）。门禁
+  `./platform/deploy/rocketmq-entrypoint-verify.sh`（用 mqbroker / mqproxy / mqadmin 替身
+  读**真实发生顺序**，并有一条把顺序倒过来的反例证明断言不是恒真）。
+- **行级解析器必须把「键名后的行内注释」当一等公民**。`  postgres:   # 注释` 是合法且常见的
+  写法，但 `^  ([a-z0-9-]+):\s*$` 这类正则认不出它——而后果不是「跳过该服务」，是把它**整段
+  并进前一个服务**，方向 fail-open。2026-09-20 在 `compose-ports-check.py`（真端口冲突被放行，
+  standalone 解析到的端口项 20→24）与 `cluster-registry-check.py`（cluster-b 缺上报方被漏掉，
+  standalone 解析到的服务 14→22）各踩到一次。四处已统一成 `(?:#.*)?$`；`edge-cors-check.py`
+  另有一条「看到像服务却解析不了就喊」的兜底。
 - 每个 compose 的 CI 冒烟：起得来 → 跑一个 headless 任务 → 正常退出。

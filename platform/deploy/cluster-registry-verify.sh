@@ -241,6 +241,74 @@ run_mutation "拓扑里删空了承载节点" \
   "- LUMO_ROLE=" \
   "topology-not-parsed"
 
+# 5b. 服务名后面带**行内注释**时，它的 environment 不能被漏掉 -------------------------
+# 2026-09-20 修：`SERVICE_KEY_RE` 首版写成 `:\s*$`，于是 `  cluster-b-dsh-0:   # 承载节点`
+# 不被认成服务键——而 `parse_compose` 的 `current` 游标会把它整段 environment **并进前一个
+# 服务**，不是丢掉。方向是 fail-open，且后果正好落在本检查器存在的理由上：被污染的宿主
+# 节点继承了 `LUMO_ROLE=node` 与**前一个服务的令牌**，于是替 cluster-b 假冒了一个上报方
+# ——「判定看起来生效了，实际上一分钱的作用都没有」这个本文件开头写的形状，正好又出现
+# 了一次。与 `compose-ports-check.py` / `compose-images-check.py` / `edge-cors-check.py`
+# 是同一个盲区，本条是它在集群侧的最后一处。
+#
+# 用夹具而不是变异：真实 `compose.cluster.yml` 里 **0 处**行内注释（8 处全在
+# standalone），所以这个形状在 cluster 拓扑上造不出来，只能手写。下面「无注释」那条是
+# **对照**——它证明夹具本身的缺陷成立，否则「加注释仍报错」可能只是碰巧报了别的规则。
+cat >"$WORK/inline-comment-base.yml" <<'YAML'
+name: lumo-inline-comment-fixture
+services:
+  scheduler-0:
+    environment:
+      LUMO_DEPLOYMENT_MODE: cluster
+      LUMO_CLUSTER_ENFORCE: "true"
+      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?must be set}"
+      LUMO_SCHEDULER_CLUSTER_ID: cluster-a
+  cluster-a-dsh-0:
+    environment:
+      LUMO_ROLE: node
+      LUMO_CLUSTER_ID: cluster-a
+      LUMO_DEPLOYMENT_MODE: cluster
+      LUMO_SCHEDULER_URL: http://scheduler-0:8083
+      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?must be set}"
+  cluster-b-dsh-0:
+    environment:
+      LUMO_ROLE: node
+      LUMO_CLUSTER_ID: cluster-b
+      LUMO_DEPLOYMENT_MODE: cluster
+      LUMO_SCHEDULER_URL: http://scheduler-0:8083
+YAML
+# 只加一个行内注释，别的逐字不动。
+python3 - "$WORK/inline-comment-base.yml" "$WORK/inline-comment.yml" <<'PY'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src, encoding="utf-8").read()
+anchor = "  cluster-b-dsh-0:\n"
+assert text.count(anchor) == 1, f"锚点命中 {text.count(anchor)} 次（要求 1 次）"
+open(dst, "w", encoding="utf-8").write(text.replace(anchor, "  cluster-b-dsh-0:   # 承载节点\n"))
+PY
+
+expect_fail "行内注释对照：无注释时 cluster-b 缺上报方被抓到" compose \
+  "$WORK/inline-comment-base.yml" cluster "cluster-without-reporter: 集群 cluster-b"
+
+if out="$(python3 "$CHECK" --kind compose --file "$WORK/inline-comment.yml" --expect-mode cluster 2>&1)"; then
+  fail "行内注释：同一个缺陷没被抓到（fail-open 盲区复现）"
+  printf '%s\n' "$out" >&2
+else
+  case "$out" in
+    *"cluster-without-reporter: 集群 cluster-b"*)
+      # 再钉一次「这个服务真的被解析出来了」：修复前这一行是「解析出 2 个服务」。
+      # 只断言文案会漏掉一种退化——报对了规则，但服务数仍然少一个。
+      case "$out" in
+        *"解析出 3 个服务"*) ok "行内注释：服务名带注释时该缺陷仍被抓到（fail-open 盲区）" ;;
+        *) fail "行内注释：报对了文案，但服务数不对（仍有服务没被解析出来）"; printf '%s\n' "$out" >&2 ;;
+      esac
+      ;;
+    *)
+      fail "行内注释：报错了，但报的不是预期的那条"
+      printf '%s\n' "$out" >&2
+      ;;
+  esac
+fi
+
 # 7. 版本闸门开着、两个集群都声明了同一个版本 —— 这是一份**合法**的派生拓扑，必须通过。
 #    它同时给下面两条反向用例当对照：证明它们抓的不是「闸门开着」这件事本身。
 if python3 "$WORK/mutate.py" "$CLUSTER_COMPOSE" "$WORK/gate-on.yml" "$GATE_OFF" "LUMO_CLUSTER_VERSION_GATE=true" >/dev/null; then
