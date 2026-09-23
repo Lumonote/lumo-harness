@@ -372,24 +372,21 @@ export function applyLumoDshOverrides(root) {
         + "  private reopenAttempts = 0\n",
     ],
     [
-      "      this.retireFailedSubmission(requestId)\n"
-        + "    }\n"
-        + "    this.openGeneration++\n"
-        + "    const events = this.events\n",
-      "      this.retireFailedSubmission(requestId)\n"
-        + "    }\n"
+      // Clear at dispose entry, ahead of retirement callbacks and event teardown.
+      "  async dispose(): Promise<void> {\n"
+        + "    this.stopObservingInbox()\n",
+      "  async dispose(): Promise<void> {\n"
         + "    if (this.reopenTimer !== undefined) {\n"
         + "      clearTimeout(this.reopenTimer) // LUMO_STREAM_RESILIENCE: a pruned session must not resurrect itself.\n"
         + "      this.reopenTimer = undefined\n"
         + "    }\n"
-        + "    this.openGeneration++\n"
-        + "    const events = this.events\n",
+        + "    this.stopObservingInbox()\n",
     ],
     [
-      "      await events.open({ maxMessages: PAGE_MESSAGES })\n"
+      "      await events.open(HISTORY_PAGE_OPTIONS)\n"
         + "      if (generation !== this.openGeneration || this.events !== events) return\n"
         + "      this.openState = 'open'\n",
-      "      await events.open({ maxMessages: PAGE_MESSAGES })\n"
+      "      await events.open(HISTORY_PAGE_OPTIONS)\n"
         + "      if (generation !== this.openGeneration || this.events !== events) return\n"
         + "      this.openState = 'open'\n"
         + "      this.reopenAttempts = 0 // LUMO_STREAM_RESILIENCE: a healthy open resets the backoff ladder.\n",

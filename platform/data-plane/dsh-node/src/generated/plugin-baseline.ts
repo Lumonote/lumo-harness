@@ -54,12 +54,6 @@ export const BASELINE_PLUGIN_PINS: readonly BaselinePluginPin[] = [
     spec: 'dsh-dream-skin@8.30.1',
     note: '桌面换肤：8 套 iOS / Linear 式清透冷调主题加弥散光壁纸，每用户可调强调色。纯原生 --dsw-* token 实现，经其 cordis.patch.yml 在 Web 壳激活。',
   },
-  {
-    name: '@linxin666/dsh-client-ui-task-board',
-    version: '0.3.14',
-    spec: '@linxin666/dsh-client-ui-task-board@0.3.14',
-    note: '任务看板：dsh web GUI 的 Host 权威任务台帐，替换 Lumo 左侧菜单原「自动化」入口。',
-  },
 ]
 
 /** 曾被考虑但已移出基线的插件。保留是为了防止有人再把它加回来。 */
@@ -75,6 +69,10 @@ export const BASELINE_EXCLUDED_PLUGINS: readonly { name: string; reason: string 
   {
     name: 'dsh-univer-office',
     reason: '0.2.14（2026-09-18，最新版）的 peerDependencies 只声明 dsh-attachment/session/settings/llm/tools/skill 的 0.1.1-rc.2 || 0.1.2-rc.1，而 runtime 实际随 master 走 0.1.6-alpha.2（四个 alpha 代差）。失效发生在**浏览器半边**：它的 dsh.client 半边在 web 启动期激活失败，boot 页停在「web boot: 1 entry did not activate / dsh-univer-office: failed」，整块工作台打不开。这类失效构建期查不出来（只有真的在浏览器里装配才会撞上），上游也没有适配版本，故先从桌面基线移除；市场仍可自行安装（那里可以钉与插件同龄的 dsh）。2026-09-18 起客户端启动已改为尽力而为（apply.mjs 的 LUMO_BEST_EFFORT_BOOT），同类插件再坏只会被跳过并告警，不会再拖垮工作台。',
+  },
+  {
+    name: '@linxin666/dsh-client-ui-task-board',
+    reason: '0.3.14（原 pin）与 0.3.20（2026-09-23 市场最新）**形状相同**：客户端半边把 `settingsScope` 写进硬 inject 列表（`lib/client.js` 的 `inject = [\'slots\',\'sessions\',\'workspaces\',\'connection\',\'settingsScope\',\'locale\',\'remote\']`），实测在该 runtime 的 web 装配里该条目永远停在 `pending`，boot 页报「web boot: 1 entry did not activate / @linxin666/dsh-client-ui-task-board: pending (waiting for service: settingsScope)」。失效面在**浏览器半边**（服务端 runtime.log 无对应 warning），构建期无门禁可查。注意 `settingsScope` 的提供方 `@deepseek-ai/dsh-client-ui-settings`（loader id `ui-settings`）自己 inject `remote` + `remote.settings`，且**只在 apply() 里**才构造该 Service —— 即服务链是「宿主 settings 域 → remote.settings → ui-settings.apply() → settingsScope → 任务看板」，任一环缺失就整条停摆；本次只确认了看板停在末端，上游链路的哪一环断的**尚未定论**，别把这条 reason 当成已定位到根因。上游是第三方包、改不了它的 inject，故移出桌面基线；市场仍可自行安装，LUMO_BEST_EFFORT_BOOT 已保证它只被跳过、不再拖垮工作台。',
   },
 ]
 

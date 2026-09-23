@@ -48,12 +48,59 @@ COPY deepseek-harness/patches /workspace/deepseek-harness/patches
 RUN cd /workspace/deepseek-harness && pnpm fetch
 
 COPY deepseek-harness /workspace/deepseek-harness
+# 清掉「不在 git 里、也没有 package.json」的残留包目录。它们是上游删掉或搬走的包
+# 留在开发工作区里的残骸（源与 manifest 都没了，只剩旧 `lib/`），所以上游自己的冷
+# checkout 里根本不存在，只有「拿工作区当构建上下文」的这里会被带进来。
+#
+# 为什么必须清：tsdown 的 workspace glob（`vendor/*`、`packages/*/*`）不看 manifest，
+# 只看目录存在；命中这种空壳后它向上回退到根 package.json，于是拿根配置的 entry
+# `lib/types/{index,invariant,startup}.js` 去那个目录下面解析 —— 必然解析不到。报错
+# 形态随命中的文件数变化：一个都没命中报 `Cannot find entry`（花括号原文保留），
+# 只命中 `index.js` 时报 `[UNRESOLVED_ENTRY] Cannot resolve entry module
+# lib/types/index.js`。后者就是本构建此前失败的样子，而且两个形态都会让
+# `build:lib` 非零退出、`build:lib:client` 永不执行。
+#
+# 上面 `**/node_modules` 只把它们里的依赖目录排掉了，剩下的旧 `lib/` 恰好够让 glob
+# 认为「这是个能构建的包」——所以不能指望 .dockerignore 解决；直接把目录删掉。
+# 也不能靠「先跑两面 tsc」：这些目录不在任何 tsconfig 的引用图里，tsc 不会给它们
+# 补上缺失的入口，冷热树上都会失败。
+RUN cd /workspace/deepseek-harness \
+    && for d in vendor/* packages/*/* apps/*; do \
+         if [ -d "$d" ] && [ ! -f "$d/package.json" ]; then \
+           echo "移除无 package.json 的残留包目录: $d" >&2; \
+           rm -rf "$d"; \
+         fi; \
+       done
 COPY platform/dsh-overrides /workspace/platform/dsh-overrides
 COPY platform/desktop-assets/lumo-logo.png /workspace/platform/desktop-assets/lumo-logo.png
 RUN node /workspace/platform/dsh-overrides/apply.mjs /workspace/deepseek-harness
 RUN cd /workspace/deepseek-harness && pnpm install --frozen-lockfile --prefer-offline
+# The source checkout can carry ignored lib/ bundles from an older dsh commit.
+# Clear those generated outputs after install so the image builds from current
+# source and never resolves an old package entry during the workspace bundle.
+RUN cd /workspace/deepseek-harness && pnpm clean
 # Build the official host/client packages plus the isolated Lumo conversation
 # extension overlay in the image. The host checkout is never modified.
+#
+# 让上游构建脚本依次构建 host 和 client：host tsc + tsdown 先生成 Remote 声明，
+# 随后 client tsc 才能消费它们。预先单独运行两个 tsc 聚合会跳过 host tsdown，
+# client 编译读到缺失或过期的声明。
+#
+# 归因更正（2026-09-20 实测）：这里原先记的失败源是「49 个只有浏览器半边的包
+# （packages/client/ui-*）的主机入口不在 tsconfig.host.json 的引用图里，冷树上 host 序
+# 走不到它们的 lib/types/index.js」——**这个归因不成立**。`clientBundle()` 在 host face
+# 下返回 `SKIP_WORKSPACE_BUILD`（见 packages/client/tsdown.client.ts），host 序的 tsdown
+# 根本不会去解析这些包的主机入口，缺不缺都不影响它。同一个 `SKIP_WORKSPACE_BUILD`
+# 也说明：host 序失败与「client 产物在不在」无关，预跑 client tsc 治不了这件事。
+#
+# 真正的失败源是上面那步清掉的「没有 package.json 的残留包目录」：glob 命中它 →
+# tsdown 向上回退到根 package.json → 拿根配置的 entry
+# `lib/types/{index,invariant,startup}.js` 去它下面解析。命中不全时两种报错形态
+# （`Cannot find entry` / `[UNRESOLVED_ENTRY] Cannot resolve entry module
+# lib/types/index.js`）都指向同一件事。命中数随工作区里残骸的数量漂移，所以
+# 「走到第 N 个配置」里的 N 会变（实测 38 与 45 都出现过），不能拿它当定位依据；
+# 唯一可靠的判据是报错里的包名 `@deepseek-ai/dsh-root` —— 根包的 name 出现在一个
+# 明明不是根包的构建单元上，就说明是这种空壳目录在被构建。
 RUN cd /workspace/deepseek-harness \
     && if grep -q '^ref: ' .git/HEAD; then \
          dsh_commit_ref="$(sed 's/^ref: //' .git/HEAD)"; \
@@ -75,14 +122,22 @@ RUN cd /workspace/platform && pnpm fetch
 
 COPY platform /workspace/platform
 RUN cd /workspace/platform && pnpm install --frozen-lockfile --prefer-offline
+RUN cd /workspace/platform && pnpm --filter @lumo/dsh-platform-ui run bundle
 RUN python3 -m venv /opt/lumo-ppt \
     && /opt/lumo-ppt/bin/python -m pip install --no-cache-dir \
       -r /workspace/platform/upstream/skills/ppt-master/requirements.txt
-RUN cd /workspace/platform && pnpm --filter @lumo/dsh-platform-ui run bundle
 # Profile plugin management follows the pnpm version pinned by the platform
 # workspace. Pre-warm it so first boot can install local link: plugins without
 # a runtime package-manager download.
-RUN corepack prepare pnpm@11.7.0
+#
+# 必须用 `install --global`，不能再用 `prepare`：corepack 0.3x 起 `prepare` 只把版本
+# 下载进缓存、**不再设默认版本**，而 `profileManagerEnv` 在启动时导出
+# `COREPACK_ENABLE_PROJECT_SPEC=0`（见 src/plugins.ts），corepack 于是既不读项目 pin、
+# 也没有默认版本可用，只能去下载 **latest**。2026-09-20 实测下载到 pnpm 12.5.1，
+# 它随即拿 dsh 根的 `packageManager: pnpm@11.7.0` 做校验并以 ERR_PNPM_BAD_PM_VERSION
+# 退出——`dsh plugin add` 失败、dsh-node exit 1、容器无限重启。`install --global`
+# 才真正写默认版本（同时同样预热缓存），使解析结果恒等于工作区 pin。
+RUN corepack install --global pnpm@11.7.0
 
 WORKDIR /workspace/platform
 ENV NODE_ENV=production

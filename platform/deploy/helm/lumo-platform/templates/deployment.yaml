@@ -73,8 +73,12 @@ spec:
       {{- end }}
       containers:
         - name: {{ $name }}
-          image: {{ $.Values.image.repository }}/{{ $name }}:{{ $.Values.image.tag }}
+          {{- /* 控制面 12 个服务共用 `control-plane` 一个镜像（2026-09-20 合并），入口由
+                 `command` 指定：镜像里装的是 12 个二进制，它的 ENTRYPOINT 是空的——没有
+                 command 时 k8s 会以「no command specified」失败，而不是默默跑错服务。 */}}
+          image: {{ $.Values.image.repository }}/control-plane:{{ $.Values.image.tag }}
           imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: ["/usr/local/bin/{{ $name }}"]
           ports:
             - name: http
               containerPort: {{ $cfg.port }}

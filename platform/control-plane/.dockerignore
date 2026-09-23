@@ -1,0 +1,28 @@
+# 构建上下文 = `platform/control-plane` 整树（见 Dockerfile 头注释的「构建上下文」一节；
+# build.sh 与 compose 两处都用这个 context）。本文件只做一件事：把**本机跑出来的产物**
+# 挡在上下文之外。
+#
+# ## 为什么必须有 `**/target`
+#
+# `collaborator/yrs-kernel/target/`（Rust 构建输出）：本机 `cargo build` 过之后实测
+# **154MB**，占整个上下文 158MB 的 **97%**。它在 `.gitignore` 第 121 行（`target/`）里，
+# 但**仍在上下文里** —— docker 的上下文来自磁盘，不是 git。留着它的两个代价：
+#
+#   1. 每次构建白传 154MB（本文件生效后：158MB → 4MB）；
+#   2. 「上下文里到底有什么」随本机有没有跑过 cargo 而变 —— 构建因此不可复现，
+#      而且它装的是 macOS 产物，进了 linux 构建环境也毫无用处。
+#
+# `**/target` 的匹配语义**实测过**（BuildKit 与旧构建器各一次）：顶层 `target/` 与任意
+# 深度的 `a/b/target/` 都命中，`**` 前的 `(.*/)?` 允许零级。
+#
+# ## 为什么只挡这两条
+#
+# 这份上下文是 12 个服务模块 + 3 个共享库（heartbeat / observability / ratelimit）的
+# **全部输入**。多挡一个目录的后果不是「慢」，而是「输入不在」—— 正是
+# `platform/tools/check-dockerfile-modules.py` 开头记的那类事故（12 个模块里 9 个各漏
+# 一个兄弟模块）。所以这里只列**确定不是输入**的本机产物，宁可少挡。
+**/target
+
+# macOS 的目录元数据：它和构建结果毫无关系，却会因为 `COPY . /src` 的内容哈希变化而让
+# 整条 RUN 失效（在 Finder 里翻一下这个目录就会产生/改动它），于是白白重跑一遍 12 个模块。
+**/.DS_Store

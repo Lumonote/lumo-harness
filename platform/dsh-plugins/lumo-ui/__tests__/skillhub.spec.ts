@@ -71,14 +71,13 @@ describe('SkillHub installation and native discovery', () => {
         'REVOLUTIONLA/dsh-dream-skin/',
         'bowenliang123/dsh-context',
         'git@github.com:Han-1413141/dsh-cost-meter.git',
-        'scwlkq/dsh-task-board',
         'https://github.com/liustack/modlens',
         'NanmiCoder/dsh-agent-teams',
       ],
     }
     expect(buildCatalog(config).installed.plugins.sort()).toEqual([
       'dsh-agent-teams', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
-      'dsh-market', 'dsh-task-board', 'modlens',
+      'dsh-market', 'modlens',
     ])
   })
 

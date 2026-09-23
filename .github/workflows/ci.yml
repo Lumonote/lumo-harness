@@ -329,7 +329,20 @@ jobs:
       # 十几分钟），而判据只是「两个集合相等」。放在这里是因为它**只在发布时才被踩到**：
       # 开发者本地不建镜像就永远看不到。
       - name: Every control-plane image copies the modules its go.mod replaces
-        run: platform/tools/check-dockerfile-modules.py platform/control-plane
+        run: |
+          # 先自证再扫真实文件：只扫真实文件的检查在它自己失效之后仍然是绿的（同下面
+          # shell-portability-check 那条）。2026-09-21 加的第 3 条断言查「下载有没有走
+          # 重试」，而它的第一版判据指向了 `echo "== go mod download: ..."` 那行回显
+          # ——正确的 Dockerfile 也会红。那种错法留在自证里，不留到 CI 上。
+          platform/tools/check-dockerfile-modules.py --self-test
+          platform/tools/check-dockerfile-modules.py platform/control-plane
+      # corepack 解析出的 pnpm 版本必须钉死。2026-09-20 实测：`corepack prepare` 在 corepack
+      # 0.3x 上只下缓存、**不设默认版本**，而 `COREPACK_ENABLE_PROJECT_SPEC=0` 的入口（dsh-node
+      # 容器、桌面 runtime）于是去下 **latest** —— latest 漂到 pin 之外那天，插件安装以
+      # `ERR_PNPM_BAD_PM_VERSION` 失败，症状是容器无限重启。这个缺陷只在**运行期**显形（本地
+      # 不建镜像、不跑那个入口就永远看不到），判据却是纯静态的：pin 处处一致 + 每个入口都装默认版本。
+      - name: Every corepack entry point pins a default pnpm version
+        run: platform/tools/check-corepack-pin.py
       - name: Render default chart (mTLS and controls disabled by default)
         run: helm template lumo platform/deploy/helm/lumo-platform >/dev/null
       - name: Render enforced production controls and Istio mTLS

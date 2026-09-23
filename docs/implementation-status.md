@@ -4,6 +4,496 @@
 
 > 集群模式下**代码与装配层面**的功能缺口清单见 [`cluster-gap-analysis.md`](./cluster-gap-analysis.md)（首版 2026-09-08，**2026-09-14 逐项复核、2026-09-15 再复核、2026-09-16 修正计数并复核 C 组、2026-09-17 改判 E7b**：现合计 34 项 = **28 已闭合 / 3 部分闭合 / 0 仍未闭合 / 3 非缺口**。首版 A/B 两组已全部闭合；E2 与 E3 经再复核**改判为误读**，不是缺口；C8 于 2026-09-16 闭合；**C7 流程血缘同样于 2026-09-16 判为已闭合**（血缘事实落 PG outbox、Nebula 降为可选呈现层）；**C3 边缘网关 / C4 终端网关为部分闭合**——代码与两种 compose 形态早已落地，是清单没跟上；那次逐点核对接线面还发现二者**不在 Helm chart 的 `services` 里**，所以当时是「已实现但没接线」。**这两个服务当天就补进了 chart**（路由表由模板从 release 名与各服务端口派生、以目录挂载；入口层的 Service 类型保持 ClusterIP、需要暴露时按服务覆盖），于是它们的残留换成了同一条：**真集群端到端验收**——`acceptance-cluster.sh` 对 C3/C4/C7 三者零探针）。**计数以缺口清单文末的表为准**——此处此前写的 18/2/11 与那份表自相矛盾（把 C 组的「部分闭合」当成「未闭合」多加了一次），凡引用请回去加一遍；**2026-09-17 又发现同一处第四次分叉**：E6 的行早在 09-16 就写着「已闭合」而表没跟改，与 E7b 一起从「仍未闭合」移出，故由 26/3/2/3 变为 28/3/0/3。**「以表为准」这条规则本身是有条件的**——那一次是**表错、行对**（行带行号与用例名，表只有一个数字），冲突时先看哪一边带了证据。本文记录的是外部集成边界与生产验收事项，两者互补。
 
+## 2026-09-21 实施：控制面构建的重试与缓存（`unexpected EOF` 不是被墙）
+
+**一句话**：`go mod download` 在 `proxy.golang.org` 上拿到一次 `unexpected EOF` 就废掉整次
+12 模块构建——因为那个循环**没有任何重试**，而失败点还是 12 个模块里的**第一个**。修法是三件事：
+给会走网络的步骤加重试、给依赖下载与编译挂上 cache mount（**热构建 230s → 15s**）、把本机产物
+挡出构建上下文（**158MB → 3.52MB**）。三件事都做了实测；其中一条**我原本要写错的判据**被实测拦下。
+
+**同一轮补上的下半**：上面只验到 `--target build`，于是补跑完整镜像——发现 Rust 阶段的
+`cargo build` 是**同一个缺陷类**（走 crates.io、无重试、无缓存），而且它才是耗时大头
+（**95.8s / 104s**），于是做了同构修复并实测（**热挂载 5.2s、编译 crate 数 36 → 1**）。这一半还
+额外产出一条**结构性结论**：`--network=none` 会改变 RUN 的缓存键，所以**含 `apk add` 的
+Dockerfile 不可能整体做断网探测**——它会在到达你想测的那一步之前就死（§三之三）。
+
+### 一、先把「不是被墙」钉死
+
+失败原文（`platform/control-plane/Dockerfile` 的 `build` 阶段）：
+
+```
+> [governance build 4/4] RUN set -eu;     for module in collaborator connector-gateway ...  63.1s
+0.397 == go mod download: collaborator
+61.48 go: golang.org/x/text@v0.21.0: read "https://proxy.golang.org/.../@v/v0.21.0.zip": unexpected EOF
+failed to solve: ... did not complete successfully: exit code: 1
+```
+
+前缀 `[governance build 4/4]` 说明它不是 `build.sh` 打的，而是 **`docker compose build`** 打的
+（`up.sh` 只是把参数透传给 compose；`build` 阶段的 4 步正好是 WORKDIR / COPY / ENV / RUN，
+所以 4/4 就是那条 RUN）。**这条线索有用**：它说明本地这条路径走的是 compose 的构建，而不是
+`build.sh`——两边用的是同一个 context 与同一个 Dockerfile，所以修 Dockerfile 对两条路径都生效。
+
+三条证据把它定性成**瞬时抖动**而不是网络不可达：
+
+| 测的东西（同一台机器、同一时刻） | 结果 |
+| --- | --- |
+| `curl` 那个 zip | **200 / 9,233,989 字节 / 完整** |
+| `goproxy.cn` 同一个模块 | 200 / 0.155s |
+| 镜像里的 `GOTOOLCHAIN` | 已经是 `local`（「构建期偷偷下工具链」这条风险不存在） |
+
+**顺带排除一个看起来像解法的方向**：换 `GOPROXY`。Go 的代理列表只在 **404/410** 时回落到下一个，
+**网络错误直接中止**——所以 `goproxy.cn,proxy.golang.org` 这种写法治不了 `unexpected EOF`。
+真正的修法是重试。
+
+### 二、重试：只加在会走网络的步骤上
+
+`retry` 是 RUN 里的一个 shell 函数（`until` 循环，3 次），包住三处调用：`go mod download`、
+`go build`，以及**后来补上的** `cargo build`。为什么不包别的：只有这几步会走网络。为什么不担心
+「真编译错误被重试三次」：第二次起命中 build cache，到同一个错误点很快，代价是几秒。
+
+**同一个缺陷类在 Rust 阶段又出现了一次，而且它才是耗时大头**：`yrs-build` 阶段的
+`cargo build --release` 也要联网（crates.io），同样没有重试、没有缓存——第一次完整镜像构建里
+它一个人吃掉 95.8s / 104s。修法与 Go 侧同构，见 §三之二。
+
+函数在 `(cd "/src/$module" && retry …)` 这种子壳里**可见**（POSIX sh 的函数是全局的），所以
+12 个模块共用一份 `retry`，不需要各自定义。
+
+用假 `go` 实跑抽出来的那段 shell（探针脚本见用户级技能 `docker-build-probe-verification`）：
+
+| 场景 | 结果 |
+| --- | --- |
+| 前两次抖动、第三次成功 | 打印两次 `== 重试第 N 次：…`，继续跑完编译段，**退出码 0** |
+| 一直失败 | 三次后 `!! 连续 3 次失败，放弃`，**退出码 1**，且**没有进入编译段** |
+
+第二条是关键：`set -eu` 下 `return 1` 会终止整条 RUN。只验「重试了」不够，还要验「重试完仍失败
+就停手」——否则会变成「失败后继续跑」，产出半套镜像。
+
+### 三、cache mount：热构建 230s → 15s
+
+两个挂载（`/go/pkg/mod`、`/root/.cache/go-build`，路径用
+`docker run --rm golang:1.25-alpine go env GOMODCACHE GOCACHE` 取，不凭记忆写）**必须与那两步在
+同一条 RUN 里**：`--mount` 是 per-RUN 的，拆成两条 RUN 就是两套互不相干的缓存。
+
+真机数字（`docker build --target build`，12 个二进制）：
+
+| | 冷构建 | 内容改一位强制重跑那条 RUN | **最终版**（补回 `retry` 后） |
+| --- | --- | --- | --- |
+| 墙钟 | **230s** | **15s** | **12s** |
+| 下载段（12 个模块全部） | 45.40s | **0.592s** | 0.327s |
+| 编译段（usage-ledger 为例） | ~229s | **10.26s** | — |
+
+前两列跑的是**少了 `retry `** 的那一版（原因见 §五之二）。`retry` 对成功的构建是零耗时包装，所以
+这两列仍代表最终形态；第三列是补回 `retry` 之后的复跑，它同时是「最终版真的能建出来」的证据
+（日志里 Dockerfile 大小 6.39kB → 6.40kB，这一项才证明跑的是最终版）。
+
+另外单独验过**断网可用**：`--network=none` 下 `go mod download` 仍是 0.089s（模块缓存 49.6M）。
+这条比「变快」更重要——它说明网络再抖一次时，只要缓存是热的，**构建根本不会碰到网络**。
+
+产物侧的一个反向证据：构建完的镜像里 **没有 `/go/pkg/mod`**。这恰好证明挂载生效了——
+若挂载没挂上，`go mod download` 会把模块写进镜像层、那个目录就会留在镜像里。
+
+### 三之二、Rust 阶段：同构修复，但它才是整次构建的大头
+
+**为什么上一轮漏了它**：上一轮只验到 `--target build`，于是「最终镜像阶段从没跑过」这件事本身
+就是个缺口。补跑一次完整镜像，`cargo build` 在总耗时里的占比是 **95.8s / 104s**——比 Go 段还大。
+
+修复三件事与 Go 侧一一对应：`retry cargo build`、挂 `/usr/local/cargo/registry`（crates 源码与
+index）、挂 `/yrs/yrs-kernel/target`（编译产物）。Rust 镜像的环境事实先实测确认，不凭记忆写：
+`CARGO_HOME=/usr/local/cargo`，而 `/usr/local/cargo/registry` 在基础镜像里**初始不存在**（是
+cargo 第一次下载时才建的）——所以挂载点是「将来会出现」的路径，不是现成目录。
+
+真机数字（完整镜像，不是 `--target`）：
+
+| | 无挂载（基线） | 加挂载后冷构建 | **强制重跑 Rust 层** |
+| --- | --- | --- | --- |
+| 整次墙钟 | 104s | **91s** | **14s** |
+| Rust 阶段 | **95.8s** | 88.0s | — |
+| `cargo build` 本体 | — | — | **5.2s** |
+| 编译的 crate 数 | — | 36 | **1** |
+| Go RUN（与 Rust 并行） | — | 15.8s | — |
+
+最后两列的关系是这次修复的要点：**改一位源码 → 只有 bin crate 重编（36 → 1）→ 5.2s**。冷构建
+仍要下 crates，所以 88.0s 这个数不会因为挂载而变小——挂载买到的是**第二次起**。
+
+**这里踩到一个与「挂载内容不进层」直接相关的坑**（两个方向都实测了）：`target/` 是 cache mount，
+它的内容**不在镜像层里**。所以最终阶段的 `COPY --from=yrs-build /yrs/yrs-kernel/target/release/
+lumo-yrs-kernel …` 会以 `failed to walk …: no such file or directory` 失败——那个路径在阶段镜像
+里根本不存在。修法是在同一条 RUN 末尾把产物 `cp` 到挂载点之外（`/yrs/lumo-yrs-kernel`），最终
+阶段 COPY 那个路径。**反向也验了**：改成 `cp` 之后构建通过，产物能被 `docker run` 跑起来。
+
+### 三之三、断网证据：为什么真 Dockerfile 不能直接加 `--network=none`
+
+这一节是我原本打算写「断网也能构建」、结果**被实测改写**的那一条，值得单独留档。
+
+**先给到目前最强的 Go 证据**：完整镜像（不是 `--target build`）加 `--network=none` 跑，
+**Go 那条 RUN 7.1s 完整跑通**——12 个 `go mod download` 全部 0.069–0.193s，12 个 `go build`
+0.231–6.146s，`ls -l /out` 列出 12 个二进制。也就是说 Go 段在**真实发布路径**上不需要网络。
+
+**但同一次构建 `rc=1`**，而且不是 cargo：`--network=none` 会改变 RUN 的**缓存键**，于是
+`apk add` 那两层每次都重跑，而它们必须联网——`stage-2` 的 `apk add ca-certificates` 在 10.2s 报
+`unable to select packages`，`yrs-build` 的 `apk add musl-dev` 报 `DNS: transient error` 后被
+`CANCELED`。**cargo 那一行根本没被执行到。**
+
+判别证据（同一个 Dockerfile、同一份缓存，只差这个 flag）：带网络时整次构建 **1s、全部 CACHED**
+（含两条 `apk add`）；加 `--network=none` 后**非 RUN 步骤仍 CACHED、两条 `apk add` 双双重跑**。
+→ 结论：**任何含网络依赖层的 Dockerfile 都不可能用 `--network=none` 整体探测**，它会在到达你
+想测的那一步之前就死。这条会让人反复重试，所以写进文档。
+
+**改成隔离探针**：从一个已经把 `musl-dev` 装好的 `yrs-build` **阶段镜像**起步（没有 `apk` 层），
+挂上**与真 Dockerfile 完全相同的两个 cache mount**（按 target 路径共享，命中的就是真构建留下的
+那份缓存），再改一位源码逼 cargo 重编：
+
+| 探针 | 结果 |
+| --- | --- |
+| 两个挂载都在，`--network=none` | **rc=0 / 12s**：`Compiling lumo-yrs-kernel v0.1.0` → `Finished in 8.20s`；**无** `Updating crates.io index`、**无** `Downloading`、**一次重试都没触发** |
+| 只留 `target` 挂载（去掉 registry），`--network=none` | **rc=1 / 61s**：0.236s 就 `Updating crates.io index`，然后 `Could not resolve host: index.crates.io` 重试 4 轮后失败 |
+
+第二条对照是这一节的收获：**registry 挂载是「能离线构建」的承重件，不只是提速件**——即使
+`target/` 全热，cargo 仍然要读 registry index；没有它，热缓存也救不了断网。反过来说，
+「热构建 5.2s」这个数字**不能**被表述成「断网也能跑」；能这么说的前提是 registry 挂载在。
+
+### 四、`.dockerignore`：158MB → 3.52MB
+
+`platform/control-plane` 的上下文是 158MB，其中 **156MB 是 `collaborator/yrs-kernel/target/`**
+（本机跑过 cargo 的产物）。它在 `.gitignore` 第 121 行里，但**仍在上下文里**——docker 的上下文
+来自磁盘、不是 git。新增的 `control-plane/.dockerignore` 只挡两条（`**/target`、`**/.DS_Store`），
+理由是这份上下文是 12 个模块 + 3 个共享库的**全部输入**，「多挡一个」的后果不是慢而是输入不在。
+
+实测：真实构建日志里 `transferring context: **3.52MB** 0.2s`；另把被挡住的路径逐条列出来审过
+（只有那 156MB 与一个 `.DS_Store`，423 个文件保留，7 个关键输入全在）。
+
+`**/target` 的匹配语义也实测过（BuildKit 与旧构建器各一次）：顶层 `target/` 与任意深度的
+`a/b/target/` **都**命中。
+
+### 五、两次「写错」：一条被实测拦下的判据，和一次我自己造成的返工
+
+我本来要加一条门禁并写进注释：「`sharing=private` 等于零复用（挂载看着在、复用是零）」。
+**实测发现 `private` 同样跨构建留存**（计数器 1→2→3）。若没实测，那条注释和门禁都是错的，
+而且它们看起来非常合理。→ 这条判据**放弃**。
+
+反过来，实测**确实**发现了一个「挂载看着在、复用是零」的形态：**`--no-cache` 会把 cache mount
+一起重置**（同一份挂载连跑三次、计数器恒为 1）。它没有写进门禁（因为没人会往这条 RUN 上加
+`--no-cache`），而是写进了 Dockerfile 注释，免得下一个人为了「干净构建」加上它、然后发现缓存
+一点用都没有。
+
+最终加进门禁的是第 3 条断言。它**最初只守 `go mod download`，后来推广成「所有会走网络的步骤」**
+（现在是 `NETWORK_STEPS = ("go mod download", "cargo build")`）——因为 Rust 阶段暴露了同一个缺陷类，
+而判据按步骤写死就会漏掉新加的那一步。它的作用范围说清楚了：只能证明「重试没被删掉」，不能证明
+重试有效；守的是**回归**（后来的人觉得 `retry` 是噪音、顺手抹平）。
+
+写这条时踩到一个坑：Dockerfile 里有一行 `echo "== go mod download: $module"` 排在真正调用**之前**，
+判据若取「第一处出现 `go mod download` 的行」就会去检查那行回显、**让正确的 Dockerfile 也红**。
+所以判据只认「调用行」（排除注释与 `echo`/`printf`）。现在 `--self-test` 有 **3 个好样本 / 3 个坏
+样本**（好样本里刻意留着那行回显与 `retry cargo build …`，坏样本是「无 `retry` 的两种 Go 写法 +
+无 `retry` 的 cargo」）。CI 里自证与真实扫描一起跑。
+
+还有一条**判据边界**写在脚本的 docstring 里：门禁**不管、也不该管**「把 cache mount 目录直接
+拿去 `COPY --from`」——那个错误是**响**的（构建直接以 `failed to walk` 失败），不需要门禁。
+门禁只该守「静默」的那类。
+
+#### 五之二、造「反向验证」夹具时把真文件盖了（自己造成的返工）
+
+上面那条反向验证是这么做的：把 `control-plane` 的每一项 symlink 到 `/tmp/cpfixture`，再放一份
+**改坏的**同名 `Dockerfile`。**但 `Dockerfile` 本身也在 symlink 列表里**，于是
+`open('/tmp/cpfixture/Dockerfile', 'w')` 穿过 symlink、把**仓库里那个真文件**写成了「去掉 `retry`」
+的版本。门禁确实红了——红的原因却不再是夹具。
+
+后果不是「少了一行」，而是**验证记录与产物不是同一个东西**：随后两次真机构建（230s 的冷构建与
+15s 的强制重跑）跑的都是「少了 `retry `」的那一版。**缓存与 `.dockerignore` 的结论不受影响**
+（那两处是完整的），但 `retry` 在真机上一次都没跑到——它只有假 `go` 探针那一条证据。
+
+**是收尾时把门禁在真实路径上再跑一次抓到的**（红得很直白：报的就是真文件那一行）。修法是把
+`retry ` 补回去，然后用**最终版**重跑一遍真机构建：rc=0 / 12s（缓存热）/ 日志里 Dockerfile
+大小 6.39kB → **6.40kB**（+6 字节，正是 `retry `，这一项才证明跑的是最终版）/ `/out` 仍是
+12 个二进制。夹具目录已删除。
+
+两条纪律（已写进技能 `docker-build-probe-verification`）：symlink 循环里**跳过**你打算覆盖的文件名
+（或直接 `copytree`）；反向验证做完**立刻在真实路径上再跑一次门禁**。
+
+### 六、验证表
+
+| 验的东西 | 怎么验的 | 结果 |
+| --- | --- | --- |
+| 12 个二进制都能产出 | `docker build --target build` | rc=0，`/out` 里 12 个，与 `ENV LUMO_CONTROL_PLANE_SERVICES` 逐一相符 |
+| 重试「抖两次后继续」 | 假 `go` + 抽取的 shell | 两次重试后继续，rc=0 |
+| 重试「一直失败就停手」 | 同上 | rc=1，**未进入编译段** |
+| cache mount 真复用 | 内容改一位强制重跑 | 230s → **15s**，下载段 45.4s → **0.592s** |
+| 缓存能离线供给（Go） | **完整镜像** + `--network=none` | Go RUN **7.1s** 跑通：12 个下载 0.069–0.193s、`/out` 12 个二进制 |
+| cache mount 真复用（Rust） | 内容改一位强制重跑 Rust 层 | `cargo build` 88.0s → **5.2s**，编译 crate 数 36 → **1**，整次 91s → **14s** |
+| Rust 断网可用 | 阶段镜像起步的隔离探针 + `--network=none` | rc=0 / 12s / `Finished in 8.20s`，**无** index 访问、**无**下载、**无**重试 |
+| registry 挂载是承重件 | 同一探针去掉 registry 挂载 | rc=1 / 61s：0.236s 起 `Updating crates.io index` → `Could not resolve host` |
+| 挂载内容不进层（正） | 产物 `cp` 到挂载点外再 `COPY --from` | 构建通过，产物可运行 |
+| 挂载内容不进层（反） | 直接 `COPY --from` 指向挂载路径 | **`failed to walk …: no such file or directory`** |
+| 真 Dockerfile 不能整体断网探测 | 带网络 vs `--network=none` 各跑一次 | 带网络 **1s 全 CACHED**；断网时两条 `apk add` **双双重跑**（缓存键含网络模式） |
+| 挂载确实生效 | 检查构建产物镜像 | 镜像里**没有** `/go/pkg/mod`（挂载没生效的话它会在） |
+| `.dockerignore` 生效 | 真实构建日志 | `transferring context: 3.52MB` |
+| 被挡住的不是必需输入 | 逐条列路径 + 体积 + 关键输入存在性 | 只挡住 156MB 与一个 `.DS_Store` |
+| 门禁正常路径 | `check-dockerfile-modules.py control-plane` | OK，3 条合并镜像断言 |
+| 门禁自证 | `--self-test` | **3 个**好样本不报、**3 个**坏样本必报 |
+| 门禁**反向验证** | 夹具里删掉 `retry`（Go、cargo **各一次**） | **两次都红**，报错指到那一行 |
+| 没碰坏 CI 链 | `build.sh --dry-run --targets images …` | rc=0 |
+| **最终版**真机构建 | `docker build --target build`（补回 `retry` 后） | rc=0 / 12s / `/out` 12 个 / 镜像内无 `/go/pkg/mod` |
+| 门禁在**真实路径**上复跑 | 收尾时再跑一次 | **红** —— 抓到夹具把真文件盖了（§五之二）；修回后绿 |
+
+### 七、顺手修掉的两处**过期文档**（都是这次合并镜像的余波）
+
+- 技能 `lumo-control-plane-service-wiring` 的第 0 组与第 8 组还写着「每个服务一份
+  `platform/control-plane/<name>/Dockerfile`」——合并后不再成立。改成「服务名加进 Dockerfile 的
+  `ENV LUMO_CONTROL_PLANE_SERVICES`」与「`build.sh` 的 `go_images` **不用改**」。顺带补上一条：
+  新服务在 compose 里**必须给 `command:`**（镜像故意不写 ENTRYPOINT），漏了会报
+  「no command specified」。
+- `platform/deploy/README.md` 的「12 个控制面镜像」→「1 个控制面镜像（装 12 个服务二进制）」；
+  并在「构建失败的两种形态」的第 2 类（网络抖动）里补上**两个**新实例（Go 模块代理、crates.io），
+  写明它们现在**由构建脚本自己重试**、以及怎么从日志判断重试是否还在（有没有 `== 重试第 N 次：`）。
+
+### 八、仍未做
+
+- **没有任何 CI job 会构建控制面镜像**——这条发布路径连 Rust 编译都没有自动化覆盖。
+  `.github/workflows` 里 `cargo` 只出现在桌面包的 tauri 构建；`build.sh --targets images` 在 CI 里
+  只跑 `--dry-run`。所以本次的「重试 + 挂载」只在真机手工验过，CI 不会替我们守住 Rust 段的回归
+  （门禁能守住「`retry` 被删掉」，守不住「cargo 缓存失效」）。要真覆盖，得加一个 job 跑
+  `--target yrs-build`——**不要在 CI 里跑完整镜像**：`apk add` 那两层每次都要联网（§三之三）。
+- `apk add` 那两层仍是网络依赖（本次未动）。它们的风险与 Go/cargo **不同类**：失败是**响**的、
+  而且 `--network=none` 下必然重跑，所以不构成「静默失败」，没有加重试。若将来要做**完全离线**
+  的构建，得先把这两层（或它们的产物）预置好——那是一条独立的工作。
+- `platform/dsh-plugins/lumo-ui/__tests__/client.spec.tsx` 仍然跑不起来（`jsdom` 与
+  `@testing-library/react` 从未在 `platform/package.json` 里声明，锁文件里只有 vitest 的可选
+  peer）。要修得显式声明并同步 `pnpm-lock.yaml`（本机 pnpm 不可用）。
+- `platform/deploy/.env` 仍被 git 跟踪，内含 64 字符 `LUMO_CONTROL_PLANE_TOKEN`；处置应是
+  `git rm --cached` + `.gitignore` + **轮换令牌**三步一起做。
+
+## 2026-09-21 实施：侧边栏登录态、登录落地页，以及一个把注释当配置的坑
+
+**一句话**：这一轮补上「登录之后落到哪一页」与「侧边栏说得出当前身份」两件事，并在
+写测试时踩到一个**把注释当配置读**的坑——vitest 是**按字符串**扫文件头找环境的，
+于是「在注释里说明我不用 jsdom」这句解释，本身就把 jsdom 启用了。
+
+### 一、侧边栏底部的登录态（新增）
+
+挂在**外壳公开的 `sidebar.footer.action` 槽**上（`ui-sidebar/src/client/contract/slots.ts:52`，
+list 槽、两种栏宽都渲染、排在「设置」之上），而不是挤进 `sidebar.navigation`：那个槽是
+工作区入口的座位，身份不是工作区。宽栏是「字位 + 名字 + realm/角色」，窄栏只剩字位
+（56px 里放不下第二列）。
+
+读的是 **`/auth/account`**，也就是「用户中心」用的**同一个读面**——自己另存一份用户名
+迟早会和会话里那份分叉（改密码、被改角色、被撤销），而这里要说的恰恰是「服务端现在认为你是谁」。
+四种结局刻意分开，**不合并成一句「未登录」**：
+
+| 结局 | 判据 | 渲染 |
+| --- | --- | --- |
+| `signed-in` | 200 且**形状对** | 身份，点击开用户中心（退出登录在那里） |
+| `anonymous` | 401 | 「未登录」，点击去 `/auth/login` |
+| `unavailable` | 404 / 网络失败 / 单机版没挂 auth 代理 | **什么都不渲染** |
+| `loading` | 一次请求那么长的空窗 | 不渲染（骨架屏只会让侧边栏先闪一下） |
+
+第三行是这一块最容易写错的地方：单机版（`localMode`）根本不装配 `lumo-user-auth`
+（`data-plane/dsh-node/src/index.ts` 的 `isWebProfile ? (localMode ? '' : …)`），那种部署里
+**没有「登录」这回事**，摆一句「未登录」是在陈述一个不存在的问题。
+
+**「形状对」不是防御性编程**：`api()` 对非 JSON 的响应会把正文**原样返回**，所以 200 也可能是
+别人在回话——单机版没有 auth 代理时，`/auth/account` 落到原生 Web 服务上，拿回来的是一份 HTML
+而不是 404。只看 `response.ok` 就会把半段 HTML 当成用户名渲染出来。
+
+**映射规则抽成纯函数**（`lumo-ui/src/client/sidebar-identity.ts`，与 `collaboration-layout.ts`
+同一个做法），因为它只有三条分支、而三条分支的区别就是它的全部内容。理由见 §三。
+
+### 二、登录落地页：`/?lumo=collaboration`
+
+新增 `user-auth/src/app-home.ts` 的 `AUTHENTICATED_APP_HOME`，**五处**引用它：密码/验证码登录的
+302、OIDC 回调的 `location.replace`、OIDC 中转页的 `<a href>`、`/auth/login` 已登录时的 302、
+以及 Passkey/密码那条**交互式**脚本里的 `location.assign`。抽成独立文件是为了断开
+`proxy.ts` 与 `html.ts` 的循环依赖。
+
+这是一条**跨模块契约的两半**：这里写下的 `?lumo=collaboration`，要靠 `lumo-ui` 客户端的
+`querySurface()` 解析成协作工作台。两半分叉时**不会有任何报错**——登录成功、页面正常打开，
+只是又回到那个空白的原生会话页（也就是这个常量存在的原因）。所以新增
+`user-auth/__tests__/app-home.spec.ts` **把两半对起来**：参数名与工作区名都**从常量里取**，
+再断言客户端源码里确实有对应的 `get('<param>')` 与 `<surface>: { label:`。
+反例验证过：把常量改成 `collabration` → 2 条红；还原 → 绿。
+
+### 三、把注释当配置：注释里写出 pragma 会真的启用它
+
+新写的 `sidebar-identity.spec.ts` 起初连 worker 都起不来：
+`Failed to start forks worker` / 60s `Timeout waiting for worker to respond` /
+`transform 0ms / environment 0ms`。这个形态在 `local-sandbox.md` §5 里被定性为
+**runner 层退化（机器被占满）**、结论只能是「未验证」——但这次是**误判**：同一台机器上
+`collaboration-layout.spec.ts` 9.9s 全绿，`uptime` 也才 4.5/16 核。
+
+真因是那条注释里写了 pragma 的**字面量**（原文：「这个文件刻意**不带**
+`` `@vitest-environment jsdom` ``」）。vitest **按字符串扫文件头**找 pragma，于是它真的去
+加载 jsdom；而 jsdom 在 platform 里不可解析（见下），worker 就死在启动阶段。
+把那一处改成「jsdom 环境的 pragma」这种不含字面量的说法 → 立刻 6/6 全绿。
+**判别顺序**：runner 层失败先看**同一台机器上别的 spec 跑不跑得动**——跑得动就不是负载问题。
+
+### 四、`client.spec.tsx` 现在跑不起来（既有缺陷，本轮未修）
+
+`lumo-ui/__tests__/client.spec.tsx` 是**唯一**用 jsdom 环境的 spec，而 platform **从未声明
+jsdom**：`platform/package.json` 没有它，`platform/pnpm-lock.yaml` 里 jsdom 只作为 vitest 的
+可选 peer 出现（`jsdom: '*'`），没有任何解析出来的 `jsdom@x` 条目——**CI 全新检出时也拿不到**。
+（jsdom@29.1.1 只存在于 `deepseek-harness/node_modules/.pnpm/`，pnpm 的隔离布局下
+platform 解析不到。）**要修就得在 platform 显式声明 `jsdom` 与 `@testing-library/react`，
+并同步 `pnpm-lock.yaml`**（本机 pnpm 不可用，改不了锁文件），所以本轮**没动**。
+
+因此本轮的 DOM 级断言（槽位接线、渲染文案、点击进用户中心）写在 `client.spec.tsx` 里
+**但无法执行**，并在那里注明了可执行证据的所在。**能抽成纯函数的判据一律不放在那里。**
+
+### 五、验证
+
+| 项 | 结果 |
+| --- | --- |
+| `sidebar-identity.spec.ts`（新增，6 条） | 6/6 通过；**两条反向用例**验证过：把 404 也算「未登录」→ 红；去掉形状校验 → 红 |
+| `user-auth/app-home.spec.ts`（新增，3 条） | 3/3 通过；反例（常量拼错）→ 2 条红，还原转绿 |
+| `user-auth/html.spec.ts`（既有，3 条） | 3/3 通过（落地页改成 `?lumo=collaboration` 后不回退） |
+| `lumo-css-tokens.spec.ts` / `theme-contract.spec.ts` | 3/3、2/2 通过（新样式只用了已声明的 token、花括号平衡） |
+| `collaboration-layout.spec.ts` | 20/20 通过（用作 runner 层探针） |
+| lumo-ui 客户端 `tsc -p … --noEmit` | 退出码 0 |
+| `client.spec.tsx`（含本轮 3 条 DOM 用例） | **未执行**——jsdom 不可解析，见 §四 |
+
+### 六、仍未做 / 边界
+
+- **jsdom 依赖未声明**（§四）：`client.spec.tsx` 全文件的用例在本机与 CI 都不执行。
+  这是「门禁的绿不等于证据」的典型——它现在连红都不会红。
+- **同一批未提交改动里的另外两件事未做深度复核**：项目菜单的分组/焦点管理与协作空间的
+  渲染重排（层带、光轨几何、状态双通道）。它们同样只能靠 jsdom 验证，本轮只做了
+  类型检查与纯函数套件。
+- **登录态没有自动刷新**：只在挂载时读一次。改密码或撤销会话之后，侧边栏要等下一次
+  页面加载才会改口（用户中心里的操作会 `location.assign` 走，所以实际影响很小）。
+
+## 2026-09-20 实施：corepack 的默认版本、两处「老库收敛」缺陷，以及控制面 12 个镜像合并成 1 个
+
+**一句话**：这一轮修的三个问题有**同一个形状**——同一份判据被写了两遍，而两条路径产出的东西不等价，
+于是**新环境全绿、只有另一条路径会坏**（运行时 vs 构建期、老库 vs 新库、镜像清单 vs 服务清单）。
+三处都不是「代码写错了一行」，是「两处手抄的判据分了叉」。
+
+### 一、dsh-node 无限重启：corepack 的默认版本不再由 `prepare` 设定
+
+**症状**：容器 `Restarting (1)`；日志里 `Error: dsh-node: profile plugin installation failed for
+@lumo/agent-teams: exit 1`，其上是 `ERR_PNPM_BAD_PM_VERSION`：`This project is configured to use 11.7.0
+of pnpm. Your current pnpm is v12.5.1`。
+
+**根因链**（每一步都有实测）：
+
+1. `RUN corepack prepare pnpm@11.7.0`（`data-plane/dsh-node/Dockerfile:129`）在 corepack 0.34.6 上
+   **只把版本下进缓存、不再设默认版本**——缓存里躺着 11.7.0，但它不是默认；
+2. 启动时 `profileManagerEnv` 导出 `COREPACK_ENABLE_PROJECT_SPEC=0`（`dsh-node/src/plugins.ts:663`，
+   本意是别让 corepack 去探测父项目 pin），corepack 于是既不读项目 pin、又没有默认版本；
+3. 只能下 **latest**：基线复现的日志里逐字是 `Downloading the pnpm 12.5.1 binary for linux-x64...`，
+   容器内 corepack 缓存 `12.5.1/` 的时间戳正是每次重启的时刻（不是构建期）；
+4. pnpm 12.5.1 拿 `/workspace/deepseek-harness/package.json` 的 `packageManager: pnpm@11.7.0` 校验 →
+   非零退出 → `plugins.ts:266` 抛错 → exit 1 → 重启循环。
+
+**这是定时炸弹而不是回归**：latest 一直在运行期拉，只要它等于 pin 就相安无事，走到 pin 之外的那天
+（与当天有没有改代码无关）才响。
+
+**改法**：`corepack install --global pnpm@11.7.0`（真正写默认版本，同时同样预热缓存）；两个
+Dockerfile（canonical 与 resume）同步。
+
+**验证**：未修复镜像上复现出逐字相同的报错；加修复的等价镜像上同一条 `dsh plugin add` 命令 exit 0；
+重建后容器 `Up 3 minutes`、0 次重启，profile 插件全部以 `pnpm v11.7.0` 装完，`HTTP 401
+{"error":"authentication_required"}`（服务确实在跑）。
+
+**门禁**：新增 `platform/tools/check-corepack-pin.py`（CI + `build.sh` 的镜像前置各挂一次），三条判据：
+
+- **R1 禁止 `corepack prepare`**——它会让人以为钉住了版本，而 corepack 0.3x 上它只下缓存；
+- **R2 所有 pin 必须一致**（`packageManager: "pnpm@X"` 与 `corepack install --global pnpm@Y` 的
+  X/Y），两份手抄的判据分叉时的症状就是容器启动即 `ERR_PNPM_BAD_PM_VERSION`；
+- **R3 每个 corepack 入口都要装默认版本**：凡自行 `export COREPACK_ENABLE_PROJECT_SPEC=0`
+  的运行期入口、或自行 `corepack enable` 的镜像，同一个文件里必须有 `corepack install --global`。
+
+只扫**被跟踪的代码/构建文件**（`git ls-files` + 后缀过滤）：第一次跑时它报了三条，其中两条是它自己的
+假警报——`docs/` 里那段散文写着这次事故的经过（自然含 `corepack prepare` 这几个字），把文档当用法等于
+让门禁去校对散文，而假警报的代价是下一个人把门禁改弱。两条反向用例都验过：把 `install` 改回 `prepare`
+→ 报 R1+R3；把版本号改成 11.9.9 → 报 R2（「pin 不止一个版本」）。
+
+**它在写出来的当天就抓到一处真缺陷**：`platform/desktop/lumo-runtime.sh` 同样 `export
+COREPACK_ENABLE_PROJECT_SPEC=0`，而桌面 runtime 的 `COREPACK_HOME` 是一个全新的状态目录——没有默认
+版本，于是插件市场第一次用到 pnpm 时下的也是 **latest**（同一个定时炸弹，只是还没响）。修法：在该脚本
+里按 `lastKnownGood.json` 判「装过没有」，没装过就 `corepack install --global pnpm@11.7.0`，失败只告警
+不拦启动（离线时插件市场本来就更新不了，让整个 App 起不来更糟）。
+
+### 二、两处「老库收敛」缺陷：建表语句与收敛语句不等价
+
+同一形状，两小时内各踩一次——**只有老库会坏，全新库永远复现不了**（`CREATE TABLE IF NOT EXISTS`
+与 `ADD COLUMN IF NOT EXISTS` 对已存在的对象都是空操作）。
+
+**（a）session-control 起不来**：`建 session_control 表失败: column "id" does not exist (SQLSTATE 42703)`。
+
+- 库里的 `session_control_audit` 是 **09-17 之前 `@lumo/control` 插件建的那张**（`request_id` /
+  `allowed` / `denied_cause` / `decided_at`），两行 `CREATE TABLE IF NOT EXISTS` 空操作跳过，
+  紧随其后的 `CREATE INDEX ... (session_ref, id DESC)` 才报错——**报错指向索引，病根是前面两行
+  没建出表**，这条假线索是定位绕圈的原因。
+- 09-17 那次修的是**代码**（插件不再建这两张表，见 `dsh-plugins/control/src/pg-control.ts` 的所有权表），
+  而**已经建过表的库不会因为那次修改变回来**。
+- 改法：`session-control/internal/store/store.go` 的 `const DDL` 里加收敛段（纯幂等 ALTER + 一个
+  DO 块做形状相关的搬运），**同文**落到 `deploy/migrations/006_session_control_single_owner.sql`——
+  Compose 不跑 migrate.sh，服务端 DDL 是那类部署唯一的收敛点。
+- 收敛语义：审计行 `role→actor_role`、`allowed→outcome`（true→`applied` / false→`policy_denied`，
+  按最接近的一档归类并注明「只是历史记录，生效判定一律当场给出」）、`decided_at→created_at`；
+  状态行 `reason/actor→last_reason/last_actor`；**`realm` 从旧审计行回填**（不回填最阴：realm 写后
+  不可变，该会话此后每条真实指令都 `realm_mismatch`，表现为「操作者暂停过的会话谁都控不动」）；
+  幽灵状态 `stopping→stopped`（不换算则闸门 fail-closed 全拒）。
+- 两个顺序坑都是实测撞出来的：幽灵状态换算必须排在**删 CHECK 之后**（否则换算自己撞 23514），
+  建索引必须排在**收敛之后**（否则就是最初那条 42703）。
+- 新增 `store_legacy_pg_test.go` 三条用例：旧库收敛（含 realm 回填/幽灵换算/结论映射/写入可用）、
+  **两条路径形状逐列等价**（列名/类型/可空/默认值）、迁移文件与服务端 DDL 同文。
+
+**（b）登录报「用户认证服务暂时不可用」**：governance 日志里是
+`create session: null value in column "session_id" ... (SQLSTATE 23502)`。
+
+- 同一形状：建表语句写 `session_id TEXT NOT NULL DEFAULT gen_random_uuid()::text`，而**收敛语句**
+  是 `ADD COLUMN IF NOT EXISTS session_id TEXT`（不带默认值）；两处 INSERT（密码登录 `auth.go:317`、
+  OIDC 回调 `oidc.go:137`）都不列这一列 → 老库上「NOT NULL 且无默认」→ 23502。
+- 改法：收敛语句补 `DEFAULT`，并**单独** `ALTER COLUMN session_id SET DEFAULT` 一遍——列已存在时
+  `ADD COLUMN IF NOT EXISTS` 整句是空操作，光添 DEFAULT 治不了已经收敛过的库。
+- 新增 `auth_sessions_legacy_integration_test.go`；**反向用例**：把修复改回坏写法，用例立刻红在
+  「session_id 没有默认值」，还原后转绿。
+
+### 三、控制面 12 个镜像合并成 1 个多二进制镜像
+
+**起因**：容器数量与「有些 docker 内容其实可以合并」的疑问。事实是 12 份 Dockerfile 互差只有模块名、
+二进制名与 EXPOSE 三处，每份都要把 heartbeat / observability / ratelimit 重新 COPY 一遍、重新
+`go mod download` 一遍、重新编译同一批包。
+
+**改法**：`platform/control-plane/Dockerfile` 一次构建产出 12 个二进制；部署形态用 `command:` 选入口
+（两个 compose 文件、Helm 的 `command: ["/usr/local/bin/<name>"]`）。**进程边界不变**——仍是 12 个
+容器/副本，§3.1 的「基础设施是独立服务」讲的是进程、故障域与伸缩粒度，不是镜像份数。先例：
+`registry/Dockerfile.provisioner` 早就是一个镜像装两个二进制。12 份 Per-service Dockerfile 删除。
+
+**门禁同步**（不同步就是静默失效）：
+
+- `tools/check-dockerfile-modules.py` 新增两条断言：整树 COPY 必须在 `go mod download` **之前**；
+  `ENV LUMO_CONTROL_PLANE_SERVICES` 必须与「有 `cmd/<模块名>` 的模块」**逐一相等**。两条都做了反例
+  验证（清单里删一个服务 → 报「镜像里没有它们：flows」；把 COPY 挪到下载之后 → 报排序违规）。
+  期间修掉自己写的第一版检测：`go mod download` 在 `RUN set -eu; \` 的**续行**上，只认 `^RUN` 的
+  版本找不到它，排序断言被整条跳过（正是被反例逼出来的）。
+- `deploy/helm-verify.sh` 的模块清单来源从「walk `platform/control-plane/*/Dockerfile`」改成读
+  **同一行 ENV**：合并后那个 walk 什么都找不到，而两个空集合 `comm` 出来是「相等」的——门禁会以
+  全绿的样子失效。同时加「解析不出清单即 fail」。
+- `build.sh` 的 `go_images` 从 12 行变 1 行（发布镜像集的唯一来源）。
+
+**代价（刻意记录）**：12 个服务从此共享一次构建，任一模块编译失败则 12 个镜像全部产不出来
+（合并前只坏那一个）。CI 的 `control-plane-go` matrix 逐模块跑测试是这条的补偿。
+
+### 四、验证
+
+| 项 | 结果 |
+| --- | --- |
+| dsh-node | 容器 Up、0 重启；插件以 `pnpm 11.7.0` 装完；`/` 返回 401（服务在跑） |
+| session-control | 容器 Up；`store_legacy_pg_test.go` 三条 + 反向探针全绿；006 迁移与服务端 DDL 同文断言通过 |
+| governance | 登录路径恢复（库里 `session_id` 默认值到位、不列该列的 INSERT 成功）；新增老库用例 + 反向用例 |
+| 合并镜像 | 159MB（旧 12 个合计 ≈192MB）；12 个服务全部重建成功；8 个 `/healthz` 200；collaborator 的 yrs 内核仍启用 |
+| 门禁 | `check-dockerfile-modules` / `compose-images-verify`（12/12）/ `compose-ports-verify`（10/10）/ `helm-verify` 全绿 |
+| Go 测试 | session-control `go test ./...` 与 governance `go test ./...` 全绿（含真 PG 用例） |
+
+### 五、仍未做 / 边界
+
+- **登录页的九宫格验证码没有自动化**：登录的端到端验证止于「库里形状修好 + 登录路径的 INSERT 原样
+  成功 + 服务在跑」，人在浏览器里点一次才算完。
+- **控制面镜像合并只做了「一个镜像」，没做「一套构建参数」**：各服务的运行时差异（如 collaborator 的
+  yrs 内核）现在是镜像里多带一个二进制，而不是按服务裁剪。
+- **session-control 的 `_pg_test` 用例需要 `LUMO_TEST_PG_DSN`**：本机跑过，CI 上由
+  `control-plane-go` 注入（见 ci.yml 的守卫）。
+
 ## 2026-09-20 实施：minio 换源、两处 fail-open 解析盲区、以及 rocketmq topic 预建并入容器
 
 **起因**：`./platform/deploy/up.sh standalone -d --build` 在 `✘ minio Error` 处停，
@@ -1444,7 +1934,7 @@ present, but **dispatch transport** and end-to-end device acceptance remain open
 
 这些不是源码 TODO，而是必须由目标环境提供的适配面：
 
-1. yrs 内核在 Docker 构建阶段从 crates.io 获取依赖并作为独立进程打包；本轮已完成联网 `cargo check` 与离线 Rust 单测，仍需在发布环境完成最终镜像构建。未配置内核的本地 fallback 不提供文本语义 materialize。
+1. yrs 内核在 Docker 构建阶段从 crates.io 获取依赖并作为独立进程打包；本轮已完成联网 `cargo check` 与离线 Rust 单测。**「仍需在发布环境完成最终镜像构建」这条已于 2026-09-21 完成**（完整镜像 rc=0 / 104s；同日又给该阶段补上重试与两个 cache mount，见文首那节）。未配置内核的本地 fallback 不提供文本语义 materialize。
 2. Nebula 通过项目约定的 graph adapter HTTP 接口访问，Milvus 需要预先建好与 embedding dimension 一致的 collection；Provider 会对 realm、角色和版本字段强制过滤。
 3. TriggerBus 的消费者分发仍是进程内，但事件入口、outbox claim/requeue/ack、自动化执行、失败运行的固定快照重放和运行幂等记录已在 flows 服务内闭环；跨服务事件骨干仍应由 RocketMQ 或调用方 outbox 接入。台账明细的唯一真相源是 PG，任何派生聚合都不得反向充当明细真相源。
 4. 具体 SaaS/MCP OAuth 仍需由集成方提供供应商端点、已注册回调和 Vault 客户端凭据。托管授权页跳转、回调、token 交换、刷新及平台侧断开已接通；不伪造供应商配置或宣称已完成真实供应商联调。

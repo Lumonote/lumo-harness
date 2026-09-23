@@ -54,7 +54,6 @@ describe('profile plugin installation', () => {
       '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/knowledge-vault', '@lumo/skill-local',
       '@lumo/web-fetch-fakeip',
       'dshmarket', '@liustack/modlens', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
-      '@linxin666/dsh-client-ui-task-board',
     ])
     expect(local).toContainEqual({ name: 'dshmarket', spec: 'dshmarket@1.41.0' })
     expect(local).toContainEqual({ name: 'dsh-context', spec: 'dsh-context@0.41.3' })
@@ -193,7 +192,6 @@ describe('baseline bundle reconciliation', () => {
   it('carries the whole pinned baseline', () => {
     expect(baselineBundlePackages()).toEqual([
       'dshmarket', '@liustack/modlens', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
-      '@linxin666/dsh-client-ui-task-board',
     ])
   })
 
@@ -237,7 +235,6 @@ describe('baseline bundle reconciliation', () => {
       '@liustack/modlens': '1.0.0',
       'dsh-cost-meter': '1.0.0',
       'dsh-dream-skin': '1.0.0',
-      '@linxin666/dsh-client-ui-task-board': '1.0.0',
     })
     // The market resolves presence and activation from the profile's own
     // node_modules, not the shared fallback directory.

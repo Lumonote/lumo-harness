@@ -273,14 +273,18 @@ const moduleSearchRoots = [
   dshNodeRoot,
   resolve(repoRoot, 'platform', 'dsh-plugins'),
   upstreamPluginRoot,
-  // Web 扩展插件把 react/react-dom 声明为必选 peer（
-  // @linxin666/dsh-client-ui-task-board；dsh-context/dsh-dream-skin 的 react 是可选的，
-  // 不被遍历点名）。这两个包在 Web 壳里只出现在 devDependencies（Vite 就地编译进前端
-  // bundle），闭包遍历不读 devDependencies，向上回溯也到不了 apps/web 的 node_modules
-  // （兄弟包）——react 因此只能撞上 lumo-ui 的 link: 依赖（指向源树 ui-jobs 的副本），
-  // react-dom 则完全落空。把 Web 壳挂进搜索根，两包都能以壳内实例（apps/web/node_modules
-  // 软链 → .pnpm 存储）解析，与壳渲染同源；react 在 link: 目标可用时仍走已入队副本，
-  // 版本与壳一致（18.3.1）。
+  // Web 扩展插件把 react/react-dom 当**必选** peer 时会点名它们（闭包遍历只读
+  // dependencies + 非 optional 的 peerDependencies）。当初点名的是
+  // `@linxin666/dsh-client-ui-task-board`；它已于 2026-09-23 移出基线，此后**没有**任何
+  // 基线插件再把 react/react-dom 声明成必选 peer（dsh-context / dsh-dream-skin 的
+  // peerDependenciesMeta 里 react 都是 optional）。这两个包在 Web 壳里只出现在
+  // devDependencies（Vite 就地编译进前端 bundle），闭包遍历不读 devDependencies，
+  // 向上回溯也到不了 apps/web 的 node_modules（兄弟包）——react 因此只能撞上 lumo-ui
+  // 的 link: 依赖（指向源树 ui-jobs 的副本），react-dom 则完全落空。
+  //
+  // 这个搜索根**暂时保留**：它是纯增量的解析根（不命中就退化成原有行为），而删掉它
+  // 无法在不跑一次完整桌面构建的前提下验证；等下一次真正跑桌面构建、且确认闭包里
+  // react/react-dom 都不再被点名时，再连同这段注释一起删。
   resolve(dshRoot, 'apps', 'web'),
 ]
 const packageSources = new Map()

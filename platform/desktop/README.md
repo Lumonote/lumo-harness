@@ -101,7 +101,7 @@ CLI 或设置 `LUMO_SKILLHUB_COMMAND`。构建从 [SkillHub 官方安装源](htt
 | 上下文洞察 | `dsh-context` | `0.41.3` | 上下文组成、趋势与事件 |
 | 费用统计 | `dsh-cost-meter` | `1.7.29` | 会话、预算、价格和历史费用 |
 | 梦幻皮肤 | `dsh-dream-skin` | `8.30.1` | 8 套高质感主题、弥散光壁纸与每用户强调色（原生 `--dsw-*` 实现） |
-| 任务看板 | `@linxin666/dsh-client-ui-task-board` | `0.3.14` | Host 权威任务台帐：看板任务、真实 DSH 会话执行、定时调度与执行历史（替换左侧菜单原「自动化」入口） |
+| 任务看板（社区版） | `@linxin666/dsh-client-ui-task-board` | 基线未收录 | 客户端半边硬等 `settingsScope` 客户端服务，会在 web 启动期一直 `pending`（boot 页报 `1 entry did not activate`）；可从市场自行安装 |
 | 多智能体团队 | `@nanmicoder/dsh-agent-teams` | `0.1.15` | 自然语言编排多智能体团队：船长/成员、带依赖任务与消息，Web 树状监控 |
 | Univer 办公文档（社区版） | `dsh-univer-office` | `0.2.14` | 基线未收录：客户端半边与 master 代差过大，会在 web 启动期失败；可从市场自行安装 |
 
@@ -114,6 +114,18 @@ CLI 或设置 `LUMO_SKILLHUB_COMMAND`。构建从 [SkillHub 官方安装源](htt
 > 这类失效构建期查不出来，故从桌面基线移除（依赖仍留可自行安装）。同时客户端启动已改为
 > 尽力而为：`@deepseek-ai/*`、`@lumo/*` 之外的条目激活失败只跳过并在控制台告警，
 > 不再把一个社区插件升级成整站停摆（见 `dsh-overrides/apply.mjs` 的 `LUMO_BEST_EFFORT_BOOT`）。
+>
+> 任务看板（`@linxin666/dsh-client-ui-task-board`）退役的原因不同：它**不是** peer 版本代差，
+> 而是客户端半边把 `settingsScope` 写进了**硬 inject 列表**（`lib/client.js` 的
+> `inject = ['slots','sessions','workspaces','connection','settingsScope','locale','remote']`）。
+> 实测该条目在 web 装配里永远停在 `pending`，boot 页报
+> `web boot: 1 entry did not activate / @linxin666/dsh-client-ui-task-board: pending
+> (waiting for service: settingsScope)`。0.3.14（原 pin）与 0.3.20（当前市场最新）形状相同，
+> 上游是第三方包、改不了它的 inject，故移出基线。提供 `settingsScope` 的
+> `@deepseek-ai/dsh-client-ui-settings`（loader id `ui-settings`）自己 inject
+> `remote` + `remote.settings`，且**只在 `apply()` 里**才构造该 Service —— 整条链是
+> 「宿主 settings 域 → `remote.settings` → `ui-settings.apply()` → `settingsScope` → 任务看板」，
+> 哪一环断的尚未定论，排查时别只看末端。
 
 ## 创作与多智能体组件
 

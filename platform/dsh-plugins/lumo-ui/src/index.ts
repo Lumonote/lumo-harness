@@ -1482,7 +1482,6 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       'RevolutionLA/dsh-dream-skin',
       'bowenliang123/dsh-context',
       'Han-1413141/dsh-cost-meter',
-      'scwlkq/dsh-task-board',
       'liustack/modlens',
       'NanmiCoder/dsh-agent-teams',
     ],

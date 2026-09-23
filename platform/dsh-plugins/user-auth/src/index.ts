@@ -3,12 +3,18 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
+import { CarrierSession } from './carrier-session.ts'
 import { GovernanceAuthClient } from './client.ts'
 import { ConnectorOAuthClient } from './connector-oauth.ts'
 import { closeAuthProxy, createAuthProxy, listenAuthProxy } from './proxy.ts'
 
 export const name = 'lumo-user-auth'
 export const inject = ['webServer']
+
+/** `connection` 服务里本插件用到的那一个方法（结构类型，不引入跨包依赖）。 */
+interface ConnectionLike {
+  authenticatedUrl(baseUrl: string): string
+}
 
 export interface Config {
   host: string
@@ -53,6 +59,17 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     throw new Error('lumo-user-auth: controlPlaneToken is required')
   }
   const client = new GovernanceAuthClient(config.governanceUrl, config.controlPlaneToken, config.timeoutMs ?? 5000)
+  // carrier 的会话交接（见 carrier-session.ts）。`connection` 用 `ctx.get` 取而不是写进
+  // `inject`：它是**可选能力**——没有 carrier 的装配里插件仍应正常认证浏览器，只是转发时
+  // 不带 carrier cookie（写进 inject 会让插件在那里整块不挂载，那是一次静默的鉴权消失）。
+  const carrier = new CarrierSession({
+    authenticatedUrl: () => {
+      const connection = ctx.get('connection') as ConnectionLike | undefined
+      if (connection === undefined) return undefined
+      return connection.authenticatedUrl(`http://127.0.0.1:${String(ctx.webServer.port)}`)
+    },
+    logger: { warn: (format, ...args) => ctx.logger.warn(format, ...args) },
+  })
   const server = createAuthProxy({
     host: config.host,
     port: config.port,
@@ -63,6 +80,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     ...(config.projectId === undefined ? {} : { projectId: config.projectId }),
     identityAssertionSecret: config.identityAssertionSecret,
     upstreamPort: ctx.webServer.port,
+    carrierCookie: () => carrier.cookieHeader(),
+    carrierRejected: () => carrier.invalidate(),
     client,
     ...(config.clusterMode && config.clusterReady && config.connectorUrl ? { connectorOAuth: new ConnectorOAuthClient(config.connectorUrl, config.controlPlaneToken) } : {}),
     logger: {

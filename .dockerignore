@@ -15,3 +15,6 @@
 **/coverage
 **/dist
 **/.turbo
+# Generated desktop/runtime staging trees are not inputs to image builds.
+platform/.build
+platform/desktop/lumo-runtime

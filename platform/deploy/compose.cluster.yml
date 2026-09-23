@@ -162,8 +162,8 @@ services:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8848/nacos/v1/console/health/readiness"]
       interval: 5s
       timeout: 5s
-      retries: 30
-      start_period: 60s
+      retries: 36
+      start_period: 120s
   opa:
     # 版本**钉死**而不是 `latest`：策略文件的语义跟着 OPA 的主版本走（本仓库的 rego 用的是
     # 1.x 的 `if` 规则体语法），而 `session-control.rego` 是用 1.3.0 的
@@ -501,16 +501,18 @@ services:
       scheduler-0: { condition: service_started }
 
   scheduler-0:
-    build: { context: ../control-plane, dockerfile: scheduler/Dockerfile }
-    image: lumo/scheduler:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/scheduler"]
+    image: lumo/control-plane:dev
     environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-0", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
     depends_on:
       postgres: { condition: service_healthy }
       nacos: { condition: service_healthy }
     ports: ["18083:8083"]
   scheduler-1:
-    build: { context: ../control-plane, dockerfile: scheduler/Dockerfile }
-    image: lumo/scheduler:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/scheduler"]
+    image: lumo/control-plane:dev
     environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-1", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -530,16 +532,18 @@ services:
   # 这一步**不**撤掉 dsh-node 侧的上报方：注册表本就接受多个上报方，而先加替代者、
   # 验证它确实在报，再撤旧路径，比在一次改动里两头都动安全。
   scheduler-cluster-a:
-    build: { context: ../control-plane, dockerfile: scheduler/Dockerfile }
-    image: lumo/scheduler:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/scheduler"]
+    image: lumo/control-plane:dev
     environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-cluster-a", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_SCHEDULER_CLUSTER_ID=cluster-a", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
     depends_on:
       postgres: { condition: service_healthy }
       nacos: { condition: service_healthy }
     ports: ["18094:8083"]
   scheduler-cluster-b:
-    build: { context: ../control-plane, dockerfile: scheduler/Dockerfile }
-    image: lumo/scheduler:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/scheduler"]
+    image: lumo/control-plane:dev
     environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-cluster-b", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_SCHEDULER_CLUSTER_ID=cluster-b", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -547,24 +551,29 @@ services:
     ports: ["18095:8083"]
 
   collaborator-0:
-    build: { context: ../control-plane, dockerfile: collaborator/Dockerfile }
-    image: lumo/collaborator:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/collaborator"]
+    image: lumo/control-plane:dev
     environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_REDIS_ADDR=redis:6379", "LUMO_INSTANCE=collaborator-0", "LUMO_LISTEN=:8081", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_NACOS_COLLABORATOR_SERVICE=lumo-collaborator", "LUMO_NODE_ADVERTISE_HOST=collaborator-0", "LUMO_NACOS_PORT=8081", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_KNOWLEDGE_SEAM_URL=http://dsh-web:8090", "LUMO_IDENTITY_ASSERTION_SECRET=${LUMO_IDENTITY_ASSERTION_SECRET:-}"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
+      nacos: { condition: service_healthy }
     ports: ["18081:8081"]
   collaborator-1:
-    build: { context: ../control-plane, dockerfile: collaborator/Dockerfile }
-    image: lumo/collaborator:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/collaborator"]
+    image: lumo/control-plane:dev
     environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_REDIS_ADDR=redis:6379", "LUMO_INSTANCE=collaborator-1", "LUMO_LISTEN=:8081", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_NACOS_COLLABORATOR_SERVICE=lumo-collaborator", "LUMO_NODE_ADVERTISE_HOST=collaborator-1", "LUMO_NACOS_PORT=8081", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_KNOWLEDGE_SEAM_URL=http://dsh-web:8090", "LUMO_IDENTITY_ASSERTION_SECRET=${LUMO_IDENTITY_ASSERTION_SECRET:-}"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
+      nacos: { condition: service_healthy }
 
   registry:
-    build: { context: ../control-plane, dockerfile: registry/Dockerfile }
-    image: lumo/registry:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/registry"]
+    image: lumo/control-plane:dev
     environment: ["REGISTRY_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=registry-0", "REGISTRY_TRUST_FILE=/run/secrets/registry-trust", "REGISTRY_LOCAL_ROOT=/var/lib/registry/objects", "REGISTRY_PORT=8084", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     secrets: [registry-trust]
     volumes:
@@ -574,8 +583,9 @@ services:
     ports: ["18084:8084"]
 
   connector-gateway:
-    build: { context: ../control-plane, dockerfile: connector-gateway/Dockerfile }
-    image: lumo/connector-gateway:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/connector-gateway"]
+    image: lumo/control-plane:dev
     environment:
       - "LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -602,8 +612,9 @@ services:
       vault: { condition: service_started }
     ports: ["18082:8082"]
   llm-gateway:
-    build: { context: ../control-plane, dockerfile: llm-gateway/Dockerfile }
-    image: lumo/llm-gateway:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/llm-gateway"]
+    image: lumo/control-plane:dev
     environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=llm-gateway-0", "LUMO_LISTEN=:8088", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -625,8 +636,9 @@ services:
   # 于是边缘自己的白名单一直是空的、边缘层等于没在管事——注释、代码与部署三者不一致，
   # 而表现上又「能用」（中间件那层替它把 preflight 答了），所以没有门禁能看出来。
   edge-gateway:
-    build: { context: ../control-plane, dockerfile: edge-gateway/Dockerfile }
-    image: lumo/edge-gateway:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/edge-gateway"]
+    image: lumo/control-plane:dev
     environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=edge-gateway-0", "LUMO_LISTEN=:8080", "LUMO_EDGE_ROUTES=/etc/lumo/edge-routes.json", "LUMO_EDGE_REDIS_URL=redis://redis:6379", "LUMO_EDGE_CORS_ORIGINS=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     volumes: ["./edge-routes.dev.json:/etc/lumo/edge-routes.json:ro"]
     depends_on:
@@ -641,8 +653,9 @@ services:
   # 被拒绝而不是放行。本地拓扑没有 OPA 容器，所以这里显式指向它并接受「敏感动作全拒」
   # 这一行为——那是安全的一侧，且日志会说明是策略引擎不可用而不是权限不足。
   terminal-gateway:
-    build: { context: ../control-plane, dockerfile: terminal-gateway/Dockerfile }
-    image: lumo/terminal-gateway:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/terminal-gateway"]
+    image: lumo/control-plane:dev
     environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=terminal-gateway-0", "LUMO_LISTEN=:8090", "LUMO_OPA_URL=http://opa:8181", "LUMO_TERMINAL_SIGNING_SECRET=${LUMO_TERMINAL_SIGNING_SECRET:-dev-terminal-signing-secret}", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -666,8 +679,9 @@ services:
   # 因此每条响应的 `effectuation` 恒为 recorded —— 状态与审计是真的，会话那边还没被动过。
   # 这是刻意的顺序（先落库再下发：**记了没做**可对账，**做了没记**无从追溯），不是遗漏。
   session-control:
-    build: { context: ../control-plane, dockerfile: session-control/Dockerfile }
-    image: lumo/session-control:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/session-control"]
+    image: lumo/control-plane:dev
     environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=session-control-0", "LUMO_LISTEN=:8092", "LUMO_OPA_URL=http://opa:8181", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -676,22 +690,25 @@ services:
     # 18091 已给 terminal-gateway、18093 是 scheduler-1，18092 是这段里最后一个空位。
     ports: ["18092:8092"]
   flows:
-    build: { context: ../control-plane, dockerfile: flows/Dockerfile }
-    image: lumo/flows:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/flows"]
+    image: lumo/control-plane:dev
     environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=flows-0", "LUMO_LISTEN=:8087", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["18087:8087"]
   projects:
-    build: { context: ../control-plane, dockerfile: projects/Dockerfile }
-    image: lumo/projects:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/projects"]
+    image: lumo/control-plane:dev
     environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=projects-0", "LUMO_LISTEN=:8086", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }
     ports: ["18086:8086"]
   governance:
-    build: { context: ../control-plane, dockerfile: governance/Dockerfile }
-    image: lumo/governance:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/governance"]
+    image: lumo/control-plane:dev
     environment:
       - LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -728,8 +745,9 @@ services:
       postgres: { condition: service_healthy }
     ports: ["18089:8089"]
   usage-ledger:
-    build: { context: ../control-plane, dockerfile: usage-ledger/Dockerfile }
-    image: lumo/usage-ledger:dev
+    build: { context: ../control-plane, dockerfile: Dockerfile }
+    command: ["/usr/local/bin/usage-ledger"]
+    image: lumo/control-plane:dev
     environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=usage-ledger-0", "LUMO_RMQ_ENDPOINT=rocketmq:8081", "LUMO_LISTEN=:8085", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"]
     depends_on:
       postgres: { condition: service_healthy }

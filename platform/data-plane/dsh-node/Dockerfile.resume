@@ -59,6 +59,20 @@ RUN set -eu; \
 # Build the untouched official host/client packages and Web static assets in
 # the image. Some lib directories are intentionally ignored build artifacts in
 # the source checkout and are not guaranteed to exist in a clean context.
+# 清理「没有 package.json 的残留包目录」。canonical 把这一步放在第一半（COPY 之后、
+# install 之前），由它产出的 stage-deps 本来就干净；但本文件允许在
+# `DSH_SRC_FINGERPRINT` 为空时跳过漂移校验（见上），也就是它可能跑在一个**陈旧**的
+# stage-deps 上——那种快照里残骸还在，紧接着的 `pnpm build` 会以
+# `[@deepseek-ai/dsh-root] Cannot find entry` 或 `[UNRESOLVED_ENTRY] Cannot resolve
+# entry module lib/types/index.js` 失败。清理幂等、代价是一层极薄的 RUN，留在这里
+# 堵住这条路径。
+RUN cd /workspace/deepseek-harness \
+    && for d in vendor/* packages/*/* apps/*; do \
+         if [ -d "$d" ] && [ ! -f "$d/package.json" ]; then \
+           echo "移除无 package.json 的残留包目录: $d" >&2; \
+           rm -rf "$d"; \
+         fi; \
+       done
 RUN cd /workspace/deepseek-harness \
     && if grep -q '^ref: ' .git/HEAD; then \
          dsh_commit_ref="$(sed 's/^ref: //' .git/HEAD)"; \
@@ -83,7 +97,15 @@ RUN cd /workspace/platform && pnpm --filter @lumo/dsh-platform-ui run bundle
 # Profile plugin management follows the pnpm version pinned by the platform
 # workspace. Pre-warm it so first boot can install local link: plugins without
 # a runtime package-manager download.
-RUN corepack prepare pnpm@11.7.0
+#
+# 必须用 `install --global`，不能再用 `prepare`：corepack 0.3x 起 `prepare` 只把版本
+# 下载进缓存、**不再设默认版本**，而 `profileManagerEnv` 在启动时导出
+# `COREPACK_ENABLE_PROJECT_SPEC=0`（见 src/plugins.ts），corepack 于是既不读项目 pin、
+# 也没有默认版本可用，只能去下载 **latest**。2026-09-20 实测下载到 pnpm 12.5.1，
+# 它随即拿 dsh 根的 `packageManager: pnpm@11.7.0` 做校验并以 ERR_PNPM_BAD_PM_VERSION
+# 退出——`dsh plugin add` 失败、dsh-node exit 1、容器无限重启。`install --global`
+# 才真正写默认版本（同时同样预热缓存），使解析结果恒等于工作区 pin。
+RUN corepack install --global pnpm@11.7.0
 
 WORKDIR /workspace/platform
 ENV NODE_ENV=production

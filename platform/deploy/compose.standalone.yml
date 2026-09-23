@@ -130,6 +130,13 @@ services:
       - "19848:9848"    # 2.x gRPC（nacos-client 必需；只开 8848 客户端会超时）
     volumes:
       - nacosdata:/home/nacos/data
+    healthcheck:
+      # Java 冷启动可能持续数分钟；只在 Naming/Config API 真正可用后放行消费者。
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8848/nacos/v1/console/health/readiness"]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+      start_period: 120s
 
   prometheus:
     image: prom/prometheus:v2.54.1
@@ -151,9 +158,11 @@ services:
   # ---- 平台编排（单实例；装配层差异，业务代码无 if(standalone)）----
   # —— 自研 Go 服务（与 compose.local.yml 同镜像，仅拓扑不同 —— 铁则：一套配置只换清单）——
   collaborator:         # 知识库文档实时协作（§5.4.7）
+    image: lumo/control-plane:dev
     build:
       context: ../control-plane
-      dockerfile: collaborator/Dockerfile
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/collaborator"]
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -172,6 +181,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      nacos:
+        condition: service_healthy
 
   dsh-node:
     build:
@@ -288,8 +299,9 @@ services:
   registry:
     build:
       context: ../control-plane
-      dockerfile: registry/Dockerfile
-    image: lumo/registry:dev
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/registry"]
+    image: lumo/control-plane:dev
     environment:
       REGISTRY_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -312,9 +324,11 @@ services:
         condition: service_started
 
   connector-gateway:    # 外部连接器网关（§10.1）
+    image: lumo/control-plane:dev
     build:
       context: ../control-plane
-      dockerfile: connector-gateway/Dockerfile
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/connector-gateway"]
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -332,19 +346,28 @@ services:
         condition: service_started
 
   scheduler-0:          # 全局任务调度 §6.2/§7.4.1（单节点；子实例多副本场景见 cluster）
+    image: lumo/control-plane:dev
     build:
       context: ../control-plane
-      dockerfile: scheduler/Dockerfile
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/scheduler"]
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       LUMO_LISTEN: ":8083"
       LUMO_INSTANCE: scheduler-0
+      # Scheduler 必须和 dsh-node 读取同一个 Naming 目录；否则节点虽然已经
+      # 注册进 Nacos，/v1/nodes 仍会退回空的 PostgreSQL 目录。
+      LUMO_NACOS_ADDR: http://nacos:8848
+      LUMO_NACOS_SERVICE: lumo-dsh-node
+      LUMO_NACOS_GROUP: DEFAULT_GROUP
       LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
     ports:
       - "18083:8083"
     depends_on:
       postgres:
+        condition: service_healthy
+      nacos:
         condition: service_healthy
 
   # llm-gateway：模型访问面（§12 网关四门之一，P2a 起始项）——OpenAI 兼容入口 +
@@ -352,9 +375,11 @@ services:
   # 传输进台账）+ 双树预算执法镜像（reserve 四态 402 / commit 同事务扣减）。
   # 上游 provider 表按需 seed（指向本集群推理或外部 API）；预算树随 metering 建表。
   llm-gateway:
+    image: lumo/control-plane:dev
     build:
       context: ../control-plane
-      dockerfile: llm-gateway/Dockerfile
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/llm-gateway"]
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -378,9 +403,11 @@ services:
   # 于是边缘自己的白名单一直是空的、边缘层等于没在管事——而表现上又「能用」
   # （中间件那层替它把 preflight 答了），没有门禁能看出来。两条拓扑同构，修一处必查另一处。
   edge-gateway:
+    image: lumo/control-plane:dev
     build:
       context: ../control-plane
-      dockerfile: edge-gateway/Dockerfile
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/edge-gateway"]
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -408,9 +435,11 @@ services:
   #   * 历史事件源未接线 → WS 接入诚实返回 503，而不是伪造一份空历史让终端以为
   #     「本来就没有事件」。接线真实 session/event 来源是后续独立一步。
   terminal-gateway:
+    image: lumo/control-plane:dev
     build:
       context: ../control-plane
-      dockerfile: terminal-gateway/Dockerfile
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/terminal-gateway"]
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -437,9 +466,11 @@ services:
   # 因此本地要验证「指令真的被裁决」走 `go test`（活库用例，`LUMO_TEST_PG_DSN` 门控），
   # 而不是指望这个拓扑——那正是 `acceptance-cluster.sh` 的职责。
   session-control:
+    image: lumo/control-plane:dev
     build:
       context: ../control-plane
-      dockerfile: session-control/Dockerfile
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/session-control"]
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -458,9 +489,11 @@ services:
   #（§11 后半，制品层；执行是 FlowEngine P2）。只读 projects 服务的
   # project_members 表做成员判定（同库跨表，无服务间调用）。
   flows:
+    image: lumo/control-plane:dev
     build:
       context: ../control-plane
-      dockerfile: flows/Dockerfile
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/flows"]
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -476,9 +509,11 @@ services:
   # N3 拍板 B（2026-08-26）：项目 = 并行预算树——创建即种子 budget_trees
   # kind='project' 行；执法（双树同事务扣减）在 TS metering，本服务只治理不执法。
   projects:
+    image: lumo/control-plane:dev
     build:
       context: ../control-plane
-      dockerfile: projects/Dockerfile
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/projects"]
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -493,9 +528,11 @@ services:
   # 组织治理和桌面节点服务始终可观测，但仅 Cluster+ready 形态会放行其写 API。
   # Standalone 显式返回 CLUSTER_ONLY，不能因本机恰好存在 Nacos 而误开启多租户功能。
   governance:
+    image: lumo/control-plane:dev
     build:
       context: ../control-plane
-      dockerfile: governance/Dockerfile
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/governance"]
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
@@ -527,9 +564,11 @@ services:
   # 装配互斥：dsh-node 侧 metering 插件须配 ledgerTransport: 'rmq'（本形态）——
   # 台账单一写入者，TS drain 轮询不并存（判据 7）。
   usage-ledger:
+    image: lumo/control-plane:dev
     build:
       context: ../control-plane
-      dockerfile: usage-ledger/Dockerfile
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/usage-ledger"]
     environment:
       LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"

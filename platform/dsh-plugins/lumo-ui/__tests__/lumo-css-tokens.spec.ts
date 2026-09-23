@@ -9,8 +9,15 @@ const css = readFileSync(new URL('../src/client/lumo.css', import.meta.url), 'ut
  * 一个被引用但既没被定义、也不在显式清单里的名字，必然是拼错或漏写。
  */
 const setFromJavaScript = new Map([
-  ['--lumo-native-sidebar-width', 'index.tsx:568 —— ResizeObserver 量出侧边栏宽度后 setProperty'],
-  ['--lumo-order', 'index.tsx:961 / 1338 —— 列表项进入动画的序号，由行内 style 写入'],
+  // 写**符号名**不写行号：行号每次往上插一段就作废，而它作废的样子是「还指着一个真实
+  // 存在的行」——2026-09-21 这次就发现两处都指错了地方（侧边栏宽度那条写 568、实际 644；
+  // --lumo-order 两条写 961/1338、实际 1106/1483 与第三处）。符号名不会这样坏。
+  //
+  // 2026-09-23：`--lumo-native-sidebar-width` 那条已删除——它的**生产点与消费点一起**没了
+  // （index.tsx 的 publishWidth / ResizeObserver，与 lumo.css 里 `.lumo-click-spark` 的
+  // `left: var(--lumo-native-sidebar-width, 0px)`）。下面这条用例正是为这一刻准备的：
+  // 名字没了设置点还留在豁免清单里，就成了下一处真拼写错误的藏身处。
+  ['--lumo-order', 'index.tsx 的 SpotlightCard / SkillHubCard 等 —— 列表项进入动画的序号，由行内 style 写入'],
 ])
 
 describe('lumo.css', () => {

@@ -54,7 +54,7 @@ TLS 握手，使用 TCP 负载均衡或 TLS passthrough，且不注入 PROXY pro
 ### 构建镜像（发布路径）
 
 ```sh
-./platform/build.sh --targets images      # 12 个控制面镜像 + provisioner + dsh-node + console
+./platform/build.sh --targets images      # 1 个控制面镜像（装 12 个服务二进制）+ provisioner + dsh-node + console
 ```
 
 **构建失败的两种形态，先分清再查**（2026-09-17 实测，两者都真出现过）：
@@ -75,6 +75,26 @@ TLS 握手，使用 TCP 负载均衡或 TLS passthrough，且不注入 PROXY pro
 2. **网络抖动** —— 报错长这样：`E: Failed to fetch ... 502 Bad Gateway [deb.debian.org]`。
    这是镜像源的问题，**重试即可**，不是仓库里的缺陷。区分方法很直接：看错的那一行是不是
    `502`/超时；装配缺陷的报错永远指向一个具体文件或程序。
+
+   同一个形态在**两个包管理器**上都会出现（2026-09-21 各实测一次）：
+
+   - **Go 模块代理**：控制面镜像的 `go mod download: collaborator` 在第 61 秒报
+     `read "https://proxy.golang.org/.../@v/v0.21.0.zip": unexpected EOF`。当时同一时刻
+     `curl` 那个 zip 是 **200 / 9.2MB / 完整**，所以不是「被墙」而是瞬时抖动。
+   - **crates.io**：`yrs-build` 阶段的 `cargo build` 是**同一个缺陷类**，而且它是整次构建的
+     耗时大头（**95.8s / 104s**）。挂上 registry 与 target 两个 cache mount 后，改一位源码的
+     重建是 **5.2s、只编 1 个 crate**（冷构建 36 个）。
+
+   **注意它们被修掉的方式和上面 `deb` 那条不同**：`deb` 那条靠重跑，这两条现在是**构建脚本
+   自己重试**（同一条 RUN 里 3 次）+ cache mount。所以遇到这类报错不必手动重跑：若仍失败，
+   看日志里有没有 `== 重试第 N 次：`——**没有**就说明重试被删了
+   （`check-dockerfile-modules.py` 有一条断言专门守这个，且对**所有会走网络的步骤**生效）。
+
+   断网可用性分两步说清（实测）：**Go 段**在完整镜像 + `--network=none` 下整条 RUN **7.1s**
+   跑通、12 个二进制齐全；**Rust 段**只能用一个「从已构建阶段镜像起步」的隔离探针来验
+   （rc=0 / 12s），因为 `--network=none` 会改变 RUN 的缓存键、使 `apk add` 那两层每次重跑并
+   失败——**真 Dockerfile 没法整体做断网探测**。另外 registry 挂载是承重的：去掉它、即使
+   `target/` 全热，cargo 仍会先去 `Updating crates.io index` 然后失败。
 
 ### 部署前置检查
 

@@ -125,7 +125,13 @@ CREATE TABLE IF NOT EXISTS governance_auth_sessions (
   expires_at        TIMESTAMPTZ NOT NULL,
   FOREIGN KEY (realm, user_id) REFERENCES governance_users(realm, id) ON DELETE CASCADE
 );
-ALTER TABLE governance_auth_sessions ADD COLUMN IF NOT EXISTS session_id TEXT;
+-- 默认值要与上面建表语句里的**逐字一致**，且必须单独再 SET DEFAULT 一遍：
+-- 「ADD COLUMN IF NOT EXISTS」在列已存在时整句是空操作（含 DEFAULT），老库于是拿到一个
+-- 「NOT NULL 且无默认」的 session_id，而两处 INSERT（auth.go 的密码登录、oidc.go 的
+-- 回调）都不列这一列 → 23502，表现为登录页「用户认证服务暂时不可用」。
+-- 一条建表语句与一条收敛语句是两份手抄的判据，它们不等价时**只有老库会坏**。
+ALTER TABLE governance_auth_sessions ADD COLUMN IF NOT EXISTS session_id TEXT DEFAULT gen_random_uuid()::text;
+ALTER TABLE governance_auth_sessions ALTER COLUMN session_id SET DEFAULT gen_random_uuid()::text;
 ALTER TABLE governance_auth_sessions ADD COLUMN IF NOT EXISTS oidc_issuer TEXT NOT NULL DEFAULT '';
 UPDATE governance_auth_sessions SET session_id=gen_random_uuid()::text WHERE session_id IS NULL OR session_id='';
 ALTER TABLE governance_auth_sessions ALTER COLUMN session_id SET NOT NULL;

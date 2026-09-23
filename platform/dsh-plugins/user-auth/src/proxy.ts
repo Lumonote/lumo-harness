@@ -4,10 +4,12 @@ import type { AddressInfo } from 'node:net'
 import type { Duplex } from 'node:stream'
 
 import { GovernanceApiError, GovernanceAuthClient, type Principal } from './client.ts'
+import { AUTHENTICATED_APP_HOME } from './app-home.ts'
 import { loginPage, loginScript, resolveLoginTheme, type LoginPageOptions } from './html.ts'
 import { CONNECTOR_OAUTH_CALLBACK, CONNECTOR_OAUTH_COOKIE, ConnectorOAuthClient, ConnectorOAuthError, connectorIDPattern, openConnectorBridge, sealConnectorBridge, type ConnectorOAuthStart } from './connector-oauth.ts'
 
 const SESSION_COOKIE = 'lumo_auth_session'
+export { AUTHENTICATED_APP_HOME } from './app-home.ts'
 const CAPTCHA_COOKIE = 'lumo_auth_captcha'
 const OIDC_COOKIE = 'lumo_auth_oidc'
 const MAX_AUTH_BODY_BYTES = 16 * 1024
@@ -35,6 +37,13 @@ export interface AuthProxyOptions {
 	client: GovernanceAuthClient
 	connectorOAuth?: ConnectorOAuthClient
   logger: AuthProxyLogger
+  /**
+   * carrier 的浏览器会话 cookie（见 carrier-session.ts）。缺省时不做交接——那种装配下
+   * 浏览器会直接看到 carrier 的 401 页面，正是本参数存在的原因。
+   */
+  carrierCookie?: () => Promise<string | undefined>
+  /** carrier 回了 401：让提供者丢掉缓存的 cookie，下一次请求重新交换。 */
+  carrierRejected?: () => void
 }
 
 function parseCookies(req: IncomingMessage): Map<string, string> {
@@ -200,12 +209,15 @@ const SPOOFABLE_IDENTITY_HEADERS = [
   'x-lumo-roles', 'x-lumo-role', 'x-lumo-dept', 'x-lumo-project', 'x-lumo-client-ip',
 ]
 
-function upstreamHeaders(req: IncomingMessage, principal: Principal, options: AuthProxyOptions, upgrade: boolean): IncomingHttpHeaders {
+function upstreamHeaders(req: IncomingMessage, principal: Principal, options: AuthProxyOptions, upgrade: boolean, carrierCookie?: string): IncomingHttpHeaders {
   const authority = `127.0.0.1:${String(options.upstreamPort)}`
   const headers: IncomingHttpHeaders = { ...req.headers, host: authority }
   const remainingCookies = stripAuthCookies(req.headers.cookie)
-  if (remainingCookies === undefined) delete headers.cookie
-  else headers.cookie = remainingCookies
+  // 保留浏览器自带的非鉴权 cookie，再附上 carrier 的会话 cookie：carrier 的 browser-auth
+  // 只认后者，而它由代理服务端持有（token 不进浏览器，见 carrier-session.ts）。
+  const forwarded = [remainingCookies, carrierCookie].filter((value): value is string => value !== undefined && value !== '')
+  if (forwarded.length === 0) delete headers.cookie
+  else headers.cookie = forwarded.join('; ')
   for (const name of SPOOFABLE_IDENTITY_HEADERS) delete headers[name]
   // The public listener is the trust boundary. Never let a browser-supplied
   // bearer credential reach the loopback DSH listener, where it could be
@@ -229,15 +241,18 @@ function upstreamHeaders(req: IncomingMessage, principal: Principal, options: Au
   return headers
 }
 
-function proxyHttp(req: IncomingMessage, res: ServerResponse, principal: Principal, options: AuthProxyOptions): void {
+async function proxyHttp(req: IncomingMessage, res: ServerResponse, principal: Principal, options: AuthProxyOptions): Promise<void> {
+  const carrierCookie = await options.carrierCookie?.()
   const upstream = httpRequest({
     agent: false,
     host: '127.0.0.1',
     port: options.upstreamPort,
     method: req.method,
     path: req.url,
-    headers: upstreamHeaders(req, principal, options, false),
+    headers: upstreamHeaders(req, principal, options, false, carrierCookie),
   }, upstreamResponse => {
+    // carrier 拒了我们的会话 cookie（过期/被轮换）——丢掉缓存，下一次请求重新交换。
+    if (upstreamResponse.statusCode === 401 && carrierCookie !== undefined) options.carrierRejected?.()
     const headers = { ...upstreamResponse.headers }
     const setCookies = headers['set-cookie']
     if (setCookies !== undefined) {
@@ -262,14 +277,15 @@ function rejectUpgrade(socket: Duplex, status = 401, message = 'Unauthorized'): 
   socket.end(`HTTP/1.1 ${String(status)} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)
 }
 
-function proxyUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, principal: Principal, options: AuthProxyOptions, sockets: Set<Duplex>): void {
+async function proxyUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, principal: Principal, options: AuthProxyOptions, sockets: Set<Duplex>): Promise<void> {
+  const carrierCookie = await options.carrierCookie?.()
   const upstream = httpRequest({
     agent: false,
     host: '127.0.0.1',
     port: options.upstreamPort,
     method: req.method,
     path: req.url,
-    headers: upstreamHeaders(req, principal, options, true),
+    headers: upstreamHeaders(req, principal, options, true, carrierCookie),
   })
   upstream.on('upgrade', (response, upstreamSocket, upstreamHead) => {
     sockets.add(upstreamSocket)
@@ -367,7 +383,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
         return
       }
       if (req.method === 'GET' && url.pathname === '/auth/login') {
-        if (await sessions.get(sessionToken) !== undefined) { redirect(res, '/'); return }
+        if (await sessions.get(sessionToken) !== undefined) { redirect(res, AUTHENTICATED_APP_HOME); return }
         let oidcEnabled = false
         if (options.clusterMode) {
           try {
@@ -380,7 +396,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
       }
       if (req.method === 'GET' && url.pathname === '/auth/oidc/complete.js') {
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
-        res.end("location.replace('/')")
+        res.end(`location.replace(${JSON.stringify(AUTHENTICATED_APP_HOME)})`)
         return
       }
       if (req.method === 'GET' && url.pathname === '/auth/oidc/start') {
@@ -411,7 +427,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
           sessions.set(result.token, result.principal)
           res.setHeader('Set-Cookie', [sessionCookie(result, options), clearOIDC])
           // Commit a same-origin document before navigating with the Strict session cookie.
-          writeHtml(res, 200, '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>登录中</title><script src="/auth/oidc/complete.js" defer></script></head><body><a href="/">进入 Lumo</a></body></html>')
+          writeHtml(res, 200, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>登录中</title><script src="/auth/oidc/complete.js" defer></script></head><body><a href="${AUTHENTICATED_APP_HOME}">进入 Lumo</a></body></html>`)
         } catch (error) {
           const state = error instanceof GovernanceApiError && error.status >= 500 ? 'unavailable' : 'oidc-failed'
           redirect(res, `/auth/login?state=${state}`, { 'Set-Cookie': clearOIDC })
@@ -449,7 +465,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
 			mfaCode: form.get('mfa') ?? '',
           })
           sessions.set(result.token, result.principal)
-          redirect(res, '/', { 'Set-Cookie': [
+          redirect(res, AUTHENTICATED_APP_HOME, { 'Set-Cookie': [
             authCookie(SESSION_COOKIE, result.token, { secure: options.secureCookie, maxAge: Math.max(1, Math.floor((Date.parse(result.expires_at) - Date.now()) / 1000)) }),
             authCookie(CAPTCHA_COOKIE, '', { secure: options.secureCookie, maxAge: 0 }),
           ] })
@@ -684,7 +700,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
         writeJson(res, 204, undefined, { 'Set-Cookie': authCookie(SESSION_COOKIE, '', { secure: options.secureCookie, maxAge: 0 }) })
         return
       }
-      proxyHttp(req, res, principal, options)
+      await proxyHttp(req, res, principal, options)
     })().catch((error: unknown) => {
       options.logger.warn('lumo-user-auth: request failed: %s', error)
       if (!res.headersSent) writeJson(res, 503, { error: 'auth_unavailable', message: '认证服务暂时不可用' })
@@ -715,7 +731,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
         socket.once('close', () => clearInterval(timer))
         if (socket.destroyed) { clearInterval(timer); return }
       }
-      proxyUpgrade(req, socket, head, principal, options, upgradedSockets)
+      await proxyUpgrade(req, socket, head, principal, options, upgradedSockets)
     })().catch(() => rejectUpgrade(socket, 503, 'Service Unavailable'))
   })
   return server

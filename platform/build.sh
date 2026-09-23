@@ -42,23 +42,18 @@ fi
 # Dockerfile.resume 是 dev-loop 变体、artifact-runtime 复用 provisioner 镜像，均不在此。
 #
 # 这份清单是**发布镜像集的唯一来源**：漏一个服务的后果是 `--push` 推出去的集合里没有它，
-# 而 `compose.cluster.yml` 里那个服务的 `image: lumo/<name>:dev` 与 Helm 的
-# `image.repository/<name>:tag` 都指向一个不存在的镜像——本地 `up.sh --build` 看不出来
-# （compose 自己会 build），只有走 registry 的那条路才炸。2026-09-16 复核补齐了
-# edge-gateway / terminal-gateway（C3/C4 落地时漏的）与 session-control（C5）。
+# 而 `compose.cluster.yml` 里那个服务的 `image: lumo/control-plane:dev` 与 Helm 的
+# `image.repository/control-plane:tag` 都指向一个不存在的镜像——本地 `up.sh --build` 看不
+# 出来（compose 自己会 build），只有走 registry 的那条路才炸。2026-09-16 复核补齐了
+# edge-gateway / terminal-gateway（C3/C4 落地时漏的）与 session-control（C5）；
+# 2026-09-20 这 12 行合并成 1 行（多二进制镜像）。
 go_images=(
-  "collaborator|platform/control-plane|collaborator/Dockerfile"
-  "connector-gateway|platform/control-plane|connector-gateway/Dockerfile"
-  "edge-gateway|platform/control-plane|edge-gateway/Dockerfile"
-  "flows|platform/control-plane|flows/Dockerfile"
-  "governance|platform/control-plane|governance/Dockerfile"
-  "llm-gateway|platform/control-plane|llm-gateway/Dockerfile"
-  "projects|platform/control-plane|projects/Dockerfile"
-  "registry|platform/control-plane|registry/Dockerfile"
-  "scheduler|platform/control-plane|scheduler/Dockerfile"
-  "session-control|platform/control-plane|session-control/Dockerfile"
-  "terminal-gateway|platform/control-plane|terminal-gateway/Dockerfile"
-  "usage-ledger|platform/control-plane|usage-ledger/Dockerfile"
+  # 控制面 12 个服务共用一个镜像（2026-09-20 合并）：一个构建产出 12 个二进制，由部署
+  # 形态用 `command:` 选入口。合并前这里是 12 行，每行一次完整的 go mod download + 构建，
+  # 而它们编译的是同一批包。**服务清单在 Dockerfile 里**（LUMO_CONTROL_PLANE_SERVICES），
+  # 这里不再重复列举——两份清单必然会分叉，而分叉的形态是「镜像建出来了、里面没有那个
+  # 二进制」，要等容器起来才报 no such file。
+  "control-plane|platform/control-plane|Dockerfile"
   "provisioner|platform/control-plane|registry/Dockerfile.provisioner"
 )
 # 仓库根为 context 的两个镜像；dsh-node 最重且 pnpm store 有写竞争，串行。
@@ -279,8 +274,10 @@ build_images() {
   # 而错误要跑到容器里下完依赖才出现（`reading /heartbeat/go.mod: no such file or directory`）——
   # 一次十几分钟。判据只是「两个集合相等」，所以放在这里，秒级失败在花钱之前。
   if [[ $dry_run -eq 1 ]]; then
+    echo "+ check-corepack-pin（发布镜像里的 pnpm 默认版本）"
     echo "+ check-dockerfile-modules $platform_root/control-plane"
   else
+    python3 "$platform_root/tools/check-corepack-pin.py"
     python3 "$platform_root/tools/check-dockerfile-modules.py" "$platform_root/control-plane"
   fi
 

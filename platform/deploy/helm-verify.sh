@@ -313,10 +313,14 @@ fi
 # docs/cluster-development-tasks.md, "Found while re-auditing C3/C4".
 #
 # The comparison is exact because both sets are already written down:
-# control-plane modules that ship as images, and the chart's `services` keys.
-# The tree half is derived by walking `platform/control-plane/*/Dockerfile` rather
-# than from a hand-written list, for the same reason the CI matrix is: a list that
-# is maintained by hand rots in the direction nobody checks.
+# control-plane services that ship in the image, and the chart's `services` keys.
+# The tree half is derived from `platform/control-plane/Dockerfile`'s
+# `LUMO_CONTROL_PLANE_SERVICES` — the line that decides which binaries the image
+# actually contains, i.e. the same input the container's `command` resolves
+# against. 2026-09-20: it used to walk `platform/control-plane/*/Dockerfile`
+# (one image per service); after those 12 merged into one image that walk found
+# nothing, and two empty sets compare equal — the gate would have gone green by
+# going blind. Hence the explicit empty-set failure right below.
 #
 # Deliberately NOT compared against `preflight-deployment.sh`'s cluster list: that
 # one includes middleware (postgres, redis, nacos, opa, vault, rocketmq, minio,
@@ -345,9 +349,13 @@ chart_service_names() {
 # If a module ever genuinely cannot be charted, re-introducing an exclusion is a
 # deliberate edit — and it should come with the reason in the message, not as a
 # quiet line in a list.
-control_plane_modules="$(cd "$script_dir/../control-plane" && for d in */; do
-  [[ -f "$d/Dockerfile" ]] && printf '%s\n' "${d%/}"
-done | sort)"
+control_plane_modules="$(sed -n 's/^ENV LUMO_CONTROL_PLANE_SERVICES="\(.*\)"$/\1/p' \
+  "$script_dir/../control-plane/Dockerfile" | tr ' ' '\n' | grep -v '^$' | sort)"
+if [[ -z "$control_plane_modules" ]]; then
+  # 解析失败必须响：下面两个 comm 拿空集合比空集合是「相等」的，门禁会以全绿的样子失效
+  # ——那正是这个 section 存在的理由（「a missing Service leaves no trace」）。
+  fail "解析不出 control-plane 镜像的服务清单（Dockerfile 的 ENV LUMO_CONTROL_PLANE_SERVICES）"
+fi
 
 # Modules present in the tree but absent from the chart.
 # `comm` requires *globally* sorted input, so the chart side is sorted here — an

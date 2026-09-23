@@ -23,7 +23,9 @@ const overview = {
   generatedAt: new Date().toISOString(),
   deployment: { mode: 'cluster', label: '服务器集群', storage: 'postgres', middleware: ['PostgreSQL', 'Nacos'], distributed: true, desktop: false, clusterReady: true, clusterOnly: true },
   services: { scheduler: { ok: true, status: 200 }, governance: { ok: true, status: 200 } },
-  cluster: { leader: { holder: 'node-a' }, nodes: [] },
+  cluster: { leader: { holder: 'node-a' }, nodes: [
+    { node_id: 'nacos-cn-01', cluster_id: 'cluster-a', capacity: 8, capabilities: ['llm', 'browser'], residency: 'cn-east' },
+  ] },
   projects: [{ id: 'growth', name: '增长项目', status: 'active', realm: 'dev' }],
   flows: [{ id: 'launch-flow', name: '发布流程', projectId: 'growth', status: 'published', version: 2 }],
   connectors: [{ id: 'orders', name: '订单中台', protocol: 'http', operations: [] }],
@@ -97,6 +99,9 @@ describe('Lumo native Harness integration', () => {
   // 与协作图读着（`employeeState` 的优先级就靠它们各差一处），动一行就可能让另一条用例
   // 静默变成在测别的规则。缺省为空，只有看板那条用例往这里放行。
   let threadRows: unknown[] = []
+  // `/auth/account` 的状态码。默认 200（有会话）；两条登录态用例分别把它改成 401
+  // （有鉴权、当前浏览器没会话）与 404（单机版没有 auth 代理）。
+  let accountStatus = 200
 
   beforeEach(() => {
     const values = new Map<string, string>()
@@ -113,6 +118,7 @@ describe('Lumo native Harness integration', () => {
     })
     calls.length = 0
     threadRows = []
+    accountStatus = 200
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const path = typeof input === 'string' ? input : input.toString()
       calls.push(`${init?.method ?? 'GET'} ${path}`)
@@ -160,10 +166,10 @@ describe('Lumo native Harness integration', () => {
           { name: 'ppt-master', description: '从主题、文档或现有模板生成、编辑和增强原生可编辑 PPTX。', whenToUse: '适用于演示文稿生成、模板填充和原生 PPTX 编辑。', invocation: { modelInvocable: true, userInvocable: true }, source: 'bundled', provider: 'lumo-creative-skills' },
           { name: 'archify', description: '架构图与数据流的视觉化设计', invocation: { modelInvocable: true, userInvocable: true }, source: 'custom', provider: 'lumo-local-snapshot' },
         ] } :
-        // 协作空间的四个读面。夹具刻意让每一种**会被图读出来的差别**各出现一次：
+        // 协作空间的五个读面。夹具刻意让每一种**会被图读出来的差别**各出现一次：
         // 一条员工上下游边、一个待审核、一个节点全离线的员工，以及一个有绑定与一个
         // 没绑定的智能体——它们分别对应图上四种不同的画法。夹具是测试的输入，
-        // **不是实现的形状**：这四个响应就是服务端那四个面真实返回的子集。
+        // **不是实现的形状**：这些响应就是服务端五个面真实返回的子集。
         path === '/lumo/api/users' ? { users: [
           { id: 'emp-a', display_name: '陈晟', status: 'active' },
           { id: 'emp-b', display_name: '林悦', status: 'active' },
@@ -227,6 +233,11 @@ describe('Lumo native Harness integration', () => {
       if (path === '/lumo/api/knowledge/vault/status') {
         return new Response(JSON.stringify({ error: 'vault 知识源未装配（集群版不适用）' }), { status: 501, headers: { 'content-type': 'application/json' } })
       }
+      // 登录态的两条非 200 分支。401 是「这个部署有会话鉴权、当前浏览器没有会话」，
+      // 404 是「这个部署根本没有会话鉴权」（单机版没挂 auth 代理）。
+      if (path === '/auth/account' && accountStatus !== 200) {
+        return new Response(JSON.stringify({ error: accountStatus === 401 ? 'authentication_required' : 'not_found' }), { status: accountStatus, headers: { 'content-type': 'application/json' } })
+      }
       return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
     }))
   })
@@ -249,37 +260,52 @@ describe('Lumo native Harness integration', () => {
     // 协作空间在最前：它是这一组里唯一以「目标与协作」为入口的工作区，而侧边栏的顺序
     // 就是产品的推荐顺序。
     expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual([
-      '协作空间', '资料库', '技能中心', '项目', '更多应用 · 灵感',
+      '协作空间', '资料库', '技能中心', '项目', '更多工作工具',
     ])
     expect(within(navigation).queryByRole('button', { name: '开放设计' })).toBeNull()
     expect(within(navigation).queryByRole('button', { name: 'PPT 生成' })).toBeNull()
 
     fireEvent.click(within(navigation).getByRole('button', { name: '项目' }))
-    expect(await screen.findByText('用量计量')).toBeTruthy()
+    expect(await screen.findByRole('button', { name: '返回对话' })).toBeTruthy()
+    expect(await screen.findByText('让每个项目都有清楚的边界与下一步。')).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: '项目领域' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /项目资产/ })).toBeTruthy()
+    expect(screen.queryByText('提交调度任务')).toBeNull()
+    expect(screen.queryByText('平台能力')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /协作执行/ }))
     expect((await screen.findAllByText('合同复核 Agent')).length).toBeGreaterThan(0)
 		expect(await screen.findByText('启用 · 2 并发 · 执行态 active · 1/2 运行中')).toBeTruthy()
+		fireEvent.click(screen.getByRole('button', { name: /项目资产/ }))
 		fireEvent.click(screen.getByRole('button', { name: '版本差异' }))
 		expect(await screen.findByText('流程版本对比')).toBeTruthy()
 		expect(await screen.findByText('新增节点：publish')).toBeTruthy()
 		expect(calls.some(call => call === 'GET /lumo/api/flows/launch-flow/versions/1')).toBe(true)
 		expect(calls.some(call => call === 'GET /lumo/api/flows/launch-flow/versions/2')).toBe(true)
+		fireEvent.click(screen.getByRole('button', { name: /协作执行/ }))
 		const agentAssets = document.querySelector<HTMLElement>('.lumo-agent-preset-layout')!
 		fireEvent.click(within(agentAssets).getByRole('button', { name: '停用' }))
 		expect(await within(agentAssets).findByRole('button', { name: '启用' })).toBeTruthy()
 		expect(calls.some(call => call === 'PATCH /lumo/api/agent-presets/contract-review')).toBe(true)
+		fireEvent.click(screen.getByRole('button', { name: /平台运营/ }))
+		expect(await screen.findByText('提交调度任务')).toBeTruthy()
 
     fireEvent.click(within(navigation).getByRole('button', { name: '资料库' }))
     expect(await screen.findByRole('heading', { name: '资料库' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '返回对话' })).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: '资料库领域' })).toBeTruthy()
     fireEvent.change(screen.getByRole('textbox', { name: '向知识空间提问' }), { target: { value: '审批' } })
     fireEvent.click(screen.getByRole('button', { name: '检索知识' }))
     expect(await screen.findByText('doc-ops · v4')).toBeTruthy()
-		expect(await screen.findByText('来源管理')).toBeTruthy()
+		fireEvent.click(screen.getByRole('button', { name: /来源内容/ }))
+		expect(await screen.findByText('来源内容', { selector: '.lumo-section-title b' })).toBeTruthy()
 		fireEvent.click(screen.getByRole('button', { name: '查看 / 编辑' }))
 		await screen.findByDisplayValue('连接器审批边界')
 		fireEvent.change(screen.getByRole('textbox', { name: '知识来源标题' }), { target: { value: '连接器审批边界（修订）' } })
 		fireEvent.click(screen.getByRole('button', { name: '保存新版本' }))
 		await screen.findByText(/已保存 doc-ops 的 v5/)
 		expect(calls.some(call => call === 'PUT /lumo/api/knowledge/sources/doc-ops')).toBe(true)
+		fireEvent.click(screen.getByRole('button', { name: /索引运营/ }))
+		expect(screen.getByRole('button', { name: '重建当前 Realm' })).toBeTruthy()
 
     fireEvent.click(within(navigation).getByRole('button', { name: '技能中心' }))
     // 技能与专家拆分后，从「技能」页进入已安装技能治理。
@@ -306,8 +332,17 @@ describe('Lumo native Harness integration', () => {
       expect(calls.some(call => call.includes(path))).toBe(true)
     }
 
+    // 工作区切换必须回到新页面顶部；否则从项目这类长页面进入「更多」会落在页面中段。
+    const workbenchMain = document.querySelector<HTMLElement>('.lumo-workbench-main > main')!
+    workbenchMain.scrollTop = 720
     fireEvent.click(within(navigation).getByRole('button', { name: '更多' }))
-    expect(await screen.findByText('已连接制品注册表')).toBeTruthy()
+    expect(await screen.findByText('按工作领域找到真正可用的入口。')).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: '更多领域' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /开放设计/ })).toBeTruthy()
+    expect(screen.queryByText('Stable 通道期望状态')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /制品目录与灰度/ }))
+    expect(screen.getByRole('list', { name: '能力生命周期' })).toBeTruthy()
+    await waitFor(() => expect(workbenchMain.scrollTop).toBe(0))
     expect((await screen.findAllByText('release-flow')).length).toBeGreaterThan(0)
     expect(screen.queryByText('基础插件已装配')).toBeNull()
     expect(calls.some(call => call.includes('/lumo/api/registry/artifacts?limit=100'))).toBe(true)
@@ -330,10 +365,71 @@ describe('Lumo native Harness integration', () => {
     fireEvent.click(screen.getByRole('button', { name: '生成签名计划' }))
     expect(await screen.findByText('计划闭包 · 1 个制品')).toBeTruthy()
     expect(calls.some(call => call === 'POST /lumo/api/registry/plan')).toBe(true)
+		fireEvent.click(screen.getByRole('button', { name: /工作工具/ }))
+		fireEvent.click(screen.getByRole('button', { name: /开放设计/ }))
+		expect(await screen.findByRole('heading', { name: '开放设计' })).toBeTruthy()
+		expect(screen.queryByRole('button', { name: '添加设计上下文' })).toBeNull()
 
     fireEvent.keyDown(window, { key: 'Escape' })
     await waitFor(() => expect(document.querySelector('.lumo-workbench')).toBeNull())
   }, 15000)
+
+  // 侧边栏底部的登录态。它挂在外壳的 `sidebar.footer.action` 槽上，不在导航槽里——
+  // 导航槽装的是工作区入口，身份不是工作区。三条用例对应三种结局，缺一条就会出现
+  // 「把没有鉴权的部署也说成未登录」这类假陈述。
+  //
+  // ⚠️ 本文件现在**跑不起来**（jsdom 未声明为 platform 的依赖，见
+  // `.workbuddy-ai/memory/local-sandbox.md` §3/§4），所以三条映射规则本身的可执行证据
+  // 在 `sidebar-identity.spec.ts`（纯函数，node 环境）。这里钉的是另一半：槽位接线、
+  // 渲染出来的文案、以及「点击进用户中心」这条动作真的通到 overlay。
+  it('把当前登录身份显示在侧边栏底部，并从这里进用户中心', async () => {
+    const registered = mountLumo()
+    // 槽位注册本身就是断言的一部分：取不到 Component 会直接抛，而不是静默跳过。
+    const Identity = registered.find(item => item.name === 'sidebar.footer.action')!.Component
+    const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
+
+    render(<div><Identity wide /><Overlay /></div>)
+    // 身份来自 `/auth/account` —— 与用户中心同一个读面，所以这一行说的就是服务端解析出的
+    // 会话，不是本地另存的一份用户名。
+    const chip = await screen.findByRole('button', { name: /当前登录身份：Palmer（dev · operator）/u })
+    expect(calls.some(call => call === 'GET /auth/account')).toBe(true)
+    expect(within(chip).getByText('Palmer')).toBeTruthy()
+    expect(within(chip).getByText('dev · operator')).toBeTruthy()
+
+    fireEvent.click(chip)
+    expect(await screen.findByRole('dialog', { name: '用户中心工作台' })).toBeTruthy()
+  })
+
+  it('有鉴权但当前浏览器没有会话时显示未登录', async () => {
+    accountStatus = 401
+    const registered = mountLumo()
+    const identity = registered.find(item => item.name === 'sidebar.footer.action')!
+    render(<identity.Component wide />)
+
+    const chip = await screen.findByRole('button', { name: '未登录，前往登录' })
+    expect(within(chip).getByText('未登录')).toBeTruthy()
+  })
+
+  it('部署里根本没有会话鉴权时，侧边栏不摆一个「未登录」', async () => {
+    // 单机版不挂 auth 代理，这个路径会落到原生 Web 服务上。用「200 + HTML」代表它，
+    // 因为那正是 `api()` 会原样返回正文的那种响应——只看 response.ok 就会把一个字符串
+    // 当成身份渲染出来，所以这条用例钉的是形状校验，不只是状态码。
+    let consumed = false
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/html' }),
+      text: async () => { consumed = true; return '<!doctype html><title>DeepSeek Harness</title>' },
+    }) as unknown as Response))
+    const registered = mountLumo()
+    const identity = registered.find(item => item.name === 'sidebar.footer.action')!
+    const { container } = render(<identity.Component wide />)
+
+    // 先等**读面被消费掉**再断言「没渲染」。少了这一步，断言的是「还没读完」而不是
+    // 「读完了也不该渲染」——两者在 DOM 上长得一模一样，用例会在空跑里变绿。
+    await waitFor(() => expect(consumed).toBe(true))
+    await waitFor(() => expect(container.querySelector('.lumo-sidebar-identity')).toBeNull())
+  })
 
   // 视图层的渲染证据。规则本身由 collaboration-layout.spec.ts 钉住；这里钉的是另一半：
   // **那些规则真的被画成了 DOM**。夹具是测试输入（见上面四个 mock），不是实现的形状。
@@ -348,6 +444,12 @@ describe('Lumo native Harness integration', () => {
 
     // 查询限定在画布里：人名在右侧详情面板里也会出现（选中项），全屏查会命中两处。
     await screen.findByText('林悦')
+    // 协作页必须同时把 Scheduler 从 Nacos Naming 读出的健康执行节点带出来；
+    // 只画治理库里的桌面节点，会漏掉真正承载子代理任务的执行层。
+    expect(await screen.findByText('nacos-cn-01')).toBeTruthy()
+    expect(screen.getByText(/cluster-a · 容量 8/)).toBeTruthy()
+    const back = screen.getByRole('button', { name: '返回对话' })
+    expect(back).toBeTruthy()
     const stage = document.querySelector('.lumo-collaboration-stage') as HTMLElement
     const node = (name: string) => within(stage).getByText(name).closest('.lumo-collaboration-node') as HTMLElement
     const text = (name: string) => node(name).textContent ?? ''
@@ -371,6 +473,10 @@ describe('Lumo native Harness integration', () => {
     // 在线节点数是按人名下数的，不是全局的。
     expect(text('周宁')).toContain('注册节点 0/2 在线')
     expect(text('陈晟')).toContain('注册节点 1/1 在线')
+
+    // 返回是页面内的显式主路径，不依赖浏览器后退；点击后整个工作台必须关闭。
+    fireEvent.click(back)
+    await waitFor(() => expect(document.querySelector('.lumo-workbench')).toBeNull())
   }, 15000)
 
   it('切到任务流向时画的是任务与依赖，卡住的那条边被标出来', async () => {
@@ -476,6 +582,7 @@ describe('Lumo native Harness integration', () => {
     // 再走一次「协作空间 → 项目」，这次没输入任何东西：意图不该被上一次的目标填上。
     fireEvent.click(within(navigation).getByRole('button', { name: '协作空间' }))
     fireEvent.click(await within(navigation).findByRole('button', { name: '项目' }))
+    fireEvent.click(screen.getByRole('button', { name: /协作执行/ }))
     expect((await screen.findByLabelText('工作意图') as HTMLTextAreaElement).value).toBe('')
   }, 15000)
 
@@ -537,6 +644,9 @@ describe('Lumo native Harness integration', () => {
     expect(await screen.findByText('已安装')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: /在对话中使用 腾讯文档/ }))
     expect(setDraft).toHaveBeenLastCalledWith('/docs-live ')
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '技能中心' }))
+    fireEvent.click(screen.getByRole('button', { name: '返回对话' }))
+    expect(screen.queryByRole('tablist', { name: '技能中心目录' })).toBeNull()
   }, 15000)
 
   it('keeps the home composer clean and opens creative workbenches only through /design and /ppt', async () => {

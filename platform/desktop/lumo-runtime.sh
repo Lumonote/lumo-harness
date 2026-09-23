@@ -38,4 +38,17 @@ export COREPACK_ENABLE_PROJECT_SPEC=0
 export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 mkdir -p "$COREPACK_HOME"
 
+# `PROJECT_SPEC=0` 之下 corepack 不读项目 pin，于是**默认版本就是唯一的版本来源**；而没有
+# 默认版本时它会去下 **latest**——2026-09-20 容器上实测：latest 漂到 pin 之外后，插件安装
+# 直接以 `ERR_PNPM_BAD_PM_VERSION` 失败（dsh-node 无限重启）。这里把默认版本显式装上，
+# 版本号与 platform/package.json 的 packageManager 必须一致（门禁
+# platform/tools/check-corepack-pin.py 盯着这条链路）。
+#
+# 只做一次：`lastKnownGood.json` 是 corepack 记录默认版本的地方，装过就跳过，不给每次冷启动
+# 加一次网络往返。失败也不拦住启动——没网时插件市场本来就更新不了，让整个 App 起不来更糟。
+if [ ! -f "$COREPACK_HOME/lastKnownGood.json" ]; then
+  corepack install --global pnpm@11.7.0 >/dev/null 2>&1 ||
+    echo "lumo: 未能预装 pnpm 默认版本（离线？）——插件市场更新时会退回到下载最新版" >&2
+fi
+
 exec "$runtime_root/node" --experimental-strip-types "$runtime_root/dsh-node/src/index.ts"

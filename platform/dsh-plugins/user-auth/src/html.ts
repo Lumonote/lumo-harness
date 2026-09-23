@@ -1,3 +1,5 @@
+import { AUTHENTICATED_APP_HOME } from './app-home.ts'
+
 export const LOGIN_THEME_IDS = ['obsidian-signal', 'ember-foundry', 'orbital-glass', 'infrared-grid'] as const
 export type LoginTheme = typeof LOGIN_THEME_IDS[number]
 
@@ -196,7 +198,7 @@ export const loginScript = `(() => {
       }) });
       const body = await finish.json();
       if (!finish.ok) throw new Error(body.message || 'Passkey 验证失败');
-      location.assign('/');
+      location.assign(${JSON.stringify(AUTHENTICATED_APP_HOME)});
     } catch (error) {
       if (promptEl) promptEl.textContent = error instanceof Error ? error.message : 'Passkey 登录失败，请重新获取验证码后重试';
       load();
