@@ -363,6 +363,7 @@ const agentTeamsRows = `    - id: lumo-agent-teams
       inject: [tools]
       config:
         realm: ${JSON.stringify(platformRealm)}
+        storageBackend: ${JSON.stringify(localMode ? 'sqlite' : 'pg')}
 `
 
 // 平台插件 patch（官方 patch 语法：insert 数组 = 追加条目）

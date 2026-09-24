@@ -1161,15 +1161,10 @@ function flowVersionChanges(previous: FlowDefinition, current: FlowDefinition): 
   return changes.length ? changes : ['两个发布快照的节点、算子和连线一致。']
 }
 
-function SurfaceIntro({ surface, trailing }: { surface: Surface; trailing?: ReactNode }) {
-  const meta = surfaceMeta[surface]
-  return <div className="lumo-surface-intro"><div><span className="lumo-eyebrow">{meta.eyebrow}</span><h1>{meta.label}</h1><p>{meta.description}</p></div>{trailing}</div>
-}
-
 function WorkspaceHero({
   surface, onClose, statement, description, children,
 }: {
-  surface: 'operations' | 'market' | 'knowledge' | 'skillhub' | 'account'
+  surface: 'operations' | 'market' | 'knowledge' | 'skillhub' | 'account' | 'skills' | 'connectors' | 'design' | 'presentation'
   onClose: () => void
   statement: string
   description: string
@@ -1368,7 +1363,7 @@ function KnowledgeSurface({ onClose }: { onClose: () => void }) {
   </div>
 }
 
-function SkillsSurface() {
+function SkillsSurface({ onClose }: { onClose: () => void }) {
   const [runtime, setRuntime] = useState<SkillSnapshot | null>(null)
   const [governance, setGovernance] = useState<GovernanceSnapshot | null>(null)
   const [loading, setLoading] = useState(true)
@@ -1468,8 +1463,11 @@ function SkillsSurface() {
   const skills = runtime?.skills ?? []
   const filteredSkills = useMemo(() => skills.filter(skill => `${localizedSkillName(skill.name)} ${localizedSkillDescription(skill)} ${localizedProvider(skill.provider)}`.toLowerCase().includes(filter.toLowerCase())), [filter, skills])
   const selected = skills.find(skill => skill.name === selectedName) ?? filteredSkills[0]
-  return <div className="lumo-surface">
-    <SurfaceIntro surface="skills" trailing={<span className="lumo-surface-actions"><button type="button" className="lumo-button lumo-secondary" onClick={() => openSurface('connectors')}>连接器管理</button><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>重新同步</BusyButton></span>} />
+  return <div className="lumo-surface lumo-skills-surface lumo-workspace-page">
+    <WorkspaceHero surface="skills" onClose={onClose} statement="查看运行时技能，管理可用版本。" description="技能目录、调用策略和治理版本集中在此处。">
+      <div className={'lumo-workspace-status' + (error ? ' degraded' : '')}><span>技能状态</span><b><i aria-hidden="true" />{loading ? '正在同步' : error ? '目录不可用' : '目录已同步'}</b><dl><div><dt>运行时</dt><dd>{skills.length}</dd></div><div><dt>模型可调用</dt><dd>{skills.filter(skill => skill.invocation.modelInvocable).length}</dd></div><div><dt>治理目录</dt><dd>{governed.length}</dd></div></dl><small>{governance?.local ? '本地技能管理' : governance?.catalog.ok ? '治理服务已连接' : '当前部署无治理目录'}</small></div>
+    </WorkspaceHero>
+    <div className="lumo-workspace-toolbar"><button type="button" className="lumo-button lumo-secondary" onClick={() => openSurface('connectors')}>连接器管理</button><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>重新同步</BusyButton></div>
     {error ? <Notice error>{error}</Notice> : null}{notice ? <Notice close={() => setNotice('')}>{notice}</Notice> : null}
     <div className="lumo-metric-grid"><Metric label="运行时可见" value={String(skills.length)} note={runtime?.complete === false ? '目录仍在收敛' : '目录已完整'} tone="mint" /><Metric label={governance?.local ? '本地自建' : '治理目录'} value={String(governed.length)} note={governance?.local ? '保存在桌面数据目录' : governance?.catalog.ok ? '集群目录' : '当前模式不可用'} /><Metric label="模型可调用" value={String(skills.filter(skill => skill.invocation.modelInvocable).length)} note="调用策略" /><Metric label="当前生效" value={String(effective.length)} note="生效策略" /></div>
     <Section title="运行时技能" meta={loading ? '正在读取技能目录' : '当前运行时快照'} actions={<label className="lumo-filter"><span>筛选</span><input value={filter} onChange={event => setFilter(event.target.value)} placeholder="技能名或提供方" /></label>}>
@@ -1794,7 +1792,7 @@ function SkillHubSurface({ onClose }: { onClose: () => void }) {
     return <BusyButton className="lumo-primary" disabled={installing !== ''} onClick={() => void install(kind, id, name)}>{label}</BusyButton>
   }
 
-  return <div className="lumo-surface lumo-skillhub-surface">
+  return <div className="lumo-surface lumo-skillhub-surface lumo-workspace-page">
     <WorkspaceHero surface="skillhub" onClose={onClose} statement="找到合适的专家，按需补齐技能。" description="先选专家或单项技能，再按领域与关键词收窄目录。安装状态来自当前工作区，不把目录收录误作已可用。">
       <div className={'lumo-workspace-status' + (error ? ' degraded' : '')}>
         <span>目录状态</span><b><i aria-hidden="true" />{sourceLabel}</b>
@@ -2007,7 +2005,7 @@ function MarketSurface({ onClose }: { onClose: () => void }) {
     { title: '技能管理', description: '管理已有技能的版本与治理状态。', surface: 'skills', domain: '能力配置', availability: '查看治理权限' },
     { title: '连接器', description: '查看网关目录、调用协议与审批状态。', surface: 'connectors', domain: '平台集成', availability: '依赖连接器网关' },
   ]
-  return <div className="lumo-surface lumo-market-surface">
+  return <div className="lumo-surface lumo-market-surface lumo-workspace-page">
     <WorkspaceHero surface="market" onClose={onClose} statement="按工作领域找到真正可用的入口。" description="创作、能力配置和平台集成各有独立工作台；发布与安装状态在运营区查看。">
       <div className="lumo-workspace-status">
         <span>工作领域</span>
@@ -2080,7 +2078,7 @@ function parseSchedulerRequirements(value: string): Array<{ key: string; value: 
   }).filter(item => item.key !== '')
 }
 
-function ConnectorsSurface() {
+function ConnectorsSurface({ onClose }: { onClose: () => void }) {
   const [data, setData] = useState<Overview>(emptyOverview)
   const [loading, setLoading] = useState(true)
   const [probeBusy, setProbeBusy] = useState(false)
@@ -2141,13 +2139,15 @@ function ConnectorsSurface() {
     catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
     finally { setProbeBusy(false) }
   }
-  return <div className="lumo-surface">
-    <SurfaceIntro surface="connectors" trailing={<div className="lumo-gateway-status"><i className="lumo-live-dot" /><span>网关已就绪</span></div>} />
+  return <div className="lumo-surface lumo-connectors-surface lumo-workspace-page">
+    <WorkspaceHero surface="connectors" onClose={onClose} statement="管理连接器能力与受控调用。" description="查看已登记能力、审批状态和 Web 出站策略。">
+      <div className={'lumo-workspace-status' + (!loading && (error || !data.services.connector?.ok) ? ' degraded' : '')}><span>网关状态</span><b><i aria-hidden="true" />{loading ? '正在同步' : error ? '目录不可用' : data.services.connector?.ok ? '网关已就绪' : '等待网关'}</b><dl><div><dt>连接器</dt><dd>{data.connectors.length}</dd></div><div><dt>操作</dt><dd>{data.connectors.reduce((count, connector) => count + (connector.operations?.length ?? 0), 0)}</dd></div><div><dt>审批</dt><dd>{approvals.length}</dd></div></dl><small>{data.deployment.clusterReady ? '集群配置入口已开放' : '配置入口需要集群模式'}</small></div>
+    </WorkspaceHero>
     {error ? <Notice error>{error}</Notice> : null}{notice ? <Notice close={() => setNotice('')}>{notice}</Notice> : null}
     <Section title="连接器目录" meta={`${connectors.length} 个可见能力`} actions={<label className="lumo-filter"><span>搜索</span><input value={filter} onChange={event => setFilter(event.target.value)} placeholder="连接器名称、协议或 ID" /></label>}>
       {connectors.length ? <div className="lumo-connector-layout"><div className="lumo-connector-grid">{connectors.map((connector, index) => <SpotlightCard className={`lumo-connector-card ${selected?.id === connector.id ? 'selected' : ''}`} index={index} key={connector.id} onClick={() => setSelectedId(connector.id ?? '')}><header><span className="lumo-connector-mark">{(connector.name ?? connector.id ?? 'C').slice(0, 1).toUpperCase()}</span><div><b>{connector.name ?? connector.id}</b><small>{connector.protocol ?? '未知协议'} · {connector.operations?.length ?? 0} 项操作</small></div><i className={`lumo-status-dot ${connector.enabled === false ? 'disabled' : ''}`} /></header><div className="lumo-operation-list">{connector.operations?.slice(0, 5).map(operation => <span key={operation.name}>{operation.method || '调用'} · {operation.name}</span>)}</div><footer><span>{connector.enabled === false ? '已停用 · 可恢复' : connector.version ? `能力清单 v${connector.version}` : '能力清单已启用'}</span><span>查看能力 ↗</span></footer>{connector.enabled === false ? <BusyButton className="lumo-primary lumo-small" onClick={event => { event.stopPropagation(); void enable(connector) }}>恢复连接器</BusyButton> : confirm === connector.id ? <div className="lumo-inline-confirm" onClick={event => event.stopPropagation()}><p>停用后运行中的工作流将无法调用它。</p><span><BusyButton onClick={() => setConfirm(null)}>取消</BusyButton><BusyButton className="lumo-danger" onClick={() => void remove(connector)}>确认停用</BusyButton></span></div> : <BusyButton className="lumo-danger lumo-small" onClick={event => { event.stopPropagation(); setConfirm(connector.id ?? null) }}>停用连接器</BusyButton>}</SpotlightCard>)}</div><aside className="lumo-inspector lumo-connector-inspector">{selected ? <><span className="lumo-inspector-label">连接器检查</span><h3>连接器详情 · {selected.name ?? selected.id}</h3><p>所有外部调用都经过网关策略、凭证闸门、限流、熔断和审计。</p><div className="lumo-detail-stack"><div><span>连接器 ID</span><b>{selected.id}</b></div><div><span>协议</span><b>{selected.protocol ?? '未声明'}</b></div><div><span>版本</span><b>{selected.version ?? '未声明'}</b></div><div><span>可用操作</span><b>{selected.operations?.length ?? 0}</b></div></div><div className="lumo-operation-detail"><span>操作面</span>{selected.operations?.length ? selected.operations.map(operation => <div key={operation.name}><b>{operation.name}</b><small>{operation.method || '调用'} · {operation.write ? '写入需审批' : '只读'}</small></div>) : <Empty>该能力清单没有声明操作。</Empty>}</div>{selected.enabled === false ? <Empty>该连接器已停用，恢复后才能再次调用。</Empty> : <form className="lumo-invoke-form" onSubmit={invoke}><label><span>操作</span><select value={invokeOperation} onChange={event => setInvokeOperation(event.target.value)}><option value="" disabled>选择操作</option>{operations.map(operation => <option key={operation.name} value={operation.name}>{operation.name} · {operation.method || '调用'}</option>)}</select></label><label><span>路径参数 JSON</span><textarea rows={2} value={pathParams} onChange={event => setPathParams(event.target.value)} placeholder='{"id":"order-42"}' /></label><label><span>查询参数 JSON</span><textarea rows={2} value={queryParams} onChange={event => setQueryParams(event.target.value)} placeholder='{"limit":"20"}' /></label><label><span>请求体 JSON</span><textarea rows={3} value={invokeBody} onChange={event => setInvokeBody(event.target.value)} placeholder='{"dryRun":true}' /></label><BusyButton type="submit" busy={invokeBusy} className="lumo-primary">受控调用</BusyButton></form>}{invokeResult ? <div className="lumo-invoke-result"><div><b>{invokeResult.status ?? '未返回'}</b><span>{invokeResult.contentType ?? '响应'} · {invokeResult.durationMs ?? 0} ms</span></div><small>{invokeResult.redacted ? '响应已按策略脱敏' : '响应未脱敏'}</small><pre>{typeof invokeResult.body === 'string' ? invokeResult.body : JSON.stringify(invokeResult.body ?? {}, null, 2)}</pre></div> : null}</> : <Empty>当前没有可见连接器。</Empty>}</aside></div> : <Empty>{loading ? '正在读取连接器能力清单' : '连接器清单为空；登记成功的能力清单会出现在这里。'}</Empty>}
     </Section>
-    {data.deployment.clusterReady ? <ConnectorManifestPanel request={api} refresh={load} /> : null}
+    {data.deployment.clusterReady ? <ConnectorManifestPanel request={api} refresh={load} /> : <div className="lumo-workspace-note" role="status">连接器配置与 OAuth 管理需要集群模式。当前仍可查看已登记连接器、审批和 Web 出站诊断。</div>}
     <Section title="高敏感写入审批" meta="审批绑定连接器版本、操作和请求参数；每次批准只能执行一次" actions={<BusyButton busy={loading} onClick={() => void load()}>刷新</BusyButton>}>
       {approvals.length ? <div className="lumo-market-note-grid">{approvals.map(approval => <div key={approval.id}><span>{approval.status === 'pending' ? '等待管理员处理' : approval.status === 'approved' ? '已批准 · 等待一次执行' : approval.status === 'consumed' ? '已使用' : approval.status === 'expired' ? '已过期' : '已拒绝'}</span><b>{approval.connector_id} · {approval.operation}</b><small>申请人 {approval.requester_user_id} · v{approval.connector_version} · 到期 {approval.expires_at}{approval.approver_user_id ? ` · 处理人 ${approval.approver_user_id}` : ''}</small>{approval.status === 'pending' ? <span className="lumo-surface-actions"><BusyButton busy={approvalBusy === `approve:${approval.id}`} onClick={() => void decideApproval(approval, 'approve')}>批准</BusyButton><BusyButton className="lumo-danger" busy={approvalBusy === `reject:${approval.id}`} onClick={() => void decideApproval(approval, 'reject')}>拒绝</BusyButton></span> : null}{approval.status === 'approved' && selected?.id === approval.connector_id && invokeOperation === approval.operation ? <BusyButton className="lumo-primary" busy={invokeBusy} onClick={() => void invokeCurrent(approval.id)}>按已批准请求执行</BusyButton> : null}</div>)}</div> : <Empty>没有待展示的连接器审批。高敏感写操作会在网关策略命中后创建一次性审批。</Empty>}
     </Section>
@@ -2361,13 +2361,24 @@ function CollaborationLegend({ entries }: { entries: Array<{ state: string; labe
   </div>
 }
 
+function collaborationReadError(reason: unknown): string {
+  if (reason instanceof ApiError) {
+    const detail = typeof reason.body === 'object' && reason.body !== null
+      ? (reason.body as { detail?: unknown }).detail : undefined
+    return `${reason.status} · ${typeof detail === 'string' && detail !== '' ? detail : reason.message}`
+  }
+  return reason instanceof Error ? reason.message : String(reason)
+}
+
 function CollaborationSurface({ onClose }: { onClose: () => void }) {
   const [users, setUsers] = useState<CollabUser[] | null>(null)
   const [nodes, setNodes] = useState<CollabNode[] | null>(null)
   const [delegations, setDelegations] = useState<DelegationRow[] | null>(null)
   const [teams, setTeams] = useState<CollabTeam[] | null>(null)
   const [runtimeNodes, setRuntimeNodes] = useState<NodeState[] | null>(null)
+  const [deploymentMode, setDeploymentMode] = useState<DeploymentState['mode'] | null>(null)
   const [absent, setAbsent] = useState<string[]>([])
+  const [errorDetails, setErrorDetails] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
@@ -2385,28 +2396,48 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
 
   const load = useCallback(async () => {
     setLoading(true)
-    // allSettled 而不是 all：五个面各自降级。用 all 的话，缺一个面整张图就空了，
-    // 而「某个服务没装」与「组织里没有协作」在读图的人眼里是两回事。
-    const [userFace, nodeFace, delegationFace, teamFace, overviewFace] = await Promise.allSettled([
-      api<{ users?: CollabUser[] }>('/lumo/api/users'),
-      api<{ nodes?: CollabNode[] }>('/lumo/api/desktop-nodes'),
-      api<DelegationRow[]>('/lumo/api/delegations'),
-      api<{ teams?: CollabTeam[] }>('/lumo/api/collaboration/teams'),
-      // Scheduler 的 `/v1/nodes` 在 Standalone / Cluster 形态背后读的是 Nacos
-      // Naming；overview 已把这份真实目录原样投影到 `cluster.nodes`。
+    // 先读部署形态。Standalone/Local 的三个治理面有明确的 Cluster 门禁；
+    // 在那两种形态里请求它们只会得到永久的 403，不能当成暂时故障提示重试。
+    const [overviewFace, teamFace] = await Promise.allSettled([
       api<Overview>('/lumo/api/overview'),
+      api<{ teams?: CollabTeam[] }>('/lumo/api/collaboration/teams'),
     ])
     const missing: string[] = []
-    setUsers(userFace.status === 'fulfilled' ? userFace.value?.users ?? [] : (missing.push('员工目录'), null))
-    setNodes(nodeFace.status === 'fulfilled' ? nodeFace.value?.nodes ?? [] : (missing.push('注册节点'), null))
-    setDelegations(delegationFace.status === 'fulfilled' && Array.isArray(delegationFace.value) ? delegationFace.value : (missing.push('委派任务'), null))
-    setTeams(teamFace.status === 'fulfilled' ? teamFace.value?.teams ?? [] : (missing.push('智能体名册'), null))
-    setRuntimeNodes(overviewFace.status === 'fulfilled' ? overviewFace.value.cluster.nodes ?? [] : (missing.push('Nacos 节点目录'), null))
-    setAbsent(missing)
-    if (userFace.status === 'fulfilled') {
-      const first = (userFace.value?.users ?? [])[0]
-      if (first !== undefined) setSelected(current => current ?? first.id)
+    const details: Record<string, string> = {}
+    const failed = (label: string, reason: unknown): null => {
+      missing.push(label)
+      details[label] = collaborationReadError(reason)
+      return null
     }
+    const mode = overviewFace.status === 'fulfilled' ? overviewFace.value.deployment.mode : null
+    const clusterOnly = mode === 'local' || mode === 'standalone'
+    setDeploymentMode(mode)
+    setTeams(teamFace.status === 'fulfilled' ? teamFace.value?.teams ?? [] : failed('智能体名册', teamFace.reason))
+    // Scheduler 的 `/v1/nodes` 在 Standalone / Cluster 形态背后读 Nacos Naming。
+    setRuntimeNodes(overviewFace.status === 'fulfilled' ? overviewFace.value.cluster.nodes ?? [] : failed('Nacos 节点目录', overviewFace.reason))
+    if (clusterOnly) {
+      setUsers(null)
+      setNodes(null)
+      setDelegations(null)
+      setSelected(null)
+      setView('board')
+    } else {
+      // Cluster 三个治理面各自降级；overview 失败时也尝试读取，避免丢掉可用数据。
+      const [userFace, nodeFace, delegationFace] = await Promise.allSettled([
+        api<{ users?: CollabUser[] }>('/lumo/api/users'),
+        api<{ nodes?: CollabNode[] }>('/lumo/api/desktop-nodes'),
+        api<DelegationRow[]>('/lumo/api/delegations'),
+      ])
+      setUsers(userFace.status === 'fulfilled' ? userFace.value?.users ?? [] : failed('员工目录', userFace.reason))
+      setNodes(nodeFace.status === 'fulfilled' ? nodeFace.value?.nodes ?? [] : failed('注册节点', nodeFace.reason))
+      setDelegations(delegationFace.status === 'fulfilled' && Array.isArray(delegationFace.value) ? delegationFace.value : failed('委派任务', delegationFace.status === 'rejected' ? delegationFace.reason : '响应不是任务列表'))
+      if (userFace.status === 'fulfilled') {
+        const first = (userFace.value?.users ?? [])[0]
+        if (first !== undefined) setSelected(current => current ?? first.id)
+      }
+    }
+    setAbsent(missing)
+    setErrorDetails(details)
     setUpdatedAt(new Date())
     setLoading(false)
   }, [])
@@ -2474,12 +2505,15 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
   const onlineDesktopNodes = employees.reduce((sum, employee) => sum + (employee.nodes?.filter(node => node.status?.trim().toUpperCase() === 'ONLINE').length ?? 0), 0)
   const attentionCount = graph.placed.filter(node => ['awaiting-review', 'blocked', 'offline'].includes(node.state)).length
   const executingCount = graph.placed.filter(node => node.state === 'executing').length
+  const clusterOnly = deploymentMode === 'local' || deploymentMode === 'standalone'
+  const readableFaces = clusterOnly ? 2 : 5
+  const teamTasks = (teams ?? []).flatMap(team => team.tasks ?? [])
   const viewMeta = view === 'people'
     ? { eyebrow: '组织脉络', title: '协作关系图', description: '从上游到下游，查看每个人正在推进什么，以及谁在等待谁。' }
     : view === 'board'
       ? { eyebrow: '任务依赖', title: '任务流向图', description: '沿着依赖关系定位阻塞点，快速找到可以立即认领的下一步。' }
       : { eyebrow: '注意力路由', title: '线程看板', description: '把需要深度审阅、轻量回应和持续观察的线程分开处理。' }
-  const statusLabel = loading ? '正在同步' : absent.length > 0 ? '部分数据不可用' : '数据已同步'
+  const statusLabel = loading ? '正在同步' : absent.length > 0 ? '部分数据不可用' : clusterOnly ? '单例数据已同步' : '数据已同步'
 
   return <section className={`lumo-collaboration ${view === 'threads' ? 'solo' : ''}`}>
     <header className="lumo-collaboration-hero">
@@ -2499,7 +2533,7 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
           <path d="M110 58c22 0 22 33 44 33h32c22 0 22-64 44-64h70" />
           <circle cx="40" cy="58" r="7" /><circle cx="110" cy="58" r="7" /><circle cx="170" cy="27" r="7" /><circle cx="170" cy="91" r="7" /><circle cx="230" cy="27" r="7" /><circle cx="230" cy="91" r="7" /><circle cx="300" cy="27" r="7" /><circle cx="300" cy="91" r="7" />
         </svg>
-        <div className="lumo-collaboration-sync-foot"><span>{absent.length > 0 ? `缺少 ${absent.length} 个读面` : '5 个读面连接正常'}</span><time>{updatedAt === null ? '等待首次同步' : `更新于 ${updatedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`}</time></div>
+        <div className="lumo-collaboration-sync-foot"><span>{absent.length > 0 ? `缺少 ${absent.length} 个读面` : `${readableFaces} 个适用读面连接正常`}</span><time>{updatedAt === null ? '等待首次同步' : `更新于 ${updatedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`}</time></div>
         <button type="button" className="lumo-collaboration-refresh" onClick={() => void load()} disabled={loading}>
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 7a6.5 6.5 0 1 0 .2 5.4" /><path d="M16 3v4h-4" /></svg>
           {loading ? '同步中' : '重新读取'}
@@ -2507,12 +2541,17 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
       </div>
     </header>
 
-    <div className="lumo-collaboration-metrics" aria-label="协作概览">
+    {clusterOnly ? <div className="lumo-collaboration-metrics" aria-label="协作概览">
+      <div><span>智能体团队</span><b>{teams === null ? '—' : teams.length}</b><small>{teams === null ? '名册未读到' : '本节点的团队'}</small></div>
+      <div><span>团队成员</span><b>{teams === null ? '—' : agents.length}</b><small>由智能体名册提供</small></div>
+      <div><span>团队任务</span><b>{teams === null ? '—' : teamTasks.length}</b><small>按团队展示依赖</small></div>
+      <div><span>执行节点</span><b>{runtimeNodes === null ? '—' : runtimeNodes.length}</b><small>Nacos 健康实例</small></div>
+    </div> : <div className="lumo-collaboration-metrics" aria-label="协作概览">
       <div><span>团队成员</span><b>{graph.placed.length}</b><small>{graph.unbound.length > 0 ? `${graph.unbound.length} 个智能体待绑定` : '绑定关系正常'}</small></div>
       <div><span>正在推进</span><b>{executingCount}</b><small>{delegations?.length ?? 0} 条任务线程</small></div>
       <div className={attentionCount > 0 ? 'attention' : ''}><span>需要关注</span><b>{attentionCount}</b><small>{attentionCount > 0 ? '审核、阻塞或离线' : '当前没有阻塞'}</small></div>
       <div><span>员工节点在线</span><b>{onlineDesktopNodes}<i>/{totalDesktopNodes}</i></b><small>{totalDesktopNodes === 0 ? '尚未注册节点' : `${Math.round((onlineDesktopNodes / totalDesktopNodes) * 100)}% 可用`}</small></div>
-    </div>
+    </div>}
 
     <section className="lumo-collaboration-fleet" aria-label="Nacos 执行节点">
       <header><div><span>execution layer</span><b>Nacos 执行节点</b></div><em>{runtimeNodes === null ? '读取失败' : `${runtimeNodes.length} 个健康实例`}</em></header>
@@ -2529,9 +2568,9 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
 
     <div className="lumo-collaboration-commandbar">
       <div className="lumo-collaboration-views" role="tablist" aria-label="协作视图">
-        <button type="button" role="tab" aria-label="协作空间" aria-selected={view === 'people'} className={view === 'people' ? 'active' : ''} onClick={() => setView('people')}><span>协作空间</span><small>谁在等待谁</small></button>
+        <button type="button" role="tab" aria-label="协作空间" aria-selected={view === 'people'} className={view === 'people' ? 'active' : ''} disabled={clusterOnly} onClick={() => setView('people')}><span>协作空间</span><small>{clusterOnly ? '需就绪的集群' : '谁在等待谁'}</small></button>
         <button type="button" role="tab" aria-label="任务流向" aria-selected={view === 'board'} className={view === 'board' ? 'active' : ''} onClick={() => setView('board')}><span>任务流向</span><small>哪里被卡住</small></button>
-        <button type="button" role="tab" aria-label="线程看板" aria-selected={view === 'threads'} className={view === 'threads' ? 'active' : ''} onClick={() => setView('threads')}><span>线程看板</span><small>现在处理什么</small></button>
+        <button type="button" role="tab" aria-label="线程看板" aria-selected={view === 'threads'} className={view === 'threads' ? 'active' : ''} disabled={clusterOnly} onClick={() => setView('threads')}><span>线程看板</span><small>{clusterOnly ? '需就绪的集群' : '现在处理什么'}</small></button>
       </div>
       <div className="lumo-collaboration-controls">
         {view === 'board' && teams !== null && teams.length > 0
@@ -2557,9 +2596,13 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
               ? '还没有可显示的团队'
               : `${board.placed.length} 条任务 · ${board.edges.length} 条依赖 · 阻塞 ${board.placed.filter(node => node.state === 'blocked').length} · 可认领 ${board.placed.filter(node => node.state === 'ready').length}`}</p>
       </header>
+      {clusterOnly ? <div className="lumo-collaboration-notice" role="status">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 18 17H2z" /><path d="M10 7v4M10 14v.1" /></svg>
+        <span><b>当前是{deploymentMode === 'local' ? '本地单机' : '服务器单例'}部署</b>员工目录、注册节点和委派任务由就绪的 Cluster 提供。这里展示当前可用的智能体团队与执行节点。</span>
+      </div> : null}
       {absent.length > 0 ? <div className="lumo-collaboration-notice" role="status">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 18 17H2z" /><path d="M10 7v4M10 14v.1" /></svg>
-        <span><b>部分信息暂时不可用</b>没有读到：{absent.join('、')}。画布中的空白不代表没有数据。</span>
+        <span><b>部分信息暂时不可用</b>{absent.map(label => `${label}：${errorDetails[label] ?? '读取失败'}`).join('；')}。画布中的空白不代表没有数据。</span>
       </div> : null}
       {view === 'threads'
         // 看板吃的是**同一个** `/lumo/api/delegations` 读面（`load` 里那次 allSettled 的
@@ -2575,7 +2618,7 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
         />
         : view === 'board'
         ? (board === null || board.placed.length === 0
-          ? <div className="lumo-collaboration-empty"><span className="lumo-collaboration-empty-mark"><Glyph surface="operations" /></span><div><b>这个团队还没有任务</b><p>任务板按团队展示。目标被分发后，任务与依赖关系会出现在这里。</p></div></div>
+          ? <div className={`lumo-collaboration-empty ${teams === null ? 'degraded' : ''}`}><span className="lumo-collaboration-empty-mark"><Glyph surface="operations" /></span><div><b>{teams === null ? '暂时无法读取智能体名册' : teams.length === 0 ? '还没有智能体团队' : '这个团队还没有任务'}</b><p>{teams === null ? '请查看上方的具体错误，修复后重新读取。' : teams.length === 0 ? '团队创建后，成员与任务依赖会显示在这里。' : '任务板按团队展示。目标被分发后，任务与依赖关系会出现在这里。'}</p></div></div>
           : <div className="lumo-collaboration-space">
             <div className="lumo-collaboration-world" style={worldTransform(board.depths, zoom)}>
               {Array.from({ length: board.depths }, (_, level) => <div key={level} className="lumo-collaboration-layer" style={layerTransform(level)}>
@@ -2638,7 +2681,9 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
               </button>)}
             </div>
           </div>}
-      {graph.unbound.length > 0 ? <div className="lumo-collaboration-unbound">
+      {clusterOnly && agents.length > 0 ? <div className="lumo-collaboration-unbound">
+        <b>智能体成员 {agents.length}</b><span>{agents.map(item => `${item.name} · ${item.teamName}`).join('、')}</span>
+      </div> : !clusterOnly && graph.unbound.length > 0 ? <div className="lumo-collaboration-unbound">
         <b>未绑定智能体 {graph.unbound.length}</b>
         {/* 单独成区而不是随便挂一个人：挂错人的智能体看起来是正常的，比空着难发现得多。 */}
         <span>这些成员没有 `ownerUserId`，因此不知道它们为谁工作。{graph.unbound.map(item => item.name).join('、')}</span>
@@ -2696,9 +2741,9 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
       handOffDelegationGoal(text, 'operations')
       setGoal('')
     }}>
-      <div className="lumo-collaboration-goal-copy"><span>新目标</span><b>把下一件事交给团队</b></div>
-      <label><Glyph surface="collaboration" /><input value={goal} onChange={event => setGoal(event.target.value)} placeholder="描述目标、期望结果和时间要求…" aria-label="描述目标" /></label>
-      <button type="submit" className="lumo-primary" disabled={goal.trim() === ''}>下达目标 <span aria-hidden="true">↗</span></button>
+      <div className="lumo-collaboration-goal-copy"><span>新目标</span><b>{clusterOnly ? '治理委派需要就绪的集群' : '把下一件事交给团队'}</b></div>
+      <label><Glyph surface="collaboration" /><input value={goal} onChange={event => setGoal(event.target.value)} disabled={clusterOnly} placeholder={clusterOnly ? '当前部署无法使用治理委派' : '描述目标、期望结果和时间要求…'} aria-label="描述目标" /></label>
+      <button type="submit" className="lumo-primary" disabled={clusterOnly || goal.trim() === ''}>下达目标 <span aria-hidden="true">↗</span></button>
     </form>
   </section>
 }
@@ -3314,11 +3359,15 @@ function OpenDesignSurface({ onConversationStart }: { onConversationStart: () =>
     setNotice(`已载入 OpenDesign 示例「${page.title}」，可继续补充后发送。`)
   }
   const visibleCollections = category === '全部' ? collections : collections.filter(item => item.category === category)
-  return <div className="lumo-studio-page lumo-design-studio">
-    <header className="lumo-studio-heading"><div><span className="lumo-eyebrow">OPEN DESIGN · 原有插件能力</span><h1>开放设计</h1><p>从一句想法开始，生成可继续编辑的设计方案。</p></div><span className={`lumo-plugin-readiness ${bridge === null || runtime === null ? 'waiting' : ''}`}><i />{bridge === null ? '等待会话' : runtime === null ? '同步技能目录' : designExamples.length ? `/${skillCommandName(designExamples[0]!.skillName)} 已就绪` : '暂无设计技能'}</span></header>
+  return <div className="lumo-studio-page lumo-design-studio lumo-workspace-page">
+    <WorkspaceHero surface="design" onClose={onConversationStart} statement="从一句想法开始，生成可继续编辑的设计方案。" description="选择产物类型和参考样例，再把创作意图发送到当前会话。">
+      <div className={'lumo-workspace-status' + (bridge === null || runtime === null || designExamples.length === 0 ? ' degraded' : '')}><span>创作状态</span><b><i aria-hidden="true" />{bridge === null ? '等待会话' : runtime === null ? '同步技能目录' : designExamples.length ? '设计技能已就绪' : '暂无设计技能'}</b><dl><div><dt>技能</dt><dd>{designExamples.length}</dd></div><div><dt>官方示例</dt><dd>{collections.length}</dd></div><div><dt>当前类型</dt><dd>{active.label}</dd></div></dl><small>原生技能 /open-design</small></div>
+    </WorkspaceHero>
+    <section className="lumo-creation-section" aria-label="开放设计创作">
     <div className="lumo-studio-tabs" role="tablist" aria-label="开放设计产物类型">{designFormats.map(item => <button type="button" role="tab" aria-selected={item.id === format} aria-label={`选择开放设计类型：${item.label}`} key={item.id} className={item.id === format ? 'active' : ''} onClick={() => { setFormat(item.id); setNotice('') }}><i>{item.icon}</i>{item.label}</button>)}</div>
     <form className="lumo-studio-composer" onSubmit={submit}>{selectedExample ? <span className="lumo-selected-example">{selectedExample.title}<button type="button" aria-label="移除设计样例" onClick={() => { setSelectedExample(null); setBrief('') }}>×</button></span> : null}<textarea aria-label="开放设计创作意图" rows={5} value={brief} onChange={event => setBrief(event.target.value)} placeholder="描述你想设计的产品、页面或流程" /><div className="lumo-studio-tools"><span><i>{active.icon}</i>{active.label}</span><span>⌁ 工作目录</span><em>{selectedExample ? `/${skillCommandName(selectedExample.skillName)}` : '/open-design'}</em><button type="submit" className="lumo-studio-send" aria-label="发送到 OpenDesign">↑</button></div></form>
     {notice ? <div className="lumo-studio-notice" role="status">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div> : null}
+    </section>
     <section className="lumo-inspiration" aria-label="OpenDesign 官方示例"><header><div><b>OpenDesign 完整示例</b><span>来自 open-design 仓库 README「演示」章节的真实产物截图，按原型 / 仪表盘 / 演示文稿 / 图片 / 视频分类；点开逐张查看，再送进创作意图</span></div>{gallery?.available ? <a href={gallery.gallery.source} target="_blank" rel="noreferrer noopener">上游原文 ↗</a> : null}</header>
       {gallery === null ? <p role="status">正在拉取 OpenDesign 示例…</p> : gallery.available ? <>
         <div className="lumo-studio-categories" aria-label="设计样例分类">{categories.map(item => <button type="button" key={item} className={category === item ? 'active' : ''} onClick={() => setCategory(item)}>{item}</button>)}</div>
@@ -3405,13 +3454,15 @@ function PresentationSurface({ onConversationStart }: { onConversationStart: () 
     else if (popup && event.key === 'Escape') { event.preventDefault(); setPopup(false) }
     else if (!popup && event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() }
   }
-  return <div className="lumo-studio-page lumo-presentation-studio">
-    <header className="lumo-studio-heading"><div><span className="lumo-eyebrow">PPT MASTER · 原有插件能力</span><h1>PPT 生成</h1><p>先选故事结构，再和 AI 一起完成整套演示。</p></div><span className={`lumo-plugin-readiness ${bridge === null ? 'waiting' : ''}`}><i />{bridge === null ? '等待会话' : '/ppt-master 已就绪'}</span></header>
+  return <div className="lumo-studio-page lumo-presentation-studio lumo-workspace-page">
+    <WorkspaceHero surface="presentation" onClose={onConversationStart} statement="先选故事结构，再和 AI 一起完成整套演示。" description="选一个样例，补充听众和时长，再发送到当前会话。">
+      <div className={'lumo-workspace-status' + (bridge === null ? ' degraded' : '')}><span>创作状态</span><b><i aria-hidden="true" />{bridge === null ? '等待会话' : '会话已就绪'}</b><dl><div><dt>技能样例</dt><dd>{presentationExamples.length}</dd></div><div><dt>官方示例</dt><dd>{collections.length}</dd></div><div><dt>已选择</dt><dd>{selected ? '1' : '0'}</dd></div></dl><small>原生技能 /ppt-master</small></div>
+    </WorkspaceHero>
     <ol className="lumo-presentation-steps"><li className="active"><i>1</i>选择样例</li><li><i>2</i>对话完善</li><li><i>3</i>生成文稿</li></ol>
-    <div className="lumo-presentation-layout"><main><div className="lumo-assistant-prompt"><Glyph surface="skills" /><p>告诉我这次演示的主题、听众和预计时长。你也可以输入 <b>#</b> 从样例开始。</p></div><div className={`lumo-presentation-composer-wrap ${popup ? 'popup-open' : ''}`}>
+    <div className="lumo-presentation-layout"><main><section className="lumo-creation-section" aria-label="演示文稿创作"><div className="lumo-assistant-prompt"><Glyph surface="skills" /><p>告诉我这次演示的主题、听众和预计时长。你也可以输入 <b>#</b> 从样例开始。</p></div><div className={`lumo-presentation-composer-wrap ${popup ? 'popup-open' : ''}`}>
       {popup ? <section className="lumo-example-popup" role="dialog" aria-label="选择演示样例"><header><b># 选择演示样例</b><span>{query ? `筛选：${query}` : '输入样例名可筛选'}</span></header><div>{matches.map((example, index) => <button type="button" key={example.id} className={activeIndex === index ? 'active' : ''} onMouseEnter={() => setActiveIndex(index)} onClick={() => choose(example)}><i className={example.className} /><span><b>{example.title}</b><small>{example.description}</small></span></button>)}</div><footer>↑↓ 选择 · Enter 插入 · Esc 关闭</footer></section> : null}
       <form className="lumo-presentation-composer" onSubmit={submit}>{selected ? <span className="lumo-selected-example">#{selected.title}<button type="button" aria-label="移除演示样例" onClick={() => { setSelected(null); setDraft('') }}>×</button></span> : null}<textarea autoFocus aria-label="PPT 对话输入" rows={5} value={draft} onChange={event => changeDraft(event.target.value)} onKeyDown={onKeyDown} placeholder="输入 # 选择样例，然后继续描述听众、时长和重点" /><div className="lumo-studio-tools"><span>▤ 演示文稿</span><span><i className="lumo-live-dot" /> {project.label}</span><em>/ppt-master</em><button type="submit" className="lumo-studio-send" aria-label="发送到 PPT Master">↑</button></div></form>
-    </div>{notice ? <div className="lumo-studio-notice" role="status">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div> : null}
+    </div>{notice ? <div className="lumo-studio-notice" role="status">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div> : null}</section>
     <section className="lumo-inspiration" aria-label="PPT Master 官方示例"><header><div><b>PPT Master 完整示例</b><span>来自 ppt-master 示例站的真实生成结果，每个示例都能逐页翻看全部幻灯片并下载 PPTX</span></div>{gallery?.available ? <a href={gallery.gallery.source} target="_blank" rel="noreferrer noopener">示例站 ↗</a> : null}</header>
       {gallery === null ? <p role="status">正在拉取 PPT Master 示例…</p> : gallery.available ? <>
         <div className="lumo-studio-categories" aria-label="演示风格筛选">{styles.map(item => <button type="button" key={item} className={style === item ? 'active' : ''} onClick={() => setStyle(item)}>{item}</button>)}</div>
@@ -3480,7 +3531,7 @@ function Workbench({ surface, close, select, commandOpen, toggleCommand }: { sur
   }, [surface])
   return <div className="lumo-backdrop"><section ref={ref} tabIndex={-1} className="lumo-workbench" data-lumo-surface={identity.surface} data-lumo-emphasis={identity.emphasis} data-lumo-effects={identity.effects} data-lumo-view={surface} role="dialog" aria-modal="true" aria-label={`${meta.label}工作台`}>
     <WorkbenchRail surface={surface} select={select} />
-    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>Lumo 工作台</span><i>›</i><b>{meta.label}</b><small>{meta.eyebrow}</small></div></header><main>{surface === 'collaboration' ? <CollaborationSurface onClose={close} /> : surface === 'knowledge' ? <KnowledgeSurface onClose={close} /> : surface === 'skills' ? <SkillsSurface /> : surface === 'connectors' ? <ConnectorsSurface /> : surface === 'operations' ? <OperationsSurface onClose={close} /> : surface === 'design' ? <OpenDesignSurface onConversationStart={close} /> : surface === 'presentation' ? <PresentationSurface onConversationStart={close} /> : surface === 'market' ? <MarketSurface onClose={close} /> : surface === 'skillhub' ? <SkillHubSurface onClose={close} /> : <AccountSurface onClose={close} />}</main><footer className="lumo-workbench-footer"><span>在对话框输入 /design 或 /ppt 可随时打开；产物仍由 /open-design 与 /ppt-master 原生技能生成</span><span>按 Esc 返回原生 DSH</span></footer></div>
+    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>Lumo 工作台</span><i>›</i><b>{meta.label}</b><small>{meta.eyebrow}</small></div></header><main>{surface === 'collaboration' ? <CollaborationSurface onClose={close} /> : surface === 'knowledge' ? <KnowledgeSurface onClose={close} /> : surface === 'skills' ? <SkillsSurface onClose={close} /> : surface === 'connectors' ? <ConnectorsSurface onClose={close} /> : surface === 'operations' ? <OperationsSurface onClose={close} /> : surface === 'design' ? <OpenDesignSurface onConversationStart={close} /> : surface === 'presentation' ? <PresentationSurface onConversationStart={close} /> : surface === 'market' ? <MarketSurface onClose={close} /> : surface === 'skillhub' ? <SkillHubSurface onClose={close} /> : <AccountSurface onClose={close} />}</main><footer className="lumo-workbench-footer"><span>在对话框输入 /design 或 /ppt 可随时打开；产物仍由 /open-design 与 /ppt-master 原生技能生成</span><span>按 Esc 返回原生 DSH</span></footer></div>
     <CommandPalette open={commandOpen} surface={surface} select={select} close={toggleCommand} />
   </section></div>
 }

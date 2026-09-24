@@ -61,6 +61,8 @@ const DEFAULT_REALM = 'agent-teams'
 
 /** 插件配置。 */
 export interface AgentTeamsConfig {
+  /** Storage hub 中承载团队名册的后端名：桌面 sqlite，服务器 pg。 */
+  storageBackend?: 'sqlite' | 'pg'
   /**
    * 成员 provider。缺省按 `lumo-remote > spawn > fork` 探测 —— 集群父节点上
    * 必然命中 `lumo-remote`（成员才会真的落到承载节点），单机自然回落 `spawn`。
@@ -89,6 +91,7 @@ export interface AgentTeamsConfig {
 
 /** Schemastery validation for {@link AgentTeamsConfig} */
 export const Config: z<AgentTeamsConfig> = z.object({
+  storageBackend: z.union(['sqlite', 'pg'] as const),
   memberProvider: z.string(),
   maxMembers: z.number(),
   maxRounds: z.number(),
@@ -269,21 +272,26 @@ export function apply(ctx: Context, config: AgentTeamsConfig): void {
     ...config.maxWaitMs === undefined ? {} : { maxWaitMs: positive('maxWaitMs', config.maxWaitMs) },
   })
 
-  // 团队状态：单机后端是 sqlite、集群后端是 PG，这里看不到区别（这正是用 storage hub 的目的）。
-  ctx.inject(['storage'], (storageCtx) => {
-    // 结构性读：storage 服务的形状由 dsh 定义，本插件不 import 它的类型
-    // （与 roster.ts 的 MemberSeam 同训）。
-    const facet = storageCtx.get('storage') as unknown as StorageFacetLike | undefined
-    const upgraded = createTeamStore(facet)
-    store = upgraded
-    if (!upgraded.durable) {
-      ctx.logger.warn('agent-teams: storage hub 已挂载但未提供持久后端，团队状态仍在内存里')
-      return
-    }
-    void upgraded.store.init().catch((error: unknown) => {
-      ctx.logger.error('agent-teams: 团队状态存储初始化失败，团队会随进程消失：%s', describe(error))
+  // ctx.storage 是后端注册中心，不是 KvFacet。等具体后端的生命周期服务激活后，
+  // 再从注册中心按部署配置取 kv；否则 `ctx.storage.kv.open` 会在首次读取名册时抛错。
+  if (config.storageBackend !== undefined) {
+    const backendName = config.storageBackend
+    ctx.inject(['storage', `storage.backend.${backendName}`], (storageCtx) => {
+      const hub = storageCtx.get('storage') as { backend: { get(name: string): StorageFacetLike } } | undefined
+      const facet = hub?.backend.get(backendName)
+      if (facet?.kv === undefined) {
+        ctx.logger.error('agent-teams: %s 存储后端缺少 kv 能力，团队状态仍在内存里', backendName)
+        return
+      }
+      const upgraded = createTeamStore(facet)
+      store = upgraded
+      void upgraded.store.init().catch((error: unknown) => {
+        // 打开失败后回到原来的内存兜底，避免列表接口永久返回 502。
+        if (store === upgraded) store = createTeamStore(undefined)
+        ctx.logger.error('agent-teams: 团队状态存储初始化失败，团队会随进程消失：%s', describe(error))
+      })
     })
-  })
+  }
 
   // 会合面：集群形态有 mailbox（PG，跨节点跨时间），单机回落进程内。
   ctx.inject(['mailbox'], (mailboxCtx) => {

@@ -8,8 +8,8 @@
  * Redis, MinIO, RocketMQ or Nacos」）。若本插件自己适配两种介质，就会长出两套
  * 读写路径、两套迁移、两套测试。
  *
- * dsh 的 storage hub 已经把这件事抽象掉了：`ctx.storage.kv.open(descriptor)` 拿到的
- * `KvUnit` 是一张 key→JSON 的表，**介质由后端决定** ——
+ * dsh 的 storage hub 已经把这件事抽象掉了：先从 `ctx.storage.backend`
+ * 按部署配置取后端，再用其 `kv.open(descriptor)` 拿到 key→JSON 的表。
  * 单机下后端是 `@deepseek-ai/dsh-storage-sqlite`，集群下是 `@lumo/storage`（PG）。
  * 于是本插件只有一份读写代码，两形态零分叉。
  *
@@ -66,7 +66,7 @@ export interface KvUnitLike {
   close(): Promise<void>
 }
 
-/** storage hub 的最小门面（dsh `ctx.storage` 的结构等价子集）。 */
+/** 已选中存储后端的 kv 门面（不是 `ctx.storage` 本身）。 */
 export interface StorageFacetLike {
   kv: {
     open(descriptor: {

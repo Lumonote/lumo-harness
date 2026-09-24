@@ -55,7 +55,7 @@ function subagentsSpy(providers: string[]): { list: () => string[]; start: () =>
   }
 }
 
-/** 内存版 storage hub：够 `StorageHubTeamStore` 跑通读写。 */
+/** 内存版后端的 kv 门面：够 `StorageHubTeamStore` 跑通读写。 */
 function storageSpy(): StorageFacetLike {
   const records = new Map<string, unknown>()
   const unit: KvUnitLike = {
@@ -164,15 +164,23 @@ describe('装配', () => {
     await ctx.fiber.dispose()
   })
 
-  it('storage 晚一步挂上时，团队状态从内存兜底升级为持久', async () => {
-    const { ctx, service } = boot({}, { subagents: ['spawn'] })
+  it('storage hub 与指定后端都挂上后，团队状态从内存兜底升级为持久', async () => {
+    const { ctx, service } = boot({ storageBackend: 'pg' }, { subagents: ['spawn'] })
     await flush()
     expect(service().capabilitiesOrNull()?.durableStore).toBe(false)
 
-    ctx.provide('storage', storageSpy())
+    const backend = storageSpy()
+    const selected: string[] = []
+    ctx.provide('storage', { backend: { get: (name: string) => { selected.push(name); return backend } } })
+    await flush()
+    expect(service().capabilitiesOrNull()?.durableStore).toBe(false)
+
+    ctx.provide('storage.backend.pg', backend)
     await flush()
 
+    expect(selected).toEqual(['pg'])
     expect(service().capabilitiesOrNull()?.durableStore).toBe(true)
+    await expect(service().list()).resolves.toEqual([])
     await ctx.fiber.dispose()
   })
 

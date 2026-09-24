@@ -270,10 +270,7 @@
 .lumo-deployment-gate.ready { border-color: var(--lumo-accent-32); color: var(--lumo-mint); }
 
 .lumo-surface { position: relative; max-width: 1480px; margin: 0 auto; padding: 32px 42px 48px; }
-.lumo-surface-intro { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; padding-bottom: 28px; }
 .lumo-eyebrow, .lumo-inspector-label { display: block; color: var(--lumo-cyan); font: var(--lumo-fw-bold) var(--lumo-fs-xxxs-11) /var(--lumo-lh-tight) var(--lumo-mono); letter-spacing: .18em; }
-.lumo-surface-intro h1 { margin: 8px 0 7px; color: var(--lumo-ink); font: var(--lumo-fw-semibold) var(--lumo-fs-xl-24)/var(--lumo-lh-tight) var(--lumo-heading); letter-spacing: -.055em; }
-.lumo-surface-intro p { max-width: 500px; margin: 0; color: var(--lumo-muted); font-size: var(--lumo-fs-xxs-12); line-height: var(--lumo-lh-loose); }
 .lumo-scope-card { min-width: 175px; padding: 13px 15px; border: 1px solid var(--lumo-line); border-radius: 10px; background: var(--lumo-accent-4); }
 .lumo-scope-card span, .lumo-scope-card b, .lumo-scope-card small { display: block; }
 .lumo-scope-card span { color: var(--lumo-faint); font: var(--lumo-fs-xxxs-11) /var(--lumo-lh-flat) var(--lumo-mono); letter-spacing: .12em; }
@@ -760,7 +757,6 @@
   .lumo-workbench-footer { display: none; }
   .lumo-identity-chip { display: none; }
   .lumo-surface { padding: 20px 13px 25px; }
-  .lumo-surface-intro { align-items: flex-start; flex-direction: column; gap: 15px; padding-bottom: 20px; }
   .lumo-scope-card { width: 100%; }
   .lumo-context-strip { flex-wrap: wrap; gap: 10px 13px; }
   .lumo-context-end { width: 100%; margin-left: 0; padding-top: 2px; }
@@ -1107,13 +1103,7 @@ html [data-dsh-frame][data-sidebar-collapsed] [data-dsh-part='sidebar-entry'] { 
 .lumo-home-presentation > div small { overflow: hidden; color: var(--lumo-faint); font-size: var(--lumo-fs-xxxs-11); text-overflow: ellipsis; white-space: nowrap; }
 
 /* Standalone plugin pages, reached from the sample area rather than sidebar. */
-.lumo-studio-page { width: min(1180px, calc(100% - 56px)); margin: 0 auto; padding: 42px 0 58px; color: var(--lumo-ink); }
-.lumo-studio-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; margin-bottom: 28px; }
-.lumo-studio-heading h1 { margin: 8px 0 6px; font: var(--lumo-fw-semibold) var(--lumo-fs-xl-24)/var(--lumo-lh-tight) var(--lumo-body); letter-spacing: -.05em; }
-.lumo-studio-heading p { margin: 0; color: var(--lumo-muted); font-size: var(--lumo-fs-xxs-12); }
-.lumo-plugin-readiness { display: inline-flex; align-items: center; gap: 7px; padding: 7px 9px; border: 1px solid var(--lumo-accent-24); border-radius: 7px; color: var(--lumo-muted); background: var(--lumo-accent-4); font: var(--lumo-fs-xxxs-11) /var(--lumo-lh-flat) var(--lumo-mono); }
-.lumo-plugin-readiness i { width: 6px; height: 6px; border-radius: 50%; corner-shape: round; background: var(--lumo-cyan); box-shadow: 0 0 8px var(--lumo-cyan); }
-.lumo-plugin-readiness.waiting i { background: var(--lumo-warn); box-shadow: none; }
+.lumo-studio-page { max-width: 1540px; margin: 0 auto; padding: 24px 28px 58px; color: var(--lumo-ink); }
 .lumo-studio-tabs { display: flex; gap: 4px; overflow-x: auto; margin-bottom: 12px; border-bottom: 1px solid var(--lumo-line); }
 .lumo-studio-tabs button { position: relative; display: inline-flex; align-items: center; gap: 7px; min-height: 42px; padding: 0 14px; border: 0; color: var(--lumo-faint); background: transparent; cursor: pointer; white-space: nowrap; }
 .lumo-studio-tabs button::after { position: absolute; right: 10px; bottom: -1px; left: 10px; height: 2px; border-radius: 2px; background: transparent; content: ""; }
@@ -1260,8 +1250,7 @@ html [data-dsh-frame][data-sidebar-collapsed] [data-dsh-part='sidebar-entry'] { 
   .lumo-home-creative { width: calc(100vw - 24px); }
   .lumo-home-creative > header { align-items: flex-start; flex-direction: column; }
   .lumo-home-example-grid, .lumo-home-presentation > div, .lumo-inspiration > div, .lumo-demo-grid, .lumo-gallery-grid, .lumo-example-popup > div, .lumo-automation-summary, .lumo-automation-principles { grid-template-columns: 1fr; }
-  .lumo-studio-page { width: calc(100% - 28px); padding-top: 24px; }
-  .lumo-studio-heading { align-items: flex-start; flex-direction: column; }
+  .lumo-studio-page { padding: 16px 14px 42px; }
   .lumo-studio-tools > span:nth-of-type(n+2), .lumo-studio-tools > em { display: none; }
   .lumo-presentation-steps li { min-width: 0; flex: 1; }
   .lumo-presentation-steps li::after { display: none; }
@@ -2392,6 +2381,10 @@ body *::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-brand-primar
 .lumo-knowledge-surface,
 .lumo-skillhub-surface,
 .lumo-account-surface { max-width: 1540px; padding: 24px 28px 58px; }
+.lumo-skills-surface,
+.lumo-connectors-surface { max-width: 1540px; padding: 24px 28px 58px; }
+.lumo-workspace-toolbar { display: flex; justify-content: flex-end; gap: 8px; margin: 0 0 16px; }
+.lumo-workspace-note { margin: 0 0 16px; padding: 13px 16px; border: 1px solid var(--lumo-line); border-radius: 12px; color: var(--lumo-muted); background: var(--lumo-accent-4); font-size: var(--lumo-fs-xxs-12); line-height: var(--lumo-lh-body); }
 
 .lumo-workspace-hero {
   position: relative;
@@ -2632,7 +2625,9 @@ body *::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-brand-primar
   .lumo-market-surface,
   .lumo-knowledge-surface,
   .lumo-skillhub-surface,
-  .lumo-account-surface { padding: 16px 14px 42px; }
+  .lumo-account-surface,
+  .lumo-skills-surface,
+  .lumo-connectors-surface { padding: 16px 14px 42px; }
   .lumo-workspace-hero { grid-template-columns: minmax(0, 1fr); min-height: 0; gap: 10px; padding: 11px 13px; border-radius: 13px; }
   .lumo-workspace-hero.account { gap: 10px; }
   .lumo-account-profile { gap: 7px; padding: 10px; }
@@ -2694,4 +2689,169 @@ body *::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-brand-primar
   .lumo-project-control-grid .lumo-placement-form,
   .lumo-project-control-grid .lumo-service-grid { grid-template-columns: minmax(0, 1fr); }
   .lumo-project-control-grid .lumo-placement-form .wide { grid-column: auto; }
+}
+
+/* More and its five tools share one page grid and surface language. */
+.lumo-workspace-page {
+  --lumo-page-edge: color-mix(in srgb, var(--lumo-line-strong) 72%, transparent);
+  --lumo-page-fill: linear-gradient(145deg, color-mix(in srgb, var(--lumo-panel-raised) 70%, transparent), color-mix(in srgb, var(--lumo-panel) 82%, transparent));
+  --lumo-page-card: color-mix(in srgb, var(--lumo-panel-raised) 35%, var(--lumo-panel));
+  --lumo-page-shadow: 0 18px 55px rgb(0 0 0 / 10%), inset 0 1px var(--lumo-accent-4);
+  max-width: 1456px;
+}
+.lumo-workspace-page > .lumo-workspace-hero { margin-bottom: 18px; }
+.lumo-workspace-page .lumo-section,
+.lumo-workspace-page .lumo-creation-section,
+.lumo-workspace-page .lumo-inspiration,
+.lumo-workspace-page .lumo-directory-domain,
+.lumo-workspace-page .lumo-skillhub-facet,
+.lumo-workspace-page .lumo-skillhub-results,
+.lumo-workspace-page .lumo-expert-create {
+  padding: 22px;
+  border: 1px solid var(--lumo-page-edge);
+  border-radius: 18px;
+  background: var(--lumo-page-fill);
+  box-shadow: var(--lumo-page-shadow);
+}
+.lumo-workspace-page .lumo-section-title,
+.lumo-workspace-page .lumo-inspiration > header,
+.lumo-workspace-page .lumo-directory-domain > header,
+.lumo-workspace-page .lumo-expert-block > header { margin-bottom: 18px; }
+.lumo-workspace-page .lumo-section-title b,
+.lumo-workspace-page .lumo-inspiration > header b,
+.lumo-workspace-page .lumo-directory-domain h2,
+.lumo-workspace-page .lumo-expert-block > header b {
+  color: var(--lumo-ink);
+  font: var(--lumo-fw-semibold) var(--lumo-fs-base-16)/var(--lumo-lh-tight) var(--lumo-heading);
+  letter-spacing: -.025em;
+}
+.lumo-workspace-page .lumo-section-title > div:first-child > span,
+.lumo-workspace-page .lumo-inspiration > header span,
+.lumo-workspace-page .lumo-expert-block > header span {
+  margin-top: 6px;
+  color: var(--lumo-muted);
+  font: var(--lumo-fs-xxs-12)/var(--lumo-lh-body) var(--lumo-body);
+  white-space: normal;
+}
+.lumo-workspace-page .lumo-workspace-directory { max-width: 1400px; }
+.lumo-workspace-page .lumo-skillhub-browser { grid-template-columns: 220px minmax(0, 1fr); gap: 16px; }
+.lumo-workspace-page .lumo-skillhub-facet { border-right: 1px solid var(--lumo-page-edge); }
+.lumo-workspace-page .lumo-skillhub-results { min-width: 0; }
+.lumo-workspace-page .lumo-skill-layout,
+.lumo-workspace-page .lumo-connector-layout,
+.lumo-workspace-page .lumo-market-layout { grid-template-columns: minmax(0, 1.6fr) minmax(290px, .8fr); gap: 16px; }
+.lumo-workspace-page :is(.lumo-directory-entry, .lumo-skillhub-card, .lumo-skill-card, .lumo-connector-card, .lumo-market-card, .lumo-gallery-card, .lumo-demo-card, .lumo-metric) {
+  border: 1px solid var(--lumo-page-edge);
+  border-radius: 13px;
+  background: var(--lumo-page-card);
+  box-shadow: inset 0 1px var(--lumo-accent-4);
+}
+.lumo-workspace-page :is(.lumo-directory-entry, .lumo-skillhub-card, .lumo-skill-card, .lumo-connector-card, .lumo-market-card, .lumo-gallery-card, .lumo-demo-card):hover {
+  border-color: var(--lumo-accent-36);
+  background: var(--lumo-panel-raised);
+  box-shadow: 0 12px 28px rgb(0 0 0 / 12%);
+}
+.lumo-workspace-page :is(.lumo-skill-card, .lumo-connector-card, .lumo-market-card).selected {
+  border-color: var(--lumo-accent-52);
+  background: color-mix(in srgb, var(--lumo-mint) 8%, var(--lumo-panel-raised));
+}
+.lumo-workspace-page :is(.lumo-directory-entry, .lumo-skillhub-card, .lumo-skill-card, .lumo-connector-card, .lumo-market-card) { padding: 16px; }
+.lumo-workspace-page :is(.lumo-directory-entry b, .lumo-skillhub-title b, .lumo-skill-card b, .lumo-connector-card header b, .lumo-market-card-head b, .lumo-gallery-card b, .lumo-demo-card b) {
+  font-size: var(--lumo-fs-s-14);
+  font-weight: var(--lumo-fw-semibold);
+  line-height: var(--lumo-lh-tight);
+}
+.lumo-workspace-page :is(.lumo-directory-entry small, .lumo-skillhub-card p, .lumo-skill-card p, .lumo-market-card-main p, .lumo-gallery-card em) {
+  color: var(--lumo-muted);
+  font-size: var(--lumo-fs-xxs-12);
+  line-height: var(--lumo-lh-body);
+}
+.lumo-workspace-page :is(.lumo-inspector, .lumo-market-inspector) {
+  border: 1px solid var(--lumo-page-edge);
+  border-radius: 13px;
+  background: var(--lumo-page-card);
+  box-shadow: inset 0 1px var(--lumo-accent-4);
+}
+.lumo-workspace-page :is(.lumo-inspector h3, .lumo-market-detail-title h3) {
+  font: var(--lumo-fw-semibold) var(--lumo-fs-l-20)/var(--lumo-lh-tight) var(--lumo-heading);
+  letter-spacing: -.035em;
+}
+.lumo-workspace-page :is(.lumo-filter input, .lumo-skillhub-search, .lumo-governance-form input, .lumo-governance-form select, .lumo-governance-form textarea, .lumo-invoke-form input, .lumo-invoke-form select, .lumo-invoke-form textarea) {
+  border-color: var(--lumo-page-edge);
+  border-radius: 9px;
+  background: var(--lumo-panel);
+}
+.lumo-workspace-page :is(.lumo-skill-compose, .lumo-cluster-form, .lumo-governed-source, .lumo-version-form) {
+  padding: 16px;
+  border: 1px solid var(--lumo-page-edge);
+  border-radius: 13px;
+  background: var(--lumo-page-card);
+}
+.lumo-workspace-page :is(.lumo-governance-form, .lumo-invoke-form, .lumo-expert-create-grid) label {
+  color: var(--lumo-muted);
+  font-size: var(--lumo-fs-xxs-12);
+  line-height: var(--lumo-lh-body);
+}
+.lumo-workspace-page :is(.lumo-governance-form, .lumo-invoke-form, .lumo-expert-create-grid) :is(input, select) { min-height: 38px; }
+.lumo-workspace-page :is(.lumo-governance-form, .lumo-invoke-form, .lumo-expert-create-grid) textarea { padding: 11px 12px; line-height: var(--lumo-lh-body); }
+.lumo-workspace-page .lumo-filter input { width: min(250px, 32vw); min-height: 38px; padding-inline: 12px; font-size: var(--lumo-fs-xxs-12); }
+.lumo-workspace-page .lumo-skillhub-search { min-height: 42px; }
+.lumo-workspace-page .lumo-button:not(.lumo-small):not(.lumo-quiet) { min-height: 38px; border-radius: 9px; font-size: var(--lumo-fs-xxs-12); }
+.lumo-workspace-page .lumo-studio-tabs,
+.lumo-workspace-page .lumo-skillhub-modebar,
+.lumo-workspace-page .lumo-presentation-steps { margin-bottom: 18px; }
+.lumo-workspace-page .lumo-studio-tabs {
+  gap: 5px;
+  padding: 5px;
+  border: 1px solid var(--lumo-page-edge);
+  border-radius: 13px;
+  background: var(--lumo-bg-deep);
+}
+.lumo-workspace-page .lumo-studio-tabs button { min-height: 44px; padding: 0 15px; border-radius: 9px; font-size: var(--lumo-fs-xxs-12); }
+.lumo-workspace-page .lumo-studio-tabs button.active { background: var(--lumo-panel-raised); }
+.lumo-workspace-page .lumo-studio-tabs button::after { right: 14px; left: 14px; }
+.lumo-workspace-page .lumo-skillhub-modebar {
+  align-items: center;
+  max-width: 1400px;
+  padding: 5px;
+  border: 1px solid var(--lumo-page-edge);
+  border-radius: 13px;
+  background: var(--lumo-bg-deep);
+}
+.lumo-workspace-page .lumo-skillhub-tabs button { border-radius: 9px; }
+.lumo-workspace-page .lumo-skillhub-tabs button.active { border-bottom-color: transparent; background: var(--lumo-panel-raised); }
+.lumo-workspace-page .lumo-skillhub-mode-actions { padding: 0 9px 0 0; }
+.lumo-workspace-page .lumo-presentation-steps {
+  gap: 14px;
+  padding: 13px 18px;
+  border: 1px solid var(--lumo-page-edge);
+  border-radius: 13px;
+  background: var(--lumo-bg-deep);
+}
+.lumo-workspace-page .lumo-studio-composer,
+.lumo-workspace-page .lumo-presentation-composer { border-radius: 13px; background: var(--lumo-panel); box-shadow: none; }
+.lumo-workspace-page .lumo-studio-notice { border-radius: 9px; }
+
+@media (max-width: 1000px) {
+  .lumo-workspace-page .lumo-skill-layout,
+  .lumo-workspace-page .lumo-connector-layout,
+  .lumo-workspace-page .lumo-market-layout { grid-template-columns: minmax(0, 1fr); }
+  .lumo-workspace-page .lumo-skillhub-browser { grid-template-columns: minmax(0, 1fr); }
+  .lumo-workspace-page .lumo-skillhub-facet { position: static; max-height: none; border-right: 1px solid var(--lumo-page-edge); }
+}
+@media (max-width: 700px) {
+  .lumo-workspace-page .lumo-section,
+  .lumo-workspace-page .lumo-creation-section,
+  .lumo-workspace-page .lumo-inspiration,
+  .lumo-workspace-page .lumo-directory-domain,
+  .lumo-workspace-page .lumo-skillhub-facet,
+  .lumo-workspace-page .lumo-skillhub-results,
+  .lumo-workspace-page .lumo-expert-create { padding: 16px; border-radius: 13px; }
+  .lumo-workspace-page .lumo-skillhub-modebar { align-items: stretch; flex-direction: column; gap: 8px; }
+  .lumo-workspace-page .lumo-skillhub-tabs { width: 100%; }
+  .lumo-workspace-page .lumo-skillhub-mode-actions { justify-content: flex-start; padding: 0 6px 5px; }
+  .lumo-workspace-page .lumo-skillhub-facet { border-right: 1px solid var(--lumo-page-edge); }
+  .lumo-workspace-page .lumo-presentation-steps { gap: 8px; padding: 10px 12px; }
+  .lumo-workspace-page .lumo-presentation-steps li { min-width: 0; }
+  .lumo-workspace-page .lumo-filter input { width: min(210px, 50vw); }
 }

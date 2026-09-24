@@ -235,6 +235,7 @@ services:
       LUMO_PROJECTS_URL: http://projects:8086
       LUMO_FLOWS_URL: http://flows:8087
       LUMO_GOVERNANCE_URL: http://governance:8089
+      LUMO_REGISTRY_URL: http://registry:8084
       LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
       PROVISIONER_ARTIFACT_NAME: "${PROVISIONER_ARTIFACT_NAME:-}"
     volumes:

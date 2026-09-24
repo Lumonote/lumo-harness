@@ -374,6 +374,50 @@ describe('Lumo native Harness integration', () => {
     await waitFor(() => expect(document.querySelector('.lumo-workbench')).toBeNull())
   }, 15000)
 
+  it('opens every work tool from a direct market link and keeps registry controls interactive', async () => {
+    history.replaceState({}, '', '/?lumo=market')
+    const overlay = mountLumo().find(item => item.name === 'shell.overlay')!
+    render(<overlay.Component />)
+
+    expect(await screen.findByRole('dialog', { name: '更多工作台' })).toBeTruthy()
+    for (const [entry, destination] of [
+      ['开放设计', 'design'],
+      ['演示文稿', 'presentation'],
+      ['技能中心', 'skillhub'],
+      ['技能管理', 'skills'],
+      ['连接器', 'connectors'],
+    ] as const) {
+      fireEvent.click(within(document.querySelector<HTMLElement>('.lumo-workspace-directory')!).getByRole('button', { name: new RegExp(`^${entry}`) }))
+      await waitFor(() => expect(document.querySelector('.lumo-workbench')?.getAttribute('data-lumo-view')).toBe(destination))
+      expect(new URLSearchParams(location.search).get('lumo')).toBe(destination)
+      expect(document.querySelector(`.lumo-workspace-hero.${destination}`)).toBeTruthy()
+      expect(screen.getByRole('button', { name: '返回对话' })).toBeTruthy()
+      fireEvent.click(within(screen.getByRole('navigation', { name: '工作领域' })).getByRole('button', { name: '更多' }))
+      await waitFor(() => expect(document.querySelector('.lumo-workbench')?.getAttribute('data-lumo-view')).toBe('market'))
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: /制品目录与灰度/ }))
+    expect(await screen.findByRole('list', { name: '能力生命周期' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('tab', { name: 'Flow' }))
+    expect(screen.getByRole('tab', { name: 'Flow' }).getAttribute('aria-selected')).toBe('true')
+    fireEvent.change(screen.getByPlaceholderText('制品名、发布者或 scope'), { target: { value: '不存在' } })
+    expect(screen.getByText('注册表中没有匹配的制品。')).toBeTruthy()
+    fireEvent.change(screen.getByPlaceholderText('制品名、发布者或 scope'), { target: { value: 'release' } })
+    expect(screen.getByRole('button', { name: /release-flow/ })).toBeTruthy()
+    const reads = calls.filter(call => call === 'GET /lumo/api/registry/artifacts?limit=100').length
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    await waitFor(() => expect(calls.filter(call => call === 'GET /lumo/api/registry/artifacts?limit=100').length).toBeGreaterThan(reads))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'OBJECT' }))
+    expect((screen.getByRole<HTMLInputElement>('checkbox', { name: 'OBJECT' })).checked).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: '生成签名计划' }))
+    expect(await screen.findByText('计划闭包 · 1 个制品')).toBeTruthy()
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Stable 灰度比例' }), { target: { value: '101' } })
+    fireEvent.click(screen.getByRole('button', { name: '设为 Stable 期望版本' }))
+    expect(await screen.findByText('灰度比例必须是 0 到 100 的整数。')).toBeTruthy()
+    fireEvent.click(screen.getByText(/查看启动器配置声明/))
+    expect(screen.getByText('当前运行时配置')).toBeTruthy()
+  }, 15000)
+
   // 侧边栏底部的登录态。它挂在外壳的 `sidebar.footer.action` 槽上，不在导航槽里——
   // 导航槽装的是工作区入口，身份不是工作区。三条用例对应三种结局，缺一条就会出现
   // 「把没有鉴权的部署也说成未登录」这类假陈述。
@@ -433,6 +477,40 @@ describe('Lumo native Harness integration', () => {
 
   // 视图层的渲染证据。规则本身由 collaboration-layout.spec.ts 钉住；这里钉的是另一半：
   // **那些规则真的被画成了 DOM**。夹具是测试输入（见上面四个 mock），不是实现的形状。
+  it('服务器单例只读取适用的协作数据，名册故障显示原因', async () => {
+    const defaultFetch = globalThis.fetch
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/lumo/api/overview') return new Response(JSON.stringify({
+        ...overview, deployment: { ...overview.deployment, mode: 'standalone', clusterReady: false },
+      }), { status: 200 })
+      if (path === '/lumo/api/collaboration/teams') return new Response(JSON.stringify({
+        error: 'agent_teams_read_failed', detail: '团队存储暂不可用',
+      }), { status: 502 })
+      if (['/lumo/api/users', '/lumo/api/desktop-nodes', '/lumo/api/delegations'].includes(path)) {
+        throw new Error(`不应请求 Cluster 专属接口：${path}`)
+      }
+      return defaultFetch(input, init)
+    }))
+    const registered = mountLumo()
+    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
+    render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '协作空间' }))
+
+    await screen.findByText(/当前是服务器单例部署/)
+    await waitFor(() => expect(screen.getByRole('tab', { name: '任务流向' }).getAttribute('aria-selected')).toBe('true'))
+    expect(screen.getByRole('tab', { name: '协作空间' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('tab', { name: '线程看板' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByText(/智能体名册：502 · 团队存储暂不可用/)).toBeTruthy()
+    expect(screen.getByText('暂时无法读取智能体名册')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /下达目标/ }).hasAttribute('disabled')).toBe(true)
+    const paths = vi.mocked(globalThis.fetch).mock.calls.map(([input]) => String(input))
+    expect(paths).not.toContain('/lumo/api/users')
+    expect(paths).not.toContain('/lumo/api/desktop-nodes')
+    expect(paths).not.toContain('/lumo/api/delegations')
+  })
+
   it('把员工、上下游与智能体绑定画成节点与光轨', async () => {
     const registered = mountLumo()
     const entries = registered.filter(item => item.name === 'sidebar.navigation')
