@@ -176,11 +176,20 @@ Go 服务的 context 是 `platform/control-plane` 而非各服务目录，因为
 | 对象 | 手段 |
 |------|------|
 | 脚本本身 | `--dry-run` 打印全部将执行命令；对每种 `--targets` 组合断言命令序列 |
-| 镜像 | 构建后 `docker compose -f compose.standalone.yml config` 校验 tag 可解析 |
+| 镜像 | 构建后组合 shared、control-plane bundle 与 standalone 文件，再用 `docker compose config` 校验 tag 可解析 |
 | 桌面包 | `lipo -archs "$app/Contents/Resources/runtime/node"` 断言 == 目标架构 |
 | 第一铁律 | 收尾执行 `git -C deepseek-harness status --porcelain -uno` 与 `describe --tags --dirty` |
 
 第三行是本设计里唯一能**证明** intel 包真是 intel 包的检查，不可省略——理由见 §4 第 3 条。
+
+当前 Compose 配置命令：
+
+```sh
+docker compose \
+  -f platform/deploy/compose.shared.yml \
+  -f platform/deploy/compose.control-plane.bundle.yml \
+  -f platform/deploy/compose.standalone.yml config
+```
 
 第四行必须有：`dsh-node` 镜像会把 `deepseek-harness/` 整棵 COPY 进构建上下文并在镜像内执行
 `dsh-overrides/apply.mjs`。改动只应发生在镜像内，宿主 checkout 必须保持洁净，而这需要证明。

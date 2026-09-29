@@ -1,0 +1,139 @@
+# 本地 Cluster bundle：保留每个逻辑节点和平台进程身份，合并到控制面容器与集群容器。
+# 通过 up.sh cluster 自动启用；故障域验收/生产可设 LUMO_CLUSTER_TOPOLOGY=full。
+name: lumo-platform
+
+x-cluster-bundle-environment: &cluster-bundle-environment
+  LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
+  LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
+  LUMO_REALM: "${LUMO_REALM:-dev}"
+  LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
+  LUMO_REDIS_URL: "redis://redis:6379"
+  LUMO_MINIO_ENDPOINT: minio
+  LUMO_MINIO_PORT: "9000"
+  LUMO_MINIO_ACCESS_KEY: "${LUMO_MINIO_ROOT_USER:-lumo}"
+  LUMO_MINIO_SECRET_KEY: "${LUMO_MINIO_ROOT_PASSWORD:-lumo-minio-123}"
+  LUMO_MINIO_BUCKET: lumo-objects
+  LUMO_CONNECTOR_GATEWAY_URL: http://connector-gateway:8082
+  LUMO_GOVERNANCE_URL: http://governance:8089
+  LUMO_SESSION_CONTROL_URL: http://session-control:8092
+  LUMO_NACOS_ADDR: http://nacos:8848
+  LUMO_NACOS_SERVICE: lumo-dsh-node
+  LUMO_NACOS_GROUP: DEFAULT_GROUP
+  LUMO_SUBAGENT_HOST_TOKEN: "${LUMO_SUBAGENT_HOST_TOKEN:-dev-subagent-token}"
+  LUMO_CLUSTER_VERSION_GATE: "${LUMO_CLUSTER_VERSION_GATE:-false}"
+  LUMO_PLACEMENT_LOAD_WEIGHT: "${LUMO_PLACEMENT_LOAD_WEIGHT:-1}"
+  LUMO_PLACEMENT_AFFINITY_WEIGHT: "${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"
+  PROVISIONER_ARTIFACT_NAME: "${PROVISIONER_ARTIFACT_NAME:-}"
+
+services:
+  # Compact 控制面将 10 个 API、2 个 Scheduler、2 个 Collaborator 放进一个容器。
+  # Scheduler-1 / Collaborator-1 使用独立容器端口，避免与 API 端口冲突；逻辑实例名不变。
+  api-bundle:
+    command: ["/usr/local/bin/lumo-control-plane-bundle", "platform-cluster"]
+    environment:
+      LUMO_NACOS_ADDR: http://nacos:8848
+      LUMO_NACOS_SERVICE: lumo-dsh-node
+      LUMO_NACOS_GROUP: DEFAULT_GROUP
+      LUMO_NACOS_COLLABORATOR_SERVICE: lumo-collaborator
+      LUMO_REDIS_ADDR: redis:6379
+      LUMO_GOVERNANCE_URL: http://governance:8089
+      LUMO_KNOWLEDGE_SEAM_URL: http://dsh-web:8090
+      LUMO_KNOWLEDGE_EMBEDDING_MODEL: "${LUMO_EMBEDDING_MODEL:-BAAI/bge-m3}"
+      LUMO_IDENTITY_ASSERTION_SECRET: "${LUMO_IDENTITY_ASSERTION_SECRET:-}"
+      LUMO_CLUSTER_ENFORCE: "true"
+      LUMO_CLUSTER_VERSION_GATE: "${LUMO_CLUSTER_VERSION_GATE:-false}"
+      LUMO_PLACEMENT_LOAD_WEIGHT: "${LUMO_PLACEMENT_LOAD_WEIGHT:-1}"
+      LUMO_PLACEMENT_AFFINITY_WEIGHT: "${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"
+      LUMO_BUNDLE_COLLABORATOR_0_LUMO_NODE_ADVERTISE_HOST: collaborator-0
+      LUMO_BUNDLE_COLLABORATOR_0_LUMO_NACOS_PORT: "8081"
+      LUMO_BUNDLE_COLLABORATOR_1_LUMO_NODE_ADVERTISE_HOST: collaborator-1
+      LUMO_BUNDLE_COLLABORATOR_1_LUMO_NACOS_PORT: "8182"
+    ports:
+      - "18081:8081"
+      - "18083:8083"
+      - "18093:8184"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/lumo-control-plane-bundle", "healthcheck", "platform-cluster"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 180s
+    networks:
+      default:
+        aliases: [scheduler-0, scheduler-1, collaborator-0, collaborator-1]
+
+  cluster-a-bundle:
+    profiles: [cluster-compact]
+    build:
+      context: ../..
+      dockerfile: platform/data-plane/dsh-node/Dockerfile
+      target: cluster-bundle
+    image: "${LUMO_CLUSTER_BUNDLE_IMAGE:-lumo/dsh-cluster-bundle:dev}"
+    restart: unless-stopped
+    env_file: [./cluster-runtime.env]
+    environment:
+      <<: *cluster-bundle-environment
+      LUMO_BUNDLE_CLUSTER_ID: cluster-a
+      LUMO_CLUSTER_A_VERSION: "${LUMO_CLUSTER_A_VERSION:-dev}"
+      LUMO_CLUSTER_A_AGENT_OWNER: "${LUMO_CLUSTER_A_AGENT_OWNER:-}"
+      LUMO_CLUSTER_A_AGENT_PROJECT: "${LUMO_CLUSTER_A_AGENT_PROJECT:-}"
+      LUMO_CLUSTER_A_AGENT_ID: "${LUMO_CLUSTER_A_AGENT_ID:-}"
+      LUMO_CLUSTER_A_AGENT_PRESET_REVISION: "${LUMO_CLUSTER_A_AGENT_PRESET_REVISION:-}"
+      LUMO_CLUSTER_A_AGENT_PROVIDER: "${LUMO_CLUSTER_A_AGENT_PROVIDER:-}"
+      LUMO_CLUSTER_A_AGENT_MODEL: "${LUMO_CLUSTER_A_AGENT_MODEL:-}"
+    volumes:
+      - provisionerdata:/var/lib/lumo/artifacts:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+      minio: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+      api-bundle: { condition: service_healthy }
+    ports: ["18094:8083"]
+    healthcheck:
+      test: ["CMD", "node", "/workspace/platform/deploy/cluster-bundle.mjs", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 180s
+    networks:
+      default:
+        aliases: [scheduler-cluster-a, cluster-a-dsh-0, cluster-a-dsh-1]
+
+  cluster-b-bundle:
+    profiles: [cluster-compact]
+    build:
+      context: ../..
+      dockerfile: platform/data-plane/dsh-node/Dockerfile
+      target: cluster-bundle
+    image: "${LUMO_CLUSTER_BUNDLE_IMAGE:-lumo/dsh-cluster-bundle:dev}"
+    restart: unless-stopped
+    env_file: [./cluster-runtime.env]
+    environment:
+      <<: *cluster-bundle-environment
+      LUMO_BUNDLE_CLUSTER_ID: cluster-b
+      LUMO_CLUSTER_B_VERSION: "${LUMO_CLUSTER_B_VERSION:-dev}"
+      LUMO_CLUSTER_B_AGENT_OWNER: "${LUMO_CLUSTER_B_AGENT_OWNER:-}"
+      LUMO_CLUSTER_B_AGENT_PROJECT: "${LUMO_CLUSTER_B_AGENT_PROJECT:-}"
+      LUMO_CLUSTER_B_AGENT_ID: "${LUMO_CLUSTER_B_AGENT_ID:-}"
+      LUMO_CLUSTER_B_AGENT_PRESET_REVISION: "${LUMO_CLUSTER_B_AGENT_PRESET_REVISION:-}"
+      LUMO_CLUSTER_B_AGENT_PROVIDER: "${LUMO_CLUSTER_B_AGENT_PROVIDER:-}"
+      LUMO_CLUSTER_B_AGENT_MODEL: "${LUMO_CLUSTER_B_AGENT_MODEL:-}"
+    volumes:
+      - provisionerdata:/var/lib/lumo/artifacts:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+      minio: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+      api-bundle: { condition: service_healthy }
+    ports: ["18095:8083"]
+    healthcheck:
+      test: ["CMD", "node", "/workspace/platform/deploy/cluster-bundle.mjs", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 180s
+    networks:
+      default:
+        aliases: [scheduler-cluster-b, cluster-b-dsh-0, cluster-b-dsh-1]

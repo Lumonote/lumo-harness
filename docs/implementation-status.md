@@ -517,6 +517,10 @@ COREPACK_ENABLE_PROJECT_SPEC=0`，而桌面 runtime 的 `COREPACK_HOME` 是一�
 `up -d minio` 后 `mc ready local` 返回 `The cluster 'local' is ready`、
 `/minio/health/live` 返回 200。同步更正 `test-local-pg.sh` 头注释与本文件的口径差异表。
 
+2026-09-25 更新：Quay 的该仓库对匿名 manifest 请求返回 401，旧版官方二进制归档返回
+410。共享 Compose 默认改为从上述固定版本的官方源码构建 `lumo/minio` 本地镜像，
+健康检查改用 `/minio/health/ready`；上段描述保留为 09-20 当时的验证记录。
+
 ### 二、新增门禁 `compose-images-verify.sh`（含 11 条反例/边界）
 
 判据两条：**同名服务跨形态必须同源**、**不得出现浮动 tag**（`latest` 或无 tag；`:dev` 不算，

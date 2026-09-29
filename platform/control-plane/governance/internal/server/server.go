@@ -161,8 +161,14 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/tasks/{taskID}/audit", s.listTaskAudit)
 	mux.HandleFunc("GET /v1/tasks/{taskID}/children", s.listChildTasks)
 	mux.HandleFunc("GET /v1/tasks/{taskID}/collaboration", s.collaborationProgress)
+	mux.HandleFunc("GET /v1/tasks/{taskID}/collaborators", s.taskCollaborators)
+	mux.HandleFunc("PUT /v1/tasks/{taskID}/collaborators", s.taskCollaborators)
 	mux.HandleFunc("GET /v1/tasks/{taskID}/runs/{runID}/result", s.taskResult)
 	mux.HandleFunc("PUT /v1/tasks/{taskID}/runs/{runID}/result", s.taskResult)
+	mux.HandleFunc("GET /v1/tasks/{taskID}/runs/{runID}/artifacts", s.taskArtifacts)
+	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/artifacts", s.taskArtifacts)
+	mux.HandleFunc("PUT /v1/tasks/{taskID}/runs/{runID}/artifacts/{artifactID}/complete", s.completeTaskArtifact)
+	mux.HandleFunc("GET /v1/tasks/{taskID}/runs/{runID}/artifacts/{artifactID}/storage", s.taskArtifactStorage)
 	mux.HandleFunc("POST /v1/tasks/{taskID}/runs", s.createTaskRun)
 	mux.HandleFunc("PATCH /v1/tasks/{taskID}/runs/{runID}", s.updateTaskRun)
 	mux.HandleFunc("POST /v1/tasks/{taskID}/outcome", s.recordOutcome)
@@ -1315,14 +1321,24 @@ func (s *Server) updateAgentPreset(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, updated)
 }
 
-func (s *Server) taskParticipant(w http.ResponseWriter, r *http.Request, c caller) (domain.DelegatedTask, bool) {
+func (s *Server) taskAccess(w http.ResponseWriter, r *http.Request, c caller, required string) (domain.DelegatedTask, bool) {
 	task, err := s.store.GetDelegationTask(r.Context(), c.realm, r.PathValue("taskID"))
 	if err != nil {
 		s.respondStoreError(w, err)
 		return domain.DelegatedTask{}, false
 	}
-	if !isRealmAdmin(c) && task.RequesterUserID != c.userID && task.AssigneeUserID != c.userID {
-		writeError(w, http.StatusForbidden, "forbidden", "task participant required")
+	access := ""
+	if isRealmAdmin(c) {
+		access = "contributor"
+	} else {
+		access, err = s.store.TaskAccess(r.Context(), c.realm, task.ID, c.userID)
+		if err != nil {
+			s.respondStoreError(w, err)
+			return domain.DelegatedTask{}, false
+		}
+	}
+	if access == "" || (required == "contributor" && access != "contributor") {
+		writeError(w, http.StatusForbidden, "forbidden", "task collaborator access required")
 		return domain.DelegatedTask{}, false
 	}
 	if !s.requirePermission(r.Context(), w, c, actionDelegate, domain.PermissionResource{
@@ -1331,6 +1347,14 @@ func (s *Server) taskParticipant(w http.ResponseWriter, r *http.Request, c calle
 		return domain.DelegatedTask{}, false
 	}
 	return task, true
+}
+
+func (s *Server) taskParticipant(w http.ResponseWriter, r *http.Request, c caller) (domain.DelegatedTask, bool) {
+	return s.taskAccess(w, r, c, "contributor")
+}
+
+func (s *Server) taskViewer(w http.ResponseWriter, r *http.Request, c caller) (domain.DelegatedTask, bool) {
+	return s.taskAccess(w, r, c, "viewer")
 }
 
 type taskTransitionRequest struct {
@@ -1388,7 +1412,7 @@ func (s *Server) listTaskRuns(w http.ResponseWriter, r *http.Request) {
 	if !ok || !requireDelegationAuthority(w, c) {
 		return
 	}
-	if _, ok := s.taskParticipant(w, r, c); !ok {
+	if _, ok := s.taskViewer(w, r, c); !ok {
 		return
 	}
 	runs, err := s.store.ListTaskRuns(r.Context(), c.realm, r.PathValue("taskID"))
@@ -1407,7 +1431,7 @@ func (s *Server) listTaskAudit(w http.ResponseWriter, r *http.Request) {
 	if !ok || !requireDelegationAuthority(w, c) {
 		return
 	}
-	if _, ok := s.taskParticipant(w, r, c); !ok {
+	if _, ok := s.taskViewer(w, r, c); !ok {
 		return
 	}
 	events, err := s.store.ListTaskAudit(r.Context(), c.realm, r.PathValue("taskID"))

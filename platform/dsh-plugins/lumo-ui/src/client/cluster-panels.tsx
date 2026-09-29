@@ -48,6 +48,94 @@ interface DesktopNode {
 }
 const nodeStatus: Record<string, string> = { ONLINE: '在线', OFFLINE: '离线', DRAINING: '排空中', REVOKED: '已撤销', PENDING_ACTIVATION: '待激活' }
 
+interface SchedulerCluster {
+  cluster_id: string
+  realm: string
+  namespace?: string
+  capabilities?: string[]
+  capabilities_declared?: boolean
+  version?: string
+  registered_at: number
+  last_seen_at: number
+  age_ms: number
+  state: 'healthy' | 'suspect' | 'down' | string
+}
+interface SchedulerClustersSnapshot {
+  clusters: SchedulerCluster[]
+  enforced: boolean
+  suspect_ms: number
+  down_ms: number
+  version_gate: boolean
+  fleet_version?: string
+  version_consistent?: boolean
+  version_declared_clusters?: number
+}
+const schedulerClusterHealth: Record<string, string> = { healthy: '健康', suspect: '可疑', down: '离线' }
+
+function formatHeartbeatAge(ageMS: number): string {
+  if (!Number.isFinite(ageMS) || ageMS < 0) return '未知'
+  if (ageMS < 1000) return `${Math.floor(ageMS)} 毫秒`
+  if (ageMS < 60_000) return `${(ageMS / 1000).toFixed(1)} 秒`
+  const minutes = Math.floor(ageMS / 60_000)
+  const seconds = Math.floor((ageMS % 60_000) / 1000)
+  return `${minutes} 分 ${seconds} 秒`
+}
+
+/** 调度 scheduler 联邦注册表的原生集群心跳与版本判定，不与 Nacos 节点或桌面设备混用。 */
+export function SchedulerClustersPanel({ request }: { request: Request }) {
+  const [snapshot, setSnapshot] = useState<SchedulerClustersSnapshot | null>(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [updatedAt, setUpdatedAt] = useState<Date | null>(null)
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const result = await request<SchedulerClustersSnapshot>('/lumo/api/scheduler/clusters')
+      setSnapshot({ ...result, clusters: result.clusters ?? [] })
+      setUpdatedAt(new Date())
+      setError('')
+    } catch (reason) {
+      setError(message(reason))
+    } finally {
+      setLoading(false)
+    }
+  }, [request])
+  useEffect(() => {
+    void load()
+    const timer = window.setInterval(() => void load(), 15_000)
+    return () => window.clearInterval(timer)
+  }, [load])
+
+  const clusters = snapshot?.clusters ?? []
+  const versionDeclared = snapshot?.version_declared_clusters ?? 0
+  return <section className="lumo-section lumo-cluster-panel" aria-label="调度集群注册表" aria-busy={loading}>
+    <div className="lumo-section-title"><div><b>调度集群注册表</b><span>{loading && !snapshot ? '正在同步' : `${clusters.length} 个注册集群${updatedAt ? ` · 更新于 ${updatedAt.toLocaleTimeString('zh-CN')}` : ''}`}</span></div><div className="lumo-form-actions"><Button disabled={loading} onClick={() => void load()}>刷新</Button></div></div>
+    <p className="lumo-inline-empty">状态来自 scheduler 注册表的心跳年龄判定；此处不显示 Nacos 执行节点或受管桌面节点。</p>
+    <Feedback error={error} />
+    {snapshot ? <>
+      <div className="lumo-cluster-toolbar" aria-label="集群判定配置">
+        <span>健康闸门：<b>{snapshot.enforced ? '已启用' : '未启用'}</b> · suspect {formatHeartbeatAge(snapshot.suspect_ms)} · down {formatHeartbeatAge(snapshot.down_ms)}</span>
+        <span>版本闸门：<b>{snapshot.version_gate ? '已启用' : '未启用'}</b> · fleet {snapshot.fleet_version || '未声明'} · 一致性 {snapshot.version_consistent === undefined ? '未知' : snapshot.version_consistent ? '通过' : '未通过'} · 已声明 {versionDeclared} 个集群</span>
+      </div>
+      <div className="lumo-cluster-list">
+        {clusters.map(cluster => <div key={`${cluster.realm}:${cluster.cluster_id}`}>
+          <span>
+            <b>{cluster.cluster_id}</b>
+            <small>realm {cluster.realm} · namespace {cluster.namespace || '未声明'}</small>
+            <small>版本 {cluster.version || '未声明'} · 能力 {cluster.capabilities?.join(' · ') || '未声明'}</small>
+            <small>最后心跳 {Number.isFinite(cluster.last_seen_at) && cluster.last_seen_at > 0 ? new Date(cluster.last_seen_at).toLocaleString('zh-CN') : '未知'}</small>
+          </span>
+          <span>
+            <b>{schedulerClusterHealth[cluster.state] ?? '未知'} <code>{cluster.state || 'unknown'}</code></b>
+            <small>距最后心跳 {formatHeartbeatAge(cluster.age_ms)}</small>
+          </span>
+        </div>)}
+      </div>
+      {!clusters.length ? <p className="lumo-inline-empty">scheduler 注册表中暂无集群。</p> : null}
+    </> : !loading && !error ? <p className="lumo-inline-empty">尚未读取调度集群注册表。</p> : null}
+  </section>
+}
+
 interface DeviceArtifact { name: string; version: string; digest: string; payload_digest?: string }
 interface DevicePolicy {
   root: string; name: string; version: string; client_version: string; artifacts: DeviceArtifact[]; scopes: string[]; shape: Record<string, boolean>
@@ -294,17 +382,15 @@ export function ProjectMembersPanel({ request, projectID, members, editable, ref
 
 export function ConnectorManifestPanel({ request, refresh }: { request: Request; refresh: () => Promise<void> }) {
   const [canManage, setCanManage] = useState(false)
-  const [managedOAuth, setManagedOAuth] = useState(false)
   const action = useAction(refresh)
   const [source, setSource] = useState('')
   const [connectorID, setConnectorID] = useState(() => new URLSearchParams(window.location.search).get('connector') ?? '')
   const [loadedID, setLoadedID] = useState(() => new URLSearchParams(window.location.search).get('connector') ?? '')
-  const [oauthRevision, setOAuthRevision] = useState(0)
   const sequence = useRef(0)
   const [loading, setLoading] = useState(false)
   useEffect(() => {
     let active = true
-    void request<{ manage: boolean; managedOAuth: boolean }>('/lumo/api/connectors/capabilities').then(result => { if (active) { setCanManage(result.manage); setManagedOAuth(result.managedOAuth) } }).catch(() => { if (active) setCanManage(false) })
+    void request<{ manage: boolean }>('/lumo/api/connectors/capabilities').then(result => { if (active) setCanManage(result.manage) }).catch(() => { if (active) setCanManage(false) })
     return () => { active = false }
   }, [request])
   if (!canManage) return null
@@ -315,7 +401,7 @@ export function ConnectorManifestPanel({ request, refresh }: { request: Request;
     setLoading(true); action.setError('')
     try {
       const manifest = await request(`/lumo/api/connectors/${encodeURIComponent(id)}/manifest`)
-      if (current === sequence.current) { setSource(JSON.stringify(manifest, null, 2)); setLoadedID(id); setOAuthRevision(value => value + 1) }
+      if (current === sequence.current) { setSource(JSON.stringify(manifest, null, 2)); setLoadedID(id) }
     }
     catch (reason) { if (current === sequence.current) action.setError(message(reason)) }
     finally { if (current === sequence.current) setLoading(false) }
@@ -326,9 +412,9 @@ export function ConnectorManifestPanel({ request, refresh }: { request: Request;
     try { manifest = JSON.parse(source); if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new Error('连接器配置必须为 JSON 对象。') }
     catch (reason) { action.setError(message(reason)); return }
     const id = connectorID.trim()
-    if (await action.run(() => request(`/lumo/api/connectors/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(manifest) }), '连接器配置已保存。')) { setLoadedID(id); setOAuthRevision(value => value + 1) }
+    if (await action.run(() => request(`/lumo/api/connectors/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(manifest) }), '连接器配置已保存。')) { setLoadedID(id) }
   }
-  return <section className="lumo-section lumo-cluster-panel"><div className="lumo-section-title"><div><b>连接器配置</b></div></div><Feedback error={action.error} notice={action.notice} /><form className="lumo-governance-form lumo-cluster-form" onSubmit={save}><label>连接器 ID<input required disabled={action.busy} value={connectorID} onChange={event => { sequence.current++; setConnectorID(event.target.value); setLoadedID(''); setSource(''); setLoading(false) }} maxLength={128} /></label><div className="lumo-form-actions"><Button disabled={loading || !connectorID || action.busy} onClick={() => void load()}>读取配置</Button></div><label className="wide">能力清单<textarea required rows={12} value={source} onChange={event => setSource(event.target.value)} maxLength={1048576} spellCheck={false} /></label><div className="lumo-user-form-actions"><Button submit disabled={loading || action.busy}>保存连接器</Button></div></form>{loadedID ? <ConnectorOAuthPanel key={`${loadedID}:${oauthRevision}`} request={request} connectorID={loadedID} configured={managedOAuth} /> : null}</section>
+  return <section className="lumo-section lumo-cluster-panel"><div className="lumo-section-title"><div><b>连接器配置</b></div></div><Feedback error={action.error} notice={action.notice} /><form className="lumo-governance-form lumo-cluster-form" onSubmit={save}><label>连接器 ID<input required disabled={action.busy} value={connectorID} onChange={event => { sequence.current++; setConnectorID(event.target.value); setLoadedID(''); setSource(''); setLoading(false) }} maxLength={128} /></label><div className="lumo-form-actions"><Button disabled={loading || !connectorID || action.busy} onClick={() => void load()}>读取配置</Button></div><label className="wide">能力清单<textarea required rows={12} value={source} onChange={event => setSource(event.target.value)} maxLength={1048576} spellCheck={false} /></label><div className="lumo-user-form-actions"><Button submit disabled={loading || action.busy}>保存连接器</Button></div></form>{loadedID ? <p className="lumo-inline-empty">连接器配置由管理员维护；个人账号授权请在连接器目录中选择对应连接器。</p> : null}</section>
 }
 
 interface ConnectorOAuthStatus {
@@ -365,11 +451,15 @@ function ConnectorOAuthPanel({ request, connectorID, configured }: { request: Re
   const busy = action.busy || loading
   return <div className="lumo-cluster-panel"><div className="lumo-section-title"><div><b>OAuth 授权</b><span>{status ? oauthStates[status.state] ?? status.state : '正在读取'}</span></div><Button disabled={busy} onClick={() => void load()}>刷新状态</Button></div>
     <Feedback error={error || action.error || (callbackFailed ? '授权未完成，请重新授权。' : '')} notice={action.notice} />
-    {status?.managed ? <><div className="lumo-cluster-list"><div><span><b>{status.provider}</b><small>Realm 共享授权 · 配置 v{status.version}</small><small>{status.scopes?.join(' · ')}</small></span><span><b>{status.expiresAt ? new Date(status.expiresAt).toLocaleString('zh-CN') : '未提供到期时间'}</b><small>{status.errorCode ? oauthEvents[status.errorCode] ?? status.errorCode : status.refreshable ? '可自动续期' : '无续期凭证'}</small></span></div></div>
-      <div className="lumo-form-actions"><Button disabled={busy || !status.available} onClick={() => void authorize()}>{status.state === 'disconnected' ? '授权连接' : '重新授权'}</Button><Button disabled={busy || !status.available || !status.refreshable || status.state !== 'connected'} onClick={() => void action.run(() => request(`${base}/refresh`, { method: 'POST' }), '令牌已续期。')}>立即续期</Button>{confirmation ? <><Button danger disabled={busy} onClick={() => void action.run(() => request(base, { method: 'DELETE' }), '共享授权已断开。').then(ok => { if (ok) setConfirmation(false) })}>确认断开共享授权</Button><Button disabled={busy} onClick={() => setConfirmation(false)}>取消</Button></> : <Button danger disabled={busy || status.state === 'disconnected'} onClick={() => setConfirmation(true)}>断开</Button>}</div>
+    {status?.managed ? <><div className="lumo-cluster-list"><div><span><b>{status.provider}</b><small>我的账号 · 配置 v{status.version}</small><small>{status.scopes?.join(' · ')}</small></span><span><b>{status.expiresAt ? new Date(status.expiresAt).toLocaleString('zh-CN') : '未提供到期时间'}</b><small>{status.errorCode ? oauthEvents[status.errorCode] ?? status.errorCode : status.refreshable ? '可自动续期' : '无续期凭证'}</small></span></div></div>
+      <div className="lumo-form-actions"><Button disabled={busy || !status.available} onClick={() => void authorize()}>{status.state === 'disconnected' ? '关联我的账号' : '重新授权我的账号'}</Button><Button disabled={busy || !status.available || !status.refreshable || status.state !== 'connected'} onClick={() => void action.run(() => request(`${base}/refresh`, { method: 'POST' }), '我的账号令牌已续期。')}>立即续期</Button>{confirmation ? <><Button danger disabled={busy} onClick={() => void action.run(() => request(base, { method: 'DELETE' }), '我的账号已断开。').then(ok => { if (ok) setConfirmation(false) })}>确认断开我的账号</Button><Button disabled={busy} onClick={() => setConfirmation(false)}>取消</Button></> : <Button danger disabled={busy || status.state === 'disconnected'} onClick={() => setConfirmation(true)}>断开我的账号</Button>}</div>
     </> : status ? <p className="lumo-inline-empty">该连接器未启用托管 OAuth。</p> : null}
     {status?.audit?.length ? <details><summary>授权记录</summary><div className="lumo-cluster-list">{status.audit.map((event, index) => <div key={`${event.createdAt}:${index}`}><span><b>{oauthEvents[event.action] ?? event.action}</b><small>{event.actorId}</small></span><time>{new Date(event.createdAt).toLocaleString('zh-CN')}</time></div>)}</div></details> : null}
   </div>
+}
+
+export function ConnectorAccountPanel({ request, connectorID }: { request: Request; connectorID: string }) {
+  return <ConnectorOAuthPanel key={connectorID} request={request} connectorID={connectorID} configured />
 }
 
 export interface AgentPreset {
@@ -562,8 +652,116 @@ export function readTaskOutput(output: unknown): { present: boolean; text: strin
   return { present: true, text: JSON.stringify(output, null, 2) ?? '' }
 }
 
-export function TaskEvidencePanel({ runID, result, error, busy, label, close }: {
-  runID: string; result: TaskResultFacts | null; error: string; busy: boolean; label: (state: string) => string; close: () => void
+interface TaskCollaboratorFact { subject_type: 'user' | 'department'; subject_id: string; access: 'viewer' | 'contributor'; include_children?: boolean; created_by?: string }
+interface TaskArtifactFact { id: string; name: string; content_type: string; size_bytes: number; sha256: string; created_by: string; created_at: string }
+
+export function TaskCollaboratorsPanel({ request, taskID }: { request: Request; taskID: string }) {
+  const [grants, setGrants] = useState<TaskCollaboratorFact[]>([])
+  const [users, setUsers] = useState<Choice[]>([])
+  const [departments, setDepartments] = useState<Choice[]>([])
+  const [subject, setSubject] = useState('')
+  const [access, setAccess] = useState<'viewer' | 'contributor'>('viewer')
+  const [includeChildren, setIncludeChildren] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [canManage, setCanManage] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const load = useCallback(async () => {
+    setLoading(true); setCanManage(false)
+    try {
+      const share = await request<{ collaborators?: TaskCollaboratorFact[]; can_manage?: boolean }>(`/lumo/api/tasks/${encodeURIComponent(taskID)}/collaborators`)
+      setGrants(share.collaborators ?? [])
+      if (share.can_manage) {
+        const [directory, org] = await Promise.all([
+          request<{ users?: Array<{ id: string; display_name?: string; status?: string }> }>('/lumo/api/users'),
+          request<{ departments?: Array<{ id: string; name?: string; status?: string; children?: Array<{ id: string; name?: string; status?: string }> }> }>('/lumo/api/departments'),
+        ])
+        setUsers((directory.users ?? []).filter(item => item.status !== 'disabled' && item.status !== 'suspended').map(item => ({ id: item.id, name: item.display_name ?? item.id })))
+        const flat: Choice[] = []
+        const visit = (rows: Array<{ id: string; name?: string; status?: string; children?: Array<{ id: string; name?: string; status?: string }> }>) => rows.forEach(item => { if (item.status !== 'disabled') flat.push({ id: item.id, name: item.name ?? item.id }); if (item.children) visit(item.children) })
+        visit(org.departments ?? [])
+        setDepartments(flat)
+      } else {
+        setUsers([]); setDepartments([])
+      }
+      setCanManage(share.can_manage === true)
+      setError('')
+    } catch (reason) { setError(message(reason)) }
+    finally { setLoading(false) }
+  }, [request, taskID])
+  useEffect(() => { void load() }, [load])
+  const save = async (next: TaskCollaboratorFact[]) => {
+    setSaving(true); setError(''); setNotice('')
+    try {
+      const result = await request<{ collaborators?: TaskCollaboratorFact[]; can_manage?: boolean }>(`/lumo/api/tasks/${encodeURIComponent(taskID)}/collaborators`, { method: 'PUT', body: JSON.stringify({ collaborators: next }) })
+      setGrants(result.collaborators ?? next); setNotice('任务协作者已更新。')
+      setCanManage(result.can_manage === true)
+    } catch (reason) { setError(message(reason)) }
+    finally { setSaving(false) }
+  }
+  const add = () => {
+    const [subjectType, subjectID] = subject.split(':', 2)
+    if ((subjectType !== 'user' && subjectType !== 'department') || !subjectID || grants.some(item => item.subject_type === subjectType && item.subject_id === subjectID)) return
+    void save([...grants, { subject_type: subjectType, subject_id: subjectID, access, ...(subjectType === 'department' ? { include_children: includeChildren } : {}) }])
+    setSubject(''); setIncludeChildren(false)
+  }
+  return <section className="lumo-section lumo-cluster-panel"><div className="lumo-section-title"><div><b>任务协作者</b><span>{loading ? '正在同步' : `${grants.length} 项用户或部门授权`}</span></div><Button disabled={loading || saving} onClick={() => void load()}>刷新</Button></div>
+    <Feedback error={error} notice={notice} />
+    {canManage ? <div className="lumo-cluster-toolbar"><label>添加用户或部门<select value={subject} onChange={event => setSubject(event.target.value)}><option value="">选择授权对象</option><optgroup label="用户">{users.map(item => <option key={`user:${item.id}`} value={`user:${item.id}`}>{item.name} · {item.id}</option>)}</optgroup><optgroup label="部门">{departments.map(item => <option key={`department:${item.id}`} value={`department:${item.id}`}>{item.name} · {item.id}</option>)}</optgroup></select></label><label>权限<select value={access} onChange={event => setAccess(event.target.value as 'viewer' | 'contributor')}><option value="viewer">查看</option><option value="contributor">协作编辑</option></select></label>{subject.startsWith('department:') ? <label className="lumo-checkbox"><input type="checkbox" checked={includeChildren} onChange={event => setIncludeChildren(event.target.checked)} />包含下级部门</label> : null}<Button disabled={saving || !subject} onClick={add}>添加</Button></div> : null}
+    <div className="lumo-compact-list">{grants.length ? grants.map(item => { const key = `${item.subject_type}:${item.subject_id}`; const label = (item.subject_type === 'user' ? users : departments).find(value => value.id === item.subject_id)?.name ?? item.subject_id; return <div key={key}><span><b>{label}</b><small>{item.subject_type === 'user' ? '用户' : item.include_children ? '部门及下级部门' : '部门'} · {item.access === 'contributor' ? '协作编辑' : '查看'}</small></span>{canManage ? <>{item.subject_type === 'department' ? <label className="lumo-checkbox"><input type="checkbox" checked={!!item.include_children} disabled={saving} onChange={event => void save(grants.map(grant => grant === item ? { ...grant, include_children: event.target.checked } : grant))} />包含下级</label> : null}<select aria-label={`${label} 权限`} value={item.access} disabled={saving} onChange={event => void save(grants.map(grant => grant === item ? { ...grant, access: event.target.value as 'viewer' | 'contributor' } : grant))}><option value="viewer">查看</option><option value="contributor">协作编辑</option></select><Button danger disabled={saving} onClick={() => void save(grants.filter(grant => grant !== item))}>移除</Button></> : null}</div> }) : <p className="lumo-inline-empty">尚未添加协作者。查看权限可读取任务记录与产物；协作编辑可上传产物并创建子任务。</p>}</div>
+    <small className="lumo-form-note">部门授权按用户当前主部门实时计算，并沿任务父子树继承。只有任务发起人或 Realm 管理员可以维护授权。</small>
+  </section>
+}
+
+function TaskArtifactsPanel({ request, taskID, runID }: { request: Request; taskID: string; runID: string }) {
+  const [artifacts, setArtifacts] = useState<TaskArtifactFact[]>([])
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [provider, setProvider] = useState<'github' | 'gitlab'>('github')
+  const [repository, setRepository] = useState('')
+  const [targetBranch, setTargetBranch] = useState('main')
+  const [filePath, setFilePath] = useState('')
+  const [publishID, setPublishID] = useState('')
+  const [notice, setNotice] = useState('')
+  const load = useCallback(async () => {
+    try { const result = await request<{ artifacts?: TaskArtifactFact[] }>(`/lumo/api/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/artifacts`); setArtifacts(result.artifacts ?? []); setError('') }
+    catch (reason) { setError(message(reason)) }
+  }, [request, taskID, runID])
+  useEffect(() => { void load() }, [load])
+  const upload = async (file?: File) => {
+    if (!file) return
+    setBusy(true); setError(''); setNotice('')
+    try {
+      const response = await fetch(`/lumo/api/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/artifacts`, { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Lumo-File-Name': encodeURIComponent(file.name) }, body: file })
+      const text = await response.text(); let body: unknown = null
+      try { body = text ? JSON.parse(text) as unknown : null } catch { body = text }
+      if (!response.ok) {
+        const detail = typeof body === 'object' && body !== null && typeof (body as { error?: unknown }).error === 'string'
+          ? (body as { error: string }).error : `上传失败 (${response.status})`
+        throw new Error(detail)
+      }
+      setNotice(`已保存产物「${file.name}」。`); await load()
+    } catch (reason) { setError(message(reason)) }
+    finally { setBusy(false) }
+  }
+  const publish = async (event: FormEvent<HTMLFormElement>, artifact: TaskArtifactFact) => {
+    event.preventDefault(); setBusy(true); setError(''); setNotice('')
+    try {
+      const result = await request<{ url?: string; number?: number; branch?: string }>(`/lumo/api/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/artifacts/${encodeURIComponent(artifact.id)}/publish`, { method: 'POST', body: JSON.stringify({ provider, repository, target_branch: targetBranch, file_path: filePath.trim() || artifact.name, title: `任务产物：${artifact.name}`, body: `由 Lumo 任务 ${taskID} 的执行产物创建。` }) })
+      setNotice(`${provider === 'github' ? '草稿 PR' : '草稿 MR'} 已创建${result.url ? `：${result.url}` : ''}${result.branch ? ` · 分支 ${result.branch}` : ''}`); setPublishID('')
+    } catch (reason) { setError(message(reason)) }
+    finally { setBusy(false) }
+  }
+  return <div className="lumo-cluster-panel"><div className="lumo-section-title"><div><b>持久化产物</b><span>{artifacts.length} 个文件 · 存储在平台对象存储</span></div><label className="lumo-button lumo-secondary">{busy ? '处理中…' : '上传产物'}<input type="file" hidden disabled={busy} onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; void upload(file) }} /></label></div>
+    <Feedback error={error} notice={notice} />
+    <div className="lumo-compact-list">{artifacts.length ? artifacts.map(artifact => <div key={artifact.id}><span><b>{artifact.name}</b><small>{artifact.content_type} · {(artifact.size_bytes / 1024).toFixed(1)} KiB · {artifact.sha256.slice(0, 12)}…</small></span><a className="lumo-button lumo-secondary" href={`/lumo/api/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/artifacts/${encodeURIComponent(artifact.id)}/content`}>下载</a><Button disabled={busy} onClick={() => { setPublishID(current => current === artifact.id ? '' : artifact.id); setFilePath(artifact.name) }}>发布到 Git</Button>{publishID === artifact.id ? <form className="lumo-governance-form lumo-cluster-form" onSubmit={event => void publish(event, artifact)}><label>平台<select value={provider} onChange={event => setProvider(event.target.value as 'github' | 'gitlab')}><option value="github">GitHub</option><option value="gitlab">GitLab</option></select></label><label>仓库（GitLab 可填 group/project）<input required value={repository} onChange={event => setRepository(event.target.value)} placeholder="org/repository" /></label><label>目标分支<input required value={targetBranch} onChange={event => setTargetBranch(event.target.value)} /></label><label>文件路径<input required value={filePath} onChange={event => setFilePath(event.target.value)} /></label><Button submit disabled={busy}>创建草稿 {provider === 'github' ? 'PR' : 'MR'}</Button></form> : null}</div>) : <p className="lumo-inline-empty">此执行记录还没有附件。上传后可跨用户查看、下载，并发布到个人授权的 GitHub/GitLab 账号。</p>}</div>
+    <small className="lumo-form-note">发布会创建新分支和草稿 PR/MR，不会自动合并。目标仓库访问权限来自当前用户关联的个人账号。</small>
+  </div>
+}
+
+export function TaskEvidencePanel({ taskID, request, runID, result, error, busy, label, close }: {
+  taskID: string; request: Request; runID: string; result: TaskResultFacts | null; error: string; busy: boolean; label: (state: string) => string; close: () => void
 }) {
   const { present: hasOutput, text: output } = readTaskOutput(result?.output)
   return <div className="lumo-cluster-panel">
@@ -581,6 +779,7 @@ export function TaskEvidencePanel({ runID, result, error, busy, label, close }: 
       <details className="lumo-governed-source"><summary>{`交付物全文 · ${hasOutput ? `${output.length} 字符` : '无 output 字段'}`}</summary>{output ? <pre>{output}</pre> : <p>{hasOutput ? '交付物是空字符串。' : '该结果只带摘要，没有结构化交付物。'}</p>}</details>
       <small className="lumo-form-note">{`上报时间 ${result.created_at ? new Date(result.created_at).toLocaleString('zh-CN') : '未记录'} · 结果行不可变，重放不会覆盖`}</small>
     </> : null}
+    <TaskArtifactsPanel request={request} taskID={taskID} runID={runID} />
   </div>
 }
 

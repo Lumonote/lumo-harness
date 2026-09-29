@@ -1,0 +1,34 @@
+{
+  "id": "gitlab",
+  "realm": "default",
+  "name": "GitLab",
+  "protocol": "rest",
+  "baseUrl": "https://gitlab.com/api/v4",
+  "auth": {
+    "kind": "bearer",
+    "credentialRef": "oauth:managed",
+    "oauth": {
+      "managed": true,
+      "provider": "GitLab",
+      "authorizationUrl": "https://gitlab.com/oauth/authorize",
+      "tokenUrl": "https://gitlab.com/oauth/token",
+      "callbackUrl": "https://lumo.example.com/auth/connector-oauth/callback",
+      "clientIdRef": "secret/data/lumo/connectors/gitlab/client-id",
+      "clientSecretRef": "secret/data/lumo/connectors/gitlab/client-secret",
+      "scopes": ["api"],
+      "pkce": true
+    }
+  },
+  "operations": {
+    "get_branch": { "name": "get_branch", "method": "GET", "path": "/projects/{project}/repository/branches/{branch}", "write": false, "sensitivity": "low", "maxResponseBytes": 1048576 },
+    "create_branch": { "name": "create_branch", "method": "POST", "path": "/projects/{project}/repository/branches", "allowedQuery": ["branch", "ref"], "write": true, "sensitivity": "normal", "maxResponseBytes": 1048576 },
+    "put_file": { "name": "put_file", "method": "PUT", "path": "/projects/{project}/repository/files/{file_path}", "write": true, "sensitivity": "normal", "maxResponseBytes": 1048576 },
+    "create_merge_request": { "name": "create_merge_request", "method": "POST", "path": "/projects/{project}/merge_requests", "write": true, "sensitivity": "normal", "maxResponseBytes": 1048576 }
+  },
+  "limits": { "requestsPerMinute": 60, "burst": 10, "timeoutMs": 30000, "maxRequestBytes": 1048576, "maxResponseBytes": 2097152 },
+  "egress": { "allowedHosts": ["gitlab.com"], "allowPrivateNetwork": false },
+  "redaction": { "request": false, "response": false },
+  "roles": ["member", "manager", "dept_manager", "operator", "realm_admin", "admin", "platform_admin"],
+  "enabled": true,
+  "version": 1
+}

@@ -205,6 +205,10 @@ dshWeb:
   publicUrl: ""
   secureCookie: true
   registryUrl: http://lumo-platform-registry:8084
+  llmGatewayUrl: http://lumo-platform-llm-gateway:8088
+  usageLedgerUrl: http://lumo-platform-usage-ledger:8085
+  edgeGatewayUrl: http://lumo-platform-edge-gateway:8080
+  terminalGatewayUrl: http://lumo-platform-terminal-gateway:8090
   nacosAddress: http://nacos:8848
   nacosService: lumo-dsh-node
   nacosGroup: DEFAULT_GROUP

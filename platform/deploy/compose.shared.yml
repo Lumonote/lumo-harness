@@ -1,0 +1,93 @@
+# Shared server components used by both standalone and cluster deployments.
+# Keep this file as the single source of truth for common infrastructure services.
+name: lumo-platform
+version: "3.9"
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  nacosdata:
+  rocketmqdata:
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: "${LUMO_POSTGRES_USER:-lumo}"
+      POSTGRES_PASSWORD: "${LUMO_POSTGRES_PASSWORD:-lumo}"
+      POSTGRES_DB: "${LUMO_POSTGRES_DB:-lumo}"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lumo -d lumo"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  minio:
+    image: "${LUMO_MINIO_IMAGE:-lumo/minio:RELEASE.2025-04-22T22-12-26Z}"
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: "${LUMO_MINIO_ROOT_USER:-lumo}"
+      MINIO_ROOT_PASSWORD: "${LUMO_MINIO_ROOT_PASSWORD:-lumo-minio-123}"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "if command -v mc >/dev/null 2>&1; then mc ready local; else wget -q -O /dev/null http://127.0.0.1:9000/minio/health/ready; fi"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  rocketmq:
+    image: apache/rocketmq:5.3.1
+    user: root
+    command: ["bash", "/rocketmq-entrypoint.sh"]
+    environment:
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m -Xmn128m"
+      NAMESRV_ADDR: 127.0.0.1:9876
+      ROCKETMQ_BROKER_START_TIMEOUT_SECONDS: "300"
+    volumes:
+      - ./rocketmq-broker-dev.conf:/rocketmq-broker-dev.conf:ro
+      - ./rocketmq-entrypoint.sh:/rocketmq-entrypoint.sh:ro
+      - rocketmqdata:/home/rocketmq/store
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9876 && exec 4<>/dev/tcp/127.0.0.1/10911 && exec 5<>/dev/tcp/127.0.0.1/8081"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 300s
+
+  nacos:
+    image: nacos/nacos-server:v2.4.0
+    environment:
+      MODE: standalone
+      JVM_XMS: 512m
+      JVM_XMX: 512m
+      JVM_XMN: 256m
+    volumes:
+      - nacosdata:/home/nacos/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8848/nacos/v1/console/health/readiness"]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+      start_period: 120s
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-alerts.yml:/etc/prometheus/lumo-alerts.yml:ro
+    ports: ["${LUMO_PROMETHEUS_PORT:-9090}:9090"]

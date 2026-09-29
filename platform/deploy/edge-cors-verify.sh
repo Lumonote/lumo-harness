@@ -114,8 +114,16 @@ mutate() {
 expect_pass() {
   local name="$1" kind="$2" file="$3"
   shift 3
+  local args=(--kind "$kind") part
+  local -a parts
+  if [[ "$kind" == compose ]]; then
+    IFS=: read -r -a parts <<< "$file"
+    for part in "${parts[@]}"; do args+=(--file "$part"); done
+  else
+    args+=(--file "$file")
+  fi
   local out
-  if ! out="$(python3 "$CHECK" --kind "$kind" --file "$file" "$@" 2>&1)"; then
+  if ! out="$(python3 "$CHECK" "${args[@]}" "$@" 2>&1)"; then
     fail "${name}：本该通过，实际失败了"
     printf '%s\n' "$out" >&2
     return
@@ -141,7 +149,15 @@ expect_pass_saying() {
   local name="$1" kind="$2" file="$3" want="$4"
   shift 4
   local out
-  if ! out="$(python3 "$CHECK" --kind "$kind" --file "$file" "$@" 2>&1)"; then
+  local args=(--kind "$kind") part
+  local -a parts
+  if [[ "$kind" == compose ]]; then
+    IFS=: read -r -a parts <<< "$file"
+    for part in "${parts[@]}"; do args+=(--file "$part"); done
+  else
+    args+=(--file "$file")
+  fi
+  if ! out="$(python3 "$CHECK" "${args[@]}" "$@" 2>&1)"; then
     fail "${name}：本该通过，实际失败了"
     printf '%s\n' "$out" >&2
     return
@@ -159,7 +175,15 @@ expect_fail() {
   local name="$1" kind="$2" file="$3" want="$4"
   shift 4
   local out
-  if out="$(python3 "$CHECK" --kind "$kind" --file "$file" "$@" 2>&1)"; then
+  local args=(--kind "$kind") part
+  local -a parts
+  if [[ "$kind" == compose ]]; then
+    IFS=: read -r -a parts <<< "$file"
+    for part in "${parts[@]}"; do args+=(--file "$part"); done
+  else
+    args+=(--file "$file")
+  fi
+  if out="$(python3 "$CHECK" "${args[@]}" "$@" 2>&1)"; then
     fail "${name}：缺陷没有被抓住（门禁放行了）"
     return
   fi
@@ -176,9 +200,13 @@ expect_fail() {
 # ---------------------------------------------------------------------------
 CLUSTER="$HERE/compose.cluster.yml"
 STANDALONE="$HERE/compose.standalone.yml"
+SHARED="$HERE/compose.shared.yml"
+BUNDLE="$HERE/compose.control-plane.bundle.yml"
 
-expect_pass "compose.cluster.yml（边缘白名单接线 + 中间件那层没开）" compose "$CLUSTER" --require-gateways
-expect_pass "compose.standalone.yml（同上）" compose "$STANDALONE" --require-gateways
+expect_pass "Cluster 共享 API bundle（边缘白名单接线 + 中间件那层没开）" \
+  compose "$SHARED:$BUNDLE:$CLUSTER" --require-gateways
+expect_pass "Standalone 共享 API bundle（同上）" \
+  compose "$SHARED:$BUNDLE:$STANDALONE" --require-gateways
 
 if helm template lumo "$CHART" >"$WORK/helm-base.yaml" 2>"$WORK/helm-base.err" \
   && helm template lumo "$CHART" --set console.corsOrigin=https://console.example \
@@ -220,6 +248,9 @@ for f in "$HERE"/compose*.yml; do
       defines_gateway=1
     fi
   done <<<"$gateway_names"
+  if grep -q '^  api-bundle:' "$f" && grep -q 'LUMO_BUNDLE_EDGE_GATEWAY_LUMO_EDGE_CORS_ORIGINS' "$f"; then
+    defines_gateway=1
+  fi
   if [ "$defines_gateway" -eq 1 ]; then
     gateway_files=$((gateway_files + 1))
     expect_pass "${base}（定义了入口网关 → 必须满足接线规则）" compose "$f" --require-gateways
@@ -230,10 +261,10 @@ for f in "$HERE"/compose*.yml; do
       compose "$f" "未做网关检查"
   fi
 done
-if [ "$gateway_files" -lt 2 ]; then
-  fail "compose 拓扑里只找到 ${gateway_files} 个定义了入口网关的文件（期望 ≥2）——遍历失效了？"
+if [ "$gateway_files" -lt 1 ]; then
+  fail "compose 拓扑里没有找到入口网关或其 api-bundle 配置来源——遍历失效了？"
 else
-  ok "compose 拓扑遍历：${gateway_files} 个文件定义了入口网关，全部已核对"
+  ok "compose 拓扑遍历：${gateway_files} 个文件声明了入口网关配置，全部已核对"
 fi
 
 # ---------------------------------------------------------------------------
@@ -261,23 +292,23 @@ expect_fail "flow mapping 形态但白名单缺失（不许因为读不到就跳
 
 # 1. 这正是 2026-09-16 修掉的那个缺陷形态：白名单变量被换回中间件读的名字。
 #    改完 compose 仍然是合法 YAML、网关仍然能起来、手测仍然正常——只有这条门禁会红。
-mutate sub "$STANDALONE" "$WORK/r1-standalone.yml" \
-  'LUMO_EDGE_CORS_ORIGINS: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"' \
-  'LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"'
-if grep -q 'LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN' "$WORK/r1-standalone.yml"; then
+mutate sub "$BUNDLE" "$WORK/r1-bundle.yml" \
+  'LUMO_BUNDLE_EDGE_GATEWAY_LUMO_EDGE_CORS_ORIGINS: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"' \
+  'LUMO_BUNDLE_EDGE_GATEWAY_LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"'
+if grep -q 'LUMO_BUNDLE_EDGE_GATEWAY_LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN' "$WORK/r1-bundle.yml"; then
   expect_fail "回归：白名单变量被换回中间件读的那个名字（边缘层静默失效）" \
-    compose "$WORK/r1-standalone.yml" "dual-cors-source" --require-gateways
+    compose "$SHARED:$WORK/r1-bundle.yml:$STANDALONE" "dual-cors-source" --require-gateways
 else
   fail "回归用例 1：锚点失效（拓扑被改过？）"
 fi
 
 # 2. 键还在、值被清空——「保留了那一行」会让人以为接线还活着。
-mutate sub "$CLUSTER" "$WORK/r2-cluster.yml" \
-  '"LUMO_EDGE_CORS_ORIGINS=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"' \
-  '"LUMO_EDGE_CORS_ORIGINS="'
-if grep -q '"LUMO_EDGE_CORS_ORIGINS="' "$WORK/r2-cluster.yml"; then
+mutate sub "$BUNDLE" "$WORK/r2-bundle.yml" \
+  'LUMO_BUNDLE_EDGE_GATEWAY_LUMO_EDGE_CORS_ORIGINS: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"' \
+  'LUMO_BUNDLE_EDGE_GATEWAY_LUMO_EDGE_CORS_ORIGINS: ""'
+if grep -q 'LUMO_BUNDLE_EDGE_GATEWAY_LUMO_EDGE_CORS_ORIGINS: ""' "$WORK/r2-bundle.yml"; then
   expect_fail "白名单变量被清空（键还在，值没了）" \
-    compose "$WORK/r2-cluster.yml" "gateway-cors-missing" --require-gateways
+    compose "$SHARED:$WORK/r2-bundle.yml:$CLUSTER" "gateway-cors-missing" --require-gateways
 else
   fail "反例 2：锚点失效"
 fi
@@ -285,30 +316,30 @@ fi
 # 3. 整个键被删掉（有人「顺手清理」掉了那行看起来多余的配置）。
 #    判据必须带 `=`：这份文件里**注释**也提到过这个变量名，只 grep 名字的话这条用例
 #    会在「变异生效」与「变异没生效」上都报错（实测踩过）。
-mutate sub "$CLUSTER" "$WORK/r3-cluster.yml" \
-  ', "LUMO_EDGE_CORS_ORIGINS=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"' ''
-if ! grep -q 'LUMO_EDGE_CORS_ORIGINS=' "$WORK/r3-cluster.yml"; then
+mutate sub "$BUNDLE" "$WORK/r3-bundle.yml" \
+  '      LUMO_BUNDLE_EDGE_GATEWAY_LUMO_EDGE_CORS_ORIGINS: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"' ''
+if ! grep -q 'LUMO_BUNDLE_EDGE_GATEWAY_LUMO_EDGE_CORS_ORIGINS:' "$WORK/r3-bundle.yml"; then
   expect_fail "白名单变量被整行删掉" \
-    compose "$WORK/r3-cluster.yml" "gateway-cors-missing" --require-gateways
+    compose "$SHARED:$WORK/r3-bundle.yml:$CLUSTER" "gateway-cors-missing" --require-gateways
 else
   fail "反例 3：锚点失效"
 fi
 
 # 4. 入口网关被改名/删掉：没有这条，一个「拓扑里根本没有网关」的仓库会全绿。
-mutate sub "$STANDALONE" "$WORK/r4-standalone.yml" '  edge-gateway:' '  edge-gateway-moved:'
-if grep -q '^  edge-gateway-moved:' "$WORK/r4-standalone.yml"; then
+mutate sub "$BUNDLE" "$WORK/r4-bundle.yml" '  api-bundle:' '  api-bundle-moved:'
+if grep -q '^  api-bundle-moved:' "$WORK/r4-bundle.yml"; then
   expect_fail "入口网关被改名（本面里不再有受检网关）" \
-    compose "$WORK/r4-standalone.yml" "required-service-absent" --require-gateways
+    compose "$SHARED:$WORK/r4-bundle.yml:$STANDALONE" "required-service-absent" --require-gateways
 else
   fail "反例 4：锚点失效"
 fi
 
 # 5. 入口网关被写进 `services:` 之外/被注掉——遍历必须以「拓扑里真的定义了网关」为准，
 #    而不是以「文件里出现过这个词」为准。这里把服务键顶到 0 缩进（不再属于 services）。
-mutate sub "$STANDALONE" "$WORK/r5-standalone.yml" '  edge-gateway:' 'edge-gateway:'
-if grep -qE '^edge-gateway:' "$WORK/r5-standalone.yml"; then
+mutate sub "$BUNDLE" "$WORK/r5-bundle.yml" '  api-bundle:' 'api-bundle:'
+if grep -qE '^api-bundle:' "$WORK/r5-bundle.yml"; then
   expect_fail "网关键被顶出 services 段（拓扑里不再有受检网关）" \
-    compose "$WORK/r5-standalone.yml" "required-service-absent" --require-gateways
+    compose "$SHARED:$WORK/r5-bundle.yml:$STANDALONE" "required-service-absent" --require-gateways
 else
   fail "反例 5：锚点失效"
 fi
@@ -378,7 +409,7 @@ mutate sub "$WORK/code/edge-gateway/cmd/edge-gateway/main.go" \
 if grep -q '"cors-allow"' "$WORK/code/main-no-flag.go"; then
   mv "$WORK/code/main-no-flag.go" "$WORK/code/edge-gateway/cmd/edge-gateway/main.go"
   expect_fail "代码侧旗标改名（推导不出白名单变量 → 不许静默放行）" \
-    compose "$CLUSTER" "cors-rule-not-derived" --require-gateways --code-root "$WORK/code"
+    compose "$SHARED:$BUNDLE:$CLUSTER" "cors-rule-not-derived" --require-gateways --code-root "$WORK/code"
   # 复原，供下一条用
   cp "$CODE/edge-gateway/cmd/edge-gateway/main.go" "$WORK/code/edge-gateway/cmd/edge-gateway/main.go"
 else
@@ -391,7 +422,7 @@ mutate sub "$WORK/code/edge-gateway/cmd/edge-gateway/main.go" \
   "$WORK/code/edge-gateway/cmd/edge-gateway/main.go" \
   'envOr("LUMO_EDGE_CORS_ORIGINS", "")' 'envOr("LUMO_EDGE_CORS_ALLOW", "")'
 expect_fail "代码侧白名单变量改名（门禁必须报出**新名字**，证明判据是推导来的）" \
-  compose "$CLUSTER" "LUMO_EDGE_CORS_ALLOW" --require-gateways --code-root "$WORK/code"
+  compose "$SHARED:$BUNDLE:$CLUSTER" "LUMO_EDGE_CORS_ALLOW" --require-gateways --code-root "$WORK/code"
 cp "$CODE/edge-gateway/cmd/edge-gateway/main.go" "$WORK/code/edge-gateway/cmd/edge-gateway/main.go"
 
 # 11. 中间件侧的锚点漂移（ACAO 头改名）：推导不出「中间件读哪个变量」时必须报错。
@@ -401,7 +432,7 @@ mutate sub "$WORK/code/observability/metrics.go" \
 if grep -q 'X-Cors-Origin' "$WORK/code/metrics-no-ancor.go"; then
   mv "$WORK/code/metrics-no-ancor.go" "$WORK/code/observability/metrics.go"
   expect_fail "中间件侧 ACAO 锚点漂移（推导不出中间件变量 → 不许静默放行）" \
-    compose "$CLUSTER" "cors-rule-not-derived" --require-gateways --code-root "$WORK/code"
+    compose "$SHARED:$BUNDLE:$CLUSTER" "cors-rule-not-derived" --require-gateways --code-root "$WORK/code"
 else
   fail "反例 11：锚点失效"
 fi

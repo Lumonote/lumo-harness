@@ -21,6 +21,38 @@ CREATE TABLE IF NOT EXISTS governance_task_results (
 );
 CREATE INDEX IF NOT EXISTS governance_task_results_task_idx
   ON governance_task_results(realm,task_id,created_at);
+
+CREATE TABLE IF NOT EXISTS governance_task_collaborators (
+  realm TEXT NOT NULL,
+  task_id TEXT NOT NULL REFERENCES governance_delegation_tasks(id) ON DELETE CASCADE,
+  subject_type TEXT NOT NULL CHECK (subject_type IN ('user','department')),
+  subject_id TEXT NOT NULL,
+  access TEXT NOT NULL CHECK (access IN ('viewer','contributor')),
+  include_children BOOLEAN NOT NULL DEFAULT FALSE,
+  created_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (realm,task_id,subject_type,subject_id)
+);
+CREATE INDEX IF NOT EXISTS governance_task_collaborators_subject_idx
+  ON governance_task_collaborators(realm,subject_type,subject_id,task_id);
+
+CREATE TABLE IF NOT EXISTS governance_task_artifacts (
+  id TEXT PRIMARY KEY,
+  realm TEXT NOT NULL,
+  task_id TEXT NOT NULL REFERENCES governance_delegation_tasks(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES governance_task_runs(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  size_bytes BIGINT NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
+  sha256 TEXT NOT NULL DEFAULT '',
+  storage_key TEXT NOT NULL DEFAULT '',
+  created_by TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','ready','failed')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ready_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS governance_task_artifacts_run_idx
+  ON governance_task_artifacts(realm,task_id,run_id,created_at);
 `
 
 func scanTaskResult(row rowScanner) (domain.TaskResult, error) {

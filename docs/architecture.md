@@ -1120,15 +1120,16 @@ Local Desktop 不依赖任何服务器中间件；下面是它和服务器形态
 | 协作服务 Collaborator | **≥2** | 验证文档归属哈希与实例故障时的归属转移 |
 | Seam Proxy / 网关 | ≥1（可与节点同置） | 验证过网路径与熔断，非 HA |
 | 全局 Scheduler | **1 + 1 备** | 验证 leader 选举与 N1 的降级模式 |
-| 「集群」数量 | **2**（两个 compose project 或两组 namespace） | 验证 §7.4 跨集群放置、失联判定、控制指令下发 |
+| 「集群」数量 | **2**（同一 Compose project 中的 `cluster-a` / `cluster-b`） | 验证 §7.4 跨集群放置、失联判定、控制指令下发 |
 | Nacos / RocketMQ / PG / Redis / MinIO / Milvus | **各 1**（standalone 模式） | 不验证中间件 HA；接口语义与生产一致即可 |
 
-**资源基线**：约 16C / 24–32G。以「两个缩微集群 + 中间件单实例」为准，可在开发机运行。
+**资源基线**：约 16C / 24–32G。默认 compact 使用共享基础组件、一个控制面 bundle 和两个每集群 bundle；要单独停掉某个调度/协作进程来做故障注入，切换 full 拓扑。
 
 **必须能在本地复现的分布式场景**（作为 compose 清单的验收用例，逐条对应已识别风险）：
 
 ```text
-docker compose -f compose.cluster.yml up          # 起两个缩微集群
+./platform/deploy/up.sh cluster -d --build       # compact：起两个缩微集群 bundle
+LUMO_CLUSTER_TOPOLOGY=full ./platform/deploy/up.sh cluster -d --build # full：逐进程容器，供故障注入
 ├─ kill 一个 agent 节点            → 任务重投 + 从日志 resume（验 R2 幂等）
 ├─ kill 全局 Scheduler             → 备节点接管 + 各集群本地放置降级（验 N1）
 ├─ pause 一个「集群」               → suspect(30s)→down(90s) 两段式判定（验 §7.4 铁律19）

@@ -1,4 +1,4 @@
-// Package oauth manages realm-shared connector grants. PostgreSQL contains
+// Package oauth manages user-owned connector grants. PostgreSQL contains
 // lifecycle metadata only; access and refresh tokens are stored in Vault KV v2.
 package oauth
 
@@ -39,14 +39,14 @@ var (
 
 const ddl = `
 CREATE TABLE IF NOT EXISTS connector_oauth (
- realm TEXT NOT NULL, connector_id TEXT NOT NULL,
+ realm TEXT NOT NULL, connector_id TEXT NOT NULL, user_id TEXT NOT NULL,
  generation BIGINT NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 0,
  state TEXT NOT NULL DEFAULT 'disconnected', vault_key TEXT NOT NULL DEFAULT '',
  state_hash TEXT NOT NULL DEFAULT '', browser_hash TEXT NOT NULL DEFAULT '',
  session_hash TEXT NOT NULL DEFAULT '', actor_id TEXT NOT NULL DEFAULT '',
  deadline TIMESTAMPTZ, expires_at TIMESTAMPTZ, refreshable BOOLEAN NOT NULL DEFAULT false,
  error_code TEXT NOT NULL DEFAULT '', updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- PRIMARY KEY (realm, connector_id),
+ PRIMARY KEY (realm, connector_id, user_id),
  FOREIGN KEY (connector_id, realm) REFERENCES connectors(id, realm)
 );
 CREATE TABLE IF NOT EXISTS connector_oauth_cleanup (
@@ -85,8 +85,37 @@ func New(options Options) (*Manager, error) {
 }
 
 func (m *Manager) Init(ctx context.Context) error {
-	_, err := m.options.Pool.Exec(ctx, ddl)
-	return err
+	tx, err := m.options.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(824017)`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, ddl); err != nil {
+		return err
+	}
+	// Upgrade the original realm-shared table without carrying its credential
+	// into any user's account. The old row is disconnected and its Vault key is
+	// scheduled for deletion; every new grant is keyed by its owner user ID.
+	if _, err = tx.Exec(ctx, `ALTER TABLE connector_oauth ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `ALTER TABLE connector_oauth DROP CONSTRAINT IF EXISTS connector_oauth_pkey`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `ALTER TABLE connector_oauth ADD CONSTRAINT connector_oauth_pkey PRIMARY KEY (realm,connector_id,user_id)`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO connector_oauth_cleanup(vault_key,not_before)
+SELECT vault_key,now() FROM connector_oauth WHERE user_id='' AND vault_key<>'' ON CONFLICT(vault_key) DO NOTHING`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE connector_oauth SET state='disconnected',vault_key='',state_hash='',browser_hash='',session_hash='',actor_id='',deadline=NULL,expires_at=NULL,refreshable=false,error_code='legacy_shared_grant_retired',updated_at=now() WHERE user_id='' AND (state<>'disconnected' OR vault_key<>'' OR actor_id<>'')`); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 type Status struct {
@@ -130,7 +159,7 @@ func (m *Manager) verifier(state string) string {
 
 // Lock the authoritative connector before its grant. No registry cache or
 // browser-supplied manifest participates in a lifecycle transition.
-func (m *Manager) lock(ctx context.Context, realm domain.RealmID, id string) (pgx.Tx, domain.Connector, slot, error) {
+func (m *Manager) lock(ctx context.Context, realm domain.RealmID, id, userID string) (pgx.Tx, domain.Connector, slot, error) {
 	tx, err := m.options.Pool.Begin(ctx)
 	if err != nil {
 		return nil, domain.Connector{}, slot{}, err
@@ -153,13 +182,13 @@ func (m *Manager) lock(ctx context.Context, realm domain.RealmID, id string) (pg
 		return fail(ErrUnavailable)
 	}
 	c.Realm, c.ID, c.Version, c.Enabled = realm, id, version, enabled
-	_, err = tx.Exec(ctx, `INSERT INTO connector_oauth(realm,connector_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, realm.String(), id)
+	_, err = tx.Exec(ctx, `INSERT INTO connector_oauth(realm,connector_id,user_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, realm.String(), id, userID)
 	if err != nil {
 		return fail(err)
 	}
 	var s slot
 	err = tx.QueryRow(ctx, `SELECT generation,version,state,vault_key,state_hash,browser_hash,session_hash,actor_id,deadline,expires_at,refreshable,error_code,updated_at
- FROM connector_oauth WHERE realm=$1 AND connector_id=$2 FOR UPDATE`, realm.String(), id).Scan(
+	FROM connector_oauth WHERE realm=$1 AND connector_id=$2 AND user_id=$3 FOR UPDATE`, realm.String(), id, userID).Scan(
 		&s.Generation, &s.Version, &s.State, &s.Key, &s.StateHash, &s.BrowserHash, &s.SessionHash, &s.ActorID, &s.Deadline, &s.ExpiresAt, &s.Refreshable, &s.ErrorCode, &s.UpdatedAt)
 	if err != nil {
 		return fail(err)
@@ -172,7 +201,7 @@ func (m *Manager) usable(c domain.Connector) bool {
 }
 
 func (m *Manager) Status(ctx context.Context, caller domain.Caller, id string) (Status, error) {
-	tx, c, s, err := m.lock(ctx, caller.Realm, id)
+	tx, c, s, err := m.lock(ctx, caller.Realm, id, caller.UserID)
 	if err != nil {
 		return Status{}, err
 	}
@@ -189,7 +218,7 @@ func (m *Manager) Status(ctx context.Context, caller domain.Caller, id string) (
 	} else if s.State == "connected" && s.ExpiresAt != nil && !s.ExpiresAt.After(time.Now()) && !s.Refreshable {
 		out.State, out.ErrorCode = "reauthorization_required", "token_expired"
 	}
-	rows, err := tx.Query(ctx, `SELECT action,actor_id,created_at FROM connector_oauth_audit WHERE realm=$1 AND connector_id=$2 ORDER BY id DESC LIMIT 20`, caller.Realm.String(), id)
+	rows, err := tx.Query(ctx, `SELECT action,actor_id,created_at FROM connector_oauth_audit WHERE realm=$1 AND connector_id=$2 AND actor_id=$3 ORDER BY id DESC LIMIT 20`, caller.Realm.String(), id, caller.UserID)
 	if err != nil {
 		return Status{}, err
 	}
@@ -257,7 +286,7 @@ func (m *Manager) Begin(ctx context.Context, caller domain.Caller, id, browser s
 	if !opaque.MatchString(browser) || caller.SessionID == "" {
 		return Start{}, ErrAuthorization
 	}
-	tx, c, s, err := m.lock(ctx, caller.Realm, id)
+	tx, c, s, err := m.lock(ctx, caller.Realm, id, caller.UserID)
 	if err != nil {
 		return Start{}, err
 	}
@@ -274,15 +303,20 @@ func (m *Manager) Begin(ctx context.Context, caller domain.Caller, id, browser s
 	if err != nil {
 		return Start{}, err
 	}
+	if s.Key != "" {
+		if _, err = tx.Exec(ctx, `INSERT INTO connector_oauth_cleanup(vault_key,not_before) VALUES($1,now()+interval '10 minutes') ON CONFLICT(vault_key) DO NOTHING`, s.Key); err != nil {
+			return Start{}, err
+		}
+	}
 	b := make([]byte, 32)
 	if _, err = rand.Read(b); err != nil {
 		return Start{}, err
 	}
 	state := base64.RawURLEncoding.EncodeToString(b)
 	s.Generation++
-	_, err = tx.Exec(ctx, `UPDATE connector_oauth SET generation=$3,version=$4,state='authorizing',vault_key='',state_hash=$5,browser_hash=$6,
- session_hash=$7,actor_id=$8,deadline=now()+interval '5 minutes',expires_at=NULL,refreshable=false,error_code='',updated_at=now()
- WHERE realm=$1 AND connector_id=$2`, c.Realm.String(), c.ID, s.Generation, c.Version, digest(state), digest(browser), digest(caller.SessionID), caller.UserID)
+	_, err = tx.Exec(ctx, `UPDATE connector_oauth SET generation=$4,version=$5,state='authorizing',vault_key='',state_hash=$6,browser_hash=$7,
+ session_hash=$8,actor_id=$9,deadline=now()+interval '5 minutes',expires_at=NULL,refreshable=false,error_code='',updated_at=now()
+ WHERE realm=$1 AND connector_id=$2 AND user_id=$3`, c.Realm.String(), c.ID, caller.UserID, s.Generation, c.Version, digest(state), digest(browser), digest(caller.SessionID), caller.UserID)
 	if err != nil {
 		return Start{}, err
 	}
@@ -309,15 +343,21 @@ type Callback struct {
 // reserve commits a unique Vault destination before any single-use exchange.
 // Cleanup is pre-scheduled, so crashes cannot leave untracked token material.
 func (m *Manager) reserve(ctx context.Context, tx pgx.Tx, c domain.Connector, s *slot, actor, phase string) error {
+	previousKey := s.Key
 	s.Generation++
-	s.Key = m.options.Prefix + "/" + digest(c.Realm.String()+"\x00"+c.ID) + "/" + fmt.Sprint(s.Generation)
+	s.Key = m.options.Prefix + "/" + digest(c.Realm.String()+"\x00"+c.ID+"\x00"+actor) + "/" + fmt.Sprint(s.Generation)
 	s.State = phase
+	if previousKey != "" && previousKey != s.Key {
+		if _, err := tx.Exec(ctx, `INSERT INTO connector_oauth_cleanup(vault_key,not_before) VALUES($1,now()+interval '10 minutes') ON CONFLICT(vault_key) DO NOTHING`, previousKey); err != nil {
+			return err
+		}
+	}
 	_, err := tx.Exec(ctx, `INSERT INTO connector_oauth_cleanup(vault_key,not_before) VALUES($1,now()+interval '10 minutes')`, s.Key)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE connector_oauth SET generation=$3,version=$4,state=$5,vault_key=$6,state_hash='',browser_hash='',session_hash='',
- actor_id=$7,deadline=now()+interval '90 seconds',error_code='',updated_at=now() WHERE realm=$1 AND connector_id=$2`, c.Realm.String(), c.ID, s.Generation, c.Version, phase, s.Key, actor)
+	_, err = tx.Exec(ctx, `UPDATE connector_oauth SET generation=$4,version=$5,state=$6,vault_key=$7,state_hash='',browser_hash='',session_hash='',
+ actor_id=$8,deadline=now()+interval '90 seconds',error_code='',updated_at=now() WHERE realm=$1 AND connector_id=$2 AND user_id=$3`, c.Realm.String(), c.ID, actor, s.Generation, c.Version, phase, s.Key, actor)
 	if err != nil {
 		return err
 	}
@@ -328,7 +368,7 @@ func (m *Manager) Complete(ctx context.Context, caller domain.Caller, id string,
 	if !opaque.MatchString(input.State) || !opaque.MatchString(input.Browser) || caller.SessionID == "" || len(input.Code) > 8192 || len(input.Error) > 256 {
 		return ErrAuthorization
 	}
-	tx, c, s, err := m.lock(ctx, caller.Realm, id)
+	tx, c, s, err := m.lock(ctx, caller.Realm, id, caller.UserID)
 	if err != nil {
 		return err
 	}
@@ -370,9 +410,14 @@ func (m *Manager) Complete(ctx context.Context, caller domain.Caller, id string,
 }
 
 func (m *Manager) clear(ctx context.Context, tx pgx.Tx, c domain.Connector, s slot, actor, state, reason string) error {
+	if s.Key != "" {
+		if _, err := tx.Exec(ctx, `INSERT INTO connector_oauth_cleanup(vault_key,not_before) VALUES($1,now()+interval '10 minutes') ON CONFLICT(vault_key) DO NOTHING`, s.Key); err != nil {
+			return err
+		}
+	}
 	s.Generation++
-	_, err := tx.Exec(ctx, `UPDATE connector_oauth SET generation=$3,version=$4,state=$5,vault_key='',state_hash='',browser_hash='',session_hash='',
- deadline=NULL,expires_at=NULL,refreshable=false,error_code=$6,updated_at=now() WHERE realm=$1 AND connector_id=$2`, c.Realm.String(), c.ID, s.Generation, c.Version, state, reason)
+	_, err := tx.Exec(ctx, `UPDATE connector_oauth SET generation=$4,version=$5,state=$6,vault_key='',state_hash='',browser_hash='',session_hash='',
+	 deadline=NULL,expires_at=NULL,refreshable=false,error_code=$7,updated_at=now() WHERE realm=$1 AND connector_id=$2 AND user_id=$3`, c.Realm.String(), c.ID, actor, s.Generation, c.Version, state, reason)
 	if err != nil {
 		return err
 	}
@@ -380,7 +425,7 @@ func (m *Manager) clear(ctx context.Context, tx pgx.Tx, c domain.Connector, s sl
 }
 
 func (m *Manager) Disconnect(ctx context.Context, caller domain.Caller, id string) error {
-	tx, c, s, err := m.lock(ctx, caller.Realm, id)
+	tx, c, s, err := m.lock(ctx, caller.Realm, id, caller.UserID)
 	if err != nil {
 		return err
 	}
@@ -413,7 +458,7 @@ func (m *Manager) Refresh(ctx context.Context, caller domain.Caller, id string) 
 }
 
 func (m *Manager) token(ctx context.Context, caller domain.Caller, id string, expectedVersion int, force bool) (credentials.Secret, error) {
-	tx, c, s, err := m.lock(ctx, caller.Realm, id)
+	tx, c, s, err := m.lock(ctx, caller.Realm, id, caller.UserID)
 	if err != nil {
 		return credentials.Secret{}, err
 	}
@@ -475,7 +520,7 @@ func (m *Manager) finish(ctx context.Context, c domain.Connector, claimed slot, 
 		m.fail(c, claimed, "vault_write_failed")
 		return ErrUnavailable
 	}
-	tx, current, s, err := m.lock(ctx, c.Realm, c.ID)
+	tx, current, s, err := m.lock(ctx, c.Realm, c.ID, actor)
 	if err != nil {
 		return err
 	}
@@ -487,8 +532,8 @@ func (m *Manager) finish(ctx context.Context, c domain.Connector, claimed slot, 
 	if !token.Expiry.IsZero() {
 		expiry = &token.Expiry
 	}
-	_, err = tx.Exec(ctx, `UPDATE connector_oauth SET state='connected',expires_at=$3,refreshable=$4,deadline=NULL,error_code='',updated_at=now()
- WHERE realm=$1 AND connector_id=$2`, c.Realm.String(), c.ID, expiry, token.RefreshToken != "")
+	_, err = tx.Exec(ctx, `UPDATE connector_oauth SET state='connected',expires_at=$4,refreshable=$5,deadline=NULL,error_code='',updated_at=now()
+	 WHERE realm=$1 AND connector_id=$2 AND user_id=$3`, c.Realm.String(), c.ID, actor, expiry, token.RefreshToken != "")
 	if err != nil {
 		return err
 	}
@@ -501,7 +546,7 @@ func (m *Manager) finish(ctx context.Context, c domain.Connector, claimed slot, 
 func (m *Manager) fail(c domain.Connector, claimed slot, reason string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	tx, current, s, err := m.lock(ctx, c.Realm, c.ID)
+	tx, current, s, err := m.lock(ctx, c.Realm, c.ID, claimed.ActorID)
 	if err != nil {
 		return
 	}
@@ -517,16 +562,17 @@ func (m *Manager) fail(c domain.Connector, claimed slot, reason string) {
 // Maintenance retires interrupted grants and destroys all Vault versions of
 // orphaned generations. The delay exceeds every exchange/write deadline.
 func (m *Manager) Maintenance(ctx context.Context) error {
-	rows, err := m.options.Pool.Query(ctx, `SELECT s.realm,s.connector_id FROM connector_oauth s JOIN connectors c ON c.realm=s.realm AND c.id=s.connector_id
- WHERE s.deadline<now() OR (s.state NOT IN ('disconnected','reauthorization_required') AND s.version<>c.version) LIMIT 100`)
+	rows, err := m.options.Pool.Query(ctx, `SELECT s.realm,s.connector_id,s.user_id FROM connector_oauth s JOIN connectors c ON c.realm=s.realm AND c.id=s.connector_id
+ WHERE s.deadline<now() OR (s.state NOT IN ('disconnected','reauthorization_required') AND s.version<>c.version)
+   OR (s.state='connected' AND s.expires_at IS NOT NULL AND s.expires_at<now() AND NOT s.refreshable) LIMIT 100`)
 	if err != nil {
 		return err
 	}
-	type identity struct{ realm, id string }
+	type identity struct{ realm, id, userID string }
 	var expired []identity
 	for rows.Next() {
 		var item identity
-		if err = rows.Scan(&item.realm, &item.id); err != nil {
+		if err = rows.Scan(&item.realm, &item.id, &item.userID); err != nil {
 			break
 		}
 		expired = append(expired, item)
@@ -539,7 +585,7 @@ func (m *Manager) Maintenance(ctx context.Context) error {
 		return rows.Err()
 	}
 	for _, item := range expired {
-		tx, c, s, err := m.lock(ctx, domain.RealmID(item.realm), item.id)
+		tx, c, s, err := m.lock(ctx, domain.RealmID(item.realm), item.id, item.userID)
 		if err != nil {
 			return err
 		}
@@ -547,6 +593,8 @@ func (m *Manager) Maintenance(ctx context.Context) error {
 			err = m.clear(ctx, tx, c, s, s.ActorID, "reauthorization_required", "configuration_changed")
 		} else if s.Deadline != nil && !s.Deadline.After(time.Now()) {
 			err = m.clear(ctx, tx, c, s, s.ActorID, "reauthorization_required", "operation_expired")
+		} else if s.State == "connected" && s.ExpiresAt != nil && !s.ExpiresAt.After(time.Now()) && !s.Refreshable {
+			err = m.clear(ctx, tx, c, s, s.ActorID, "reauthorization_required", "token_expired")
 		}
 		if err == nil {
 			err = tx.Commit(ctx)

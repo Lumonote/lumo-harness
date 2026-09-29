@@ -20,8 +20,12 @@ Istio SDS 管理，不应创建或挂载通用私钥 Secret。上线前还应启
 | 文件/目录 | 形态 | 载体 | 用途 |
 |------|------|------|------|
 | `desktop/` | 本地单机 | Rust/Tauri 桌面包 | SQLite、本机 Agent、本地技能；无 RocketMQ/Nacos/MinIO/Redis/PostgreSQL |
-| `compose.standalone.yml` | 服务器单例 | Docker Compose | PG+pgvector / Redis / MinIO / RocketMQ / Nacos + 平台 Go 服务单实例 |
-| `compose.cluster.yml` | 服务器集群 | Docker Compose | **自研服务多实例 + 中间件单实例**；分布式行为与故障注入调试 |
+| `compose.shared.yml` | 服务器单例 / 集群 | Docker Compose 基础文件 | 两种形态共用 PG、Redis、MinIO、RocketMQ、Nacos、Prometheus 定义与持久化卷 |
+| `compose.minio-source.yml` | 服务器单例 / 集群 | Docker Compose 构建覆盖文件 | 未指定 `LUMO_MINIO_IMAGE` 时，从固定 MinIO 源码版本构建本地镜像 |
+| `compose.control-plane.bundle.yml` | 服务器单例 / 集群 | Docker Compose 基础文件 | 10 个控制面 API 进程共用一个 `api-bundle` 容器和镜像 |
+| `compose.standalone.yml` | 服务器单例 | Docker Compose 形态覆盖 | 将 10 个 API、单实例调度与协作进程合并到 `api-bundle`，另运行 DSH Web |
+| `compose.cluster.yml` | 服务器集群 | Docker Compose 形态覆盖 | 声明集群专属中间件、DSH Web、策略与模型服务；共享组件只覆盖差异项 |
+| `compose.cluster.compact.yml` | Cluster 默认开发 | Compose 叠加文件 | 将双 Scheduler、双 Collaborator 并入 `api-bundle`；每集群一个 DSH bundle 容器 |
 | `compose.cluster.devices.yml` | Cluster 设备接入 | Compose 叠加文件 | 独立设备 TLS 监听、服务端证书和设备签发 CA 挂载 |
 | `helm/` | Cluster | 生产 | 控制面服务 Helm chart、健康探针和依赖配置 |
 | `compose.local.yml` | Legacy Local-lite | 本地 | 仅开发/CI：PG + Redis + Embedding，不作为产品发行包 |
@@ -127,6 +131,24 @@ pnpm --dir platform desktop:dev
 ./platform/deploy/up.sh cluster -d --build
 ```
 
+单例与集群通过同一组共享 Compose 文件启动，切换形态只改变形态覆盖层；数据库、对象存储、
+服务发现、消息队列、监控和控制面 API 不再各建一份定义。RocketMQ 的 NameServer、Broker、Proxy
+由同一个 `rocketmq` 容器启动。10 个 API、Scheduler 和 Collaborator 在单例与 Cluster compact 下
+都由一个 `api-bundle` 容器托管；进程仍保留独立端口、逻辑服务名和健康检查。
+
+Cluster 默认 compact 拓扑将双 Scheduler、双 Collaborator 与 10 个 API 合并在 `api-bundle`；
+每集群的 agent 父节点、node 承载节点、本地 Scheduler 合并在 cluster-a、cluster-b 各自的
+bundle 容器，内部进程身份、端口、Nacos 上报和网络 alias 保留。默认启动 16 个容器；完整
+故障域拓扑启动 24 个容器；Standalone 启动 8 个容器。计数包含共享基础组件、应用和监控，
+不包含未启用的 `provisioner` profile。需要逐进程容器故障隔离时使用完整拓扑：
+
+Compose 输出的 `[+] Running 1/1` 只统计当前正在执行的步骤。若在 MinIO 镜像处理阶段失败，
+启动会提前停止，不能用这个数字判断单例拓扑的容器数量。
+
+```sh
+LUMO_CLUSTER_TOPOLOGY=full ./platform/deploy/up.sh cluster -d --build
+```
+
 Cluster 全部容器启动后执行统一冒烟验收；脚本会等待全部服务进入 running/healthy，并检查
 双 Scheduler、控制面、DSH Web 与 Prometheus：
 
@@ -146,10 +168,11 @@ Cluster 全部容器启动后执行统一冒烟验收；脚本会等待全部服
 ./platform/deploy/probes-cluster.sh
 ```
 
-- **目标端从拓扑派生，不写名单。** 探针集合来自 `compose.cluster.yml` 里容器端口落在
-  控制面段（默认 `8080-8099`）的服务。新增一个控制面服务会自动多一条探针，删掉/改名会
+- **目标端从拓扑派生，不写名单。** 探针集合来自共享文件、API bundle、cluster 形态和
+  compact overlay 中容器端口落在控制面段（默认 `8080-8099`）的逻辑服务。脚本会将物理
+  bundle 端口映射回 edge-gateway、Scheduler 等逻辑名。新增一个控制面服务会自动多一条探针，删掉/改名会
   报 `probe-targets-not-derived` 而不是静默少跑一条。`probes-cluster-verify.sh` 会用
-  写死的期望条数（cluster 13 / standalone 12）与它对照，并验证「容器端口挪出控制面段
+  写死的期望条数（cluster compact 15 / standalone 12）与它对照，并验证「容器端口挪出控制面段
   就跟着少一条」。
 - **区分「服务没起来」与「服务起来了但行为不对」。** 前者是 curl 传输错误
   （exit 7/28/6），后者是 HTTP 2xx/4xx/5xx。两者退出码都非零，所以报出来的是**分类文案**
@@ -196,11 +219,12 @@ set -a; . platform/deploy/acceptance.env; set +a
   计数为 0 即失败，并在日志里打出跳过数，让部分覆盖至少是可见的。
 
 ⚠️ 仓库自带的 cluster 拓扑**不发布任何基础设施端口**（只有 prometheus、dsh-web 与
-11 个控制面服务暴露到宿主机）。要对着 compose 跑验收，用仓库自带的验收覆盖文件把
+15 个控制面监听端口暴露到宿主机；多个监听端口可能属于同一个 bundle 容器）。要对着 compose 跑验收，用仓库自带的验收覆盖文件把
 需要的端口暴露出来——它只给已有服务加 `ports:`，不新增服务，所以 preflight / smoke
 的服务集检查不受影响：
 
 ```sh
+LUMO_CLUSTER_TOPOLOGY=full \
 LUMO_COMPOSE_EXTRA_FILES=platform/deploy/compose.cluster.acceptance.yml \
   ./platform/deploy/up.sh cluster -d --build
 ```
@@ -216,8 +240,10 @@ standalone 拓扑本身就发布这些端口，本地验证不需要覆盖文件
 已经发布的等价镜像：
 
 ```sh
-docker compose -f compose.cluster.yml up -d --build
+LUMO_CLUSTER_TOPOLOGY=full ./platform/deploy/up.sh cluster -d --build
 ```
+
+本地开发保持默认 compact 启动，bundle 镜像由同一 DSH Dockerfile 的 `cluster-bundle` target 构建。
 
 Web profile 首次启动会自动安装固定版本的数据分析插件，以及所有本地 Lumo 插件包。
 登录不再依赖第三方认证包：本地 `@lumo/user-auth` 连接 Governance 的
@@ -248,23 +274,30 @@ OpenDesign 提供 artifact-first 的设计/原型工作流；Archify 提供可�
 `platform/upstream/skill-sources.json`。这些适配器不会运行 `ruflo init`、修改仓库级指令文件，
 也不会在服务启动时下载上游代码。
 
-## 故障注入（compose.cluster.yml）
+## 故障注入（完整 Cluster 拓扑）
 
 ```sh
-docker compose -f compose.cluster.yml up              # 起两集群缩微拓扑
-docker compose stop cluster-a-dsh-1                  # R2: 任务重投 + resume 幂等
-docker compose stop scheduler-0                       # N1: 备节点接管；无 leader 时放置快速失败
-docker compose pause cluster-b                        # §7.4: suspect(30s)→down(90s) 两段式
-docker compose stop collaborator-0                    # §5.4.7.4: CRDT 归属转移
+compose=(docker compose \
+  -f platform/deploy/compose.shared.yml \
+  -f platform/deploy/compose.control-plane.bundle.yml \
+  -f platform/deploy/compose.cluster.yml --profile cluster-full)
+LUMO_CLUSTER_TOPOLOGY=full ./platform/deploy/up.sh cluster -d --build
+"${compose[@]}" stop cluster-a-dsh-1 # R2: 任务重投 + resume 幂等
+"${compose[@]}" stop scheduler-0      # N1: 备节点接管
+"${compose[@]}" pause cluster-b-dsh-0 # §7.4: 两段式健康降级
+"${compose[@]}" stop collaborator-0   # §5.4.7.4: CRDT 归属转移
 # 网络分区用 toxiproxy/tc 注入（R1: SeamProxy 熔断 + 背压）
 ```
 
+Compact 模式需要整体重启时可以停止 `cluster-a-bundle` 或 `cluster-b-bundle`；要验证某个进程单独
+失效时切换到完整拓扑，因为 bundle 内进程共享容器生命周期。
+
 ## RocketMQ 启动与排障
 
-NameServer 与 Broker 已拆成独立容器。NameServer 健康检查只探测 9876 TCP 端点；不能使用
-`clusterList`，因为后者需要已注册的 Broker，会产生「Broker 等 NameServer 健康、NameServer
-又等 Broker」的循环。Broker 入口会以 root 修正 `/home/rocketmq/store` 卷属主后再降权运行，
-因此不再需要手工 `chown`。
+NameServer、Broker 和 Proxy 在同一个 `rocketmq` 容器内启动，共享本地 NameServer 地址与
+持久化卷。健康检查确认 9876、10911 和 8081 TCP 监听就绪；不使用 `clusterList`，避免把
+Broker 注册反过来作为 NameServer 健康条件。入口会以 root 修正 `/home/rocketmq/store` 卷属主后
+再降权运行，因此不需要手工 `chown`。
 
 RocketMQ 异常退出可能留下空文件或截断的 JSON 元数据，例如 `consumerOffset.json`、
 `timermetrics` 及其 `.bak`；其表象是启动日志先报 JSON EOF，随后在关机路径出现
@@ -277,15 +310,14 @@ JSON 对象边界，优先从完整备份恢复；主备都损坏时将原文件
 
 ```sh
 ./platform/deploy/up.sh cluster -d --build --force-recreate \
-  rocketmq-namesrv rocketmq usage-ledger
+  rocketmq api-bundle
 ```
 
 若仍失败，优先取 NameServer 和 Broker 的健康检查输出与日志：
 
 ```sh
-docker inspect --format '{{json .State.Health}}' lumo-platform-cluster-rocketmq-namesrv-1
-docker compose -f platform/deploy/compose.cluster.yml logs --tail=150 \
-  rocketmq-namesrv rocketmq
+docker inspect --format '{{json .State.Health}}' lumo-platform-rocketmq-1
+docker logs --tail=150 lumo-platform-rocketmq-1
 ```
 
 **topic 命名注意**：RocketMQ 合法字符集 `^[%|a-zA-Z0-9_-]+$`，点号非法；本项目的
@@ -343,10 +375,11 @@ Registry 对象目录和 Provisioner 安装目录（存在时）。Redis 是可�
 Compose 环境变量、挂载的信任根文件和宿主机 Secret 不会被复制；但 MinIO/Nacos 内的应用数据
 仍可能含敏感信息，必须按密钥材料同等级保管备份目录。
 
-Cluster 在此改动前使用容器可写层保存 PostgreSQL、MinIO、Nacos 等数据。首次采用新命名卷前，
-请先运行 `migrate-deployment.sh cluster cluster --replace`，让脚本从旧容器层导出并恢复到命名卷；
-不要直接对旧集群执行一次完整的 `up --force-recreate`，否则这些未挂卷的数据会随旧容器被丢弃。
-Cluster 备份若包含 Milvus，不能恢复到默认未启用 Milvus 的 Standalone，脚本会明确拒绝而不是静默丢数。
+统一 Compose 项目名后，新部署共用 `lumo-platform_*` 卷。旧版 `lumo-platform-cluster_*`、
+`lumo-platform-standalone_*` 命名卷不会自动改名或挂载；旧 Cluster 的 PostgreSQL、MinIO、
+Nacos 等数据还可能留在容器可写层。已有部署请先通过 `migrate-deployment.sh` 导出并恢复到
+统一项目，再执行新拓扑启动；不要直接对旧容器运行 `up --force-recreate`。Cluster 备份若包含
+Milvus，不能恢复到默认未启用 Milvus 的 Standalone，脚本会明确拒绝而不是静默丢数。
 
 ## 生产 Helm 与迁移
 
@@ -379,7 +412,11 @@ Bearer 令牌或发布内容被转发到其他地址。使用外部签名服务�
 PROVISIONER_ARTIFACT_NAME=my-skill \
 PROVISIONER_ARTIFACT_VERSION=1.2.3 \
 LUMO_CONTROL_PLANE_TOKEN='replace-me' \
-docker compose -f compose.standalone.yml --profile provisioner up -d --build provisioner artifact-runtime dsh-node
+docker compose \
+  -f platform/deploy/compose.shared.yml \
+  -f platform/deploy/compose.control-plane.bundle.yml \
+  -f platform/deploy/compose.standalone.yml \
+  --profile provisioner up -d --build provisioner artifact-runtime dsh-node
 ```
 
 也可以把版本选择交给 Registry 的 `stable` 通道：管理员先在 Lumo 插件市场将某个
@@ -404,13 +441,13 @@ payload digest 和所有 payload 文件后，`artifact-runtime` 才会授予入�
 操作（以下以服务器单例为例）：
 
 ```sh
-docker compose -f compose.standalone.yml exec artifact-runtime \
+docker compose -f platform/deploy/compose.shared.yml -f platform/deploy/compose.control-plane.bundle.yml -f platform/deploy/compose.standalone.yml exec artifact-runtime \
   artifact-runtime start --socket /var/lib/lumo/artifacts/artifact-runtime.sock \
   --name my-component --version 1.2.3
-docker compose -f compose.standalone.yml exec artifact-runtime \
+docker compose -f platform/deploy/compose.shared.yml -f platform/deploy/compose.control-plane.bundle.yml -f platform/deploy/compose.standalone.yml exec artifact-runtime \
   artifact-runtime health --socket /var/lib/lumo/artifacts/artifact-runtime.sock \
   --name my-component --version 1.2.3
-docker compose -f compose.standalone.yml exec artifact-runtime \
+docker compose -f platform/deploy/compose.shared.yml -f platform/deploy/compose.control-plane.bundle.yml -f platform/deploy/compose.standalone.yml exec artifact-runtime \
   artifact-runtime logs --socket /var/lib/lumo/artifacts/artifact-runtime.sock \
   --name my-component --version 1.2.3
 ```
@@ -648,10 +685,16 @@ Scheduler 的两个开关：
 
 - **同一套镜像与应用配置，只换编排清单**；禁止「本地专用镜像」或「本地专用配置项」。
 - **镜像引用有两个自由度（registry 与 tag），两个都要钉**。只钉 tag 会踩「仓库整体下线」
-  （2026-09-16→09-20 的 `minio/minio`：先换 tag 只撑了四天，因为整个仓库从 Docker Hub 下架，
-  现已改用 `quay.io/minio/minio`）；只钉 registry 会踩 `latest` 漂移。**两份 compose 的同名
+  （2026-09-16→09-20 的 `minio/minio`：先换 tag 只撑了四天，因为整个仓库从 Docker Hub 下架）；
+  只钉 registry 会踩 `latest` 漂移。**两份 compose 的同名
   服务必须同源**——否则 standalone 能起的拓扑在 cluster 里起不来，反之亦然。门禁
   `./platform/deploy/compose-images-verify.sh`（含 11 条反例/边界）。
+  MinIO 默认由 `up.sh` 从官方固定源码标签构建为本地镜像；构建定义在
+  `minio-source.Dockerfile` 与 `compose.minio-source.yml`，两种部署形态共用。
+  首次构建需要访问 GitHub、Go 模块代理和 Docker Hub，后续使用 Docker 构建缓存。
+  也可通过共享变量 `LUMO_MINIO_IMAGE` 指向组织内镜像缓存或可达的镜像仓库：
+  `LUMO_MINIO_IMAGE=registry.example.com/mirror/minio:RELEASE.2025-04-22T22-12-26Z ./platform/deploy/up.sh standalone -d --build`。
+  设置该变量时 `up.sh` 不加载本地构建文件；两种部署形态使用同一个变量。
 - 中间件在缩微集群中一律单实例（不验证中间件自身的 HA，那是它们各自的事）。
 - **计量闭集 topic 的预建在 rocketmq 入口脚本里，不在独立容器里**（2026-09-20 合并；原先是
   一次性容器 `rocketmq-topic-init`）。顺序即契约：注册断言 → 建 topic → 才 `sh mqproxy`，

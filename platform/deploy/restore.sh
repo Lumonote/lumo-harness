@@ -30,7 +30,21 @@ esac
 [[ -d "$2" ]] || die "backup directory does not exist: $2"
 backup_dir="$(cd -- "$2" && pwd -P)"
 compose_file="$script_dir/compose.$shape.yml"
-compose=(docker compose -f "$compose_file")
+compose=(docker compose -p "${COMPOSE_PROJECT_NAME:-lumo-platform}"
+  -f "$script_dir/compose.shared.yml"
+  -f "$script_dir/compose.control-plane.bundle.yml"
+  -f "$compose_file")
+if [[ -z "${LUMO_MINIO_IMAGE:-}" ]]; then
+  compose+=(-f "$script_dir/compose.minio-source.yml")
+fi
+if [[ "$shape" == "cluster" ]]; then
+  if [[ "${LUMO_CLUSTER_TOPOLOGY:-compact}" == "full" ]]; then
+    compose+=(--profile cluster-full)
+  else
+    compose+=(-f "$script_dir/compose.cluster.compact.yml" --profile cluster-compact)
+  fi
+fi
+compose+=(--profile provisioner)
 
 for command_name in docker zstd shasum tar awk; do
   require_command "$command_name"
@@ -82,7 +96,7 @@ component_specs=(
   "nacos|/home/nacos/data|nacos.tar.zst"
   "rocketmq|/home/rocketmq/store|rocketmq.tar.zst"
   "milvus|/var/lib/milvus|milvus.tar.zst"
-  "registry|/var/lib/registry/objects|registry.tar.zst"
+  "api-bundle|/var/lib/registry/objects|registry.tar.zst"
   "provisioner|/var/lib/lumo/artifacts|provisioner.tar.zst"
 )
 for spec in "${component_specs[@]}"; do

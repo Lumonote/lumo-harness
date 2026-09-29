@@ -12,9 +12,27 @@ command -v curl >/dev/null 2>&1 || { echo "smoke: curl is required" >&2; exit 12
 # render, trust root, or mandatory control-plane credential is unavailable.
 LUMO_ENV_FILE="$env_file" "$script_dir/preflight-deployment.sh" cluster
 
-compose=(docker compose -f "$script_dir/compose.cluster.yml")
+cluster_topology="${LUMO_CLUSTER_TOPOLOGY:-compact}"
+compose_files=("$script_dir/compose.shared.yml" "$script_dir/compose.control-plane.bundle.yml" "$script_dir/compose.cluster.yml")
+compose=(docker compose)
+for file in "${compose_files[@]}"; do compose+=(-f "$file"); done
+if [[ "$cluster_topology" == "compact" ]]; then
+  compose_files+=("$script_dir/compose.cluster.compact.yml")
+  compose+=(-f "$script_dir/compose.cluster.compact.yml" --profile cluster-compact)
+elif [[ "$cluster_topology" == "full" ]]; then
+  compose+=(--profile cluster-full)
+else
+  echo "smoke: LUMO_CLUSTER_TOPOLOGY must be compact or full" >&2
+  exit 64
+fi
 if [[ -f "$env_file" ]]; then
-  compose=(docker compose --env-file "$env_file" -f "$script_dir/compose.cluster.yml")
+  compose=(docker compose --env-file "$env_file")
+  for file in "${compose_files[@]}"; do compose+=(-f "$file"); done
+  if [[ "$cluster_topology" == "compact" ]]; then
+    compose+=(--profile cluster-compact)
+  else
+    compose+=(--profile cluster-full)
+  fi
 fi
 
 control_plane_token="${LUMO_CONTROL_PLANE_TOKEN:-}"
@@ -117,7 +135,7 @@ wait_http() {
 # 用同一份——两份实现迟早会在「哪种失败算哪种」上分叉。
 source "$script_dir/lib/probes.sh"
 
-probe_targets="$(derive_probe_targets "$script_dir/compose.cluster.yml")"
+probe_targets="$(derive_probe_targets "${compose_files[@]}")"
 probe_count=0
 while IFS=$'\t' read -r probe_service probe_host probe_container; do
   [[ -n "$probe_service" ]] || continue
@@ -133,7 +151,7 @@ if (( probe_count == 0 )); then
   echo "smoke: FAIL: 一条控制面探针都没构造出来（派生失效？）" >&2
   exit 1
 fi
-echo "smoke: 控制面存活探针 ${probe_count} 条（从拓扑派生）"
+echo "smoke: $cluster_topology 拓扑控制面存活探针 ${probe_count} 条（从拓扑派生）"
 
 wait_http "scheduler leader" "http://127.0.0.1:18083/v1/leader" yes
 wait_http "scheduler nodes" "http://127.0.0.1:18083/v1/nodes" yes

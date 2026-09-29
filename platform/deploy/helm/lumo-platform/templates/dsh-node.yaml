@@ -351,6 +351,14 @@ spec:
               value: {{ .Values.dshWeb.connectorUrl | quote }}
             - name: LUMO_REGISTRY_URL
               value: {{ .Values.dshWeb.registryUrl | quote }}
+            - name: LUMO_LLM_GATEWAY_URL
+              value: {{ .Values.dshWeb.llmGatewayUrl | quote }}
+            - name: LUMO_USAGE_LEDGER_URL
+              value: {{ .Values.dshWeb.usageLedgerUrl | quote }}
+            - name: LUMO_EDGE_GATEWAY_URL
+              value: {{ .Values.dshWeb.edgeGatewayUrl | quote }}
+            - name: LUMO_TERMINAL_GATEWAY_URL
+              value: {{ .Values.dshWeb.terminalGatewayUrl | quote }}
             - name: LUMO_NACOS_ADDR
               value: {{ .Values.dshWeb.nacosAddress | quote }}
             - name: LUMO_NACOS_SERVICE

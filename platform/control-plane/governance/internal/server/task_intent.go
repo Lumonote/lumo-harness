@@ -20,7 +20,11 @@ func (s *Server) prepareDelegationIntent(ctx context.Context, c caller, spec *do
 		if err != nil {
 			return err
 		}
-		if parent.ProjectID != spec.ProjectID || (parent.RequesterUserID != c.userID && parent.AssigneeUserID != c.userID) {
+		access, accessErr := s.store.TaskAccess(ctx, c.realm, parent.ID, c.userID)
+		if accessErr != nil {
+			return accessErr
+		}
+		if parent.ProjectID != spec.ProjectID || (!isRealmAdmin(c) && access != "contributor") {
 			return store.ErrForbidden
 		}
 		parentIntent, err := domain.NormalizeIntent(parent.Intent, parent.IntentContract)
@@ -100,7 +104,7 @@ func (s *Server) listChildTasks(w http.ResponseWriter, r *http.Request) {
 	if !ok || !requireDelegationAuthority(w, c) {
 		return
 	}
-	if _, ok := s.taskParticipant(w, r, c); !ok {
+	if _, ok := s.taskViewer(w, r, c); !ok {
 		return
 	}
 	tasks, err := s.store.ListChildTasks(r.Context(), c.realm, r.PathValue("taskID"))

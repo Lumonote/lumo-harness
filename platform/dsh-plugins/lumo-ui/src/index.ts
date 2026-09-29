@@ -1,6 +1,11 @@
 /** Host half: keep DSH's native Web shell and add a same-origin Lumo control API. */
 import { readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { basename, dirname, extname, join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -27,7 +32,48 @@ interface SessionLogQuerySeam {
 
 /** Read-only browser projection of the platform KnowledgeSeam. */
 interface KnowledgeQueryService {
-  query(request: { realm: string; roles: string[]; text: string; topK: number; scope: 'published' | 'draft' }): Promise<Array<{ docId: string; sourceVersion: number; score: number; text: string }>>
+  query(request: { realm: string; roles: string[]; userId?: string; libraryAdmin?: boolean; text: string; topK: number; scope: 'published' | 'draft' }): Promise<Array<{ docId: string; sourceVersion: number; score: number; text: string }>>
+}
+
+interface KnowledgeLibraryManagerService {
+  listLibraryFolders(realm: string, userId: string, roles: string[], isAdmin: boolean): Promise<Array<{ folderId: string; realm: string; parentId: string | null; name: string; ownerUserId: string; createdAt: string }>>
+  canAccessLibraryFolder(input: { realm: string; folderId: string; userId: string; roles: string[]; isAdmin: boolean; access?: 'viewer' | 'editor' }): Promise<boolean>
+  createLibraryFolder(input: { realm: string; parentId: string | null; name: string; ownerUserId: string; roles: string[]; isAdmin: boolean }): Promise<{ folderId: string; realm: string; parentId: string | null; name: string; ownerUserId: string; createdAt: string }>
+  deleteLibraryFolder(input: { realm: string; folderId: string; actorUserId: string; roles: string[]; isAdmin: boolean }): Promise<void>
+  listLibraryFiles(realm: string, userId: string, roles: string[], isAdmin: boolean): Promise<LibraryFileInfo[]>
+  getLibraryFile(docId: string, realm: string): Promise<LibraryFileInfo | undefined>
+  createLibraryFile(file: LibraryFileInfo): Promise<void>
+  removeLibraryFile(docId: string, realm: string): Promise<void>
+  canAccessLibraryFile(input: { docId: string; realm: string; userId: string; roles: string[]; isAdmin: boolean; access?: 'viewer' | 'editor' }): Promise<boolean>
+  setLibraryGrants(input: { realm: string; resourceType: 'folder' | 'file'; resourceId: string; actorUserId: string; roles: string[]; isAdmin: boolean; grants: Array<{ type: 'user' | 'role'; id: string; access: 'viewer' | 'editor' }> }): Promise<void>
+  listLibraryGrants(realm: string, resourceType: 'folder' | 'file', resourceId: string): Promise<Array<{ type: 'user' | 'role'; id: string; access: 'viewer' | 'editor' }>>
+  getSource(docId: string, realm: string): Promise<{ chunks: Array<{ text: string; metadata: Record<string, unknown> }> } | undefined>
+  upsertSource(entry: { docId: string; realm: string; space: string; title: string; chunks: Array<{ text: string; metadata: Record<string, unknown> }> }): Promise<unknown>
+}
+
+interface LibraryFileInfo {
+  docId: string; realm: string; folderId: string | null; filename: string; mimeType: string
+  objectKey: string; byteSize: number; sha256: string; ownerUserId: string
+  extractionState: 'pending' | 'ready' | 'failed' | 'unsupported'
+  ocrState: 'not_needed' | 'pending' | 'ready' | 'failed' | 'unavailable'; createdAt: string
+}
+
+interface ObjectStoreService {
+  putContent(realm: string, body: Buffer | string, contentType?: string): Promise<string>
+  get(realm: string, key: string): Promise<{ body: Buffer; contentType?: string } | undefined>
+}
+
+interface OfficeToPdfService {
+  convert(request: {
+    extension: 'docx' | 'pptx'
+    priority: 'foreground'
+    source: {
+      key: string
+      version: string
+      bytes: number
+      read(signal: AbortSignal, maxBytes: number): Promise<{ bytes: Uint8Array; version: string }>
+    }
+  }, signal?: AbortSignal): Promise<{ pdf: Uint8Array; missingFonts: string[] }>
 }
 
 /** 单机版 vault 知识源的运行态面（Local Desktop；未装配时面板走「未配置」引导）。 */
@@ -86,6 +132,10 @@ export interface Config {
   connectorUrl: string
   governanceUrl: string
   registryUrl: string
+  llmGatewayUrl?: string
+  usageLedgerUrl?: string
+  edgeGatewayUrl?: string
+  terminalGatewayUrl?: string
   /** 会话控制面（§8.4.3 的 Session Console 后端）。空串 = 本部署没接线，控制台面返回 503。 */
   sessionControlUrl: string
   realm: string
@@ -119,6 +169,8 @@ export interface Config {
 
 export const Config: z<Config> = z.object({
   schedulerUrl: z.string(), projectsUrl: z.string(), flowsUrl: z.string(), connectorUrl: z.string(), governanceUrl: z.string(), registryUrl: z.string().default(''),
+  llmGatewayUrl: z.string().default(''), usageLedgerUrl: z.string().default(''),
+  edgeGatewayUrl: z.string().default(''), terminalGatewayUrl: z.string().default(''),
   // 有缺省（空串）**不是**给 localhost 兜底：空串是「本部署没有这个服务」的显式标记，
   // 路由据此回 503。若这里放一个 http://127.0.0.1:8092 之类的值，一个没接线的部署会去
   // 连本机端口，症状变成「控制面连不上」——排查方向指向网络，而真实原因是这个部署没接线。
@@ -144,7 +196,7 @@ export const Config: z<Config> = z.object({
   skillhubSnapshotFile: z.string().default('.lumo/skill-snapshot.json'),
 })
 
-type ServiceName = 'scheduler' | 'projects' | 'flows' | 'connector' | 'governance' | 'registry' | 'session-control'
+type ServiceName = 'scheduler' | 'projects' | 'flows' | 'connector' | 'governance' | 'registry' | 'session-control' | 'llm-gateway' | 'usage-ledger' | 'edge-gateway' | 'terminal-gateway'
 interface UpstreamResult { ok: boolean; status: number; data: unknown; error?: string }
 
 interface PluginSummary {
@@ -164,6 +216,10 @@ function base(config: Config, service: ServiceName): string {
     governance: config.governanceUrl,
     registry: config.registryUrl,
     'session-control': config.sessionControlUrl,
+    'llm-gateway': config.llmGatewayUrl ?? '',
+    'usage-ledger': config.usageLedgerUrl ?? '',
+    'edge-gateway': config.edgeGatewayUrl ?? '',
+    'terminal-gateway': config.terminalGatewayUrl ?? '',
   }[service].replace(/\/+$/u, '')
 }
 
@@ -178,10 +234,10 @@ function identityHeaders(config: Config, identity: RequestIdentity): Record<stri
   }
 }
 
-async function upstream(config: Config, identity: RequestIdentity, service: ServiceName, path: string, req: IncomingMessage, method = 'GET', body?: Buffer): Promise<UpstreamResult> {
+async function upstream(config: Config, identity: RequestIdentity, service: ServiceName, path: string, req: IncomingMessage, method = 'GET', body?: Buffer, contentType?: string): Promise<UpstreamResult> {
   const headers: Record<string, string> = {
     ...identityHeaders(config, identity),
-    ...(body === undefined ? {} : { 'content-type': req.headers['content-type']?.toString() || 'application/json' }),
+    ...(body === undefined ? {} : { 'content-type': contentType ?? req.headers['content-type']?.toString() ?? 'application/json' }),
   }
   try {
     const serviceBase = base(config, service)
@@ -198,6 +254,37 @@ async function upstream(config: Config, identity: RequestIdentity, service: Serv
   } catch (error) {
     return { ok: false, status: 0, data: null, error: error instanceof Error ? error.message : String(error) }
   }
+}
+
+const TASK_ARTIFACT_GIT_LIMIT = 512 * 1024
+const GIT_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$/u
+const GIT_REPOSITORY = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+){1,8}$/u
+
+async function invokeGitConnector(
+  config: Config, identity: RequestIdentity, req: IncomingMessage, connectorID: 'github' | 'gitlab',
+  operation: string, pathParams: Record<string, string>, query?: Record<string, string>, body?: Record<string, unknown>,
+): Promise<unknown> {
+  const payload = Buffer.from(JSON.stringify({ operation, pathParams, ...(query ? { query } : {}), ...(body ? { body } : {}), correlationId: `task-artifact-${Date.now()}` }), 'utf8')
+  const result = await upstream(config, identity, 'connector', `/connectors/${connectorID}/invoke`, req, 'POST', payload, 'application/json')
+  if (!result.ok) {
+    const detail = typeof result.data === 'object' && result.data !== null && typeof (result.data as { error?: unknown }).error === 'string'
+      ? (result.data as { error: string }).error : result.error ?? 'connector gateway rejected the request'
+    throw new Error(`${connectorID} 连接器调用失败 (${result.status || 502})：${detail}`)
+  }
+  const response = result.data as { status?: unknown; body?: unknown } | null
+  if (response === null || typeof response.status !== 'number' || response.status < 200 || response.status >= 300) {
+    const code = typeof response?.status === 'number' ? response.status : 502
+    const detail = typeof response?.body === 'string' ? response.body : JSON.stringify(response?.body ?? {})
+    throw new Error(`${connectorID} API 返回 ${code}：${detail.slice(0, 600)}`)
+  }
+  return response.body
+}
+
+function gitObjectString(value: unknown, path: string): string {
+  let current: unknown = value
+  for (const key of path.split('.')) current = typeof current === 'object' && current !== null ? (current as Record<string, unknown>)[key] : undefined
+  if (typeof current !== 'string' || current === '') throw new Error(`Git 服务没有返回 ${path}`)
+  return current
 }
 
 async function overview(config: Config, identity: RequestIdentity, req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -222,8 +309,15 @@ async function overview(config: Config, identity: RequestIdentity, req: Incoming
     upstream(config, identity, 'flows', '/healthz', req), upstream(config, identity, 'flows', '/v1/flows', req),
     upstream(config, identity, 'connector', '/healthz', req), upstream(config, identity, 'connector', '/connectors', req),
     upstream(config, identity, 'governance', '/healthz', req),
+    upstream(config, identity, 'registry', '/healthz', req),
+    upstream(config, identity, 'session-control', '/healthz', req),
+    upstream(config, identity, 'llm-gateway', '/healthz', req),
+    upstream(config, identity, 'usage-ledger', '/healthz', req),
+    upstream(config, identity, 'edge-gateway', '/healthz', req),
+    upstream(config, identity, 'terminal-gateway', '/healthz', req),
   ])
-  const [schedulerHealth, leader, nodes, projectsHealth, projects, flowsHealth, flows, connectorHealth, connectors, governanceHealth] = results
+  const [schedulerHealth, leader, nodes, projectsHealth, projects, flowsHealth, flows, connectorHealth, connectors, governanceHealth,
+    registryHealth, sessionControlHealth, llmGatewayHealth, usageLedgerHealth, edgeGatewayHealth, terminalGatewayHealth] = results
   return {
     generatedAt: new Date().toISOString(),
     deployment: {
@@ -236,7 +330,12 @@ async function overview(config: Config, identity: RequestIdentity, req: Incoming
       clusterReady: config.deploymentMode === 'cluster' && config.clusterStatus.toLowerCase() === 'ready',
       clusterOnly: config.deploymentMode === 'cluster',
     },
-    services: { scheduler: schedulerHealth, projects: projectsHealth, flows: flowsHealth, connector: connectorHealth, governance: governanceHealth },
+    services: {
+      scheduler: schedulerHealth, projects: projectsHealth, flows: flowsHealth, connector: connectorHealth,
+      governance: governanceHealth, registry: registryHealth, 'session-control': sessionControlHealth,
+      'llm-gateway': llmGatewayHealth, 'usage-ledger': usageLedgerHealth,
+      'edge-gateway': edgeGatewayHealth, 'terminal-gateway': terminalGatewayHealth,
+    },
     cluster: { leader: leader.data, nodes: (nodes.data as { nodes?: unknown[] } | null)?.nodes ?? [] },
     projects: (projects.data as { projects?: unknown[] } | null)?.projects ?? [],
     flows: (flows.data as { flows?: unknown[] } | null)?.flows ?? [],
@@ -252,13 +351,13 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body))
 }
 
-async function readBody(req: IncomingMessage): Promise<Buffer> {
+async function readBody(req: IncomingMessage, maxBytes = 1 << 20): Promise<Buffer> {
   const chunks: Buffer[] = []
   let bytes = 0
   for await (const part of req) {
     const chunk = Buffer.isBuffer(part) ? part : Buffer.from(part)
     bytes += chunk.length
-    if (bytes > 1<<20) throw new RangeError('request body too large')
+    if (bytes > maxBytes) throw new RangeError('request body too large')
     chunks.push(chunk)
   }
   return Buffer.concat(chunks)
@@ -283,6 +382,10 @@ function safeID(value: string | undefined): string | undefined {
 
 function isRealmAdmin(identity: RequestIdentity): boolean {
   return identity.roles.some(role => role === 'platform_admin' || role === 'realm_admin' || role === 'admin')
+}
+
+function isPlatformAdmin(identity: RequestIdentity): boolean {
+  return identity.roles.includes('platform_admin')
 }
 
 // 控制面认的角色是**闭集**，写在 `platform/deploy/policies/session-control.rego` 的
@@ -313,6 +416,27 @@ function sourceManager(knowledge: KnowledgeQueryService | undefined): KnowledgeS
     && typeof candidate.rebuild === 'function'
     ? candidate as KnowledgeSourceManagerService
     : undefined
+}
+
+function knowledgeLibrary(knowledge: KnowledgeQueryService | undefined): KnowledgeLibraryManagerService | undefined {
+  if (knowledge === undefined || typeof knowledge !== 'object') return undefined
+  const candidate = knowledge as Partial<KnowledgeLibraryManagerService>
+  const methods: Array<keyof KnowledgeLibraryManagerService> = [
+    'listLibraryFolders', 'canAccessLibraryFolder', 'createLibraryFolder', 'deleteLibraryFolder',
+    'listLibraryFiles', 'getLibraryFile', 'createLibraryFile', 'removeLibraryFile', 'canAccessLibraryFile',
+    'setLibraryGrants', 'listLibraryGrants', 'getSource', 'upsertSource',
+  ]
+  return methods.every(method => typeof candidate[method] === 'function')
+    ? candidate as KnowledgeLibraryManagerService : undefined
+}
+
+function requireKnowledgeLibrary(res: ServerResponse, knowledge: KnowledgeQueryService | undefined): KnowledgeLibraryManagerService | undefined {
+  const manager = knowledgeLibrary(knowledge)
+  if (manager === undefined) {
+    writeJson(res, 501, { error: '当前资料库 Provider 不支持文件目录管理；请使用 PostgreSQL 权威资料库。' })
+    return undefined
+  }
+  return manager
 }
 
 function requireKnowledgeAdmin(res: ServerResponse, identity: RequestIdentity, knowledge: KnowledgeQueryService | undefined, singleMachine = false): KnowledgeSourceManagerService | undefined {
@@ -357,6 +481,44 @@ function expectedSourceVersion(value: unknown, required: boolean): number | unde
   return value as number
 }
 
+function libraryGrants(body: Record<string, unknown>): Array<{ type: 'user' | 'role'; id: string; access: 'viewer' | 'editor' }> {
+  const value = body['grants']
+  if (!Array.isArray(value) || value.length > 200) throw new TypeError('grants 必须是最多 200 项的数组')
+  const seen = new Set<string>()
+  return value.map((entry, index) => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new TypeError(`grants[${index}] 格式无效`)
+    const row = entry as Record<string, unknown>
+    const type = row['type']; const id = typeof row['id'] === 'string' && /^[A-Za-z0-9._:-]{1,128}$/u.test(row['id']) ? row['id'] : undefined; const access = row['access']
+    if ((type !== 'user' && type !== 'role') || id === undefined || (access !== 'viewer' && access !== 'editor')) throw new TypeError(`grants[${index}] 分享对象、ID 或权限无效`)
+    const key = `${type}:${id}`
+    if (seen.has(key)) throw new TypeError(`分享对象重复：${key}`)
+    seen.add(key)
+    return { type, id, access }
+  })
+}
+
+function libraryEntities(header: string | undefined): string[] {
+  if (header === undefined || header === '') return []
+  if (header.length > 8_192) throw new TypeError('知识图谱实体标签过长')
+  let value: unknown
+  try {
+    if (!/^[A-Za-z0-9+/]*={0,2}$/u.test(header)) throw new Error('invalid base64')
+    const decoded = Buffer.from(header, 'base64')
+    if (decoded.toString('base64') !== header) throw new Error('invalid base64')
+    value = JSON.parse(decoded.toString('utf8'))
+  } catch { throw new TypeError('知识图谱实体标签格式无效') }
+  if (!Array.isArray(value) || value.length > 50) throw new TypeError('最多添加 50 个知识图谱实体标签')
+  const entities: string[] = []
+  const seen = new Set<string>()
+  for (const [index, candidate] of value.entries()) {
+    if (typeof candidate !== 'string') throw new TypeError(`知识图谱实体标签 ${index + 1} 格式无效`)
+    const entity = candidate.trim()
+    if (entity === '' || Buffer.byteLength(entity, 'utf8') > 128 || /[\u0000-\u001f\u007f]/u.test(entity)) throw new TypeError(`知识图谱实体标签 ${index + 1} 无效`)
+    if (!seen.has(entity)) { seen.add(entity); entities.push(entity) }
+  }
+  return entities
+}
+
 function sourceWrite(body: Record<string, unknown>, realm: string, docId?: string, requireExpectedVersion = false): {
   docId: string; realm: string; space: string; title: string
   chunks: Array<{ text: string; metadata: Record<string, unknown> }>
@@ -381,7 +543,172 @@ function knowledgeManagementStatus(error: unknown): number {
   if (error instanceof RangeError) return 413
   if (error instanceof SyntaxError || error instanceof TypeError) return 400
   if (error instanceof Error && error.name === 'KnowledgeSourceConflictError') return 409
+  if (typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === '23505') return 409
+  if (typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === '23503') return 409
+  if (error instanceof Error && (error.name === 'SeamError' || error.name === 'RemoteSeamError') && 'code' in error) {
+    switch ((error as Error & { code?: unknown }).code) {
+      case 'forbidden': return 403
+      case 'invalid': return 400
+      case 'capability_unavailable': return 501
+      case 'timeout': return 504
+      case 'unavailable': return 503
+    }
+  }
   return 502
+}
+
+const executeFile = promisify(execFile)
+const LIBRARY_UPLOAD_LIMIT = 50 * 1024 * 1024
+const OFFICE_TEXT_EXTRACTOR = String.raw`
+import sys, zipfile, xml.etree.ElementTree as ET
+path = sys.argv[1]
+with zipfile.ZipFile(path) as archive:
+    infos = archive.infolist()
+    if len(infos) > 1000 or sum(item.file_size for item in infos) > 80 * 1024 * 1024:
+        raise ValueError('office archive expands beyond the extraction limit')
+    names = set(archive.namelist())
+    def texts(name):
+        root = ET.fromstring(archive.read(name))
+        return [item.text or '' for item in root.iter() if item.tag.rsplit('}', 1)[-1] in ('t', 'v')]
+    if 'word/document.xml' in names:
+        selected = ['word/document.xml']
+    elif 'ppt/presentation.xml' in names:
+        selected = sorted((n for n in names if n.startswith('ppt/slides/slide') and n.endswith('.xml')), key=lambda n: int(''.join(c for c in n.rsplit('slide',1)[-1][:-4] if c.isdigit()) or '0'))
+    elif 'xl/workbook.xml' in names:
+        selected = sorted(n for n in names if n.startswith('xl/worksheets/sheet') and n.endswith('.xml'))
+        shared = texts('xl/sharedStrings.xml') if 'xl/sharedStrings.xml' in names else []
+        values = []
+        for name in selected:
+            root = ET.fromstring(archive.read(name))
+            for row in root.iter():
+                if row.tag.rsplit('}', 1)[-1] != 'row': continue
+                cells = []
+                for cell in list(row):
+                    if cell.tag.rsplit('}', 1)[-1] != 'c': continue
+                    kind = cell.attrib.get('t')
+                    value = next((child.text or '' for child in list(cell) if child.tag.rsplit('}', 1)[-1] in ('v','t')), '')
+                    if kind == 's' and value.isdigit() and int(value) < len(shared): value = shared[int(value)]
+                    cells.append(value)
+                if cells: values.append('\t'.join(cells))
+        print('\n'.join(values))
+        raise SystemExit(0)
+    else:
+        raise ValueError('unsupported Office document')
+    output = []
+    for name in selected:
+        output.extend(texts(name))
+    print('\n'.join(value for value in output if value))
+`
+
+function safeUploadFilename(value: string | undefined): string {
+  if (value === undefined || value.length > 1024) throw new TypeError('请提供有效的文件名')
+  let decoded = value
+  try { decoded = decodeURIComponent(value) } catch { throw new TypeError('文件名编码无效') }
+  const filename = basename(decoded.replaceAll('\\', '/')).replace(/[\u0000-\u001f\u007f]/gu, '').trim()
+  if (filename === '' || Buffer.byteLength(filename, 'utf8') > 240 || filename === '.' || filename === '..') throw new TypeError('文件名无效')
+  return filename
+}
+
+function libraryMimeType(filename: string): string | undefined {
+  const ext = extname(filename).toLowerCase()
+  const known: Record<string, string> = {
+    '.txt': 'text/plain; charset=utf-8', '.log': 'text/plain; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.markdown': 'text/markdown; charset=utf-8',
+    '.csv': 'text/csv; charset=utf-8', '.tsv': 'text/tab-separated-values; charset=utf-8', '.json': 'application/json; charset=utf-8',
+    '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.xml': 'application/xml; charset=utf-8', '.yaml': 'text/yaml; charset=utf-8', '.yml': 'text/yaml; charset=utf-8',
+    '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.tif': 'image/tiff', '.tiff': 'image/tiff', '.bmp': 'image/bmp',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  }
+  return known[ext]
+}
+
+async function runDocumentCommand(command: string, args: string[], timeout: number, maxBuffer = 5 * 1024 * 1024): Promise<string> {
+  const result = await executeFile(command, args, { timeout, maxBuffer, encoding: 'utf8' })
+  return result.stdout
+}
+
+async function extractLibraryText(filename: string, mimeType: string, body: Buffer): Promise<{
+  text: string; extractionState: LibraryFileInfo['extractionState']; ocrState: LibraryFileInfo['ocrState']
+}> {
+  const ext = extname(filename).toLowerCase()
+  if (['.txt', '.log', '.md', '.markdown', '.csv', '.tsv', '.json', '.html', '.htm', '.xml', '.yaml', '.yml'].includes(ext)) {
+    const text = body.toString('utf8').replace(/^\uFEFF/u, '').trim()
+    return text ? { text, extractionState: 'ready', ocrState: 'not_needed' } : { text: '', extractionState: 'failed', ocrState: 'not_needed' }
+  }
+
+  const directory = await mkdtemp(join(tmpdir(), 'lumo-library-'))
+  const inputPath = join(directory, `document${ext || '.bin'}`)
+  try {
+    await writeFile(inputPath, body, { mode: 0o600 })
+    if (mimeType === 'application/pdf') {
+      let text = ''
+      try { text = (await runDocumentCommand('pdftotext', ['-layout', '-enc', 'UTF-8', inputPath, '-'], 30_000)).trim() }
+      catch { /* 扫描版/无可提取文本时继续尝试 OCR */ }
+      if (text.length >= 20) return { text, extractionState: 'ready', ocrState: 'not_needed' }
+      const prefix = join(directory, 'page')
+      try {
+        await runDocumentCommand('pdftoppm', ['-f', '1', '-l', '20', '-scale-to', '2200', '-jpeg', inputPath, prefix], 60_000, 2 * 1024 * 1024)
+        const pages = (await readdir(directory)).filter(name => /^page-\d+\.jpg$/u.test(name)).sort((left, right) => Number(left.match(/\d+/u)?.[0]) - Number(right.match(/\d+/u)?.[0]))
+        if (pages.length === 0) return { text: '', extractionState: 'failed', ocrState: 'failed' }
+        const recognized: string[] = []
+        for (const page of pages) recognized.push((await runDocumentCommand('tesseract', [join(directory, page), 'stdout', '-l', 'chi_sim+eng', '--psm', '3'], 60_000, 2 * 1024 * 1024)).trim())
+        const scannedText = recognized.filter(Boolean).join('\n\n').trim()
+        return scannedText ? { text: scannedText, extractionState: 'ready', ocrState: 'ready' } : { text: '', extractionState: 'failed', ocrState: 'failed' }
+      } catch (error) {
+        return { text: '', extractionState: 'failed', ocrState: isMissingExecutable(error) ? 'unavailable' : 'failed' }
+      }
+    }
+    if (mimeType.startsWith('image/')) {
+      try {
+        const text = (await runDocumentCommand('tesseract', [inputPath, 'stdout', '-l', 'chi_sim+eng', '--psm', '3'], 60_000, 4 * 1024 * 1024)).trim()
+        return text ? { text, extractionState: 'ready', ocrState: 'ready' } : { text: '', extractionState: 'failed', ocrState: 'failed' }
+      } catch (error) {
+        return { text: '', extractionState: 'failed', ocrState: isMissingExecutable(error) ? 'unavailable' : 'failed' }
+      }
+    }
+    if (['.docx', '.xlsx', '.pptx'].includes(ext)) {
+      try {
+        const text = (await runDocumentCommand('python3', ['-c', OFFICE_TEXT_EXTRACTOR, inputPath], 30_000)).trim()
+        return text ? { text, extractionState: 'ready', ocrState: 'not_needed' } : { text: '', extractionState: 'failed', ocrState: 'not_needed' }
+      } catch {
+        return { text: '', extractionState: 'failed', ocrState: 'not_needed' }
+      }
+    }
+    return { text: '', extractionState: 'unsupported', ocrState: 'not_needed' }
+  } finally { await rm(directory, { recursive: true, force: true }) }
+}
+
+function isMissingExecutable(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'ENOENT'
+}
+
+function documentChunks(text: string, filename: string, mimeType: string, entities: string[] = []): Array<{ text: string; metadata: Record<string, unknown> }> {
+  const maxChars = 5_000
+  const blocks = text.replaceAll('\r\n', '\n').split(/\n{2,}|\f/u).map(part => part.trim()).filter(Boolean)
+  const chunks: string[] = []
+  let current = ''
+  for (const block of blocks) {
+    let remaining = block
+    while (remaining.length > maxChars) {
+      if (current) { chunks.push(current); current = '' }
+      chunks.push(remaining.slice(0, maxChars))
+      remaining = remaining.slice(maxChars)
+    }
+    if (current.length + remaining.length + 2 > maxChars && current) { chunks.push(current); current = '' }
+    current = current ? `${current}\n\n${remaining}` : remaining
+  }
+  if (current) chunks.push(current)
+  if (chunks.length > 500) throw new RangeError('文件提取文本过长，当前单文件索引上限为 250 万字符')
+  return chunks.map((chunk, index) => ({ text: chunk, metadata: { filename, mimeType, chunkIndex: index, libraryFile: true, ...(entities.length === 0 ? {} : { entities }) } }))
+}
+
+function publicLibraryFile(file: LibraryFileInfo): Omit<LibraryFileInfo, 'objectKey' | 'sha256'> {
+  return {
+    docId: file.docId, realm: file.realm, folderId: file.folderId, filename: file.filename, mimeType: file.mimeType,
+    byteSize: file.byteSize, ownerUserId: file.ownerUserId, extractionState: file.extractionState, ocrState: file.ocrState,
+    createdAt: file.createdAt,
+  }
 }
 
 function writeUpstream(res: ServerResponse, result: UpstreamResult): void {
@@ -467,7 +794,7 @@ interface AgentTeamsService {
   }>
 }
 
-export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, vault: VaultService | undefined, req: IncomingMessage, res: ServerResponse, skillhubRuntime?: SkillHubRuntime, agentTeams?: AgentTeamsService): Promise<void> {
+export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, vault: VaultService | undefined, req: IncomingMessage, res: ServerResponse, skillhubRuntime?: SkillHubRuntime, agentTeams?: AgentTeamsService, objectStore?: ObjectStoreService, officeToPdf?: OfficeToPdfService): Promise<void> {
   const pathname = new URL(req.url ?? '/', 'http://lumo.local').pathname
   // 单机版（Local Desktop）：vault 知识源 + fallback 身份,知识管理路由不套 realm 管理员角色门。
   const singleMachine = config.deploymentMode === 'local'
@@ -490,6 +817,40 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       organization: config.deploymentMode === 'cluster' && config.clusterStatus.toLowerCase() === 'ready' && isRealmAdmin(identity),
       sharedRuntimeInstall: config.deploymentMode !== 'cluster' || isRealmAdmin(identity),
     })
+    return
+  }
+
+  if (req.method === 'GET' && pathname === '/lumo/api/scheduler/clusters') {
+    if (!isPlatformAdmin(identity)) { writeJson(res, 403, { error: '仅平台管理员可查看全局调度集群注册表' }); return }
+    if (config.deploymentMode === 'local') { writeJson(res, 501, { error: '本地单机没有调度集群注册表' }); return }
+    writeUpstream(res, await upstream(config, identity, 'scheduler', '/v1/clusters', req))
+    return
+  }
+
+  if (req.method === 'GET' && pathname === '/lumo/api/ops/token-usage') {
+    if (!isPlatformAdmin(identity)) { writeJson(res, 403, { error: '平台 Token 用量仅对平台管理员开放' }); return }
+    if ((config.usageLedgerUrl ?? '').trim() === '') { writeJson(res, 503, { error: 'usage-ledger 服务未配置，暂时无法读取 Token 用量' }); return }
+    const params = new URL(req.url ?? '/', 'http://lumo.local').searchParams
+    const fromValues = params.getAll('from')
+    const toValues = params.getAll('to')
+    if (fromValues.length > 1 || toValues.length > 1) { writeJson(res, 400, { error: 'from 与 to 各只能提供一次' }); return }
+    const validDate = (value: string | null): value is string => {
+      if (value === null || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+      const parsed = new Date(`${value}T00:00:00.000Z`)
+      return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
+    }
+    const today = new Date().toISOString().slice(0, 10)
+    const to = toValues[0] ?? today
+    const toDate = validDate(to) ? new Date(`${to}T00:00:00.000Z`) : undefined
+    const defaultFromDate = toDate === undefined ? undefined : new Date(toDate.getTime() - 6 * 24 * 60 * 60 * 1000)
+    const from = fromValues[0] ?? defaultFromDate?.toISOString().slice(0, 10) ?? ''
+    if (!validDate(from) || !validDate(to)) { writeJson(res, 400, { error: '日期必须使用有效的 YYYY-MM-DD 格式' }); return }
+    const start = new Date(`${from}T00:00:00.000Z`).getTime()
+    const end = new Date(`${to}T00:00:00.000Z`).getTime()
+    const days = Math.floor((end - start) / (24 * 60 * 60 * 1000)) + 1
+    if (days < 1 || days > 90) { writeJson(res, 400, { error: 'Token 用量查询范围需为 1–90 天' }); return }
+    const query = new URLSearchParams({ from, to })
+    writeUpstream(res, await upstream(config, identity, 'usage-ledger', `/v1/usage/tokens?${query.toString()}`, req))
     return
   }
 
@@ -592,12 +953,205 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       const text = typeof body['text'] === 'string' ? body['text'].trim() : ''
       if (text.length === 0 || text.length > 2_000) { writeJson(res, 400, { error: '检索问题长度应为 1–2000 字符' }); return }
       const requestedTopK = typeof body['topK'] === 'number' && Number.isInteger(body['topK']) ? body['topK'] : 8
-      const hits = await knowledge.query({ realm: identity.realm, roles: identity.roles, text, topK: Math.min(Math.max(requestedTopK, 1), 20), scope: 'published' })
+      const hits = await knowledge.query({ realm: identity.realm, roles: identity.roles, userId: identity.userId, libraryAdmin: isRealmAdmin(identity), text, topK: Math.min(Math.max(requestedTopK, 1), 20), scope: 'published' })
       writeJson(res, 200, { query: text, scope: 'published', hits })
     } catch (error) {
-      const status = error instanceof RangeError ? 413 : error instanceof SyntaxError ? 400 : 502
+      const status = knowledgeManagementStatus(error)
       writeJson(res, status, { error: error instanceof Error ? error.message : 'knowledge query failed' })
     }
+    return
+  }
+
+  const libraryFoldersPath = '/lumo/api/knowledge/library/folders'
+  if (req.method === 'GET' && libraryFoldersPath === pathname) {
+    const manager = requireKnowledgeLibrary(res, knowledge)
+    if (manager === undefined) return
+    try { writeJson(res, 200, { folders: await manager.listLibraryFolders(identity.realm, identity.userId, identity.roles, isRealmAdmin(identity)) }) }
+    catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '资料文件夹不可用' }) }
+    return
+  }
+  if (req.method === 'POST' && libraryFoldersPath === pathname) {
+    const manager = requireKnowledgeLibrary(res, knowledge)
+    if (manager === undefined) return
+    try {
+      const body = await readJson(req)
+      const parentId = body['parentId'] === null || body['parentId'] === undefined ? null : safeID(typeof body['parentId'] === 'string' ? body['parentId'] : undefined)
+      if (body['parentId'] !== null && body['parentId'] !== undefined && parentId === undefined) throw new TypeError('parentId 无效')
+      if (parentId !== null && !isRealmAdmin(identity) && !await manager.canAccessLibraryFolder({ realm: identity.realm, folderId: parentId, userId: identity.userId, roles: identity.roles, isAdmin: false, access: 'editor' })) {
+        writeJson(res, 403, { error: '没有在此资料文件夹中创建子目录的权限' }); return
+      }
+      const folder = await manager.createLibraryFolder({
+        realm: identity.realm, parentId, name: requiredText(body, 'name', 240), ownerUserId: identity.userId,
+        roles: identity.roles, isAdmin: isRealmAdmin(identity),
+      })
+      writeJson(res, 201, { folder })
+    } catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '资料文件夹未创建' }) }
+    return
+  }
+
+  const libraryFolder = pathname.match(/^\/lumo\/api\/knowledge\/library\/folders\/([^/]+)(?:\/(shares))?$/u)
+  if (libraryFolder !== null) {
+    const folderId = safeID(libraryFolder[1])
+    if (folderId === undefined) { writeJson(res, 400, { error: '资料文件夹 ID 无效' }); return }
+    const manager = requireKnowledgeLibrary(res, knowledge)
+    if (manager === undefined) return
+    const isAdmin = isRealmAdmin(identity)
+    if (libraryFolder[2] === 'shares') {
+      if (!await manager.canAccessLibraryFolder({ realm: identity.realm, folderId, userId: identity.userId, roles: identity.roles, isAdmin, access: 'editor' })) {
+        writeJson(res, 403, { error: '没有管理此资料文件夹分享的权限' }); return
+      }
+      if (req.method === 'GET') {
+        try { writeJson(res, 200, { grants: await manager.listLibraryGrants(identity.realm, 'folder', folderId) }) }
+        catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '分享权限读取失败' }) }
+        return
+      }
+      if (req.method === 'PUT') {
+        try { await manager.setLibraryGrants({ realm: identity.realm, resourceType: 'folder', resourceId: folderId, actorUserId: identity.userId, roles: identity.roles, isAdmin, grants: libraryGrants(await readJson(req)) }); writeJson(res, 200, { folderId, state: 'shared' }) }
+        catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '分享权限未保存' }) }
+        return
+      }
+      writeJson(res, 405, { error: 'method not allowed' }); return
+    }
+    if (req.method === 'DELETE') {
+      try { await manager.deleteLibraryFolder({ realm: identity.realm, folderId, actorUserId: identity.userId, roles: identity.roles, isAdmin }); writeJson(res, 200, { folderId, state: 'removed' }) }
+      catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '资料文件夹未删除' }) }
+      return
+    }
+  }
+
+  const libraryFilesPath = '/lumo/api/knowledge/library/files'
+  if (req.method === 'GET' && libraryFilesPath === pathname) {
+    const manager = requireKnowledgeLibrary(res, knowledge)
+    if (manager === undefined) return
+    try { writeJson(res, 200, { files: (await manager.listLibraryFiles(identity.realm, identity.userId, identity.roles, isRealmAdmin(identity))).map(publicLibraryFile) }) }
+    catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '资料文件读取失败' }) }
+    return
+  }
+  if (req.method === 'POST' && libraryFilesPath === pathname) {
+    const manager = requireKnowledgeLibrary(res, knowledge)
+    if (manager === undefined) return
+    if (objectStore === undefined) { writeJson(res, 501, { error: '对象存储未装配，无法上传资料文件' }); return }
+    const params = new URL(req.url ?? '/', 'http://lumo.local').searchParams
+    const folderValue = params.get('folder_id')
+    const folderId = folderValue === null ? null : safeID(folderValue)
+    if (folderValue !== null && folderId === undefined) { writeJson(res, 400, { error: '资料文件夹 ID 无效' }); return }
+    if (folderId !== null && !await manager.canAccessLibraryFolder({ realm: identity.realm, folderId, userId: identity.userId, roles: identity.roles, isAdmin: isRealmAdmin(identity), access: 'editor' })) {
+      writeJson(res, 403, { error: '没有在此资料文件夹中上传资料的权限' }); return
+    }
+    try {
+      const filename = safeUploadFilename(typeof req.headers['x-lumo-file-name'] === 'string' ? req.headers['x-lumo-file-name'] : undefined)
+      const mimeType = libraryMimeType(filename)
+      if (mimeType === undefined) { writeJson(res, 415, { error: '支持 PDF、常见图片、TXT、Markdown、CSV、JSON、HTML、XML、YAML、DOCX、XLSX、PPTX 文件' }); return }
+      const body = await readBody(req, LIBRARY_UPLOAD_LIMIT)
+      if (body.length === 0) { writeJson(res, 400, { error: '上传文件不能为空' }); return }
+      const entitiesHeader = req.headers['x-lumo-library-entities']
+      if (entitiesHeader !== undefined && typeof entitiesHeader !== 'string') throw new TypeError('知识图谱实体标签格式无效')
+      const entities = libraryEntities(typeof entitiesHeader === 'string' ? entitiesHeader : undefined)
+      const extracted = await extractLibraryText(filename, mimeType.split(';', 1)[0]!, body)
+      const chunks = extracted.text === '' ? [] : documentChunks(extracted.text, filename, mimeType, entities)
+      const docId = `file-${randomUUID()}`
+      const objectKey = await objectStore.putContent(identity.realm, body, mimeType)
+      const file: LibraryFileInfo = {
+        docId, realm: identity.realm, folderId, filename, mimeType, objectKey, byteSize: body.length,
+        sha256: createHash('sha256').update(body).digest('hex'), ownerUserId: identity.userId,
+        extractionState: extracted.extractionState, ocrState: extracted.ocrState, createdAt: new Date().toISOString(),
+      }
+      await manager.createLibraryFile(file)
+      try {
+        if (chunks.length > 0) await manager.upsertSource({ docId, realm: identity.realm, space: 'library', title: filename, chunks })
+      } catch (error) {
+        await manager.removeLibraryFile(docId, identity.realm)
+        throw error
+      }
+      writeJson(res, 201, { file: publicLibraryFile(file), indexed: extracted.text !== '' })
+    } catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '资料文件未上传' }) }
+    return
+  }
+
+  const libraryFile = pathname.match(/^\/lumo\/api\/knowledge\/library\/files\/([^/]+)(?:\/(preview|content|shares))?$/u)
+  if (libraryFile !== null) {
+    const docId = safeID(libraryFile[1])
+    if (docId === undefined) { writeJson(res, 400, { error: '资料文件 ID 无效' }); return }
+    const manager = requireKnowledgeLibrary(res, knowledge)
+    if (manager === undefined) return
+    const file = await manager.getLibraryFile(docId, identity.realm)
+    if (file === undefined) { writeJson(res, 404, { error: '资料文件不存在' }); return }
+    const isAdmin = isRealmAdmin(identity)
+    const route = libraryFile[2]
+    if (route === 'shares') {
+      if (!await manager.canAccessLibraryFile({ docId, realm: identity.realm, userId: identity.userId, roles: identity.roles, isAdmin, access: 'editor' })) { writeJson(res, 403, { error: '没有管理此资料文件分享的权限' }); return }
+      if (req.method === 'GET') {
+        try { writeJson(res, 200, { grants: await manager.listLibraryGrants(identity.realm, 'file', docId) }) }
+        catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '分享权限读取失败' }) }
+        return
+      }
+      if (req.method === 'PUT') {
+        try { await manager.setLibraryGrants({ realm: identity.realm, resourceType: 'file', resourceId: docId, actorUserId: identity.userId, roles: identity.roles, isAdmin, grants: libraryGrants(await readJson(req)) }); writeJson(res, 200, { docId, state: 'shared' }) }
+        catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '分享权限未保存' }) }
+        return
+      }
+      writeJson(res, 405, { error: 'method not allowed' }); return
+    }
+    if (req.method !== 'GET' || route === undefined) { writeJson(res, 405, { error: 'method not allowed' }); return }
+    if (!await manager.canAccessLibraryFile({ docId, realm: identity.realm, userId: identity.userId, roles: identity.roles, isAdmin, access: 'viewer' })) { writeJson(res, 403, { error: '没有查看此资料文件的权限' }); return }
+    if (objectStore === undefined) { writeJson(res, 501, { error: '对象存储未装配，无法读取资料文件' }); return }
+    try {
+      const stored = await objectStore.get(identity.realm, file.objectKey)
+      if (stored === undefined) { writeJson(res, 404, { error: '资料文件对象不存在' }); return }
+      const extension = extname(file.filename).toLowerCase()
+      if (route === 'preview' && (extension === '.docx' || extension === '.pptx')) {
+        if (officeToPdf === undefined) { writeJson(res, 503, { error: 'DSH Office 预览服务当前不可用' }); return }
+        if (stored.body.length !== file.byteSize || createHash('sha256').update(stored.body).digest('hex') !== file.sha256) {
+          writeJson(res, 409, { error: '资料文件内容已变化，请刷新文件列表后重试' }); return
+        }
+        const controller = new AbortController()
+        const cancelIfDisconnected = (): void => { if (!res.writableEnded) controller.abort(new Error('Preview request disconnected')) }
+        req.once('aborted', cancelIfDisconnected)
+        res.once('close', cancelIfDisconnected)
+        try {
+          const rendered = await officeToPdf.convert({
+            extension: extension.slice(1) as 'docx' | 'pptx', priority: 'foreground',
+            source: {
+              key: `knowledge-library:${identity.realm}:${docId}:${file.sha256}`,
+              version: file.sha256, bytes: stored.body.length,
+              read: async (signal, maxBytes) => {
+                signal.throwIfAborted()
+                if (stored.body.length > maxBytes) return { bytes: stored.body.subarray(0, maxBytes + 1), version: file.sha256 }
+                return { bytes: stored.body, version: file.sha256 }
+              },
+            },
+          }, controller.signal)
+          if (controller.signal.aborted) return
+          res.writeHead(200, {
+            'content-type': 'application/pdf',
+            'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(file.filename.replace(/\.(docx|pptx)$/iu, '.pdf'))}`,
+            'content-length': String(rendered.pdf.byteLength), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
+          })
+          res.end(rendered.pdf)
+        } catch (error) {
+          if (controller.signal.aborted) return
+          const code = typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string' ? error.code : 'failed'
+          const message = code === 'input-too-large' ? 'Office 文件超过预览大小限制。'
+            : code === 'unavailable' ? 'DSH Office 预览服务当前不可用。'
+              : code === 'busy' ? 'Office 预览任务较多，请稍后重试。'
+                : 'Office 文件无法转换为预览，请检查文件内容。'
+          const status = code === 'input-too-large' ? 413 : code === 'unavailable' || code === 'busy' ? 503 : 422
+          writeJson(res, status, { error: message })
+        } finally {
+          req.removeListener('aborted', cancelIfDisconnected)
+          res.removeListener('close', cancelIfDisconnected)
+        }
+        return
+      }
+      const isDownload = route === 'content' && new URL(req.url ?? '/', 'http://lumo.local').searchParams.get('download') === '1'
+      const safeInline = route === 'preview' && (file.mimeType === 'application/pdf' || file.mimeType.startsWith('image/') || extension === '.xlsx')
+      res.writeHead(200, {
+        'content-type': isDownload ? 'application/octet-stream' : safeInline ? file.mimeType : 'text/plain; charset=utf-8',
+        'content-disposition': `${isDownload ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(file.filename)}`,
+        'content-length': String(stored.body.length), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
+      })
+      res.end(stored.body)
+    } catch (error) { writeJson(res, 502, { error: error instanceof Error ? error.message : '资料文件读取失败' }) }
     return
   }
 
@@ -643,8 +1197,22 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   if (knowledgeSource !== null) {
     const docID = safeID(knowledgeSource[1])
     if (docID === undefined) { writeJson(res, 400, { error: 'invalid knowledge source id' }); return }
-    const manager = requireKnowledgeAdmin(res, identity, knowledge, singleMachine)
-    if (manager === undefined) return
+    let manager: KnowledgeSourceManagerService | undefined
+    if (req.method === 'GET' && !singleMachine && !isRealmAdmin(identity)) {
+      const library = knowledgeLibrary(knowledge)
+      if (library === undefined) { writeJson(res, 403, { error: 'knowledge source management requires realm_admin, platform_admin, or admin' }); return }
+      try {
+        const file = await library.getLibraryFile(docID, identity.realm)
+        if (file === undefined || !await library.canAccessLibraryFile({ docId: docID, realm: identity.realm, userId: identity.userId, roles: identity.roles, isAdmin: false })) {
+          writeJson(res, 404, { error: 'knowledge source not found' }); return
+        }
+        manager = sourceManager(knowledge)
+        if (manager === undefined) { writeJson(res, 501, { error: 'knowledge source content is unavailable' }); return }
+      } catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : 'knowledge source unavailable' }); return }
+    } else {
+      manager = requireKnowledgeAdmin(res, identity, knowledge, singleMachine)
+      if (manager === undefined) return
+    }
     if (req.method === 'GET') {
       try {
         const source = await manager.getSource(docID, identity.realm)
@@ -1096,6 +1664,127 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     if (taskID === undefined) { writeJson(res, 400, { error: 'invalid task id' }); return }
     writeUpstream(res, await upstream(config, identity, 'governance', `/v1/tasks/${encodeURIComponent(taskID)}/runs`, req))
     return
+  }
+
+  const taskCollaborators = pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/collaborators$/u)
+  if (taskCollaborators !== null && (req.method === 'GET' || req.method === 'PUT')) {
+    const taskID = safeID(taskCollaborators[1])
+    if (taskID === undefined) { writeJson(res, 400, { error: 'invalid task id' }); return }
+    if (req.method === 'GET') {
+      writeUpstream(res, await upstream(config, identity, 'governance', `/v1/tasks/${encodeURIComponent(taskID)}/collaborators`, req)); return
+    }
+    try { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/tasks/${encodeURIComponent(taskID)}/collaborators`, req, 'PUT', await readBody(req))) }
+    catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
+  const taskArtifacts = pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/runs\/([^/]+)\/artifacts(?:\/([^/]+)(?:\/(content|publish))?)?$/u)
+  if (taskArtifacts !== null) {
+    const taskID = safeID(taskArtifacts[1]); const runID = safeID(taskArtifacts[2])
+    const artifactID = taskArtifacts[3] === undefined ? undefined : safeID(taskArtifacts[3])
+    const action = taskArtifacts[4]
+    if (taskID === undefined || runID === undefined || (taskArtifacts[3] !== undefined && artifactID === undefined)) { writeJson(res, 400, { error: 'invalid task, run or artifact id' }); return }
+    const collectionPath = `/v1/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/artifacts`
+    if (artifactID === undefined && req.method === 'GET') {
+      writeUpstream(res, await upstream(config, identity, 'governance', collectionPath, req)); return
+    }
+    if (artifactID === undefined && req.method === 'POST') {
+      if (objectStore === undefined) { writeJson(res, 503, { error: '对象存储未装配，无法保存任务产物' }); return }
+      try {
+        const filename = safeUploadFilename(typeof req.headers['x-lumo-file-name'] === 'string' ? req.headers['x-lumo-file-name'] : undefined)
+        const rawType = typeof req.headers['content-type'] === 'string' ? req.headers['content-type'].split(';', 1)[0]!.trim().toLowerCase() : ''
+        const contentType = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/u.test(rawType) ? rawType : 'application/octet-stream'
+        const body = await readBody(req, LIBRARY_UPLOAD_LIMIT)
+        if (body.length === 0) { writeJson(res, 400, { error: '上传文件不能为空' }); return }
+        const reservation = await upstream(config, identity, 'governance', collectionPath, req, 'POST', Buffer.from(JSON.stringify({ name: filename, content_type: contentType })), 'application/json')
+        if (!reservation.ok) { writeUpstream(res, reservation); return }
+        const reserved = reservation.data as { id?: unknown }
+        if (typeof reserved?.id !== 'string') { writeJson(res, 502, { error: '治理服务未返回产物记录 ID' }); return }
+        const fullKey = await objectStore.putContent(identity.realm, body, contentType)
+        const storageKey = fullKey.startsWith(`${identity.realm}/`) ? fullKey.slice(identity.realm.length + 1) : fullKey
+        const sha256 = createHash('sha256').update(body).digest('hex')
+        const completion = await upstream(config, identity, 'governance', `${collectionPath}/${encodeURIComponent(reserved.id)}/complete`, req, 'PUT', Buffer.from(JSON.stringify({ storage_key: storageKey, sha256, size_bytes: body.length })), 'application/json')
+        writeUpstream(res, completion)
+      } catch (error) {
+        writeJson(res, error instanceof RangeError ? 413 : error instanceof TypeError ? 400 : 503, { error: error instanceof Error ? error.message : '任务产物上传失败' })
+      }
+      return
+    }
+    if (artifactID !== undefined && action === 'content' && req.method === 'GET') {
+      if (objectStore === undefined) { writeJson(res, 503, { error: '对象存储未装配，无法读取任务产物' }); return }
+      const storedRef = await upstream(config, identity, 'governance', `${collectionPath}/${encodeURIComponent(artifactID)}/storage`, req)
+      if (!storedRef.ok) { writeUpstream(res, storedRef); return }
+      const ref = storedRef.data as { storage_key?: unknown; sha256?: unknown; size_bytes?: unknown; name?: unknown; content_type?: unknown }
+      if (typeof ref.storage_key !== 'string' || typeof ref.sha256 !== 'string' || typeof ref.size_bytes !== 'number') { writeJson(res, 502, { error: '治理服务返回了无效的产物引用' }); return }
+      const stored = await objectStore.get(identity.realm, ref.storage_key)
+      if (stored === undefined) { writeJson(res, 404, { error: '任务产物对象不存在' }); return }
+      const digest = createHash('sha256').update(stored.body).digest('hex')
+      if (stored.body.length !== ref.size_bytes || digest !== ref.sha256) { writeJson(res, 502, { error: '任务产物完整性校验失败' }); return }
+      const filename = safeUploadFilename(typeof ref.name === 'string' ? encodeURIComponent(ref.name) : undefined)
+      const encodedFilename = encodeURIComponent(filename).replaceAll("'", '%27')
+      const mimeType = typeof ref.content_type === 'string' && /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/u.test(ref.content_type) ? ref.content_type : 'application/octet-stream'
+      res.writeHead(200, { 'content-type': mimeType, 'content-length': String(stored.body.length), 'content-disposition': `attachment; filename*=UTF-8''${encodedFilename}`, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' })
+      res.end(stored.body)
+      return
+    }
+    if (artifactID !== undefined && action === 'publish' && req.method === 'POST') {
+      if (!requireClusterReady(config, res)) return
+      if (objectStore === undefined) { writeJson(res, 503, { error: '对象存储未装配，无法发布任务产物' }); return }
+      try {
+        const input = await readJson(req)
+        const provider = input['provider']
+        const repository = typeof input['repository'] === 'string' ? input['repository'].trim() : ''
+        const targetBranch = typeof input['target_branch'] === 'string' ? input['target_branch'].trim() : ''
+        const filePath = typeof input['file_path'] === 'string' ? input['file_path'].trim() : ''
+        const title = typeof input['title'] === 'string' ? input['title'].trim() : ''
+        const description = typeof input['body'] === 'string' ? input['body'].trim() : ''
+        if ((provider !== 'github' && provider !== 'gitlab') || !GIT_REPOSITORY.test(repository) || !GIT_BRANCH.test(targetBranch) ||
+          filePath.length === 0 || filePath.length > 512 || filePath.startsWith('/') || filePath.includes('\\') ||
+          filePath.split('/').some(part => part === '' || part === '.' || part === '..') || /[\u0000-\u001f\u007f]/u.test(filePath) ||
+          title.length === 0 || title.length > 256 || description.length > 4000) {
+          writeJson(res, 400, { error: 'Git 发布参数无效；请检查平台、仓库、分支、文件路径、标题和说明长度' }); return
+        }
+        if (provider === 'github' && repository.split('/').length !== 2) { writeJson(res, 400, { error: 'GitHub 仓库格式应为 owner/repository' }); return }
+        const storageResponse = await upstream(config, identity, 'governance', `${collectionPath}/${encodeURIComponent(artifactID)}/storage?access=contributor`, req)
+        if (!storageResponse.ok) { writeUpstream(res, storageResponse); return }
+        const ref = storageResponse.data as { storage_key?: unknown; sha256?: unknown; size_bytes?: unknown; name?: unknown }
+        if (typeof ref.storage_key !== 'string' || typeof ref.sha256 !== 'string' || typeof ref.size_bytes !== 'number') { writeJson(res, 502, { error: '治理服务返回了无效的产物引用' }); return }
+        if (ref.size_bytes > TASK_ARTIFACT_GIT_LIMIT) { writeJson(res, 413, { error: `通过连接器 API 发布的单个文件上限为 ${TASK_ARTIFACT_GIT_LIMIT / 1024} KiB；产物仍可下载使用` }); return }
+        const stored = await objectStore.get(identity.realm, ref.storage_key)
+        if (stored === undefined) { writeJson(res, 404, { error: '任务产物对象不存在' }); return }
+        const digest = createHash('sha256').update(stored.body).digest('hex')
+        if (stored.body.length !== ref.size_bytes || digest !== ref.sha256) { writeJson(res, 502, { error: '任务产物完整性校验失败' }); return }
+        const branch = `lumo/task-${taskID.slice(-12)}-${artifactID.slice(-12)}-${Date.now()}`
+        const content = stored.body.toString('base64')
+        let result: unknown
+        if (provider === 'github') {
+          const [owner, repo] = repository.split('/')
+          const repoPath = { owner: owner!, repo: repo! }
+          const baseRef = await invokeGitConnector(config, identity, req, 'github', 'get_ref', { ...repoPath, ref: `heads/${targetBranch}` })
+          const sha = gitObjectString(baseRef, 'object.sha')
+          await invokeGitConnector(config, identity, req, 'github', 'create_ref', repoPath, undefined, { ref: `refs/heads/${branch}`, sha })
+          await invokeGitConnector(config, identity, req, 'github', 'put_file', { ...repoPath, path: filePath }, undefined, { message: title, content, branch })
+          result = await invokeGitConnector(config, identity, req, 'github', 'create_pull_request', repoPath, undefined, { title, head: branch, base: targetBranch, body: description, draft: true })
+        } else {
+          const projectPath = { project: repository }
+          const baseRef = await invokeGitConnector(config, identity, req, 'gitlab', 'get_branch', { ...projectPath, branch: targetBranch })
+          const refName = gitObjectString(baseRef, 'name')
+          await invokeGitConnector(config, identity, req, 'gitlab', 'create_branch', projectPath, { branch, ref: refName })
+          await invokeGitConnector(config, identity, req, 'gitlab', 'put_file', { ...projectPath, file_path: filePath }, undefined, { branch, content, encoding: 'base64', commit_message: title })
+          result = await invokeGitConnector(config, identity, req, 'gitlab', 'create_merge_request', projectPath, undefined, { source_branch: branch, target_branch: targetBranch, title: `Draft: ${title}`, description })
+        }
+        const url = typeof result === 'object' && result !== null
+          ? ((result as { html_url?: unknown; web_url?: unknown }).html_url ?? (result as { web_url?: unknown }).web_url)
+          : undefined
+        const number = typeof result === 'object' && result !== null
+          ? ((result as { number?: unknown; iid?: unknown }).number ?? (result as { iid?: unknown }).iid)
+          : undefined
+        writeJson(res, 201, { provider, branch, ...(typeof url === 'string' ? { url } : {}), ...(typeof number === 'number' ? { number } : {}) })
+      } catch (error) {
+        writeJson(res, error instanceof RangeError ? 413 : error instanceof SyntaxError || error instanceof TypeError ? 400 : 502, { error: error instanceof Error ? error.message : 'Git 草稿发布失败' })
+      }
+      return
+    }
   }
 
   // The collaboration view and the full run result are separate governance
@@ -1562,6 +2251,8 @@ export function apply(ctx: Context, config: Config): void {
           // 「没装 agent-teams 的形态整个 /lumo/api 都不工作」——一个可选功能拖垮全部。
           // 取不到时路由回 503 并说明缺席，其余面照常。
           runtimeCtx.get('agentTeams') as AgentTeamsService | undefined,
+          runtimeCtx.get('objectStore') as ObjectStoreService | undefined,
+          runtimeCtx.get('officeToPdf') as OfficeToPdfService | undefined,
         ),
       })
       const disposeOps = runtimeCtx.webServer.register({ kind: 'exact', path: '/lumo/ops', handler: ops })

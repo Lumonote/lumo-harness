@@ -371,13 +371,14 @@ fi
 # 那么正向的两条照样绿。所以下面把 edge-gateway 的容器端口挪出控制面段，断言派生**跟着变**。
 DERIVED=""
 derive_of() {
-  DERIVED="$(bash -c 'source "$1/lib/probes.sh"; derive_probe_targets "$2"' _ "$HERE" "$1")" || return 1
+  DERIVED="$(bash -c 'source "$1/lib/probes.sh"; shift; derive_probe_targets "$@"' _ "$HERE" "$@")" || return 1
   return 0
 }
 
 expect_derivation() {
-  local name="$1" file="$2" want="$3"
-  if ! derive_of "$file"; then
+  local name="$1" want="$2"
+  shift 2
+  if ! derive_of "$@"; then
     fail "${name}：派生失败"
     return
   fi
@@ -390,8 +391,9 @@ expect_derivation() {
 }
 
 expect_derivation_differs() {
-  local name="$1" file="$2"
-  if ! derive_of "$file"; then
+  local name="$1"
+  shift
+  if ! derive_of "$@"; then
     fail "${name}：派生失败（本该派生出一个不同的集合）"
     return
   fi
@@ -412,7 +414,7 @@ llm-gateway	18088	8088
 projects	18086	8086
 registry	18084	8084
 scheduler-0	18083	8083
-scheduler-1	18093	8083
+scheduler-1	18093	8184
 scheduler-cluster-a	18094	8083
 scheduler-cluster-b	18095	8083
 session-control	18092	8092
@@ -421,7 +423,7 @@ usage-ledger	18085	8085
 PINNED
 )"
 STANDALONE_PINNED="$(cat <<'PINNED'
-collaborator	18081	8081
+collaborator-0	18081	8081
 connector-gateway	18082	8082
 edge-gateway	18080	8080
 flows	18087	8087
@@ -436,15 +438,17 @@ usage-ledger	18085	8085
 PINNED
 )"
 
-expect_derivation "compose.cluster.yml 的探针目标 == 写死的 15 条" \
-  "$HERE/compose.cluster.yml" "$CLUSTER_PINNED"
-expect_derivation "compose.standalone.yml 的探针目标 == 写死的 12 条" \
-  "$HERE/compose.standalone.yml" "$STANDALONE_PINNED"
+SHARED_FILES=("$HERE/compose.shared.yml" "$HERE/compose.control-plane.bundle.yml")
+expect_derivation "Cluster compact bundle 的探针目标 == 写死的 15 条" "$CLUSTER_PINNED" \
+  "${SHARED_FILES[@]}" "$HERE/compose.cluster.yml" "$HERE/compose.cluster.compact.yml"
+expect_derivation "Standalone 共用 bundle 的探针目标 == 写死的 12 条" "$STANDALONE_PINNED" \
+  "${SHARED_FILES[@]}" "$HERE/compose.standalone.yml"
 
 # 反向 1：把 edge-gateway 的容器端口挪出控制面段（8080 → 9080）→ 派生必须跟着变。
 sed 's/"18080:8080"/"18080:9080"/' "$HERE/compose.cluster.yml" >"$WORK/port-moved.yml"
 if grep -q '"18080:9080"' "$WORK/port-moved.yml"; then
-  expect_derivation_differs "容器端口挪出控制面段 → 派生跟着变（不是恒返回全部）" "$WORK/port-moved.yml"
+  expect_derivation_differs "容器端口挪出控制面段 → 派生跟着变（不是恒返回全部）" \
+    "${SHARED_FILES[@]}" "$WORK/port-moved.yml" "$HERE/compose.cluster.compact.yml"
 else
   fail "反向用例：无法把 edge-gateway 的容器端口挪出控制面段（锚点失效？拓扑被改过？）"
 fi
@@ -455,7 +459,7 @@ fi
 # 容器端口必须落在控制面段（8091）——第一次写成 8111 时这条用例红了，而**派生是对的**：
 # 8111 不在 8080-8099 里，被正确排除。用例写错与实现写错在输出上长得一样，这是本仓库
 # 反复出现的一类误判，所以这条注释留在原地。
-sed 's/^  usage-ledger:/  brand-new-service:\n    ports: ["18111:8091"]\n  usage-ledger:/' \
+sed 's/^  api-bundle:/  brand-new-service:\n    ports: ["18111:8091"]\n  api-bundle:/' \
   "$HERE/compose.cluster.yml" >"$WORK/new-service.yml"
 if grep -q '^  brand-new-service:' "$WORK/new-service.yml"; then
   if derive_of "$WORK/new-service.yml" && grep -qF "brand-new-service	18111	8091" <<<"$DERIVED"; then

@@ -34,9 +34,9 @@
 #              `RELEASE.2025-04-22T22-12-26Z` —— 但**钉的还是 Docker Hub 那个仓库**；
 #   2026-09-20 整个 `minio/minio` 仓库在 Docker Hub 下线（仓库 API 与 `docker pull`
 #              双双 404），于是连同一个版本号也不可拉了。
-# 结论：**换 registry 才是修，换 tag 不是**。现在两处都指向
-# `quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z`（实测可拉；镜像内容一致，内含
-# cluster healthcheck 依赖的 `mc`）。
+# 2026-09-25 Quay 上该仓库的匿名 manifest 请求也返回 401，旧版二进制归档返回 410。
+# 默认改为从 MinIO 官方固定源码标签构建本地镜像；HTTP readiness 作为 healthcheck。
+# 完整部署可用 `LUMO_MINIO_IMAGE`，本脚本可用 `LUMO_LOCAL_MINIO_IMAGE` 指向内部镜像缓存。
 # 这类错误只在 `up` 时才暴露，因为 compose 解析镜像名时不发探测请求——表现得像
 # 「对象存储起不来」，而不是「镜像写错了」。
 # `LUMO_LOCAL_MINIO_IMAGE` 仍用于**试别的版本**：它用一个覆盖文件临时替换 image，不改 compose。
@@ -45,7 +45,7 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 platform_dir="$(cd -- "$script_dir/.." && pwd)"
 compose_file="$script_dir/compose.standalone.yml"
-compose_project="lumo-platform-standalone"
+compose_project="lumo-platform"
 
 services_csv="${LUMO_LOCAL_SERVICES:-postgres,redis}"
 [[ -n "$services_csv" ]] || { echo "local-pg: FAIL: LUMO_LOCAL_SERVICES 不能为空" >&2; exit 1; }
@@ -55,7 +55,10 @@ report_dir="$(mktemp -d "${TMPDIR:-/tmp}/lumo-local-pg.XXXXXX")"
 created_databases=()
 pg_container=""
 pg_user="lumo"
-compose_args=(-f "$compose_file")
+compose_args=(-f "$script_dir/compose.shared.yml" -f "$script_dir/compose.control-plane.bundle.yml" -f "$compose_file")
+if [[ -z "${LUMO_LOCAL_MINIO_IMAGE:-}" && -z "${LUMO_MINIO_IMAGE:-}" ]]; then
+  compose_args+=(-f "$script_dir/compose.minio-source.yml")
+fi
 
 # MinIO 镜像覆盖：只改 image，其余（command/ports/env/healthcheck）沿用 compose 定义。
 if [[ -n "${LUMO_LOCAL_MINIO_IMAGE:-}" ]]; then

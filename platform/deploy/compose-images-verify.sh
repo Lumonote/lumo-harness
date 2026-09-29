@@ -9,6 +9,8 @@
 #
 #   09-16 两处都写 `minio/minio:latest` 拉不到 → 改成钉具体版本 `RELEASE.2025-04-22T22-12-26Z`；
 #   09-20 同一个版本号也不可拉了 —— 因为**整个 `minio/minio` 仓库从 Docker Hub 下线了**。
+#   09-25 Quay 上同一仓库的匿名 manifest 请求返回 401，旧版二进制归档返回 410；
+#         默认改为从固定官方源码标签构建本地镜像（compose.minio-source.yml）。
 #
 # 两次的根因是同一件事：**镜像引用有两个自由度（registry 与 tag），只钉其中一个等于没钉。**
 # 第二类错法是两份 compose 各写各的版本（`redis:7` vs `redis:7-alpine`），两个文件各自都能
@@ -35,6 +37,8 @@ CHECK="$HERE/compose-images-check.py"
 STANDALONE="$HERE/compose.standalone.yml"
 CLUSTER="$HERE/compose.cluster.yml"
 LOCAL="$HERE/compose.local.yml"
+SHARED="$HERE/compose.shared.yml"
+BUNDLE="$HERE/compose.control-plane.bundle.yml"
 ACCEPTANCE="$HERE/compose.cluster.acceptance.yml"
 DEVICES="$HERE/compose.cluster.devices.yml"
 
@@ -118,23 +122,22 @@ mutate() {
 }
 
 # --- 正向：真实拓扑（三形态 + 两个 overlay）必须通过 -------------------------------
-expect_pass "compose.standalone / compose.cluster / compose.local + 两个 overlay" \
-  --shape "$STANDALONE" --shape "$CLUSTER" --shape "$LOCAL" \
+expect_pass "共享组件、API bundle 与三种运行形态 + 两个 overlay" \
+  --shape "$SHARED" --shape "$BUNDLE" --shape "$STANDALONE" --shape "$CLUSTER" --shape "$LOCAL" \
   --overlay "$ACCEPTANCE" --overlay "$DEVICES"
 
 # --- 反向 1：本仓库真实踩过的那条 —— minio 回到 Docker Hub 上已下线的仓库 -------------
 # 这是本门禁存在的第一个理由。注意它**不是**浮动 tag：版本号一模一样，坏的只是 registry，
 # 所以只有「跨形态同源」这一半抓得住它 —— 反例 1 与反例 2 各守一半，缺一不可。
-mutate sub "$STANDALONE" "$WORK/minio-hub.yml" \
-  'image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z' \
-  'image: minio/minio:RELEASE.2025-04-22T22-12-26Z'
-if grep -q 'image: minio/minio:' "$WORK/minio-hub.yml"; then
-  expect_fail "回归：standalone 的 minio 回到已下线的 Docker Hub 仓库" \
-    "shape-divergence: 服务 minio" \
-    --shape "$WORK/minio-hub.yml" --shape "$CLUSTER" --shape "$LOCAL" \
+mutate sub "$SHARED" "$WORK/minio-hub.yml" \
+  'image: "${LUMO_MINIO_IMAGE:-lumo/minio:RELEASE.2025-04-22T22-12-26Z}"' 'image: minio/minio'
+if grep -q 'image: minio/minio$' "$WORK/minio-hub.yml"; then
+  expect_fail "回归：共享 MinIO 镜像丢失 tag 必须被抓到" \
+    "服务 minio 的镜像没有 tag" \
+    --shape "$WORK/minio-hub.yml" --shape "$BUNDLE" --shape "$STANDALONE" --shape "$CLUSTER" --shape "$LOCAL" \
     --overlay "$ACCEPTANCE" --overlay "$DEVICES"
 else
-  fail "回归用例：无法把 minio 改回 Docker Hub（锚点失效？registry 又被改过？）"
+  fail "回归用例：无法把共享 MinIO 镜像改成无 tag（锚点失效？）"
 fi
 
 # --- 反向 2：把已钉死的版本改成 `latest` ---------------------------------------------
@@ -142,15 +145,15 @@ mutate sub "$CLUSTER" "$WORK/opa-latest.yml" \
   'image: openpolicyagent/opa:1.3.0' 'image: openpolicyagent/opa:latest'
 expect_fail "回归：opa 被改回 latest" \
   "服务 opa 用了 latest 标签" \
-  --shape "$STANDALONE" --shape "$WORK/opa-latest.yml" --shape "$LOCAL" \
+  --shape "$SHARED" --shape "$BUNDLE" --shape "$STANDALONE" --shape "$WORK/opa-latest.yml" --shape "$LOCAL" \
   --overlay "$ACCEPTANCE" --overlay "$DEVICES"
 
 # --- 反向 3：镜像**没有 tag**（比 `latest` 更隐蔽：连「浮动」都看不出来）---------------
-mutate sub "$CLUSTER" "$WORK/nacos-notag.yml" \
+mutate sub "$SHARED" "$WORK/nacos-notag.yml" \
   'image: nacos/nacos-server:v2.4.0' 'image: nacos/nacos-server'
 expect_fail "回归：nacos 去掉 tag" \
   "没有 tag" \
-  --shape "$STANDALONE" --shape "$WORK/nacos-notag.yml" --shape "$LOCAL" \
+  --shape "$WORK/nacos-notag.yml" --shape "$BUNDLE" --shape "$STANDALONE" --shape "$CLUSTER" --shape "$LOCAL" \
   --overlay "$ACCEPTANCE" --overlay "$DEVICES"
 
 # --- 反向 4：**flow 写法**里的浮动 tag（行级 grep 看不见的那一类）---------------------
@@ -161,7 +164,7 @@ mutate sub "$CLUSTER" "$WORK/vault-flow-latest.yml" \
 if grep -q 'vault: { image: "hashicorp/vault:latest"' "$WORK/vault-flow-latest.yml"; then
   expect_fail "回归：flow 写法里的 vault:latest 必须被抓到（解析盲区）" \
     "服务 vault 用了 latest 标签" \
-    --shape "$STANDALONE" --shape "$WORK/vault-flow-latest.yml" --shape "$LOCAL" \
+    --shape "$SHARED" --shape "$BUNDLE" --shape "$STANDALONE" --shape "$WORK/vault-flow-latest.yml" --shape "$LOCAL" \
     --overlay "$ACCEPTANCE" --overlay "$DEVICES"
 else
   fail "flow 用例：锚点失效（vault 不再是行内 flow 写法？）"
@@ -173,19 +176,22 @@ fi
 mutate rename-image-key "$STANDALONE" "$WORK/no-images-standalone.yml"
 mutate rename-image-key "$CLUSTER" "$WORK/no-images-cluster.yml"
 mutate rename-image-key "$LOCAL" "$WORK/no-images-local.yml"
+mutate rename-image-key "$SHARED" "$WORK/no-images-shared.yml"
+mutate rename-image-key "$BUNDLE" "$WORK/no-images-bundle.yml"
 expect_fail "拓扑里不再有任何 image 键（解析失效的形态）" \
   "topology-not-parsed" \
+  --shape "$WORK/no-images-shared.yml" --shape "$WORK/no-images-bundle.yml" \
   --shape "$WORK/no-images-standalone.yml" --shape "$WORK/no-images-cluster.yml" \
   --shape "$WORK/no-images-local.yml" \
   --overlay "$ACCEPTANCE" --overlay "$DEVICES"
 
 # --- 反向 6：解析不了的 image 值必须报错，不能跳过 -----------------------------------
 # 跳过它的后果很具体：解析盲区与「真的同源」在输出上完全一样。
-mutate sub "$STANDALONE" "$WORK/bad-value.yml" \
+mutate sub "$SHARED" "$WORK/bad-value.yml" \
   'image: redis:7-alpine' 'image: [a, b]'
 expect_fail "非标量的 image 值（解析不了就必须喊，不能跳过）" \
   "image-entry-unparsed" \
-  --shape "$WORK/bad-value.yml" --shape "$CLUSTER" --shape "$LOCAL" \
+  --shape "$WORK/bad-value.yml" --shape "$BUNDLE" --shape "$STANDALONE" --shape "$CLUSTER" --shape "$LOCAL" \
   --overlay "$ACCEPTANCE" --overlay "$DEVICES"
 
 # --- 反向 7：overlay 里定义了镜像 ----------------------------------------------------
@@ -197,7 +203,7 @@ mutate sub "$ACCEPTANCE" "$WORK/overlay-image.yml" \
 if grep -q 'image: someone/minio:1.0' "$WORK/overlay-image.yml"; then
   expect_fail "overlay 里出现 image（本门禁不合并它，会成盲区）" \
     "overlay-defines-image" \
-    --shape "$STANDALONE" --shape "$CLUSTER" --shape "$LOCAL" \
+    --shape "$SHARED" --shape "$BUNDLE" --shape "$STANDALONE" --shape "$CLUSTER" --shape "$LOCAL" \
     --overlay "$WORK/overlay-image.yml" --overlay "$DEVICES"
 else
   fail "overlay 用例：锚点失效（acceptance 里没有独立的 minio 服务？）"
@@ -206,13 +212,13 @@ fi
 # --- 边界 1：注释掉的 image 不是引用 -------------------------------------------------
 # `compose.standalone.yml` 里就留着一行注释掉的 `#   image: milvusdb/milvus:latest`。
 # 把它当真会得到一个**永远修不掉**的假阳性，所以这条边界必须有守卫。
-mutate sub "$STANDALONE" "$WORK/commented.yml" \
-  '    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z' \
+mutate sub "$SHARED" "$WORK/commented.yml" \
+  '    image: "${LUMO_MINIO_IMAGE:-lumo/minio:RELEASE.2025-04-22T22-12-26Z}"' \
   '    #   image: someone/repo:latest
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z'
+    image: "${LUMO_MINIO_IMAGE:-lumo/minio:RELEASE.2025-04-22T22-12-26Z}"'
 if grep -q '#   image: someone/repo:latest' "$WORK/commented.yml"; then
   expect_pass "边界：注释掉的 image:latest 不算引用" \
-    --shape "$WORK/commented.yml" --shape "$CLUSTER" --shape "$LOCAL" \
+    --shape "$WORK/commented.yml" --shape "$BUNDLE" --shape "$STANDALONE" --shape "$CLUSTER" --shape "$LOCAL" \
     --overlay "$ACCEPTANCE" --overlay "$DEVICES"
 else
   fail "注释边界用例：锚点失效"
@@ -225,7 +231,7 @@ mutate sub "$STANDALONE" "$WORK/solo-service.yml" \
   'image: "${LUMO_DSH_IMAGE:-lumo/dsh-node:dev}"' 'image: other/dsh-node:9.9'
 if grep -q 'image: other/dsh-node:9.9' "$WORK/solo-service.yml"; then
   expect_pass "边界：只在 standalone 存在的服务改版本不算分歧（过紧会逼人统一形态差异）" \
-    --shape "$WORK/solo-service.yml" --shape "$CLUSTER" --shape "$LOCAL" \
+    --shape "$SHARED" --shape "$BUNDLE" --shape "$WORK/solo-service.yml" --shape "$CLUSTER" --shape "$LOCAL" \
     --overlay "$ACCEPTANCE" --overlay "$DEVICES"
 else
   fail "单形态服务用例：锚点失效"
@@ -233,9 +239,9 @@ fi
 
 # --- 边界 3：不带默认值的 ${VAR} 无法静态判定，提示而不报错 ---------------------------
 # 不能因为静态判不了就报错，否则门禁会逼着人把动态镜像写成硬编码。
-mutate sub "$STANDALONE" "$WORK/dynamic.yml" \
+mutate sub "$SHARED" "$WORK/dynamic.yml" \
   'image: redis:7-alpine' 'image: "${LUMO_REDIS_IMAGE}"'
-if out="$(python3 "$CHECK" --shape "$WORK/dynamic.yml" --shape "$CLUSTER" --shape "$LOCAL" \
+if out="$(python3 "$CHECK" --shape "$WORK/dynamic.yml" --shape "$BUNDLE" --shape "$STANDALONE" --shape "$CLUSTER" --shape "$LOCAL" \
     --overlay "$ACCEPTANCE" --overlay "$DEVICES" 2>&1)"; then
   case "$out" in
     *"不可静态判定"*) ok "动态镜像：提示而不报错（边界）" ;;

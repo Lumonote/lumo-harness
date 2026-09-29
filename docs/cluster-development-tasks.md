@@ -677,10 +677,11 @@ Was ten hardcoded names; omitted `connector-gateway`, `llm-gateway`, `flows`,
 `tei`, `tei-rerank`, `rocketmq-namesrv`, `rocketmq-topic-init`. The static check
 passed even when those were absent.
 
-Now shape-aware and exact: cluster 34 services, standalone 20. Verified by
-extracting the arrays from the script and diffing against the compose
-default-render sets — zero missing, zero extra in both shapes. Two corrections
-to the numbers that stood here before:
+The current shape-aware preflight expects 8 Standalone containers, 16 Cluster
+compact containers, or 24 Cluster full containers. The older counts in this
+historical note referred to the process-per-service Compose layout. The checks
+now compare each topology's required physical services with its rendered set.
+Two corrections to the older numbers that stood here before:
 
 - Both counts dropped by one on 2026-09-20, when the one-shot
   `rocketmq-topic-init` service was merged into the `rocketmq` entrypoint and

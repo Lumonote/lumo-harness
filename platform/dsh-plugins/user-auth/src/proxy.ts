@@ -534,7 +534,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
           if (authorization.protocol !== 'https:' || authorization.username || authorization.password) throw new ConnectorOAuthError(503)
           const bridge = sealConnectorBridge({ connectorId: body['connectorId'], browser, sessionToken: sessionToken ?? '', expiresAt: Date.now() + 300_000 }, options.identityAssertionSecret, options.realm, options.publicBaseUrl ?? '')
           writeJson(res, 200, { authorizationUrl: result.authorizationUrl }, { 'Set-Cookie': authCookie(CONNECTOR_OAUTH_COOKIE, bridge, { secure: options.secureCookie, maxAge: 300, sameSite: 'Lax' }) })
-        } catch (error) { writeJson(res, error instanceof ConnectorOAuthError ? error.status : 503, { error: 'connector_oauth_failed', message: '连接器授权暂不可用，请检查配置及管理员权限' }) }
+        } catch (error) { writeJson(res, error instanceof ConnectorOAuthError ? error.status : 503, { error: 'connector_oauth_failed', message: '连接器授权暂不可用，请检查连接器配置及账号状态' }) }
         return
       }
       if (req.method === 'GET' && url.pathname === '/auth/account') {

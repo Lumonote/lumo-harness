@@ -109,6 +109,8 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
       echo "== go build: $module"; \
       (cd "/src/$module" && export CGO_ENABLED=0 && retry go build -trimpath -ldflags="-s -w" -o "/out/$module" "./cmd/$module"); \
     done; \
+    echo "== go build: service bundle supervisor"; \
+    (cd /src && export CGO_ENABLED=0 GO111MODULE=off && retry go build -trimpath -ldflags="-s -w" -o /out/lumo-control-plane-bundle ./tools/service-bundle); \
     ls -l /out
 
 FROM alpine:3.20
@@ -117,7 +119,10 @@ FROM alpine:3.20
 # 用户统一成 10001：原先 10 个服务是 lumo、registry 与 scheduler 是 root，而那两位的
 # 文件系统写入点都在别处（desktop-agent / artifact-runtime 等其它 cmd），服务本体只跟
 # PG / MinIO 打交道，不需要 root。
-RUN apk add --no-cache ca-certificates && adduser -D -u 10001 lumo
+RUN apk add --no-cache ca-certificates \
+    && adduser -D -u 10001 lumo \
+    && mkdir -p /var/lib/registry/objects \
+    && chown -R lumo:lumo /var/lib/registry
 COPY --from=build /out/ /usr/local/bin/
 # 路径**不是** `yrs-kernel/target/release/…`：`target/` 在上一阶段是 cache mount，它的内容
 # 不进层，所以那边最后把二进制搬到了 `/yrs/lumo-yrs-kernel`（见 yrs-build 那段注释）。

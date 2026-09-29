@@ -26,6 +26,10 @@ export interface KnowledgeQuery {
   realm: string
   /** 检索者角色（Provider 层据此注入强制过滤，不接受上游传参的 realm） */
   roles: string[]
+  /** 有签名身份的交互式查询可附带 userId；未带身份时不会召回用户/文件级分享资料。 */
+  userId?: string
+  /** 仅宿主在验证 Realm 管理员身份后设置。 */
+  libraryAdmin?: boolean
   text: string
   topK: number
   scope: 'published' | 'draft'
@@ -40,9 +44,9 @@ export interface KnowledgeQuery {
    * 正是按 length 判的）。两处取不同的默认值，会让「没配空间」的预设在一侧不受限、在另一侧
    * 什么都查不到——而两边看起来都对。
    *
-   * **它是收窄，不是授权**：授权在 `realm` + `roles` 上（Provider 强制注入，见 §5.4.1）。
-   * 传一个调用方本无权访问的空间名不会因此拿到内容——那一步在 realm 过滤时就已经被挡掉了。
-   * 把这条写下来是因为「多了一个过滤字段」很容易被读成「多了一道安全边界」。
+   * **它是收窄，不是授权**：基础检索权限仍由 Provider 校验 `realm` + `roles`（§5.4.1）；
+   * 文件资料还会按服务端可信的 `userId`/角色分享 ACL 再过滤。传一个调用方无权访问的空间名不会
+   * 因此拿到内容——空间字段不会代替身份或目录授权。
    *
    * # 空数组
    *
@@ -65,8 +69,11 @@ export interface KnowledgeQuery {
  */
 export interface KnowledgeSessionScope {
   set(sessionRef: string, spaces: readonly string[]): void
+  /** 可选的可信执行身份；由宿主从受验证的任务绑定写入，供资料库 ACL 使用。 */
+  setUser?(sessionRef: string, userId: string): void
   clear(sessionRef: string): void
   spacesFor(sessionRef: string): readonly string[] | undefined
+  userIdFor?(sessionRef: string): string | undefined
 }
 
 /**
@@ -138,6 +145,34 @@ export interface KnowledgeSourceManager {
   getSource(docId: string, realm: string): Promise<KnowledgeIngest | undefined>
   upsertSource(entry: KnowledgeSourceWrite): Promise<KnowledgeSourceSummary>
   removeSource(docId: string, realm: string, expectedSourceVersion: number): Promise<void>
+}
+
+/** 资料库文件权限。viewer 可预览/检索，editor 还可上传、整理和分享。 */
+export type KnowledgeLibraryAccess = 'viewer' | 'editor'
+export type KnowledgeLibraryPrincipal = { type: 'user' | 'role'; id: string; access: KnowledgeLibraryAccess }
+export type KnowledgeLibraryGrant = KnowledgeLibraryPrincipal & { resourceType: 'folder' | 'file'; resourceId: string }
+export interface KnowledgeLibraryFolder {
+  folderId: string; realm: string; parentId: string | null; name: string; ownerUserId: string; createdAt: string
+}
+export interface KnowledgeLibraryFile {
+  docId: string; realm: string; folderId: string | null; filename: string; mimeType: string
+  objectKey: string; byteSize: number; sha256: string; ownerUserId: string
+  extractionState: 'pending' | 'ready' | 'failed' | 'unsupported'
+  ocrState: 'not_needed' | 'pending' | 'ready' | 'failed' | 'unavailable'
+  createdAt: string
+}
+export interface KnowledgeLibraryManager {
+  listLibraryFolders(realm: string, userId: string, roles: string[], isAdmin: boolean): Promise<KnowledgeLibraryFolder[]>
+  canAccessLibraryFolder(input: { realm: string; folderId: string; userId: string; roles: string[]; isAdmin: boolean; access?: KnowledgeLibraryAccess }): Promise<boolean>
+  createLibraryFolder(input: { realm: string; parentId: string | null; name: string; ownerUserId: string; roles: string[]; isAdmin: boolean }): Promise<KnowledgeLibraryFolder>
+  deleteLibraryFolder(input: { realm: string; folderId: string; actorUserId: string; roles: string[]; isAdmin: boolean }): Promise<void>
+  listLibraryFiles(realm: string, userId: string, roles: string[], isAdmin: boolean): Promise<KnowledgeLibraryFile[]>
+  getLibraryFile(docId: string, realm: string): Promise<KnowledgeLibraryFile | undefined>
+  createLibraryFile(file: KnowledgeLibraryFile): Promise<void>
+  removeLibraryFile(docId: string, realm: string): Promise<void>
+  canAccessLibraryFile(input: { docId: string; realm: string; userId: string; roles: string[]; isAdmin: boolean; access?: KnowledgeLibraryAccess }): Promise<boolean>
+  setLibraryGrants(input: { realm: string; resourceType: 'folder' | 'file'; resourceId: string; actorUserId: string; roles: string[]; isAdmin: boolean; grants: KnowledgeLibraryPrincipal[] }): Promise<void>
+  listLibraryGrants(realm: string, resourceType: 'folder' | 'file', resourceId: string): Promise<KnowledgeLibraryPrincipal[]>
 }
 
 export interface KnowledgeSeam {

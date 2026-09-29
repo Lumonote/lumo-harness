@@ -14,7 +14,7 @@ func (s *Server) collaborationProgress(w http.ResponseWriter, r *http.Request) {
 	if !ok || !requireDelegationAuthority(w, c) {
 		return
 	}
-	if _, ok := s.taskParticipant(w, r, c); !ok {
+	if _, ok := s.taskViewer(w, r, c); !ok {
 		return
 	}
 	progress, err := s.store.CollaborationProgress(r.Context(), c.realm, r.PathValue("taskID"))
@@ -34,7 +34,7 @@ func (s *Server) taskResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		if _, ok := s.taskParticipant(w, r, c); !ok {
+		if _, ok := s.taskViewer(w, r, c); !ok {
 			return
 		}
 		result, err := s.store.GetTaskResult(r.Context(), c.realm, r.PathValue("taskID"), r.PathValue("runID"))

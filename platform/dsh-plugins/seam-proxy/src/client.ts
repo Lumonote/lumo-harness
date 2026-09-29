@@ -122,6 +122,11 @@ export class SeamProxyClient {
     return this.balancer.health()
   }
 
+  /** 用签名调用身份收束远程查询的角色声明，避免 Consumer 的静态配置扩大权限。 */
+  callerRoles(): string[] {
+    return [...this.roles]
+  }
+
   /**
    * 发一次 seam 调用。
    *

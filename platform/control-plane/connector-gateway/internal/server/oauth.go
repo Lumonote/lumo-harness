@@ -16,10 +16,6 @@ func (s *Server) oauthCaller(w http.ResponseWriter, r *http.Request) (domain.Cal
 		writeErr(w, http.StatusUnauthorized, "authentication required")
 		return caller, false
 	}
-	if !hasAnyRole(caller.Roles, s.AdminRoles) {
-		writeErr(w, http.StatusForbidden, "connector administrator required")
-		return caller, false
-	}
 	if s.oauth == nil {
 		writeErr(w, http.StatusServiceUnavailable, "managed connector OAuth is not configured")
 		return caller, false

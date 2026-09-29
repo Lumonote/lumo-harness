@@ -244,7 +244,7 @@ describe('Lumo native Harness integration', () => {
 
   afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
-  it('mounts the requested product navigation without putting creative plugins in the sidebar', async () => {
+  it('keeps only the primary server workspaces in product navigation', async () => {
     const registered = mountLumo()
 
     const entries = registered.filter(item => item.name === 'sidebar.navigation')
@@ -257,18 +257,15 @@ describe('Lumo native Harness integration', () => {
 
     render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
     const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
-    // 协作空间在最前：它是这一组里唯一以「目标与协作」为入口的工作区，而侧边栏的顺序
-    // 就是产品的推荐顺序。
     expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual([
-      '协作空间', '资料库', '技能中心', '项目', '更多工作工具',
+      '协作空间', '资料库', '技能中心', '更多工作工具',
     ])
-    expect(within(navigation).queryByRole('button', { name: '开放设计' })).toBeNull()
-    expect(within(navigation).queryByRole('button', { name: 'PPT 生成' })).toBeNull()
 
-    fireEvent.click(within(navigation).getByRole('button', { name: '项目' }))
+    fireEvent.click(within(navigation).getByRole('button', { name: '更多' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^项目运营/ }))
     expect(await screen.findByRole('button', { name: '返回对话' })).toBeTruthy()
     expect(await screen.findByText('让每个项目都有清楚的边界与下一步。')).toBeTruthy()
-    expect(screen.getByRole('navigation', { name: '项目领域' })).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: '项目与运营分区' })).toBeTruthy()
     expect(screen.getByRole('button', { name: /项目资产/ })).toBeTruthy()
     expect(screen.queryByText('提交调度任务')).toBeNull()
     expect(screen.queryByText('平台能力')).toBeNull()
@@ -286,7 +283,7 @@ describe('Lumo native Harness integration', () => {
 		fireEvent.click(within(agentAssets).getByRole('button', { name: '停用' }))
 		expect(await within(agentAssets).findByRole('button', { name: '启用' })).toBeTruthy()
 		expect(calls.some(call => call === 'PATCH /lumo/api/agent-presets/contract-review')).toBe(true)
-		fireEvent.click(screen.getByRole('button', { name: /平台运营/ }))
+		fireEvent.click(screen.getByRole('button', { name: /集群与服务/ }))
 		expect(await screen.findByText('提交调度任务')).toBeTruthy()
 
     fireEvent.click(within(navigation).getByRole('button', { name: '资料库' }))
@@ -339,6 +336,9 @@ describe('Lumo native Harness integration', () => {
     expect(await screen.findByText('按工作领域找到真正可用的入口。')).toBeTruthy()
     expect(screen.getByRole('navigation', { name: '更多领域' })).toBeTruthy()
     expect(screen.getByRole('button', { name: /开放设计/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /技能管理/ })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: /连接器/ })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: /用户中心/ })).toBeTruthy()
     expect(screen.queryByText('Stable 通道期望状态')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: /制品目录与灰度/ }))
     expect(screen.getByRole('list', { name: '能力生命周期' })).toBeTruthy()
@@ -365,7 +365,7 @@ describe('Lumo native Harness integration', () => {
     fireEvent.click(screen.getByRole('button', { name: '生成签名计划' }))
     expect(await screen.findByText('计划闭包 · 1 个制品')).toBeTruthy()
     expect(calls.some(call => call === 'POST /lumo/api/registry/plan')).toBe(true)
-		fireEvent.click(screen.getByRole('button', { name: /工作工具/ }))
+		fireEvent.click(within(screen.getByRole('navigation', { name: '工作领域' })).getByRole('button', { name: '更多' }))
 		fireEvent.click(screen.getByRole('button', { name: /开放设计/ }))
 		expect(await screen.findByRole('heading', { name: '开放设计' })).toBeTruthy()
 		expect(screen.queryByRole('button', { name: '添加设计上下文' })).toBeNull()
@@ -382,12 +382,12 @@ describe('Lumo native Harness integration', () => {
     expect(await screen.findByRole('dialog', { name: '更多工作台' })).toBeTruthy()
     for (const [entry, destination] of [
       ['开放设计', 'design'],
-      ['演示文稿', 'presentation'],
-      ['技能中心', 'skillhub'],
+      ['PPT 生成', 'presentation'],
       ['技能管理', 'skills'],
       ['连接器', 'connectors'],
+      ['用户中心', 'account'],
     ] as const) {
-      fireEvent.click(within(document.querySelector<HTMLElement>('.lumo-workspace-directory')!).getByRole('button', { name: new RegExp(`^${entry}`) }))
+      fireEvent.click(await within(document.querySelector<HTMLElement>('.lumo-workspace-directory')!).findByRole('button', { name: new RegExp(`^${entry}`) }))
       await waitFor(() => expect(document.querySelector('.lumo-workbench')?.getAttribute('data-lumo-view')).toBe(destination))
       expect(new URLSearchParams(location.search).get('lumo')).toBe(destination)
       expect(document.querySelector(`.lumo-workspace-hero.${destination}`)).toBeTruthy()
@@ -653,23 +653,23 @@ describe('Lumo native Harness integration', () => {
     fireEvent.click(screen.getByRole('button', { name: '下达目标' }))
 
     // 落到「项目」，工作意图已经填好。
-    expect(await screen.findByRole('heading', { name: '项目' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: '项目运营' })).toBeTruthy()
     const intent = await screen.findByLabelText('工作意图')
     expect((intent as HTMLTextAreaElement).value).toBe('跟进华东客户的合同复核')
 
     // 再走一次「协作空间 → 项目」，这次没输入任何东西：意图不该被上一次的目标填上。
     fireEvent.click(within(navigation).getByRole('button', { name: '协作空间' }))
-    fireEvent.click(await within(navigation).findByRole('button', { name: '项目' }))
+    fireEvent.click(await within(screen.getByRole('navigation', { name: '工作领域' })).findByRole('button', { name: '更多' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^项目运营/ }))
     fireEvent.click(screen.getByRole('button', { name: /协作执行/ }))
     expect((await screen.findByLabelText('工作意图') as HTMLTextAreaElement).value).toBe('')
   }, 15000)
 
-  it('hides 项目/资料库/更多 in the local standalone sidebar', async () => {
+  it('shows only locally available workbenches in the desktop sidebar', async () => {
     const registered = mountLumo()
     const entry = registered.find(item => item.name === 'sidebar.navigation')
     const Navigation = entry!.Component
-    // 单机版（deployment.mode=local，桌面本地 runtime）不显示服务端工作台与资料库
-    // 入口：左侧只保留技能中心。
+    // 本地桌面保留 vault 资料库和本机技能、创作入口。
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       generatedAt: new Date().toISOString(),
       deployment: { mode: 'local', label: '本地单机', storage: 'sqlite', middleware: [], distributed: false, desktop: true, clusterReady: false, clusterOnly: false },
@@ -677,10 +677,11 @@ describe('Lumo native Harness integration', () => {
     }), { status: 200, headers: { 'content-type': 'application/json' } })))
     render(<Navigation wide />)
     const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
-    await waitFor(() => expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual(['技能中心']))
-    expect(within(navigation).queryByRole('button', { name: '项目' })).toBeNull()
-    expect(within(navigation).queryByRole('button', { name: '资料库' })).toBeNull()
-    expect(within(navigation).queryByRole('button', { name: '更多' })).toBeNull()
+    await waitFor(() => expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual(['资料库', '技能中心', '更多工作工具']))
+    expect(within(navigation).queryByRole('button', { name: '项目运营' })).toBeNull()
+    expect(within(navigation).queryByRole('button', { name: '连接器' })).toBeNull()
+    expect(within(navigation).queryByRole('button', { name: '技能管理' })).toBeNull()
+    expect(within(navigation).queryByRole('button', { name: '开放设计' })).toBeNull()
   })
 
   it('separates experts from skills and supports creating an expert', async () => {
@@ -834,10 +835,11 @@ describe('Lumo native Harness integration', () => {
     const Overlay = overlay!.Component
 
     render(<><Entry wide /><Overlay /></>)
-    const opener = screen.getByRole('button', { name: '项目' })
+    const opener = screen.getByRole('button', { name: '更多' })
     opener.focus()
     fireEvent.click(opener)
-    const workbench = await screen.findByRole('dialog', { name: '项目工作台' })
+    fireEvent.click(await screen.findByRole('button', { name: /^项目运营/ }))
+    const workbench = await screen.findByRole('dialog', { name: '项目运营工作台' })
     await waitFor(() => expect(workbench.contains(document.activeElement)).toBe(true))
 
     fireEvent.keyDown(window, { key: 'k', metaKey: true })
@@ -851,7 +853,7 @@ describe('Lumo native Harness integration', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Lumo 工作区菜单' })).toBeNull())
     expect(workbench.contains(document.activeElement)).toBe(true)
     fireEvent.keyDown(window, { key: 'Escape' })
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: '项目工作台' })).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '项目运营工作台' })).toBeNull())
     expect(document.activeElement).toBe(opener)
   })
 

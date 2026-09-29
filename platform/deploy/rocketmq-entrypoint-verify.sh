@@ -20,7 +20,7 @@
 #
 # ## 怎么钉
 #
-# 真起一套 broker 太重，所以用替身：把 `mqbroker` / `mqproxy` / `mqadmin` 换成沙箱脚本，
+# 真起一套 broker 太重，所以用替身：把 `mqnamesrv` / `mqbroker` / `mqproxy` / `mqadmin` 换成沙箱脚本，
 # 由一个共享事件文件记录**真实发生顺序**（`broker:start` / `topic:<名>` / `proxy:start`）。
 # 入口脚本的 stdout 读不出顺序——它对 `mqadmin updateTopic` 的输出做了重定向——所以顺序只能
 # 从副作用侧读，而那也正是它真实发生的位置。
@@ -91,6 +91,12 @@ fi
 BIN="$WORK/bin"
 mkdir -p "$BIN"
 
+cat >"$BIN/mqnamesrv" <<'SH'
+#!/bin/sh
+echo "namesrv:start" >>"$FAKE_STATE/events.log"
+exec sleep 300
+SH
+
 cat >"$BIN/mqbroker" <<'SH'
 #!/bin/sh
 echo "broker:start" >>"$FAKE_STATE/events.log"
@@ -140,28 +146,32 @@ case "$cmd" in
     ;;
 esac
 SH
-chmod +x "$BIN/mqbroker" "$BIN/mqproxy" "$BIN/mqadmin"
+chmod +x "$BIN/mqnamesrv" "$BIN/mqbroker" "$BIN/mqproxy" "$BIN/mqadmin"
 
 # 入口脚本用 `bash -c 'exec 3<>/dev/tcp/127.0.0.1/10911'` 判断 broker 是否就绪，
 # 那是一次真实 TCP 连接，所以这里得有个真的监听方。
 cat >"$WORK/listener.py" <<'PY'
 import socket, sys, time
-server = socket.socket()
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-try:
-    server.bind(("127.0.0.1", 10911))
-except OSError as exc:
-    print(f"bind 10911 失败: {exc}", file=sys.stderr)
-    sys.exit(1)
-server.listen(64)
-server.settimeout(1.0)
+servers = []
+for port in (9876, 10911):
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server.bind(("127.0.0.1", port))
+    except OSError as exc:
+        print(f"bind {port} 失败: {exc}", file=sys.stderr)
+        sys.exit(1)
+    server.listen(64)
+    server.settimeout(0.25)
+    servers.append(server)
 deadline = time.time() + 900
 while time.time() < deadline:
-    try:
-        conn, _ = server.accept()
-        conn.close()
-    except socket.timeout:
-        pass
+    for server in servers:
+        try:
+            conn, _ = server.accept()
+            conn.close()
+        except socket.timeout:
+            pass
 PY
 python3 "$WORK/listener.py" >"$WORK/listener.log" 2>&1 &
 LISTEN_PID=$!
@@ -170,7 +180,7 @@ LISTEN_PID=$!
 disown "$LISTEN_PID" 2>/dev/null || true
 sleep 1
 if kill -0 "$LISTEN_PID" 2>/dev/null; then
-  ok "已在 127.0.0.1:10911 起监听（入口脚本的就绪探测需要真连接）"
+  ok "已在 127.0.0.1:9876 和 10911 起监听（入口脚本的就绪探测需要真连接）"
 else
   # 端口被占（例如真有 rocketmq 在跑）时探测照样会成功，测试仍然有效，只是要说出来。
   fail "无法在 127.0.0.1:10911 起监听：$(cat "$WORK/listener.log")"

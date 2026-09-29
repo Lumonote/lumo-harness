@@ -15,7 +15,8 @@ source "$script_dir/lib/dsh-source.sh"
 usage() {
   echo "usage: $0 {cluster|standalone} [docker compose up options]" >&2
   echo "local is the Rust desktop shape; run: pnpm --dir platform desktop:dev" >&2
-  echo "example: $0 cluster -d --build" >&2
+  echo "example: $0 cluster -d --build   (two per-cluster bundle containers)" >&2
+  echo "full topology: LUMO_CLUSTER_TOPOLOGY=full $0 cluster -d --build" >&2
   echo "extra additive compose files: LUMO_COMPOSE_EXTRA_FILES=a.yml:b.yml $0 cluster -d" >&2
   exit 64
 }
@@ -35,9 +36,9 @@ warn_legacy_cluster_storage() {
   # otherwise initialise an empty pgdata volume. This is only a warning so a
   # focused repair (for example RocketMQ alone) remains possible; the explicit
   # migration command is the safe path before recreating the full topology.
-  local compose_file="$script_dir/compose.cluster.yml"
+  local compose_files=(-p "${COMPOSE_PROJECT_NAME:-lumo-platform}" -f "$script_dir/compose.shared.yml" -f "$script_dir/compose.control-plane.bundle.yml" -f "$script_dir/compose.cluster.yml")
   local postgres_container mount_type
-  postgres_container="$(docker compose -f "$compose_file" ps -aq postgres 2>/dev/null | sed -n '1p' || true)"
+  postgres_container="$(docker compose "${compose_files[@]}" ps -aq postgres 2>/dev/null | sed -n '1p' || true)"
   # 没有容器 = 还没部署过，不是错误。
   [[ -n "$postgres_container" ]] || return 0
   mount_type="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Type}}{{end}}{{end}}' "$postgres_container" 2>/dev/null || true)"
@@ -45,6 +46,20 @@ warn_legacy_cluster_storage() {
 
   echo "warning: legacy Cluster PostgreSQL data is still in the container layer." >&2
   echo "Run ./platform/deploy/migrate-deployment.sh cluster cluster --replace before a full Cluster recreate." >&2
+  return 0
+}
+
+guard_legacy_compose_projects() {
+  command -v docker >/dev/null 2>&1 || return 0
+  local project legacy_shape has_containers
+  for project in lumo-platform-cluster lumo-platform-standalone; do
+    has_containers="$(docker ps -aq --filter "label=com.docker.compose.project=$project" | sed -n '1p' || true)"
+    [[ -n "$has_containers" ]] || continue
+    legacy_shape="${project#lumo-platform-}"
+    echo "error: found containers from the legacy Compose project $project; starting the unified topology would create a second set of shared services and volumes." >&2
+    echo "Back it up and migrate first: COMPOSE_PROJECT_NAME=$project ./platform/deploy/migrate-deployment.sh $legacy_shape $shape --replace" >&2
+    exit 64
+  done
   return 0
 }
 
@@ -61,13 +76,45 @@ case "$shape" in
   *) usage ;;
 esac
 
+case "${COMPOSE_PROJECT_NAME:-}" in
+  lumo-platform-cluster|lumo-platform-standalone)
+    legacy_shape="${COMPOSE_PROJECT_NAME#lumo-platform-}"
+    echo "error: COMPOSE_PROJECT_NAME points at a legacy deployment. Back it up and migrate before recreating it:" >&2
+    echo "  COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME ./platform/deploy/migrate-deployment.sh $legacy_shape $shape --replace" >&2
+    exit 64
+    ;;
+esac
+
 ensure_dsh_source "$dsh_root"
+guard_legacy_compose_projects
 warn_legacy_cluster_storage
 
+compose_args=(-f "$script_dir/compose.shared.yml" -f "$script_dir/compose.control-plane.bundle.yml" -f "$script_dir/compose.$shape.yml")
+if [[ "$shape" == "cluster" ]]; then
+  cluster_topology="${LUMO_CLUSTER_TOPOLOGY:-compact}"
+  case "$cluster_topology" in
+    compact)
+      compose_args+=(-f "$script_dir/compose.cluster.compact.yml" --profile cluster-compact)
+      ;;
+    full)
+      compose_args+=(--profile cluster-full)
+      ;;
+    *)
+      echo "error: LUMO_CLUSTER_TOPOLOGY 只能是 compact|full" >&2
+      exit 64
+      ;;
+  esac
+fi
+
+# The public MinIO image repository and legacy binary archive are no longer
+# available. Build the pinned upstream source by default; an explicit image
+# override still uses the caller's registry without running this build.
+if [[ -z "${LUMO_MINIO_IMAGE:-}" ]]; then
+  compose_args+=(-f "$script_dir/compose.minio-source.yml")
+fi
+
 # 额外的 compose 覆盖文件（冒号分隔），用于本地 / 验收场景——例如把基础设施端口暴露到
-# 宿主机（见 compose.cluster.acceptance.yml）。additive：只加不删，所以 preflight 与
-# smoke 的服务集检查不受影响。
-compose_args=(-f "$script_dir/compose.$shape.yml")
+# 宿主机（见 compose.cluster.acceptance.yml）。
 if [[ -n "${LUMO_COMPOSE_EXTRA_FILES:-}" ]]; then
   IFS=':' read -r -a extra_files <<< "$LUMO_COMPOSE_EXTRA_FILES"
   for extra_file in "${extra_files[@]}"; do
@@ -79,4 +126,4 @@ if [[ -n "${LUMO_COMPOSE_EXTRA_FILES:-}" ]]; then
   done
 fi
 
-exec docker compose "${compose_args[@]}" up "$@"
+exec docker compose "${compose_args[@]}" up --remove-orphans "$@"

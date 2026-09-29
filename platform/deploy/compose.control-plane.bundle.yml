@@ -1,0 +1,88 @@
+# Compact application runtime shared by server standalone and cluster modes.
+# Each logical service keeps its own process, listener, identity, and DNS alias.
+name: lumo-platform
+
+x-bundle-common: &bundle-common
+  LUMO_BUNDLE_COMMON_LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
+  LUMO_BUNDLE_COMMON_LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
+  LUMO_BUNDLE_COMMON_LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
+
+services:
+  api-bundle:
+    build:
+      context: ../control-plane
+      dockerfile: Dockerfile
+    image: lumo/control-plane:dev
+    command: ["/usr/local/bin/lumo-control-plane-bundle", "api"]
+    restart: unless-stopped
+    environment:
+      <<: *bundle-common
+      LUMO_BUNDLE_CONNECTOR_GATEWAY_LUMO_REDIS_ADDR: redis:6379
+      LUMO_BUNDLE_CONNECTOR_GATEWAY_LUMO_ADMIN_ROLES: admin
+      LUMO_BUNDLE_CONNECTOR_GATEWAY_LUMO_CRED_PREFIX: LUMO_CRED_
+      LUMO_BUNDLE_EDGE_GATEWAY_LUMO_CORS_ORIGIN: ""
+      LUMO_BUNDLE_EDGE_GATEWAY_LUMO_EDGE_ROUTES: /etc/lumo/edge-routes.json
+      LUMO_BUNDLE_EDGE_GATEWAY_LUMO_EDGE_REDIS_URL: redis://redis:6379
+      LUMO_BUNDLE_EDGE_GATEWAY_LUMO_EDGE_CORS_ORIGINS: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
+      LUMO_BUNDLE_GOVERNANCE_LUMO_DEPLOYMENT_MODE: standalone
+      LUMO_BUNDLE_GOVERNANCE_LUMO_CLUSTER_STATUS: not_ready
+      LUMO_BUNDLE_GOVERNANCE_LUMO_CORS_ORIGIN: ""
+      LUMO_BUNDLE_GOVERNANCE_LUMO_SCHEDULER_URL: http://scheduler-0:8083
+      LUMO_BUNDLE_GOVERNANCE_LUMO_AUTH_BOOTSTRAP_REALM: "${LUMO_REALM:-dev}"
+      LUMO_BUNDLE_GOVERNANCE_LUMO_AUTH_BOOTSTRAP_USER_ID: "${LUMO_AUTH_BOOTSTRAP_USER_ID:-admin}"
+      LUMO_BUNDLE_GOVERNANCE_LUMO_AUTH_BOOTSTRAP_USERNAME: "${LUMO_AUTH_BOOTSTRAP_USERNAME:-admin}"
+      LUMO_BUNDLE_GOVERNANCE_LUMO_AUTH_BOOTSTRAP_PASSWORD: "${LUMO_AUTH_BOOTSTRAP_PASSWORD:-lumo-admin-123}"
+      LUMO_BUNDLE_GOVERNANCE_LUMO_AUTH_BOOTSTRAP_DISPLAY_NAME: "${LUMO_AUTH_BOOTSTRAP_DISPLAY_NAME:-Lumo Administrator}"
+      LUMO_BUNDLE_GOVERNANCE_LUMO_AUTH_BOOTSTRAP_DEPARTMENT: "${LUMO_AUTH_BOOTSTRAP_DEPARTMENT:-platform}"
+      LUMO_BUNDLE_GOVERNANCE_LUMO_AUTH_BOOTSTRAP_ROLES: "${LUMO_AUTH_BOOTSTRAP_ROLES:-platform_admin,operator}"
+      LUMO_BUNDLE_GOVERNANCE_LUMO_AUTH_MAX_ATTEMPTS: "${LUMO_AUTH_MAX_ATTEMPTS:-5}"
+      LUMO_BUNDLE_GOVERNANCE_LUMO_AUTH_LOCK_SECONDS: "${LUMO_AUTH_LOCK_SECONDS:-300}"
+      LUMO_BUNDLE_GOVERNANCE_LUMO_AUTH_SESSION_TTL_SECONDS: "${LUMO_AUTH_SESSION_TTL_SECONDS:-86400}"
+      LUMO_BUNDLE_GOVERNANCE_LUMO_AUTH_CAPTCHA_TTL_SECONDS: "${LUMO_AUTH_CAPTCHA_TTL_SECONDS:-120}"
+      LUMO_BUNDLE_GOVERNANCE_LUMO_AUTH_MFA_KEY: "${LUMO_AUTH_MFA_KEY:-}"
+      LUMO_BUNDLE_REGISTRY_REGISTRY_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
+      LUMO_BUNDLE_REGISTRY_REGISTRY_TRUST_FILE: /run/secrets/registry-trust
+      LUMO_BUNDLE_REGISTRY_REGISTRY_S3_ENDPOINT: minio:9000
+      LUMO_BUNDLE_REGISTRY_REGISTRY_S3_ACCESS_KEY: "${LUMO_MINIO_ROOT_USER:-lumo}"
+      LUMO_BUNDLE_REGISTRY_REGISTRY_S3_SECRET_KEY: "${LUMO_MINIO_ROOT_PASSWORD:-lumo-minio-123}"
+      LUMO_BUNDLE_REGISTRY_REGISTRY_S3_BUCKET: lumo-registry
+      LUMO_BUNDLE_REGISTRY_REGISTRY_S3_SSL: "false"
+      LUMO_BUNDLE_USAGE_LEDGER_LUMO_RMQ_ENDPOINT: rocketmq:8081
+      LUMO_BUNDLE_USAGE_LEDGER_LUMO_RMQ_GROUP: usage-ledger
+      LUMO_BUNDLE_TERMINAL_GATEWAY_LUMO_TERMINAL_SIGNING_SECRET: "${LUMO_TERMINAL_SIGNING_SECRET:-dev-terminal-signing-secret}"
+    volumes:
+      - ./edge-routes.dev.json:/etc/lumo/edge-routes.json:ro
+      - registrydata:/var/lib/registry/objects
+    secrets: [registry-trust]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+      minio: { condition: service_healthy }
+      nacos: { condition: service_healthy }
+      rocketmq: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/lumo-control-plane-bundle", "healthcheck", "api"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 180s
+    networks:
+      default:
+        aliases:
+          - connector-gateway
+          - edge-gateway
+          - flows
+          - governance
+          - llm-gateway
+          - projects
+          - registry
+          - session-control
+          - terminal-gateway
+          - usage-ledger
+
+volumes:
+  registrydata:
+
+secrets:
+  registry-trust:
+    file: "${REGISTRY_TRUST_FILE:-./registry-trust.dev.json}"

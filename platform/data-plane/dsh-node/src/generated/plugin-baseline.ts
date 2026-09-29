@@ -26,9 +26,9 @@ export interface BaselinePluginPin {
 export const BASELINE_PLUGIN_PINS: readonly BaselinePluginPin[] = [
   {
     name: 'dshmarket',
-    version: '1.41.0',
-    spec: 'dshmarket@1.41.0',
-    note: '插件市场：浏览、搜索、安装和更新 DSH 社区插件。原钉 1.36.0，因 dsh-settings 0.1.2 移除旧 API 后在运行期 import 失败，随 master 升到 1.41.0。',
+    version: '1.65.4',
+    spec: 'dshmarket@1.65.4',
+    note: '插件市场：浏览、搜索、安装和更新 DSH 社区插件。1.41.0 能读取目录，但与当前 Web 客户端装配存在版本差距；固定到已发布的 1.65.4，其客户端依赖声明已收敛到 locale、settings 和 theme。',
   },
   {
     name: '@liustack/modlens',

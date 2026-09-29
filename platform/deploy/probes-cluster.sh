@@ -48,7 +48,23 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-topology="${LUMO_PROBE_TOPOLOGY:-$script_dir/compose.cluster.yml}"
+topology_label="${LUMO_PROBE_TOPOLOGY:-shared + control-plane bundle + cluster}"
+if [[ -n "${LUMO_PROBE_TOPOLOGY:-}" ]]; then
+  topology_files=("$LUMO_PROBE_TOPOLOGY")
+else
+  topology_files=(
+    "$script_dir/compose.shared.yml"
+    "$script_dir/compose.control-plane.bundle.yml"
+    "$script_dir/compose.cluster.yml"
+  )
+  if [[ "${LUMO_CLUSTER_TOPOLOGY:-compact}" == "compact" ]]; then
+    topology_files+=("$script_dir/compose.cluster.compact.yml")
+    topology_label+=" + compact overlay"
+  elif [[ "${LUMO_CLUSTER_TOPOLOGY:-compact}" != "full" ]]; then
+    echo "probes: LUMO_CLUSTER_TOPOLOGY must be compact or full" >&2
+    exit 64
+  fi
+fi
 env_file="${LUMO_ENV_FILE:-$script_dir/.env}"
 export LUMO_PROBE_TIMEOUT_SECONDS="${LUMO_PROBE_TIMEOUT_SECONDS:-3}"
 # 指标序列是**后台周期发布**的（session-control 的 tick、flows 的启动期设置），
@@ -75,7 +91,7 @@ if [[ -z "$control_plane_token" ]]; then
   exit 64
 fi
 
-targets="$(derive_probe_targets "$topology")"
+targets="$(derive_probe_targets "${topology_files[@]}")"
 
 passed=0
 failed=0
@@ -101,7 +117,7 @@ resolve_host() {
 # target_absent <service>：把「探针目标解析不到」记成一条失败。文案单独拎出来，
 # 是为了四个调用点说的是同一件事、同一句话。
 target_absent() {
-  fail "probe-target-port-absent: ${1} 不在 ${topology} 派生出的探针目标里" \
+  fail "probe-target-port-absent: ${1} 不在 ${topology_label} 派生出的探针目标里" \
     "（改名了？被删了？宿主端口写成动态变量了？）—— 这条探针无法构造，按失败处理"
 }
 

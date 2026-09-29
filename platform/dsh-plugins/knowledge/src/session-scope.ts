@@ -29,16 +29,25 @@ import type { KnowledgeSessionScope } from '../../../shared/seam-contracts/knowl
  */
 export function createSessionScope(): KnowledgeSessionScope {
   const bySession = new Map<string, readonly string[]>()
+  const byUser = new Map<string, string>()
   return {
     set(sessionRef, spaces) {
       if (!sessionRef) throw new Error('knowledge: 会话作用域必须带 sessionRef')
       bySession.set(sessionRef, [...spaces])
     },
+    setUser(sessionRef, userId) {
+      if (!sessionRef || !userId) throw new Error('knowledge: 会话用户身份必须带 sessionRef 和 userId')
+      byUser.set(sessionRef, userId)
+    },
     clear(sessionRef) {
       bySession.delete(sessionRef)
+      byUser.delete(sessionRef)
     },
     spacesFor(sessionRef) {
       return bySession.get(sessionRef)
+    },
+    userIdFor(sessionRef) {
+      return byUser.get(sessionRef)
     },
   }
 }

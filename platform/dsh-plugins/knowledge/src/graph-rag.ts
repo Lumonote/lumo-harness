@@ -41,6 +41,10 @@ export function defineGraphRagTool(
     const session = (exec as { agent?: { session?: { id?: unknown } } }).agent?.session?.id
     return session === undefined || session === null ? undefined : scope.spacesFor(String(session))
   }
+  const sessionUserId = (exec: ToolRunContext): string | undefined => {
+    const session = (exec as { agent?: { session?: { id?: unknown } } }).agent?.session?.id
+    return session === undefined || session === null ? undefined : scope.userIdFor?.(String(session))
+  }
   const definition: ToolDefinition = {
     name: KNOWLEDGE_TOOL_GRAPH,
     description:
@@ -114,9 +118,11 @@ export function defineGraphRagTool(
       // 阶段 1：向量召回（只读 published —— 铁律 17）
       const k = Math.min(Math.max(topK ?? config.defaultTopK, 1), config.defaultTopK * 4)
       const factor = config.rerank ? Math.max(config.overfetchFactor ?? DEFAULT_OVERFETCH_FACTOR, 1) : 1
+      const userId = sessionUserId(exec)
       const candidates = await vector.query({
         realm: config.realm,
         roles: config.roles,
+        ...(userId === undefined ? {} : { userId }),
         text: question,
         topK: k * factor,
         scope: 'published',
@@ -141,14 +147,37 @@ export function defineGraphRagTool(
             maxNodes: config.graphMaxNodes,
           })
 
+      // 图谱邻域可能从可访问来源走到单独授权的文件。对可识别为资料文件但当前用户无权查看的
+      // 节点，屏蔽它在本次邻域中的整个连通片段，避免经共享实体间接泄露文件标题或关系。
+      const library = vector as KnowledgeSeam & Partial<{
+        canAccessLibraryFile(input: { docId: string; realm: string; userId: string; roles: string[]; isAdmin: boolean }): Promise<boolean>
+      }>
+      const blocked = new Set<string>()
+      if (typeof library.canAccessLibraryFile === 'function') {
+        for (const node of hood.nodes) {
+          if (node.kind !== 'document' || origins.includes(node.id) || node.properties?.['libraryFile'] !== true) continue
+          if (!await library.canAccessLibraryFile({
+            docId: node.id, realm: config.realm, userId: userId ?? '', roles: config.roles, isAdmin: false,
+          })) blocked.add(node.id)
+        }
+        let changed = true
+        while (changed) {
+          changed = false
+          for (const edge of hood.edges) {
+            if (blocked.has(edge.from) && !blocked.has(edge.to)) { blocked.add(edge.to); changed = true }
+            if (blocked.has(edge.to) && !blocked.has(edge.from)) { blocked.add(edge.from); changed = true }
+          }
+        }
+      }
+
       return {
         // 该字段让模型与策略层都能识别：以下是外部检索内容，非用户指令
         provenance: 'external:knowledge-base',
         hits: hits.map((h) => ({ docId: h.docId, text: h.text, score: h.score })),
         related: hood.nodes
-          .filter((n) => !origins.includes(n.id))
+          .filter((n) => !origins.includes(n.id) && !blocked.has(n.id))
           .map((n) => ({ id: n.id, kind: n.kind, label: n.label })),
-        relations: hood.edges.map((e) => ({ from: e.from, to: e.to, kind: e.kind })),
+        relations: hood.edges.filter(e => !blocked.has(e.from) && !blocked.has(e.to)).map((e) => ({ from: e.from, to: e.to, kind: e.kind })),
         truncated: hood.truncated,
       }
     },

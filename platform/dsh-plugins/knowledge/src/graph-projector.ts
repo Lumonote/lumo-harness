@@ -36,6 +36,8 @@ export interface DocProjection {
   title: string
   space: string
   sourceVersion: number
+  /** 资料库文件节点需经过文件 ACL 检查后才能作为图谱上下文返回。 */
+  libraryFile?: boolean
   /** 引用的其它文档 docId → references 边 */
   references: string[]
   /** 提及的实体名 → entity 节点 + mentions 边 */
@@ -49,13 +51,14 @@ export function collectProjection(
   doc: { title: string; space: string; sourceVersion: number },
   chunks: Array<{ metadata: Record<string, unknown> }>,
 ): DocProjection {
-  const bag = { references: new Set<string>(), entities: new Set<string>(), derivedFrom: new Set<string>() }
+  const bag = { references: new Set<string>(), entities: new Set<string>(), derivedFrom: new Set<string>(), libraryFile: false }
   const take = (raw: unknown, into: Set<string>) => {
     if (typeof raw === 'string') { if (raw.trim()) into.add(raw.trim()); return }
     if (!Array.isArray(raw)) return
     for (const v of raw) if (typeof v === 'string' && v.trim()) into.add(v.trim())
   }
   for (const chunk of chunks) {
+    if (chunk.metadata?.libraryFile === true) bag.libraryFile = true
     take(chunk.metadata?.references, bag.references)
     take(chunk.metadata?.entities, bag.entities)
     take(chunk.metadata?.derivedFrom, bag.derivedFrom)
@@ -64,6 +67,7 @@ export function collectProjection(
     title: doc.title,
     space: doc.space,
     sourceVersion: doc.sourceVersion,
+    ...(bag.libraryFile ? { libraryFile: true } : {}),
     references: [...bag.references],
     entities: [...bag.entities],
     derivedFrom: [...bag.derivedFrom],
@@ -86,7 +90,7 @@ export function expandUpsert(
     kind: 'document',
     realm,
     label: p.title || docId,
-    properties: { space: p.space, sourceVersion: p.sourceVersion },
+    properties: { space: p.space, sourceVersion: p.sourceVersion, ...(p.libraryFile === true ? { libraryFile: true } : {}) },
   }]
   const edges: GraphEdge[] = []
 

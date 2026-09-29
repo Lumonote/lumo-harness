@@ -144,6 +144,7 @@ func main() {
 	})
 	mux.HandleFunc("GET /metrics", observability.Handler)
 	mux.Handle("GET /v1/usage/aggregate", analyticsService.AggregateHandler())
+	mux.Handle("GET /v1/usage/tokens", analyticsService.TokenUsageHandler())
 	// 仪表化积压（§20/§21 已立指标）：outbox 未发布数。发布后未消费的积压在
 	// broker 侧，不在 PG 可见——此处是 publisher 侧的天花板告警口径。
 	mux.HandleFunc("GET /v1/metrics/pending", func(w http.ResponseWriter, r *http.Request) {

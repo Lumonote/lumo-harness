@@ -12,6 +12,7 @@ env_file="${LUMO_ENV_FILE:-$script_dir/.env}"
 usage() {
   echo "usage: $0 {cluster|standalone} [--strict]" >&2
   echo "  --strict rejects development defaults before a production deployment." >&2
+  echo "  cluster defaults to compact bundles; set LUMO_CLUSTER_TOPOLOGY=full for per-process containers." >&2
   exit 64
 }
 
@@ -66,10 +67,32 @@ fi
 
 compose_file="$script_dir/compose.$shape.yml"
 [[ -r "$compose_file" ]] && pass "topology file $compose_file" || fail "missing topology file $compose_file"
+shared_file="$script_dir/compose.shared.yml"
+bundle_file="$script_dir/compose.control-plane.bundle.yml"
+[[ -r "$shared_file" ]] && pass "shared components file $shared_file" || fail "missing shared components file $shared_file"
+[[ -r "$bundle_file" ]] && pass "control-plane bundle file $bundle_file" || fail "missing control-plane bundle file $bundle_file"
 
-compose=(docker compose -f "$compose_file")
+compose=(docker compose -f "$shared_file" -f "$bundle_file" -f "$compose_file")
+cluster_topology="full"
+if [[ "$shape" == "cluster" ]]; then
+  cluster_topology="${LUMO_CLUSTER_TOPOLOGY:-compact}"
+  compact_file="$script_dir/compose.cluster.compact.yml"
+  [[ -r "$compact_file" ]] && pass "cluster topology overlay $compact_file" || fail "missing topology file $compact_file"
+  case "$cluster_topology" in
+    compact) compose+=(-f "$compact_file" --profile cluster-compact) ;;
+    full) compose+=(--profile cluster-full) ;;
+    *) fail "LUMO_CLUSTER_TOPOLOGY must be compact or full" ;;
+  esac
+fi
 if [[ -r "$env_file" ]]; then
-  compose=(docker compose --env-file "$env_file" -f "$compose_file")
+  compose=(docker compose --env-file "$env_file" -f "$shared_file" -f "$bundle_file" -f "$compose_file")
+  if [[ "$shape" == "cluster" ]]; then
+    if [[ "$cluster_topology" == "compact" ]]; then
+      compose+=(-f "$script_dir/compose.cluster.compact.yml" --profile cluster-compact)
+    else
+      compose+=(--profile cluster-full)
+    fi
+  fi
   pass "using environment file $env_file"
 else
   echo "preflight: INFO: no environment file at $env_file; shell environment/defaults will be used"
@@ -114,39 +137,41 @@ if command -v docker >/dev/null 2>&1 && [[ -r "$compose_file" ]]; then
     #
     # 刻意排除 `profiles: [provisioner]` 的 provisioner / artifact-runtime：默认
     # `config --services` 不渲染 profiled 服务，列进来会让每一次默认部署都误报。
-    shared_services=(
-      postgres redis minio rocketmq-namesrv rocketmq nacos prometheus
-    )
-    # 这份名单**必须与 topology 里的默认控制面服务逐字相等**。2026-09-16 复核发现它少了
-    # 三个：`edge-gateway` / `terminal-gateway`（C3/C4 落地时进了 compose 但没进这里）
-    # 与 `session-control`（C5）。少一个的后果不是「少查一个」，而是这个检查宣称的
-    # 「拓扑被改坏会红」对它不成立——三个服务从两条拓扑里同时消失，preflight 照样绿。
-    # 名单腐烂的方向恰是它唯一要防的方向，所以发现一处补一处。
-    control_plane_services=(
-      scheduler-0 registry connector-gateway llm-gateway edge-gateway terminal-gateway
-      session-control flows projects governance usage-ledger
-    )
+    shared_services=(postgres redis minio rocketmq nacos prometheus api-bundle)
+    # API bundle 中的十个逻辑 API 是一个物理 Compose 服务；这里验证运行容器拓扑，
+    # 行为探针另会把 bundle 监听端口映射回 edge/terminal/session 等逻辑服务名。
     if [[ "$shape" == "standalone" ]]; then
-      required_services=("${shared_services[@]}" "${control_plane_services[@]}" collaborator dsh-node)
+      required_services=("${shared_services[@]}" dsh-node)
     else
-      # scheduler-1 是 standby（租约接管对象）；scheduler-cluster-a/b 是**每集群一份的
-      # 本地决策者**（architecture §7.4.1 的两层，全局调度缺席时由它们本地受理）。
-      # collaborator-0/1 与四个 cluster-*-dsh-* 是集群形态独有的多副本；
+      # 集群 API、Scheduler、Collaborator 共用 api-bundle；compact 再把每集群
+      # 3 个 DSH 进程放进一个 bundle。逻辑服务由控制面 healthcheck 与行为探针覆盖。
       # etcd / milvus / opa / tei / tei-rerank / vault 只在 cluster 拓扑里，standalone 没有。
-      required_services=(
-        "${shared_services[@]}" "${control_plane_services[@]}"
-        etcd milvus opa tei tei-rerank vault
-        scheduler-1 scheduler-cluster-a scheduler-cluster-b
-        collaborator-0 collaborator-1
-        dsh-web cluster-a-dsh-0 cluster-a-dsh-1 cluster-b-dsh-0 cluster-b-dsh-1
-      )
+      if [[ "$cluster_topology" == "compact" ]]; then
+        required_services=(
+          postgres redis minio rocketmq nacos prometheus api-bundle
+          etcd milvus opa tei tei-rerank vault
+          dsh-web cluster-a-bundle cluster-b-bundle
+        )
+      else
+        required_services=(
+          postgres redis minio rocketmq nacos prometheus api-bundle
+          etcd milvus opa tei tei-rerank vault
+          scheduler-0 scheduler-1 scheduler-cluster-a scheduler-cluster-b
+          collaborator-0 collaborator-1
+          dsh-web cluster-a-dsh-0 cluster-a-dsh-1 cluster-b-dsh-0 cluster-b-dsh-1
+        )
+      fi
     fi
     missing_services=""
     for service in "${required_services[@]}"; do
       grep -Fxq "$service" <<< "$services" || missing_services="$missing_services $service"
     done
     if [[ -z "$missing_services" ]]; then
-      pass "all ${#required_services[@]} required $shape services are present in the rendered topology"
+      if [[ "$shape" == "cluster" ]]; then
+        pass "all ${#required_services[@]} required $shape/$cluster_topology services are present in the rendered topology"
+      else
+        pass "all ${#required_services[@]} required $shape services are present in the rendered topology"
+      fi
     else
       fail "required $shape services are absent from the rendered topology:$missing_services"
     fi

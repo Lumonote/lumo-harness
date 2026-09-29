@@ -8,6 +8,7 @@
 import type {
   KnowledgeHit,
   KnowledgeIngest,
+  KnowledgeLibraryManager,
   KnowledgeQuery,
   KnowledgeSeam,
 } from '../../../shared/seam-contracts/knowledge.ts'
@@ -20,19 +21,22 @@ import type {
 } from '../../../shared/seam-contracts/graph.ts'
 import type { SeamProxyClient } from './client.ts'
 
-export function createRemoteKnowledge(client: SeamProxyClient): KnowledgeSeam {
+export function createRemoteKnowledge(client: SeamProxyClient): KnowledgeSeam & Pick<KnowledgeLibraryManager, 'canAccessLibraryFile'> {
   return {
     ingest(entry: KnowledgeIngest): Promise<void> {
       return client.call('knowledge', 'ingest', [entry]) as Promise<void>
     },
     query(request: KnowledgeQuery): Promise<KnowledgeHit[]> {
-      return client.call('knowledge', 'query', [request]) as Promise<KnowledgeHit[]>
+      return client.call('knowledge', 'query', [{ ...request, roles: client.callerRoles() }]) as Promise<KnowledgeHit[]>
     },
     remove(docId: string, realm: string): Promise<void> {
       return client.call('knowledge', 'remove', [docId, realm]) as Promise<void>
     },
     rebuild(realm: string): Promise<void> {
       return client.call('knowledge', 'rebuild', [realm]) as Promise<void>
+    },
+    canAccessLibraryFile(input: Parameters<KnowledgeLibraryManager['canAccessLibraryFile']>[0]): Promise<boolean> {
+      return client.call('knowledge', 'canAccessLibraryFile', [input]) as Promise<boolean>
     },
   }
 }
@@ -46,7 +50,7 @@ export function createRemoteGraph(client: SeamProxyClient): GraphSeam {
       return client.call('knowledgeGraph', 'upsertEdges', [edges]) as Promise<void>
     },
     neighborhood(query: NeighborhoodQuery): Promise<Neighborhood> {
-      return client.call('knowledgeGraph', 'neighborhood', [query]) as Promise<Neighborhood>
+      return client.call('knowledgeGraph', 'neighborhood', [{ ...query, roles: client.callerRoles() }]) as Promise<Neighborhood>
     },
     removeNode(id: string, realm: string): Promise<void> {
       return client.call('knowledgeGraph', 'removeNode', [id, realm]) as Promise<void>

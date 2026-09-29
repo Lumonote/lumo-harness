@@ -11,9 +11,10 @@
  *    远程调用的载荷则完全由对端构造，不校验就等于把跨租户读取开放给任何能连上
  *    端口的人（§5.4.1 的强制过滤在 Provider 侧只过滤「传进来的 realm」）。
  */
-import { invalid } from '../../../shared/seam-contracts/errors.ts'
+import { capabilityUnavailable, invalid } from '../../../shared/seam-contracts/errors.ts'
 import type {
   KnowledgeIngest,
+  KnowledgeLibraryManager,
   KnowledgeQuery,
   KnowledgeSeam,
 } from '../../../shared/seam-contracts/knowledge.ts'
@@ -87,6 +88,14 @@ const KNOWLEDGE_METHODS: Record<string, MethodSpec> = {
     arity: 1,
     realms(args) {
       return [asString(args[0], 'rebuild.realm')]
+    },
+  },
+  canAccessLibraryFile: {
+    arity: 1,
+    realms(args) {
+      const input = asObject(args[0], 'canAccessLibraryFile.input')
+      asString(input['docId'], 'canAccessLibraryFile.input.docId')
+      return [asString(input['realm'], 'canAccessLibraryFile.input.realm')]
     },
   },
 }
@@ -170,6 +179,11 @@ export function callKnowledge(seam: KnowledgeSeam, method: string, args: unknown
     case 'query': return seam.query(args[0] as KnowledgeQuery)
     case 'remove': return seam.remove(args[0] as string, args[1] as string)
     case 'rebuild': return seam.rebuild(args[0] as string)
+    case 'canAccessLibraryFile': {
+      const manager = seam as KnowledgeSeam & Partial<Pick<KnowledgeLibraryManager, 'canAccessLibraryFile'>>
+      if (typeof manager.canAccessLibraryFile !== 'function') throw capabilityUnavailable('本节点未挂载资料库 ACL Provider')
+      return manager.canAccessLibraryFile(args[0] as Parameters<KnowledgeLibraryManager['canAccessLibraryFile']>[0])
+    }
     default: throw invalid(`seam knowledge 未注册方法 ${method}`)
   }
 }

@@ -441,7 +441,7 @@ ${seamRows}    - id: lumo-knowledge
 ${cluster.knowledge.rerank ? `        rerank: ${JSON.stringify(cluster.knowledge.rerank)}\n` : ''}
         connectionString: ${JSON.stringify(pgDSN)}
         realm: ${JSON.stringify(platformRealm)}
-        roles: [viewer, operator]
+        roles: [viewer, operator, realm_admin, platform_admin, admin]
         defaultTopK: 5
         embedding:
           baseUrl: ${JSON.stringify(embeddingBaseURL)}
@@ -580,6 +580,10 @@ ${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
         connectorUrl: ${JSON.stringify(process.env['LUMO_CONNECTOR_GATEWAY_URL'] ?? 'http://localhost:8082')}
         governanceUrl: ${JSON.stringify(governanceURL)}
         registryUrl: ${JSON.stringify(process.env['LUMO_REGISTRY_URL'] ?? 'http://localhost:8084')}
+        llmGatewayUrl: ${JSON.stringify(process.env['LUMO_LLM_GATEWAY_URL'] ?? '')}
+        usageLedgerUrl: ${JSON.stringify(process.env['LUMO_USAGE_LEDGER_URL'] ?? '')}
+        edgeGatewayUrl: ${JSON.stringify(process.env['LUMO_EDGE_GATEWAY_URL'] ?? '')}
+        terminalGatewayUrl: ${JSON.stringify(process.env['LUMO_TERMINAL_GATEWAY_URL'] ?? '')}
         # Empty means "this deployment has no session-control"; no localhost fallback.
         sessionControlUrl: ${JSON.stringify(sessionControlURL)}
         realm: ${JSON.stringify(platformRealm)}

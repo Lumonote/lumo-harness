@@ -1,7 +1,7 @@
 # Build the official dsh source and the Lumo adapter from this repository.
 # deepseek-harness is intentionally git-ignored in the host repository, but it
 # is part of this build context and is the authoritative local source.
-FROM node:22-bookworm-slim
+FROM node:22-bookworm-slim AS dsh-runtime
 
 # `node` 基镜像不带 C 工具链，而 dsh 的构建要编一个原生插件
 # （`native/system/scripts/build.ts --host-addon-only` 直接用 `cc`）。少了它，
@@ -19,7 +19,8 @@ RUN set -e; \
     for attempt in 1 2 3 4 5; do \
       if apt-get update \
          && apt-get install -y --no-install-recommends \
-            ca-certificates build-essential python3 python3-pip python3-venv; then \
+            ca-certificates build-essential python3 python3-pip python3-venv \
+            poppler-utils tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng; then \
         break; \
       fi; \
       if [ "$attempt" = 5 ]; then echo "apt-get 五次均失败，放弃" >&2; exit 1; fi; \
@@ -145,3 +146,23 @@ ENV LUMO_BUNDLED_SKILLS_ROOT=/workspace/platform/upstream/skills
 ENV LUMO_RUFLO_BIN=/workspace/platform/dsh-plugins/ruflo-orchestration/node_modules/ruflo/bin/ruflo.js
 ENV LUMO_PPT_PYTHON=/opt/lumo-ppt/bin/python
 CMD ["pnpm", "--filter", "@lumo/dsh-node", "start"]
+
+# 本地 Cluster bundle 继续沿用 DSH 完整运行时，只增加集群专属 Scheduler。
+# 默认 dsh-node target 不依赖此阶段；普通 DSH 镜像构建不额外编译 Go 服务。
+FROM golang:1.25-alpine AS cluster-scheduler-build
+WORKDIR /src
+COPY platform/control-plane /src
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=shared \
+    set -eu; \
+    cd /src/scheduler; \
+    go mod download; \
+    mkdir -p /out; \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/scheduler ./cmd/scheduler
+
+FROM dsh-runtime AS cluster-bundle
+COPY --from=cluster-scheduler-build /out/scheduler /usr/local/bin/scheduler
+ENTRYPOINT ["node", "/workspace/platform/deploy/cluster-bundle.mjs"]
+
+# Keep the normal DSH image as the default target for existing consumers.
+FROM dsh-runtime AS dsh-node

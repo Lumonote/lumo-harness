@@ -46,6 +46,9 @@ func DayBounds(day string) (time.Time, time.Time, error) {
 // 无界区间等于允许任何人把库拖慢。
 const MaxSpanDays = 366
 
+// MaxTokenUsageSpanDays limits the operator token report to a 90-day window.
+const MaxTokenUsageSpanDays = 90
+
 // Row 一个 (day, project, user, cost_type) 分组的聚合值。
 type Row struct {
 	Day       string  `json:"day"`
@@ -73,6 +76,55 @@ type Response struct {
 	Totals    Totals `json:"totals"`
 }
 
+// TokenUsageTotals contains the two measures exposed by the operator token report.
+type TokenUsageTotals struct {
+	Tokens  int64   `json:"tokens"`
+	CostUSD float64 `json:"cost_usd"`
+}
+
+// DailyTokenUsage is one UTC day of llm.tokens usage.
+type DailyTokenUsage struct {
+	Day string `json:"day"`
+	TokenUsageTotals
+}
+
+// ModelTokenUsage is one model's llm.tokens usage in the requested interval.
+type ModelTokenUsage struct {
+	Model string `json:"model"`
+	TokenUsageTotals
+}
+
+// UserTokenUsage is one user's llm.tokens usage in the requested interval.
+type UserTokenUsage struct {
+	UserID string `json:"user_id"`
+	TokenUsageTotals
+}
+
+// ProjectTokenUsage is one project's llm.tokens usage in the requested interval.
+type ProjectTokenUsage struct {
+	ProjectID string `json:"project_id"`
+	TokenUsageTotals
+}
+
+// TokenUsageAggregates is the query-source result before the service adds interval totals.
+type TokenUsageAggregates struct {
+	Daily       []DailyTokenUsage
+	TopModels   []ModelTokenUsage
+	TopUsers    []UserTokenUsage
+	TopProjects []ProjectTokenUsage
+}
+
+// TokenUsageResponse is the operator-facing LLM token report.
+type TokenUsageResponse struct {
+	From        string              `json:"from"`
+	To          string              `json:"to"`
+	Totals      TokenUsageTotals    `json:"totals"`
+	Daily       []DailyTokenUsage   `json:"daily"`
+	TopModels   []ModelTokenUsage   `json:"top_models"`
+	TopUsers    []UserTokenUsage    `json:"top_users"`
+	TopProjects []ProjectTokenUsage `json:"top_projects"`
+}
+
 // Source 一次查询的执行者。
 //
 // 只有一个实现（PgSource）时接口仍然值得存在，理由很具体：HTTP 层要在**没有数据库**
@@ -80,6 +132,12 @@ type Response struct {
 type Source interface {
 	// Aggregate 返回 [fromDay, toDay] 闭区间（按天）的聚合行。
 	Aggregate(ctx context.Context, fromDay, toDay, projectID string) ([]Row, error)
+}
+
+// TokenUsageSource provides the fixed llm.tokens aggregates used by the operator report.
+// It is separate from Source so existing aggregate-only sources remain compatible.
+type TokenUsageSource interface {
+	AggregateTokens(ctx context.Context, fromDay, toDay string) (TokenUsageAggregates, error)
 }
 
 // Service 是查询服务。
@@ -118,6 +176,43 @@ func (s *Service) Aggregate(ctx context.Context, fromDay, toDay, projectID strin
 	return response, nil
 }
 
+// AggregateTokens returns daily totals and the top 10 models, users, and projects.
+func (s *Service) AggregateTokens(ctx context.Context, fromDay, toDay string) (TokenUsageResponse, error) {
+	if err := validateTokenUsageRange(fromDay, toDay); err != nil {
+		return TokenUsageResponse{}, err
+	}
+	source, ok := s.source.(TokenUsageSource)
+	if !ok {
+		return TokenUsageResponse{}, ErrTokenUsageUnavailable
+	}
+	aggregates, err := source.AggregateTokens(ctx, fromDay, toDay)
+	if err != nil {
+		return TokenUsageResponse{}, err
+	}
+	if aggregates.Daily == nil {
+		aggregates.Daily = []DailyTokenUsage{}
+	}
+	if aggregates.TopModels == nil {
+		aggregates.TopModels = []ModelTokenUsage{}
+	}
+	if aggregates.TopUsers == nil {
+		aggregates.TopUsers = []UserTokenUsage{}
+	}
+	if aggregates.TopProjects == nil {
+		aggregates.TopProjects = []ProjectTokenUsage{}
+	}
+	response := TokenUsageResponse{
+		From: fromDay, To: toDay,
+		Daily: aggregates.Daily, TopModels: aggregates.TopModels,
+		TopUsers: aggregates.TopUsers, TopProjects: aggregates.TopProjects,
+	}
+	for _, day := range response.Daily {
+		response.Totals.Tokens += day.Tokens
+		response.Totals.CostUSD += day.CostUSD
+	}
+	return response, nil
+}
+
 // AggregateHandler 暴露 `GET /v1/usage/aggregate?from=&to=&project_id=`。
 //
 // 参数非法一律 400 并说明原因：用量查询是给报表和运维用的，猜一个默认区间
@@ -140,6 +235,33 @@ func (s *Service) AggregateHandler() http.HandlerFunc {
 				return
 			}
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "用量查询失败"})
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+	}
+}
+
+// TokenUsageHandler exposes GET /v1/usage/tokens?from=&to= for operator reporting.
+func (s *Service) TokenUsageHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		query := r.URL.Query()
+		fromValues, toValues := query["from"], query["to"]
+		if len(fromValues) != 1 || len(toValues) != 1 || fromValues[0] == "" || toValues[0] == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "from 与 to 各需提供一次，格式 YYYY-MM-DD"})
+			return
+		}
+		response, err := s.AggregateTokens(r.Context(), fromValues[0], toValues[0])
+		if err != nil {
+			if errors.Is(err, ErrInvalidRange) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			if errors.Is(err, ErrTokenUsageUnavailable) {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "token 用量查询未配置"})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "token 用量查询失败"})
 			return
 		}
 		writeJSON(w, http.StatusOK, response)
@@ -169,6 +291,9 @@ func SortRows(rows []Row) {
 // ErrInvalidRange 查询区间非法（调用方的问题，映射 HTTP 400）。
 var ErrInvalidRange = errors.New("analytics: 查询区间非法")
 
+// ErrTokenUsageUnavailable indicates that the configured query source has no token report.
+var ErrTokenUsageUnavailable = errors.New("analytics: token 用量查询源未配置")
+
 // validateRange 校验区间：格式、先后、跨度上限。
 func validateRange(fromDay, toDay string) error {
 	from, err := time.ParseInLocation("2006-01-02", fromDay, ReportingLocation)
@@ -184,6 +309,21 @@ func validateRange(fromDay, toDay string) error {
 	}
 	if days := int(to.Sub(from).Hours()/24) + 1; days > MaxSpanDays {
 		return fmt.Errorf("%w: 区间跨 %d 天，超过上限 %d 天", ErrInvalidRange, days, MaxSpanDays)
+	}
+	return nil
+}
+
+func validateTokenUsageRange(fromDay, toDay string) error {
+	if err := validateRange(fromDay, toDay); err != nil {
+		return err
+	}
+	from, _ := time.ParseInLocation("2006-01-02", fromDay, ReportingLocation)
+	to, _ := time.ParseInLocation("2006-01-02", toDay, ReportingLocation)
+	if from.Format("2006-01-02") != fromDay || to.Format("2006-01-02") != toDay {
+		return fmt.Errorf("%w: 日期必须使用 YYYY-MM-DD", ErrInvalidRange)
+	}
+	if days := int(to.Sub(from).Hours()/24) + 1; days > MaxTokenUsageSpanDays {
+		return fmt.Errorf("%w: 区间跨 %d 天，超过 token 用量查询上限 %d 天", ErrInvalidRange, days, MaxTokenUsageSpanDays)
 	}
 	return nil
 }

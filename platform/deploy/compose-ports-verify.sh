@@ -35,6 +35,9 @@ CHECK="$HERE/compose-ports-check.py"
 CLUSTER="$HERE/compose.cluster.yml"
 DEVICES="$HERE/compose.cluster.devices.yml"
 STANDALONE="$HERE/compose.standalone.yml"
+SHARED="$HERE/compose.shared.yml"
+API_BUNDLE="$HERE/compose.control-plane.bundle.yml"
+COMPACT="$HERE/compose.cluster.compact.yml"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/lumo-compose-ports.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -138,10 +141,14 @@ mutate() {
 }
 
 # --- 正向：真实拓扑（含合并语义）都必须通过 --------------------------------------
-expect_pass "compose.cluster.yml + compose.cluster.devices.yml（合并语义）" \
-  --file "$CLUSTER" --file "$DEVICES"
+expect_pass "Cluster compact + 验收与设备 overlay（profile 合并语义）" \
+  --file "$SHARED" --file "$API_BUNDLE" --file "$CLUSTER" --file "$COMPACT" \
+  --file "$HERE/compose.cluster.acceptance.yml" --file "$DEVICES" --profile cluster-compact
+expect_pass "Cluster full profile 的端口集合" \
+  --file "$SHARED" --file "$API_BUNDLE" --file "$CLUSTER" --profile cluster-full
 expect_pass "compose.cluster.yml 单独" --file "$CLUSTER"
-expect_pass "compose.standalone.yml 单独" --file "$STANDALONE"
+expect_pass "Standalone 共用文件与形态覆盖" \
+  --file "$SHARED" --file "$API_BUNDLE" --file "$STANDALONE"
 
 # 反向 0：宿主端口写成不带默认值的变量时，它**不是**冲突（不能因为静态判不了就报错，
 # 否则门禁会逼着人把动态端口写成硬编码）。这一条钉住这个边界。
@@ -162,7 +169,8 @@ fi
 mutate sub "$CLUSTER" "$WORK/regressed.yml" '"18091:8090"' '"18090:8090"'
 if grep -q '"18090:8090"' "$WORK/regressed.yml"; then
   expect_fail "回归：terminal-gateway 与设备网关再次同时主张宿主 18090" \
-    "port-collision: 宿主端口 18090" --file "$WORK/regressed.yml" --file "$DEVICES"
+    "port-collision: 宿主端口 18090" --file "$SHARED" --file "$API_BUNDLE" \
+    --file "$WORK/regressed.yml" --file "$COMPACT" --file "$DEVICES" --profile cluster-compact
 else
   fail "回归用例：无法把端口改回 18090（锚点失效？拓扑被改过？）"
 fi
@@ -179,10 +187,9 @@ fi
 # --- 反向 2b：服务名带**行内注释**时，它的 ports 不能被漏掉 ---------------------------
 # 2026-09-20 修：首版的服务名正则要求行尾没有别的东西，于是 `  postgres:   # 注释` 不被
 # 识别为服务，它的整段 `ports:` 被当成「不在服务区内」处理。**方向是 fail-open**：冲突的
-# 另一方成了唯一主张者，于是**真冲突被放行**（实测过，退出码 0）。而本仓库
-# `compose.standalone.yml` 里有 8 个带行内注释的服务名，cluster 一个都没有 ——
-# 也就是说这个盲区在本机只对 standalone 生效，而 standalone 恰是最常起的那一个。
-mutate sub-line "$CLUSTER" "$WORK/inline-a.yml" \
+# 另一方成了唯一主张者，于是**真冲突被放行**（实测过，退出码 0）。公共服务现在集中在
+# compose.shared.yml；这个反例直接在共享文件里注入同端口映射。
+mutate sub-line "$SHARED" "$WORK/inline-a.yml" \
   '  postgres:' '  postgres:   # 行内注释
     ports: ["15432:5432"]'
 mutate sub-line "$WORK/inline-a.yml" "$WORK/inline-comment.yml" \

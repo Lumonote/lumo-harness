@@ -30,7 +30,30 @@ esac
 
 compose_file="$script_dir/compose.$shape.yml"
 [[ -f "$compose_file" ]] || die "Compose file not found: $compose_file"
-compose=(docker compose -f "$compose_file")
+project_name="${COMPOSE_PROJECT_NAME:-}"
+if [[ -z "$project_name" ]]; then
+  for candidate in lumo-platform "lumo-platform-$shape"; do
+    if docker ps -aq \
+      --filter "label=com.docker.compose.project=$candidate" \
+      --filter label=com.docker.compose.service=postgres | grep -q .; then
+      project_name="$candidate"
+      break
+    fi
+  done
+fi
+project_name="${project_name:-lumo-platform}"
+compose=(docker compose -p "$project_name"
+  -f "$script_dir/compose.shared.yml"
+  -f "$script_dir/compose.control-plane.bundle.yml"
+  -f "$compose_file")
+if [[ "$shape" == "cluster" ]]; then
+  if [[ "${LUMO_CLUSTER_TOPOLOGY:-compact}" == "full" ]]; then
+    compose+=(--profile cluster-full)
+  else
+    compose+=(-f "$script_dir/compose.cluster.compact.yml" --profile cluster-compact)
+  fi
+fi
+compose+=(--profile provisioner)
 
 for command_name in docker zstd shasum tar awk; do
   require_command "$command_name"
@@ -47,14 +70,14 @@ chmod 700 "$stage_dir"
 manifest="$stage_dir/backup-manifest.jsonl"
 checksums="$backup_dir/SHA256SUMS"
 file_count=0
-stopped_services=()
+stopped_containers=()
 quiesced=0
 
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
-  if [[ "$quiesced" -eq 1 && "${#stopped_services[@]}" -gt 0 ]]; then
-    "${compose[@]}" start "${stopped_services[@]}" >&2 || true
+  if [[ "$quiesced" -eq 1 && "${#stopped_containers[@]}" -gt 0 ]]; then
+    docker start "${stopped_containers[@]}" >&2 || true
   fi
   rm -rf -- "$stage_dir"
   exit "$status"
@@ -62,7 +85,19 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 container_id() {
-  "${compose[@]}" ps -aq "$1" | sed -n '1p'
+  local service="$1" candidate result
+  case "$service" in
+    registry) candidates=(api-bundle registry) ;;
+    provisioner) candidates=(provisioner dsh-web dsh-node cluster-a-bundle cluster-b-bundle) ;;
+    *) candidates=("$service") ;;
+  esac
+  for candidate in "${candidates[@]}"; do
+    result="$(docker ps -aq \
+      --filter "label=com.docker.compose.project=$project_name" \
+      --filter "label=com.docker.compose.service=$candidate" | sed -n '1p')"
+    [[ -n "$result" ]] && { printf '%s' "$result"; return 0; }
+  done
+  return 0
 }
 
 record_file() {
@@ -103,16 +138,18 @@ postgres_container="$(container_id postgres)"
 [[ "$(docker inspect -f '{{.State.Running}}' "$postgres_container")" == "true" ]] || \
   die "postgres is not running; start it before creating a backup"
 
-# Stop only services that were already running, preserving the caller's
-# selected topology. PostgreSQL remains available for a consistent logical
-# dump after writers have been quiesced.
-while IFS= read -r service; do
-  [[ -n "$service" && "$service" != "postgres" ]] || continue
-  stopped_services+=("$service")
-done < <("${compose[@]}" ps --status running --services || true)
-if [[ "${#stopped_services[@]}" -gt 0 ]]; then
-  "${compose[@]}" stop --timeout 30 "${stopped_services[@]}"
+# Stop every running application container in this Compose project, including
+# legacy per-service containers that are absent from the new bundled topology.
+# PostgreSQL remains available for a consistent logical dump.
+while IFS= read -r container; do
+  [[ -n "$container" ]] || continue
+  service="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$container")"
+  [[ "$service" == postgres ]] && continue
+  stopped_containers+=("$container")
+done < <(docker ps -q --filter "label=com.docker.compose.project=$project_name")
+if [[ "${#stopped_containers[@]}" -gt 0 ]]; then
   quiesced=1
+  docker stop --time 30 "${stopped_containers[@]}" >/dev/null
 fi
 
 created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -121,7 +158,7 @@ printf '{"record":"header","format":"lumo-backup","version":1,"shape":"%s","crea
 
 pg_user="${LUMO_POSTGRES_USER:-lumo}"
 pg_database="${LUMO_POSTGRES_DB:-lumo}"
-"${compose[@]}" exec -T postgres pg_dump -U "$pg_user" -d "$pg_database" \
+docker exec "$postgres_container" pg_dump -U "$pg_user" -d "$pg_database" \
   --no-owner --no-privileges | zstd -q -T0 -19 > "$backup_dir/postgres.sql.zst"
 record_file "postgres.sql.zst" "postgres-logical"
 
@@ -143,4 +180,5 @@ zstd -q -T0 -19 "$manifest" -o "$backup_dir/backup-manifest.jsonl.zst"
 zstd -tq "$backup_dir/backup-manifest.jsonl.zst"
 
 echo "backup created: $backup_dir"
+echo "source project: $project_name"
 echo "manifest: $backup_dir/backup-manifest.jsonl.zst"

@@ -1940,6 +1940,24 @@ func (s *Store) ListDelegationTasks(ctx context.Context, realm, userID string, a
 	args := []any{realm}
 	if !all {
 		query += ` AND (t.requester_user_id=$2 OR t.assignee_user_id=$2`
+		query += ` OR EXISTS (
+			WITH RECURSIVE ancestors(id,parent_task_id,visited) AS (
+				SELECT t.id,t.parent_task_id,ARRAY[t.id]::text[]
+				UNION ALL
+				SELECT parent.id,parent.parent_task_id,a.visited || parent.id
+				FROM governance_delegation_tasks parent JOIN ancestors a ON parent.realm=t.realm AND parent.id=a.parent_task_id
+				WHERE NOT parent.id=ANY(a.visited)
+			)
+			SELECT 1 FROM ancestors a JOIN governance_task_collaborators g ON g.realm=t.realm AND g.task_id=a.id
+			WHERE (g.subject_type='user' AND g.subject_id=$2)
+			   OR (g.subject_type='department' AND EXISTS (
+					SELECT 1 FROM governance_users u
+					JOIN governance_departments ud ON ud.realm=u.realm AND ud.id=u.primary_dept_id AND ud.status='active'
+				JOIN governance_departments gd ON gd.realm=g.realm AND gd.id=g.subject_id AND gd.status='active'
+					WHERE u.realm=t.realm AND u.id=$2 AND u.status='active'
+					  AND (ud.id=gd.id OR (g.include_children AND ud.path LIKE gd.path || '%'))
+				))
+		)`
 		if departmentScope {
 			query += ` OR EXISTS (
 				SELECT 1

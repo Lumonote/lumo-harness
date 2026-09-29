@@ -50,6 +50,7 @@ import re
 import sys
 
 SERVICE_RE = re.compile(r"^  ([a-z0-9][a-z0-9-]*):\s*(?:#.*)?$")
+SERVICE_FLOW_RE = re.compile(r"^  ([a-z0-9][a-z0-9-]*):\s*\{(.*)\}\s*$")
 PORTS_KEY_RE = re.compile(r"^(\s*)ports:\s*(.*)$")
 TOPLEVEL_RE = re.compile(r"^[a-z]")
 DIGITS_RE = re.compile(r"(\d+)")
@@ -140,12 +141,13 @@ def parse(path, problems):
             lines = handle.read().split("\n")
     except OSError as exc:
         problems.append(f"topology-unreadable: 无法读取 {path}: {exc}")
-        return 0, [], 0
+        return 0, [], 0, {}
 
     service_count = 0
     current = None
     found = []
     entry_count = 0
+    service_profiles = {}
     index = 0
     while index < len(lines):
         line = lines[index]
@@ -156,6 +158,15 @@ def parse(path, problems):
             service_count += 1
             index += 1
             continue
+        flow = SERVICE_FLOW_RE.match(line)
+        if flow:
+            current = flow.group(1)
+            service_count += 1
+            profiles = re.search(r"profiles:\s*\[([^\]]*)\]", flow.group(2))
+            if profiles:
+                service_profiles[current] = [item.strip().strip("\"'") for item in profiles.group(1).split(",") if item.strip()]
+            index += 1
+            continue
         if line and not line.startswith(" ") and TOPLEVEL_RE.match(line):
             current = None  # 回到顶层键，离开服务区
             index += 1
@@ -164,6 +175,10 @@ def parse(path, problems):
             index += 1
             continue
         key = PORTS_KEY_RE.match(line)
+        if stripped.startswith("profiles:"):
+            profiles = re.search(r"profiles:\s*\[([^\]]*)\]", stripped)
+            if profiles:
+                service_profiles[current] = [item.strip().strip("\"'") for item in profiles.group(1).split(",") if item.strip()]
         if key:
             inline, entries, last = collect_entries(lines, index, len(key.group(1)))
             raw = inline if inline is not None else entries
@@ -178,17 +193,20 @@ def parse(path, problems):
             index = last + 1
             continue
         index += 1
-    return service_count, found, entry_count
+    return service_count, found, entry_count, service_profiles
 
 
-def run(files):
+def run(files, active_profiles=None):
+    active_profiles = set(active_profiles or [])
     problems = []
     all_mappings = []
     total_entries = 0
+    service_profiles = {}
     for path in files:
-        _, mappings, entries = parse(path, problems)
+        _, mappings, entries, profiles = parse(path, problems)
         all_mappings.extend(mappings)
         total_entries += entries
+        service_profiles.update(profiles)
 
     # --- 计数守卫 ---------------------------------------------------------------
     # 本门禁的全部价值在于「发现冲突」，而任何解析失效都会让它退化成「没有冲突」。
@@ -201,17 +219,20 @@ def run(files):
     # --- 冲突判定 ---------------------------------------------------------------
     owners = {}
     for mapping in all_mappings:
+        profiles = service_profiles.get(mapping.service, [])
+        if profiles and not active_profiles.intersection(profiles):
+            continue
         if mapping.host_port is None:
             continue
         owners.setdefault(mapping.host_port, []).append(mapping)
 
     for host_port in sorted(owners, key=int):
         claims = owners[host_port]
-        services = {claim.service for claim in claims}
-        if len(services) < 2:
+        mappings = {(claim.service, claim.container_port) for claim in claims}
+        if len(mappings) < 2:
             continue
         detail = "、".join(f"{c.service}（{c.where}）" for c in claims)
-        problems.append(f"port-collision: 宿主端口 {host_port} 被 {len(services)} 个服务同时声明：{detail}")
+        problems.append(f"port-collision: 宿主端口 {host_port} 被 {len(mappings)} 个端口映射同时声明：{detail}")
 
     undecidable = [m for m in all_mappings if m.host_port is None]
     return problems, len(all_mappings), total_entries, undecidable
@@ -221,9 +242,11 @@ def main():
     parser = argparse.ArgumentParser(description="compose 宿主端口冲突检查")
     parser.add_argument("--file", action="append", default=[], required=True,
                         help="compose 文件；多个表示合并语义（后者叠加在前者之上）")
+    parser.add_argument("--profile", action="append", default=[],
+                        help="启用的 Compose profile；可重复指定")
     args = parser.parse_args()
 
-    problems, mapping_count, entry_count, undecidable = run(args.file)
+    problems, mapping_count, entry_count, undecidable = run(args.file, args.profile)
     for path in args.file:
         print(f"compose-ports-check: 读取 {path}")
     for mapping in undecidable:

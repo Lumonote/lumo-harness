@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -63,4 +64,140 @@ func (s *PgSource) Aggregate(ctx context.Context, fromDay, toDay, projectID stri
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// AggregateTokens reads only llm.tokens rows and returns daily totals plus the top dimensions.
+// The repeatable-read transaction keeps all four result sets on one ledger snapshot.
+func (s *PgSource) AggregateTokens(ctx context.Context, fromDay, toDay string) (TokenUsageAggregates, error) {
+	from, _, err := DayBounds(fromDay)
+	if err != nil {
+		return TokenUsageAggregates{}, err
+	}
+	_, toEnd, err := DayBounds(toDay)
+	if err != nil {
+		return TokenUsageAggregates{}, err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return TokenUsageAggregates{}, fmt.Errorf("analytics: 开始 token 聚合事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	result := TokenUsageAggregates{
+		Daily:       make([]DailyTokenUsage, 0),
+		TopModels:   make([]ModelTokenUsage, 0),
+		TopUsers:    make([]UserTokenUsage, 0),
+		TopProjects: make([]ProjectTokenUsage, 0),
+	}
+
+	dailyRows, err := tx.Query(ctx, `
+		SELECT to_char(timezone($1::text, days.day), 'YYYY-MM-DD') AS day,
+		       COALESCE(SUM(ledger.tokens), 0)::bigint AS tokens,
+		       COALESCE(SUM(ledger.cost_usd), 0)::float8 AS cost_usd
+		  FROM generate_series($2::timestamptz, $3::timestamptz - interval '1 day', interval '1 day') AS days(day)
+		  LEFT JOIN usage_ledger AS ledger
+		    ON ledger.cost_type = 'llm.tokens'
+		   AND ledger.ts >= days.day
+		   AND ledger.ts < days.day + interval '1 day'
+		 GROUP BY days.day
+		 ORDER BY days.day`, ReportingLocation.String(), from, toEnd)
+	if err != nil {
+		return TokenUsageAggregates{}, fmt.Errorf("analytics: token 日聚合失败: %w", err)
+	}
+	for dailyRows.Next() {
+		var row DailyTokenUsage
+		if err := dailyRows.Scan(&row.Day, &row.Tokens, &row.CostUSD); err != nil {
+			dailyRows.Close()
+			return TokenUsageAggregates{}, fmt.Errorf("analytics: 扫描 token 日聚合失败: %w", err)
+		}
+		result.Daily = append(result.Daily, row)
+	}
+	if err := dailyRows.Err(); err != nil {
+		dailyRows.Close()
+		return TokenUsageAggregates{}, fmt.Errorf("analytics: 读取 token 日聚合失败: %w", err)
+	}
+	dailyRows.Close()
+
+	modelRows, err := tx.Query(ctx, `
+		SELECT COALESCE(NULLIF(model, ''), 'unknown') AS model,
+		       COALESCE(SUM(tokens), 0)::bigint AS tokens,
+		       COALESCE(SUM(cost_usd), 0)::float8 AS cost_usd
+		  FROM usage_ledger
+		 WHERE cost_type = 'llm.tokens' AND ts >= $1 AND ts < $2
+		 GROUP BY 1
+		 ORDER BY tokens DESC, cost_usd DESC, model ASC
+		 LIMIT 10`, from, toEnd)
+	if err != nil {
+		return TokenUsageAggregates{}, fmt.Errorf("analytics: token 模型聚合失败: %w", err)
+	}
+	for modelRows.Next() {
+		var row ModelTokenUsage
+		if err := modelRows.Scan(&row.Model, &row.Tokens, &row.CostUSD); err != nil {
+			modelRows.Close()
+			return TokenUsageAggregates{}, fmt.Errorf("analytics: 扫描 token 模型聚合失败: %w", err)
+		}
+		result.TopModels = append(result.TopModels, row)
+	}
+	if err := modelRows.Err(); err != nil {
+		modelRows.Close()
+		return TokenUsageAggregates{}, fmt.Errorf("analytics: 读取 token 模型聚合失败: %w", err)
+	}
+	modelRows.Close()
+
+	userRows, err := tx.Query(ctx, `
+		SELECT user_id,
+		       COALESCE(SUM(tokens), 0)::bigint AS tokens,
+		       COALESCE(SUM(cost_usd), 0)::float8 AS cost_usd
+		  FROM usage_ledger
+		 WHERE cost_type = 'llm.tokens' AND ts >= $1 AND ts < $2
+		 GROUP BY user_id
+		 ORDER BY tokens DESC, cost_usd DESC, user_id ASC
+		 LIMIT 10`, from, toEnd)
+	if err != nil {
+		return TokenUsageAggregates{}, fmt.Errorf("analytics: token 用户聚合失败: %w", err)
+	}
+	for userRows.Next() {
+		var row UserTokenUsage
+		if err := userRows.Scan(&row.UserID, &row.Tokens, &row.CostUSD); err != nil {
+			userRows.Close()
+			return TokenUsageAggregates{}, fmt.Errorf("analytics: 扫描 token 用户聚合失败: %w", err)
+		}
+		result.TopUsers = append(result.TopUsers, row)
+	}
+	if err := userRows.Err(); err != nil {
+		userRows.Close()
+		return TokenUsageAggregates{}, fmt.Errorf("analytics: 读取 token 用户聚合失败: %w", err)
+	}
+	userRows.Close()
+
+	projectRows, err := tx.Query(ctx, `
+		SELECT project_id,
+		       COALESCE(SUM(tokens), 0)::bigint AS tokens,
+		       COALESCE(SUM(cost_usd), 0)::float8 AS cost_usd
+		  FROM usage_ledger
+		 WHERE cost_type = 'llm.tokens' AND ts >= $1 AND ts < $2
+		 GROUP BY project_id
+		 ORDER BY tokens DESC, cost_usd DESC, project_id ASC
+		 LIMIT 10`, from, toEnd)
+	if err != nil {
+		return TokenUsageAggregates{}, fmt.Errorf("analytics: token 项目聚合失败: %w", err)
+	}
+	for projectRows.Next() {
+		var row ProjectTokenUsage
+		if err := projectRows.Scan(&row.ProjectID, &row.Tokens, &row.CostUSD); err != nil {
+			projectRows.Close()
+			return TokenUsageAggregates{}, fmt.Errorf("analytics: 扫描 token 项目聚合失败: %w", err)
+		}
+		result.TopProjects = append(result.TopProjects, row)
+	}
+	if err := projectRows.Err(); err != nil {
+		projectRows.Close()
+		return TokenUsageAggregates{}, fmt.Errorf("analytics: 读取 token 项目聚合失败: %w", err)
+	}
+	projectRows.Close()
+
+	if err := tx.Commit(ctx); err != nil {
+		return TokenUsageAggregates{}, fmt.Errorf("analytics: 提交 token 聚合事务失败: %w", err)
+	}
+	return result, nil
 }

@@ -1,0 +1,34 @@
+{
+  "id": "github",
+  "realm": "default",
+  "name": "GitHub",
+  "protocol": "rest",
+  "baseUrl": "https://api.github.com",
+  "auth": {
+    "kind": "bearer",
+    "credentialRef": "oauth:managed",
+    "oauth": {
+      "managed": true,
+      "provider": "GitHub",
+      "authorizationUrl": "https://github.com/login/oauth/authorize",
+      "tokenUrl": "https://github.com/login/oauth/access_token",
+      "callbackUrl": "https://lumo.example.com/auth/connector-oauth/callback",
+      "clientIdRef": "secret/data/lumo/connectors/github/client-id",
+      "clientSecretRef": "secret/data/lumo/connectors/github/client-secret",
+      "scopes": ["repo"],
+      "pkce": true
+    }
+  },
+  "operations": {
+    "get_ref": { "name": "get_ref", "method": "GET", "path": "/repos/{owner}/{repo}/git/ref/{ref}", "write": false, "sensitivity": "low", "maxResponseBytes": 1048576 },
+    "create_ref": { "name": "create_ref", "method": "POST", "path": "/repos/{owner}/{repo}/git/refs", "write": true, "sensitivity": "normal", "maxResponseBytes": 1048576 },
+    "put_file": { "name": "put_file", "method": "PUT", "path": "/repos/{owner}/{repo}/contents/{path}", "write": true, "sensitivity": "normal", "maxResponseBytes": 1048576 },
+    "create_pull_request": { "name": "create_pull_request", "method": "POST", "path": "/repos/{owner}/{repo}/pulls", "write": true, "sensitivity": "normal", "maxResponseBytes": 1048576 }
+  },
+  "limits": { "requestsPerMinute": 60, "burst": 10, "timeoutMs": 30000, "maxRequestBytes": 1048576, "maxResponseBytes": 2097152 },
+  "egress": { "allowedHosts": ["api.github.com"], "allowPrivateNetwork": false },
+  "redaction": { "request": false, "response": false },
+  "roles": ["member", "manager", "dept_manager", "operator", "realm_admin", "admin", "platform_admin"],
+  "enabled": true,
+  "version": 1
+}

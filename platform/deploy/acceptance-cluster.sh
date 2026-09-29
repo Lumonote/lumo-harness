@@ -12,6 +12,9 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root_dir="$(cd -- "$script_dir/../.." && pwd)"
 timeout_seconds="${LUMO_ACCEPTANCE_TIMEOUT_SECONDS:-5}"
+# The acceptance gate exercises independent container failure domains. The
+# normal developer startup is compact; this suite defaults to the full shape.
+export LUMO_CLUSTER_TOPOLOGY="${LUMO_CLUSTER_TOPOLOGY:-full}"
 report_dir="$(mktemp -d "${TMPDIR:-/tmp}/lumo-acceptance.XXXXXX")"
 trap 'rm -rf "$report_dir"' EXIT
 
@@ -72,9 +75,9 @@ fi
 # 套件最终超时——失败形态与被测代码无关。所以按 cluster compose 反查真实容器名传下去。
 if [[ -z "${LUMO_TEST_RMQ_CONTAINER:-}" ]] && command -v docker >/dev/null 2>&1; then
   env_file="${LUMO_ENV_FILE:-$script_dir/.env}"
-  rmq_compose=(docker compose -f "$script_dir/compose.cluster.yml")
+  rmq_compose=(docker compose -f "$script_dir/compose.shared.yml" -f "$script_dir/compose.control-plane.bundle.yml" -f "$script_dir/compose.cluster.yml")
   if [[ -r "$env_file" ]]; then
-    rmq_compose=(docker compose --env-file "$env_file" -f "$script_dir/compose.cluster.yml")
+    rmq_compose=(docker compose --env-file "$env_file" -f "$script_dir/compose.shared.yml" -f "$script_dir/compose.control-plane.bundle.yml" -f "$script_dir/compose.cluster.yml")
   fi
   rmq_container_id="$("${rmq_compose[@]}" ps -q rocketmq 2>/dev/null | sed -n '1p' || true)"
   if [[ -n "$rmq_container_id" ]]; then

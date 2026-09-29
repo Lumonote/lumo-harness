@@ -167,6 +167,30 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: SeamHo
       assertRequestedRoles(caller.roles, spec.roles(payload.args))
     }
 
+    // 文件资料 ACL 需要用户级身份。不能把 query body 中的 userId 或
+    // libraryAdmin 当成身份来源：签名模式用已验证调用者覆盖；兼容令牌模式无可信
+    // userId/角色声明，因此清掉字段，使 Provider 对私有文件 fail closed。
+    if (seamName === 'knowledge' && method === 'query') {
+      const query = payload.args[0] as Record<string, unknown>
+      if (options.identityAssertionSecret !== undefined) {
+        if (query['userId'] !== undefined && query['userId'] !== caller.userId) {
+          throw forbidden('knowledge query userId must match the signed caller identity')
+        }
+        query['userId'] = caller.userId
+        query['libraryAdmin'] = caller.roles.some(role => role === 'platform_admin' || role === 'realm_admin' || role === 'admin')
+      } else {
+        delete query['userId']
+        delete query['libraryAdmin']
+      }
+    }
+    if (seamName === 'knowledge' && method === 'canAccessLibraryFile') {
+      const input = payload.args[0] as Record<string, unknown>
+      input['userId'] = options.identityAssertionSecret === undefined ? '' : caller.userId
+      input['roles'] = options.identityAssertionSecret === undefined ? [] : [...caller.roles]
+      input['isAdmin'] = options.identityAssertionSecret !== undefined
+        && caller.roles.some(role => role === 'platform_admin' || role === 'realm_admin' || role === 'admin')
+    }
+
     const value = await dispatch(seamName, method, payload.args, options)
     respondOk(res, { ok: true, value } satisfies SeamResponse)
   } catch (e) {

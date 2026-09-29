@@ -1,153 +1,63 @@
 # Server Standalone 形态：服务器单例拓扑；它不是本地桌面单机模式。
 # 本地桌面单机请使用 platform/desktop（SQLite、无 RocketMQ/Nacos/MinIO/Redis/PostgreSQL）。
-# 启动：docker compose -f compose.standalone.yml up -d
-# 说明：这是可启动的服务器单例拓扑（RocketMQ namesrv+broker、Nacos、MinIO、
-#       PG+pgvector、Redis；平台 Go 服务单实例）。Milvus 除外——其官方单容器 standalone
+# 启动：./platform/deploy/up.sh standalone -d
+# 说明：这是可启动的服务器单例拓扑。公共基础组件来自 compose.shared.yml，
+#       10 个 API、Scheduler、Collaborator 合并在一个控制面容器，DSH 节点保留独立身份。
+#       Milvus 除外——其官方单容器 standalone
 #       需伴生 etcd 与该清单共用 MinIO 需自配配置，故留注释块，对应能力 seam 明确不可用
 #       （铁律 21：能力缺失显式拒绝，不得以别的库模拟）。
-# 隔离：显式项目名（默认名会是目录名 deploy，与其它项目容器撞名）。
-name: lumo-platform-standalone
+# 单例与集群共用项目名、基础服务定义及数据卷。
+name: lumo-platform
 version: "3.9"
 
 services:
+  api-bundle:
+    command: ["/usr/local/bin/lumo-control-plane-bundle", "platform-standalone"]
+    environment:
+      LUMO_NACOS_ADDR: http://nacos:8848
+      LUMO_NACOS_SERVICE: lumo-dsh-node
+      LUMO_NACOS_GROUP: DEFAULT_GROUP
+      LUMO_REDIS_ADDR: redis:6379
+      LUMO_NACOS_COLLABORATOR_SERVICE: lumo-collaborator
+      LUMO_KNOWLEDGE_SEAM_URL: http://dsh-node:8090
+      LUMO_KNOWLEDGE_EMBEDDING_MODEL: "${LUMO_EMBEDDING_MODEL:-BAAI/bge-m3}"
+      LUMO_IDENTITY_ASSERTION_SECRET: "${LUMO_IDENTITY_ASSERTION_SECRET:-}"
+      LUMO_BUNDLE_COLLABORATOR_0_LUMO_NODE_ADVERTISE_HOST: collaborator
+      LUMO_BUNDLE_COLLABORATOR_0_LUMO_NACOS_PORT: "8081"
+    ports:
+      - "18080:8080"
+      - "18081:8081"
+      - "18082:8082"
+      - "18083:8083"
+      - "18084:8084"
+      - "18085:8085"
+      - "18086:8086"
+      - "18087:8087"
+      - "18088:8088"
+      - "18089:8089"
+      - "18091:8090"
+      - "18092:8092"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/lumo-control-plane-bundle", "healthcheck", "platform-standalone"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 180s
+    networks:
+      default:
+        aliases: [collaborator, collaborator-0, scheduler-0]
+  postgres: { ports: ["15432:5432"] }
+  redis: { ports: ["16379:6379"] }
+  minio: { ports: ["19000:9000", "19001:9001"] }
+  rocketmq: { ports: ["19876:9876", "10911:10911", "10909:10909", "8081:8081"] }
+  nacos: { ports: ["18848:8848", "19848:9848"] }
   # ---- 数据引擎（同引擎单实例）----
-  postgres:      # pgvector 一处同理：Standalone 向量走 Milvus，PG 为 OLTP 主库
-    image: pgvector/pgvector:pg16
-    environment:
-      POSTGRES_USER: "${LUMO_POSTGRES_USER:-lumo}"
-      POSTGRES_PASSWORD: "${LUMO_POSTGRES_PASSWORD:-lumo}"
-      POSTGRES_DB: "${LUMO_POSTGRES_DB:-lumo}"
-    ports:
-      - "15432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lumo"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  redis:         # 热共享态/信箱读穿/限流（信箱持久性在 PG，铁律 8）
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "16379:6379"
-    volumes:
-      - redisdata:/data
-
-  minio:         # 对象存储：日志冷层/制品/知识库原文
-    # 分发源必须是 **quay.io**：Docker Hub 上的 `minio/minio` 仓库已整体下线
-    # （实测 2026-09-20：仓库 API 与 `docker pull` 双双 404 / `pull access denied`）。
-    # 2026-09-16 那次只把 `latest` 换成具体版本，钉的却还是同一个已下线的仓库，
-    # 所以只撑了四天 —— **换 registry 才是修，换 tag 不是**。
-    # 版本仍必须钉死，理由与 registry 无关：compose 解析镜像名时不发探测请求，
-    # 拉不到只在 `up` 时才暴露，表现为「对象存储起不来」，与 minio 自身的配置毫无关系。
-    # 两个 compose 文件（standalone / cluster）必须同源同版本，改一处就要改另一处。
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      MINIO_ROOT_USER: "${LUMO_MINIO_ROOT_USER:-lumo}"
-      MINIO_ROOT_PASSWORD: "${LUMO_MINIO_ROOT_PASSWORD:-lumo-minio-123}"
-    ports:
-      - "19000:9000"    # S3 API
-      - "19001:9001"    # 控制台
-    volumes:
-      - miniodata:/data
-
-  rocketmq-namesrv:
-    image: apache/rocketmq:5.3.1
-    command: ["sh", "mqnamesrv"]
-    ports:
-      - "19876:9876"    # namesrv（remoting 客户端/运维）
-    healthcheck:
-      # 探端口而不是跑 mqadmin：NettyRemotingServer 只在 boot 完成后才 bind 9876，
-      # 连上即等价于「remoting 已就绪」。mqadmin 每次探活都要新起一个 1g 堆的 JVM，
-      # 在任何合理 timeout 内都跑不完一次往返，会被 Docker 中途 kill；而每 interval
-      # 一个这样的 JVM 又会把被探测的 NameServer 饿死，容器永远转不成 healthy。
-      # 镜像里 /bin/sh 是 dash（无 /dev/tcp），bash 已安装。
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9876"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 15s
-
-  rocketmq:      # Broker + Proxy 前台进程（RocketMQ 5.3.1）
-    #
-    # 首次启动注意：镜像里没有 /home/rocketmq/store，docker 新建卷时属主为 root，
-    # 运行用户 rocketmq 无权创建 config/ 子目录 → broker init 失败（NPE 假象，
-    # 真实报错见容器内 logs/rocketmqlogs/broker.log 的 FileNotFoundException）。
-    # 首次 up 后执行一次修复（见 deploy/README.md「首次启动」）：
-    #   docker exec -u 0 lumo-platform-standalone-rocketmq-1 \
-    #     chown -R rocketmq:rocketmq /home/rocketmq/store
-    #
-    # brokerIP1 必须写 127.0.0.1：容器网络里 broker 默认注册自己的 br 网段 IP，
-    # 而 Docker Desktop(macOS) 上宿主机不可达容器 IP——客户端经 published port 得到
-    # 的 broker 地址是 172.x，会连不上。dev broker.conf（rocketmq-broker-dev.conf）
-    # 就是为此存在（生产 K8s hostNetwork 形态不需要它，见 helm 阶段 5）。
-    # Broker 与独立 mqproxy 同容器运行并共享 netns；broker 注册 127.0.0.1，proxy
-    # 仍可直连，客户端通过 8081 gRPC proxy，不会收到不可达的容器 bridge IP。
-    # 已实测 `mqbroker --enable-proxy` LOCAL 模式不会把 broker conf 的 NameServer
-    # 地址交给 ProxyStartup，会以 "NamesrvAddr is not configured" 退出。
-    image: apache/rocketmq:5.3.1
-    user: root
-    depends_on:
-      rocketmq-namesrv:
-        condition: service_healthy
-    command: ["bash", "/rocketmq-entrypoint.sh"]
-    environment:
-      JAVA_OPT_EXT: "-Xms512m -Xmx512m -Xmn128m"
-      NAMESRV_ADDR: rocketmq-namesrv:9876
-      # Keep the health window aligned with the entrypoint's persisted-store
-      # recovery timeout so a valid cold start is not killed prematurely.
-      ROCKETMQ_BROKER_START_TIMEOUT_SECONDS: "300"
-    ports:
-      - "10911:10911"   # broker remoting
-      - "10909:10909"   # broker fast remoting
-      - "8081:8081"     # proxy gRPC（v5 客户端——usage-ledger publisher/consumer）
-    volumes:
-      - ./rocketmq-broker-dev.conf:/rocketmq-broker-dev.conf:ro
-      - ./rocketmq-entrypoint.sh:/rocketmq-entrypoint.sh:ro
-      - rocketmqdata:/home/rocketmq/store
-    healthcheck:
-      # Broker 与独立 mqproxy 共用 netns；两端口都就绪才算服务健康。8081 是入口脚本
-      # 建完 topic 之后才监听的，所以本探针顺带覆盖「topic 已就绪」；「已向 NameServer
-      # 注册」断言同样在入口脚本内执行一次，不必让健康检查反复启动 mqadmin JVM。
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/10911 && exec 4<>/dev/tcp/127.0.0.1/8081"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 300s
-
-  nacos:         # 注册/配置中心（docs/README 三·补：Standalone 组成含 Nacos）
-    image: nacos/nacos-server:v2.4.0
-    environment:
-      MODE: standalone
-      JVM_XMS: 512m
-      JVM_XMX: 512m
-      JVM_XMN: 256m
-    ports:
-      - "18848:8848"    # 控制台/客户端 HTTP
-      - "19848:9848"    # 2.x gRPC（nacos-client 必需；只开 8848 客户端会超时）
-    volumes:
-      - nacosdata:/home/nacos/data
-    healthcheck:
-      # Java 冷启动可能持续数分钟；只在 Naming/Config API 真正可用后放行消费者。
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8848/nacos/v1/console/health/readiness"]
-      interval: 5s
-      timeout: 5s
-      retries: 36
-      start_period: 120s
-
   prometheus:
-    image: prom/prometheus:v2.54.1
     volumes:
       - ./prometheus-standalone.yml:/etc/prometheus/prometheus.yml:ro
-      - ./prometheus-alerts.yml:/etc/prometheus/lumo-alerts.yml:ro
-    ports:
-      - "${LUMO_PROMETHEUS_PORT:-9090}:9090"
     depends_on:
-      scheduler-0:
-        condition: service_started
+      api-bundle:
+        condition: service_healthy
 
   # 可选（需人工启用，见文件头说明）：milvus 单实例 —— 依赖伴生 etcd + 本清单 MinIO
   # 的自配 config；未启用时 ctx.knowledge.vector 侧 seam 显式不可用（铁律 21）。
@@ -155,35 +65,7 @@ services:
   #   image: milvusdb/milvus:latest
   #   command: ["milvus", "run", "standalone"]
 
-  # ---- 平台编排（单实例；装配层差异，业务代码无 if(standalone)）----
-  # —— 自研 Go 服务（与 compose.local.yml 同镜像，仅拓扑不同 —— 铁则：一套配置只换清单）——
-  collaborator:         # 知识库文档实时协作（§5.4.7）
-    image: lumo/control-plane:dev
-    build:
-      context: ../control-plane
-      dockerfile: Dockerfile
-    command: ["/usr/local/bin/collaborator"]
-    environment:
-      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
-      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
-      LUMO_REDIS_ADDR: redis:6379
-      LUMO_LISTEN: ":8081"
-      LUMO_INSTANCE: collaborator-0
-      LUMO_NACOS_ADDR: http://nacos:8848
-      LUMO_NACOS_COLLABORATOR_SERVICE: lumo-collaborator
-      LUMO_NODE_ADVERTISE_HOST: collaborator
-      LUMO_NACOS_PORT: "8081"
-      LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
-    ports:
-      - "18081:8081"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      nacos:
-        condition: service_healthy
-
+  # ---- DSH 数据平面 ----
   dsh-node:
     build:
       context: ../..
@@ -215,6 +97,10 @@ services:
       LUMO_MINIO_SECRET_KEY: "${LUMO_MINIO_ROOT_PASSWORD:-lumo-minio-123}"
       LUMO_MINIO_BUCKET: lumo-objects
       LUMO_CONNECTOR_GATEWAY_URL: http://connector-gateway:8082
+      LUMO_LLM_GATEWAY_URL: http://llm-gateway:8088
+      LUMO_USAGE_LEDGER_URL: http://usage-ledger:8085
+      LUMO_EDGE_GATEWAY_URL: http://edge-gateway:8080
+      LUMO_TERMINAL_GATEWAY_URL: http://terminal-gateway:8090
       LUMO_SUBAGENT_HOST_BIND: 0.0.0.0
       LUMO_SUBAGENT_HOST_TOKEN: "${LUMO_SUBAGENT_HOST_TOKEN:-dev-subagent-token}"
       LUMO_SUBAGENT_CALLBACK_ALLOWED_ORIGINS: http://dsh-node:8092
@@ -244,12 +130,8 @@ services:
     ports:
       - "127.0.0.1:${LUMO_CONSOLE_PORT:-4173}:3080"
     depends_on:
-      scheduler-0:
-        condition: service_started
-      collaborator:
-        condition: service_started
-      governance:
-        condition: service_started
+      api-bundle:
+        condition: service_healthy
 
   # 可选持续制品收敛器：默认不启动；设置制品名和显式 VERSION，或设置
   # ROLLOUT_CHANNEL 由 Registry 的期望状态决定版本后，以 profile 启动。
@@ -276,8 +158,8 @@ services:
       timeout: 3s
       retries: 24
     depends_on:
-      registry:
-        condition: service_started
+      api-bundle:
+        condition: service_healthy
 
   # 受控 Component 进程运行时。管理 API 只在共享卷上的 Unix socket 暴露，
   # 不发布宿主机端口；制品须由 Provisioner 先完成签名与 digest 校验。
@@ -297,304 +179,5 @@ services:
       timeout: 3s
       retries: 12
 
-  registry:
-    build:
-      context: ../control-plane
-      dockerfile: Dockerfile
-    command: ["/usr/local/bin/registry"]
-    image: lumo/control-plane:dev
-    environment:
-      REGISTRY_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
-      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
-      REGISTRY_TRUST_FILE: /run/secrets/registry-trust
-      REGISTRY_S3_ENDPOINT: minio:9000
-      REGISTRY_S3_ACCESS_KEY: "${LUMO_MINIO_ROOT_USER:-lumo}"
-      REGISTRY_S3_SECRET_KEY: "${LUMO_MINIO_ROOT_PASSWORD:-lumo-minio-123}"
-      REGISTRY_S3_BUCKET: lumo-registry
-      REGISTRY_S3_SSL: "false"
-      REGISTRY_PORT: "8084"
-      LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
-    volumes:
-      - ./registry-trust.dev.json:/run/secrets/registry-trust:ro
-    ports:
-      - "18084:8084"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      minio:
-        condition: service_started
-
-  connector-gateway:    # 外部连接器网关（§10.1）
-    image: lumo/control-plane:dev
-    build:
-      context: ../control-plane
-      dockerfile: Dockerfile
-    command: ["/usr/local/bin/connector-gateway"]
-    environment:
-      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
-      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
-      LUMO_REDIS_ADDR: redis:6379
-      LUMO_LISTEN: ":8082"
-      LUMO_ADMIN_ROLES: admin
-      LUMO_CRED_PREFIX: LUMO_CRED_
-      LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
-    ports:
-      - "18082:8082"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-
-  scheduler-0:          # 全局任务调度 §6.2/§7.4.1（单节点；子实例多副本场景见 cluster）
-    image: lumo/control-plane:dev
-    build:
-      context: ../control-plane
-      dockerfile: Dockerfile
-    command: ["/usr/local/bin/scheduler"]
-    environment:
-      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
-      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
-      LUMO_LISTEN: ":8083"
-      LUMO_INSTANCE: scheduler-0
-      # Scheduler 必须和 dsh-node 读取同一个 Naming 目录；否则节点虽然已经
-      # 注册进 Nacos，/v1/nodes 仍会退回空的 PostgreSQL 目录。
-      LUMO_NACOS_ADDR: http://nacos:8848
-      LUMO_NACOS_SERVICE: lumo-dsh-node
-      LUMO_NACOS_GROUP: DEFAULT_GROUP
-      LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
-    ports:
-      - "18083:8083"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      nacos:
-        condition: service_healthy
-
-  # llm-gateway：模型访问面（§12 网关四门之一，P2a 起始项）——OpenAI 兼容入口 +
-  # 计量单截面跨网（emitter=llm-gateway：写 usage_event_outbox，由 usage-ledger
-  # 传输进台账）+ 双树预算执法镜像（reserve 四态 402 / commit 同事务扣减）。
-  # 上游 provider 表按需 seed（指向本集群推理或外部 API）；预算树随 metering 建表。
-  llm-gateway:
-    image: lumo/control-plane:dev
-    build:
-      context: ../control-plane
-      dockerfile: Dockerfile
-    command: ["/usr/local/bin/llm-gateway"]
-    environment:
-      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
-      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
-      LUMO_LISTEN: ":8088"
-      LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
-    ports:
-      - "18088:8088"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  # 边缘网关（§12.1 南北向的「门」，缺口 C3）：协议接入 / 路由分发 / 横切治理 / 边界隔离。
-  # 路由表随仓库只读挂载：它是「门后有哪些面」的声明，需要 review、diff 与门禁
-  # （platform/deploy/edge-routes-verify.sh），塞进 env 就三样都做不了。
-  # 限流复用与内部网关同一份共享令牌桶；fail-open 保持缺省 false（Redis 抖动时拒绝而非放行）。
-  #
-  # CORS 走 `LUMO_EDGE_CORS_ORIGINS`（网关自己的白名单，按**请求的 Origin** 裁决），
-  # **不**设 `LUMO_CORS_ORIGIN`：后者是 observability 中间件读的名字，它会按配置的
-  # 来源把 ACAO 写死，两个语义不同的 CORS 层叠在同一个响应上（gate.go:122-124 明确
-  # 要求部署 edge-gateway 时不要再设它）。此处此前设的正是 `LUMO_CORS_ORIGIN`，
-  # 于是边缘自己的白名单一直是空的、边缘层等于没在管事——而表现上又「能用」
-  # （中间件那层替它把 preflight 答了），没有门禁能看出来。两条拓扑同构，修一处必查另一处。
-  edge-gateway:
-    image: lumo/control-plane:dev
-    build:
-      context: ../control-plane
-      dockerfile: Dockerfile
-    command: ["/usr/local/bin/edge-gateway"]
-    environment:
-      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
-      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
-      LUMO_INSTANCE: edge-gateway-0
-      LUMO_LISTEN: ":8080"
-      LUMO_EDGE_ROUTES: /etc/lumo/edge-routes.json
-      LUMO_EDGE_REDIS_URL: redis://redis:6379
-      LUMO_EDGE_CORS_ORIGINS: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
-    volumes:
-      - ./edge-routes.dev.json:/etc/lumo/edge-routes.json:ro
-    ports:
-      - "18080:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-
-  # 终端网关（§8.2 多端，缺口 C4）：终端无关事件汇 + 能力协商 + replay + presence。
-  # 不实现状态机——pause/resume/stop 的语义在 session-control（§8.4.3 末句）。
-  #
-  # `LUMO_OPA_URL` 与 `LUMO_TERMINAL_MEM_EVENTS` 都**故意留空**：
-  #   * 本拓扑没有 OPA 容器 → 敏感动作 fail-closed 全拒（安全的一侧，且日志会区分
-  #     「策略引擎不可用」与「权限不足」，不会被误读成权限问题）；
-  #   * 历史事件源未接线 → WS 接入诚实返回 503，而不是伪造一份空历史让终端以为
-  #     「本来就没有事件」。接线真实 session/event 来源是后续独立一步。
-  terminal-gateway:
-    image: lumo/control-plane:dev
-    build:
-      context: ../control-plane
-      dockerfile: Dockerfile
-    command: ["/usr/local/bin/terminal-gateway"]
-    environment:
-      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
-      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
-      LUMO_INSTANCE: terminal-gateway-0
-      LUMO_LISTEN: ":8090"
-      LUMO_TERMINAL_SIGNING_SECRET: "${LUMO_TERMINAL_SIGNING_SECRET:-dev-terminal-signing-secret}"
-      LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
-    # 与集群拓扑用同一个宿主端口：同一个服务的开发入口不该随部署形态漂移（否则 curl 示例、
-    # 排查笔记、转发脚本都会按形态分叉）。18090 已被设备网关占用（compose.cluster.devices.yml），
-    # 一并避开，两条拓扑保持 18091。
-    ports:
-      - "18091:8090"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  # 共享执行控制（§8.4，缺口 C5）：控制指令裁成可审计的一等事件 + 控制台只读投影。
-  #
-  # 与集群形态唯一的差别是 `LUMO_OPA_URL`（本拓扑没有 OPA 容器，同 terminal-gateway）：
-  #   * 留空 → 每条控制指令被拒，响应里明确写 policy_unavailable 而不是 policy_denied，
-  #     日志也区分「策略引擎不可用」与「权限不足」，不会被误读成权限问题；
-  #   * **只读面不受影响**：状态、此刻可点的按钮、时间线、队列现场都能查——本地单机形态
-  #     下这就是它的用途（本机没有 OPA，但会话的排队与审计语义仍然可以看）。
-  # 因此本地要验证「指令真的被裁决」走 `go test`（活库用例，`LUMO_TEST_PG_DSN` 门控），
-  # 而不是指望这个拓扑——那正是 `acceptance-cluster.sh` 的职责。
-  session-control:
-    image: lumo/control-plane:dev
-    build:
-      context: ../control-plane
-      dockerfile: Dockerfile
-    command: ["/usr/local/bin/session-control"]
-    environment:
-      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
-      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
-      LUMO_INSTANCE: session-control-0
-      LUMO_LISTEN: ":8092"
-      LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
-    # 与集群拓扑用同一个宿主端口：同一个服务的开发入口不该随部署形态漂移（否则 curl 示例、
-    # 排查笔记、转发脚本都会按形态分叉）。
-    ports:
-      - "18092:8092"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  # flows：第五类制品（用户自定义流程）——生命周期/FlowReview/定向分发/版本回滚
-  #（§11 后半，制品层；执行是 FlowEngine P2）。只读 projects 服务的
-  # project_members 表做成员判定（同库跨表，无服务间调用）。
-  flows:
-    image: lumo/control-plane:dev
-    build:
-      context: ../control-plane
-      dockerfile: Dockerfile
-    command: ["/usr/local/bin/flows"]
-    environment:
-      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
-      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
-      LUMO_LISTEN: ":8087"
-      LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
-    ports:
-      - "18087:8087"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  # projects：项目工作区（§11.1 首切片）——项目实体/生命周期/成员角色/用量聚合。
-  # N3 拍板 B（2026-08-26）：项目 = 并行预算树——创建即种子 budget_trees
-  # kind='project' 行；执法（双树同事务扣减）在 TS metering，本服务只治理不执法。
-  projects:
-    image: lumo/control-plane:dev
-    build:
-      context: ../control-plane
-      dockerfile: Dockerfile
-    command: ["/usr/local/bin/projects"]
-    environment:
-      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
-      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
-      LUMO_LISTEN: ":8086"
-      LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
-    ports:
-      - "18086:8086"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  # 组织治理和桌面节点服务始终可观测，但仅 Cluster+ready 形态会放行其写 API。
-  # Standalone 显式返回 CLUSTER_ONLY，不能因本机恰好存在 Nacos 而误开启多租户功能。
-  governance:
-    image: lumo/control-plane:dev
-    build:
-      context: ../control-plane
-      dockerfile: Dockerfile
-    command: ["/usr/local/bin/governance"]
-    environment:
-      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
-      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
-      LUMO_LISTEN: ":8089"
-      LUMO_DEPLOYMENT_MODE: "standalone"
-      LUMO_CLUSTER_STATUS: "not_ready"
-      LUMO_SCHEDULER_URL: http://scheduler-0:8083
-      LUMO_AUTH_BOOTSTRAP_REALM: "${LUMO_REALM:-dev}"
-      LUMO_AUTH_BOOTSTRAP_USER_ID: "${LUMO_AUTH_BOOTSTRAP_USER_ID:-admin}"
-      LUMO_AUTH_BOOTSTRAP_USERNAME: "${LUMO_AUTH_BOOTSTRAP_USERNAME:-admin}"
-      LUMO_AUTH_BOOTSTRAP_PASSWORD: "${LUMO_AUTH_BOOTSTRAP_PASSWORD:-lumo-admin-123}"
-      LUMO_AUTH_BOOTSTRAP_DISPLAY_NAME: "${LUMO_AUTH_BOOTSTRAP_DISPLAY_NAME:-Lumo Administrator}"
-      LUMO_AUTH_BOOTSTRAP_DEPARTMENT: "${LUMO_AUTH_BOOTSTRAP_DEPARTMENT:-platform}"
-      LUMO_AUTH_BOOTSTRAP_ROLES: "${LUMO_AUTH_BOOTSTRAP_ROLES:-platform_admin,operator}"
-      LUMO_AUTH_MAX_ATTEMPTS: "${LUMO_AUTH_MAX_ATTEMPTS:-5}"
-      LUMO_AUTH_LOCK_SECONDS: "${LUMO_AUTH_LOCK_SECONDS:-300}"
-      LUMO_AUTH_SESSION_TTL_SECONDS: "${LUMO_AUTH_SESSION_TTL_SECONDS:-86400}"
-      LUMO_AUTH_CAPTCHA_TTL_SECONDS: "${LUMO_AUTH_CAPTCHA_TTL_SECONDS:-120}"
-      # Optional: base64-encoded 32-byte AES-GCM key. Do not commit a value.
-      LUMO_AUTH_MFA_KEY: "${LUMO_AUTH_MFA_KEY:-}"
-    ports:
-      - "18089:8089"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  # usage-ledger：计量台账 RocketMQ 传输（§6.4 异步削峰，设计说明 2026-08-26）。
-  # publisher（outbox→broker）+ consumer（broker→usage_ledger）双 goroutine 单实例。
-  # 装配互斥：dsh-node 侧 metering 插件须配 ledgerTransport: 'rmq'（本形态）——
-  # 台账单一写入者，TS drain 轮询不并存（判据 7）。
-  usage-ledger:
-    image: lumo/control-plane:dev
-    build:
-      context: ../control-plane
-      dockerfile: Dockerfile
-    command: ["/usr/local/bin/usage-ledger"]
-    environment:
-      LUMO_PG_DSN: "${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
-      LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
-      LUMO_RMQ_ENDPOINT: rocketmq:8081   # 容器网内直连 proxy gRPC（无需宿主端口绕行）
-      LUMO_RMQ_GROUP: usage-ledger
-      LUMO_LISTEN: ":8085"
-      LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
-    ports:
-      - "18085:8085"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      # topic 预建已并入 rocketmq 入口脚本（排在 mqproxy 启动之前），因此 rocketmq
-      # healthy 本身就蕴含 topic 已就绪——不再需要单独的一次性 init 容器。
-      rocketmq:
-        condition: service_healthy
-
-  # dsh-node：dsh 容器 + @lumo/* 插件（阶段 1+ 填充；本形态单节点）
-  # 用例：cd .. && pnpm --filter @lumo/platform run local（本地裸进程）或
-  #       docker build -t lumo/dsh-node dev 后以本清单运行
-
 volumes:
-  pgdata:
-  miniodata:
-  redisdata:
-  nacosdata:
-  rocketmqdata:
   provisionerdata:

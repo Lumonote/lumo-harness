@@ -90,10 +90,12 @@ esac
 export HOME=/home/rocketmq
 export JAVA_HOME="${JAVA_HOME:-/opt/java/openjdk}"
 export PATH="$JAVA_HOME/bin:$PATH"
-export NAMESRV_ADDR="${NAMESRV_ADDR:-rocketmq-namesrv:9876}"
+export NAMESRV_ADDR="${NAMESRV_ADDR:-127.0.0.1:9876}"
 broker_config="${ROCKETMQ_BROKER_CONFIG:-/rocketmq-broker-dev.conf}"
 broker_start_timeout="${ROCKETMQ_BROKER_START_TIMEOUT_SECONDS:-300}"
+namesrv_start_timeout="${ROCKETMQ_NAMESRV_START_TIMEOUT_SECONDS:-120}"
 topic_max_attempts="${ROCKETMQ_TOPIC_INIT_MAX_ATTEMPTS:-60}"
+namesrv_pid=""
 broker_pid=""
 proxy_pid=""
 
@@ -113,6 +115,11 @@ if [[ ! "$broker_start_timeout" =~ ^[1-9][0-9]*$ ]]; then
   exit 64
 fi
 
+if [[ ! "$namesrv_start_timeout" =~ ^[1-9][0-9]*$ ]]; then
+  echo "rocketmq-entrypoint: ROCKETMQ_NAMESRV_START_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 64
+fi
+
 if [[ ! "$topic_max_attempts" =~ ^[1-9][0-9]*$ ]]; then
   echo "rocketmq-entrypoint: ROCKETMQ_TOPIC_INIT_MAX_ATTEMPTS must be a positive integer" >&2
   exit 64
@@ -121,6 +128,7 @@ fi
 report_logs() {
   local log_file
   for log_file in \
+    /home/rocketmq/logs/rocketmqlogs/namesrv.log \
     /home/rocketmq/logs/rocketmqlogs/broker.log \
     /home/rocketmq/logs/rocketmqlogs/proxy.log; do
     if [[ -f "$log_file" ]]; then
@@ -141,8 +149,7 @@ report_logs() {
 # 2026-09-20 实测（本机，3MB 输出）：写入方是 `cat` 时管道写法 rc=141、落变量写法 rc=0；
 # 写入方是 bash 内建 `echo` 时两者都 rc=0（bash 把 EPIPE 当写错误吞掉、继续跑完）。
 # 也就是说这条管道的成败**取决于写入方**：内建命令不受影响，真实进程会死。`mqadmin` 不是
-# 内建命令——仓库已记过它每次探针都 fork 一个 1g 堆的 JVM（见 compose.cluster.yml 的
-# rocketmq-namesrv 注释），故取与写入方无关的那种写法。
+# 内建命令——仓库已记过它每次探针都 fork 一个 1g 堆的 JVM，故取与写入方无关的那种写法。
 # 注意分寸：`clusterList` 正常只有几行，管道缓冲能吞下时本来也不会触发，这里不做
 # 「一定会炸」的断言——只是没有理由去赌它。
 wait_for_broker_registration() {
@@ -187,8 +194,10 @@ create_usage_topics() {
 }
 
 cleanup() {
+  [[ -z "$namesrv_pid" ]] || kill "$namesrv_pid" 2>/dev/null || true
   [[ -z "$broker_pid" ]] || kill "$broker_pid" 2>/dev/null || true
   [[ -z "$proxy_pid" ]] || kill "$proxy_pid" 2>/dev/null || true
+  [[ -z "$namesrv_pid" ]] || wait "$namesrv_pid" 2>/dev/null || true
   [[ -z "$broker_pid" ]] || wait "$broker_pid" 2>/dev/null || true
   [[ -z "$proxy_pid" ]] || wait "$proxy_pid" 2>/dev/null || true
 }
@@ -199,6 +208,29 @@ terminate() {
 
 trap cleanup EXIT
 trap terminate TERM INT
+
+sh mqnamesrv &
+namesrv_pid=$!
+namesrv_ready=false
+namesrv_started_at=$SECONDS
+while (( SECONDS - namesrv_started_at < namesrv_start_timeout )); do
+  if ! kill -0 "$namesrv_pid" 2>/dev/null; then
+    status=0
+    wait "$namesrv_pid" || status=$?
+    report_logs
+    exit "$status"
+  fi
+  if bash -c 'exec 3<>/dev/tcp/127.0.0.1/9876' 2>/dev/null; then
+    namesrv_ready=true
+    break
+  fi
+  sleep 1
+done
+if [[ "$namesrv_ready" != true ]]; then
+  echo "rocketmq-entrypoint: NameServer did not bind 9876 within ${namesrv_start_timeout} seconds" >&2
+  report_logs
+  exit 1
+fi
 
 sh mqbroker -c "$broker_config" &
 broker_pid=$!
@@ -240,7 +272,7 @@ sh mqproxy -n "$NAMESRV_ADDR" &
 proxy_pid=$!
 
 status=0
-wait -n "$broker_pid" "$proxy_pid" || status=$?
+wait -n "$namesrv_pid" "$broker_pid" "$proxy_pid" || status=$?
 if (( status == 0 )); then
   status=1
 fi

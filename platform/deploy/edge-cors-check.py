@@ -204,6 +204,28 @@ def parse_compose(path):
     return services, unparsed
 
 
+def parse_compose_files(paths):
+    """合并多个 Compose 文件，并把 api-bundle 的 edge 配置还原成逻辑服务。"""
+    services = {}
+    unparsed = []
+    for path in paths:
+        found, skipped = parse_compose(path)
+        unparsed.extend(f"{os.path.basename(path)}: {line}" for line in skipped)
+        for name, service in found.items():
+            target = services.setdefault(name, {"env": {}, "config_maps": []})
+            target["env"].update(service["env"])
+            target["config_maps"] = service["config_maps"]
+
+    bundle = services.get("api-bundle")
+    if bundle is not None:
+        prefix = "LUMO_BUNDLE_EDGE_GATEWAY_"
+        edge_env = {key[len(prefix):]: value for key, value in bundle["env"].items()
+                    if key.startswith(prefix)}
+        if edge_env:
+            services["edge-gateway"] = {"env": edge_env, "config_maps": []}
+    return services, unparsed
+
+
 def parse_helm(path):
     """把渲染结果里的容器当成「服务」，同时把 ConfigMap 的 data 收出来。
 
@@ -461,7 +483,8 @@ def check_surface(services, config_maps, gateways, middleware_envs, require_gate
 def main():
     parser = argparse.ArgumentParser(description="边缘网关 CORS 接线一致性检查")
     parser.add_argument("--kind", choices=("compose", "helm"), required=True)
-    parser.add_argument("--file", required=True)
+    parser.add_argument("--file", action="append", required=True,
+                        help="Compose 文件；可重复指定以检查合并后的配置")
     parser.add_argument("--code-root",
                         default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                              os.pardir, "control-plane"))
@@ -469,8 +492,9 @@ def main():
                         help="推导出的网关服务必须出现在本面里（入口网关不得被悄悄删掉）")
     args = parser.parse_args()
 
-    if not os.path.isfile(args.file):
-        print(f"edge-cors: FAIL: missing-file: {args.file}")
+    missing = [path for path in args.file if not os.path.isfile(path)]
+    if missing:
+        print(f"edge-cors: FAIL: missing-file: {', '.join(missing)}")
         return 1
 
     report = Report()
@@ -478,25 +502,29 @@ def main():
     middleware_envs = derive_middleware_env(args.code_root)
 
     if args.kind == "compose":
-        services, unparsed = parse_compose(args.file)
+        services, unparsed = parse_compose_files(args.file)
         config_maps = None
         if unparsed:
             # 先报这个再谈别的：漏看服务键会让后面的每一条结论都建立在残缺的拓扑上。
             report.fail("topology-not-parsed",
-                        f"{os.path.basename(args.file)} 里这些形如服务键的行没被解析进来：{unparsed}"
+                        f"这些 Compose 文件里形如服务键的行没被解析进来：{unparsed}"
                         "——漏看一个服务与那个服务没问题，在退出码上完全一样")
             print(f"edge-cors: {len(report.problems)} 个不一致（共 {report.checks} 项检查）")
             return 1
     else:
-        services, config_maps = parse_helm(args.file)
+        if len(args.file) != 1:
+            print("edge-cors: FAIL: helm 面只能指定一个渲染文件")
+            return 1
+        services, config_maps = parse_helm(args.file[0])
 
+    label = ", ".join(os.path.basename(path) for path in args.file)
     check_surface(services, config_maps, gateways, middleware_envs,
-                  args.require_gateways, report, os.path.basename(args.file))
+                  args.require_gateways, report, label)
 
     if report.problems:
         print(f"edge-cors: {len(report.problems)} 个不一致（共 {report.checks} 项检查）")
         return 1
-    print(f"edge-cors: {args.file} 通过（{report.checks} 项检查）")
+    print(f"edge-cors: {label} 通过（{report.checks} 项检查）")
     return 0
 
 

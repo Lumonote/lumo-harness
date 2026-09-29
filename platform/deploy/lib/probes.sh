@@ -68,7 +68,29 @@ LUMO_CONTROL_PLANE_PORT_HI="${LUMO_CONTROL_PLANE_PORT_HI:-8099}"
 # `IFS= read -r -d ''` 在读到 EOF 时必然返回非零，所以这里必须吞掉那个状态：
 # 调用方普遍开着 `set -e`。
 if ! IFS= read -r -d '' LUMO_PROBE_TARGETS_AWK <<'AWK'
-function emit(svc, raw,   e, parts, n, last, cont, host, hp) {
+function logical_service(svc, cont) {
+  if (svc == "api-bundle") {
+    if (cont == 8081) return "collaborator-0"
+    if (cont == 8080) return "edge-gateway"
+    if (cont == 8082) return "connector-gateway"
+    if (cont == 8083) return "scheduler-0"
+    if (cont == 8084) return "registry"
+    if (cont == 8085) return "usage-ledger"
+    if (cont == 8086) return "projects"
+    if (cont == 8087) return "flows"
+    if (cont == 8088) return "llm-gateway"
+    if (cont == 8089) return "governance"
+    if (cont == 8090) return "terminal-gateway"
+    if (cont == 8092) return "session-control"
+    if (cont == 8182) return "collaborator-1"
+    if (cont == 8184) return "scheduler-1"
+  }
+  if (svc == "cluster-a-bundle") return "scheduler-cluster-a"
+  if (svc == "cluster-b-bundle") return "scheduler-cluster-b"
+  return svc
+}
+
+function emit(svc, raw,   e, parts, n, last, cont, host, hp, logical) {
   e = raw
   gsub(/["' \t]/, "", e)             # 去掉引号与空白
   sub(/\/[a-z]+$/, "", e)            # /tcp /udp
@@ -85,7 +107,8 @@ function emit(svc, raw,   e, parts, n, last, cont, host, hp) {
     host = hp
     sub(/^.*[^0-9]/, "", host)
   }
-  print svc "\t" host "\t" cont
+  logical = logical_service(svc, cont)
+  print logical "\t" host "\t" cont
 }
 
 BEGIN { svc = ""; inports = 0 }
@@ -139,7 +162,7 @@ then :; fi
 
 # derive_probe_targets <compose 文件>...
 #
-# 成功时把目标打到 stdout（按 service+container 去重、按 service 排序）并返回 0；
+# 成功时把目标打到 stdout（按已发布 host-port+container-port 去重、按 service 排序）并返回 0；
 # 一个目标都没派生出来时把原因打到 stderr 并返回 1。
 derive_probe_targets() {
   if [[ $# -eq 0 ]]; then
@@ -159,7 +182,12 @@ derive_probe_targets() {
   done
 
   local derived
-  derived="$(printf '%s' "$raw" | awk -F'\t' 'NF >= 3 && $1 != "" { seen[$1 "\t" $3] = $0 }
+  # Full topology service 与 compact bundle alias 可以代表同一个外部端口；合并拓扑文件时
+  # 只探一次该 host/container 端口。未发布端口没有稳定 host 地址，仍按 service+container 区分。
+  derived="$(printf '%s' "$raw" | awk -F'\t' 'NF >= 3 && $1 != "" {
+      key = $2 != "" ? "port:" $2 "\t" $3 : "service:" $1 "\t" $3
+      seen[key] = $0
+    }
     END { for (k in seen) print seen[k] }' | LC_ALL=C sort)"
 
   if [[ -z "$derived" ]]; then
@@ -340,5 +368,3 @@ metric_value() {
   done <<< "$text"
   return 1
 }
-
-

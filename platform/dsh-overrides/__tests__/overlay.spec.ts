@@ -23,7 +23,7 @@ import { brandWebBuild } from '../brand-web.mjs'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
 const dshRoot = resolve(repoRoot, 'deepseek-harness')
 
-/** 覆盖层触碰的上游文件；顺序即 applyLumoDshOverrides 的补丁顺序。 */
+/** 覆盖层触碰的上游文件；保留旧项目顺序以稳定现有用例的读取下标。 */
 const PATCHED = [
   'packages/client/ui-conversation/src/client/apply.ts',
   'packages/client/ui-conversation/src/client/contract/slots.ts',
@@ -44,6 +44,8 @@ const PATCHED = [
   'packages/api/session-controller/src/client/sessions/session.ts',
   // LUMO_BEST_EFFORT_BOOT：web 启动壳里可选插件的降级点（补丁顺序的最后一段）。
   'packages/client/web/src/boot.ts',
+  // LUMO_LIBRARY_FILE_PREVIEW：导出 DSH 原生阅读器并重建该客户端包。
+  'packages/client/ui-sidebar-documentpreview/src/client/index.ts',
 ]
 
 const temporaries: string[] = []

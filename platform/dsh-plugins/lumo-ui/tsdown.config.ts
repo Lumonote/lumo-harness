@@ -21,7 +21,8 @@ const browser = {
   name: `${id}/client`,
   entry: { client: 'src/client/index.tsx' },
   outDir: 'lib', format: 'cjs', platform: 'browser', dts: false, sourcemap: true, clean: false,
-  external: [/^@deepseek-ai\/dsh-client-ui-renderer(\/|$)/u, /^@deepseek-ai\/dsh-client-ui-theme(\/|$)/u],
+  external: [/^@deepseek-ai\/dsh-client-ui-renderer(\/|$)/u, /^@deepseek-ai\/dsh-client-ui-theme(\/|$)/u,
+    /^@deepseek-ai\/dsh-client-ui-sidebar-documentpreview\/client$/u],
   plugins: [cssPlugin],
   outputOptions: {
     entryFileNames: 'client.js',
@@ -33,7 +34,7 @@ const browser = {
 
 const node = {
   name: id,
-  entry: { index: 'lib/types/index.js' },
+  entry: { index: 'src/index.ts' },
   outDir: 'lib', format: 'esm', platform: 'node', dts: false, sourcemap: true, clean: false,
   external: [/^@deepseek-ai\//u, /^node:/u],
   outputOptions: { entryFileNames: 'index.js' },

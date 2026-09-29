@@ -69,6 +69,7 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
             + 'Refusing to run without the enforcement the preset assumes.' }
       }
       knowledgeScope.set(execution.sessionRef, spaces)
+      knowledgeScope.setUser?.(execution.sessionRef, binding.userId)
     }
     const handle = await ctx.agents.create({
       sessionId: SessionId(execution.sessionRef), signal,

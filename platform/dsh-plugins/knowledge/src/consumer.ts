@@ -38,6 +38,10 @@ export function defineKnowledgeTool(
     const session = (exec as { agent?: { session?: { id?: unknown } } }).agent?.session?.id
     return session === undefined || session === null ? undefined : scope.spacesFor(String(session))
   }
+  const sessionUserId = (exec: ToolRunContext): string | undefined => {
+    const session = (exec as { agent?: { session?: { id?: unknown } } }).agent?.session?.id
+    return session === undefined || session === null ? undefined : scope.userIdFor?.(String(session))
+  }
   const definition: ToolDefinition = {
     name: KNOWLEDGE_TOOL_QUERY,
     description: '在知识库中检索与问题相关的已发布文档片段，供回答问题时引用。',
@@ -84,6 +88,7 @@ export function defineKnowledgeTool(
       const candidates = await seam.query({
         realm: config.realm,
         roles: config.roles,
+        ...(sessionUserId(exec) === undefined ? {} : { userId: sessionUserId(exec) }),
         text: question,
         topK: k * factor,
         scope: 'published', // 铁律 17：模型只读发布态

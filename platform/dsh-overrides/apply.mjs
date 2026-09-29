@@ -1,6 +1,8 @@
-import { readFileSync, writeFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+const overlayRoot = dirname(fileURLToPath(import.meta.url))
 
 /**
  * 锚点失配诊断开关。
@@ -44,6 +46,21 @@ function patchFile(root, relativePath, replacements, marker = 'LUMO_DSH_OVERLAY'
   writeFileSync(file, source)
 }
 
+function addLibraryDocumentPreview(root) {
+  const sourceRoot = resolve(overlayRoot, 'sidebar-documentpreview')
+  const targetRoot = resolve(root, 'packages/client/ui-sidebar-documentpreview/src/client')
+  for (const name of ['PdfDataPreview.tsx', 'ExcelDataPreview.tsx']) {
+    const target = resolve(targetRoot, name)
+    mkdirSync(dirname(target), { recursive: true })
+    copyFileSync(resolve(sourceRoot, name), target)
+  }
+  const exportLine = "export type { DocumentLoadMode, DocumentPreviewDefinition } from './document/registry.ts'\n"
+  patchFile(root, 'packages/client/ui-sidebar-documentpreview/src/client/index.ts', [[
+    exportLine,
+    `${exportLine}\n// LUMO_LIBRARY_FILE_PREVIEW: reuse DSH's lazy PDF and spreadsheet viewers for library bytes.\nexport { PdfDataPreview } from './PdfDataPreview.tsx'\nexport { ExcelDataPreview } from './ExcelDataPreview.tsx'\n`,
+  ]], 'LUMO_LIBRARY_FILE_PREVIEW')
+}
+
 /**
  * The packages whose sources this overlay rewrites. They are the only packages
  * that must be rebuilt inside the snapshot; every other package can reuse the
@@ -53,6 +70,8 @@ function patchFile(root, relativePath, replacements, marker = 'LUMO_DSH_OVERLAY'
  */
 export const overriddenPackageDirectories = [
   'packages/client/ui-conversation',
+  // Lumo 的资料库预览直接复用此包导出的 Office PDF 与表格查看器。
+  'packages/client/ui-sidebar-documentpreview',
   'packages/client/ui-sidebar',
   'packages/client/ui-workspace',
   'packages/client/ui-model-selection',
@@ -69,6 +88,7 @@ export const overriddenPackageDirectories = [
  * only be called for an isolated checkout/copy, never the upstream worktree.
  */
 export function applyLumoDshOverrides(root) {
+  addLibraryDocumentPreview(root)
   // 上游 master 重构期（2026-09 · 76fda72979）根配置的花括号 entry 对 dsh-root 解析
   // 断裂（Cannot find entry: ["lib/types/{index,invariant,startup}.js"]），整个 host
   // tsdown 序失败——typert 的 lib/typert.remote-client.* 投影与 host 包 bundle 全部

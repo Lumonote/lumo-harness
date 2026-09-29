@@ -13,9 +13,9 @@ scrape_configs:
   - job_name: lumo-control-plane
     metrics_path: /metrics
     static_configs:
-      - targets: [collaborator-0:8081, collaborator-1:8081]
+      - targets: [collaborator-0:8081, collaborator-1:8182]
         labels: {service: collaborator}
-      - targets: [scheduler-0:8083, scheduler-1:8083, scheduler-cluster-a:8083, scheduler-cluster-b:8083]
+      - targets: [scheduler-0:8083, scheduler-1:8184, scheduler-cluster-a:8083, scheduler-cluster-b:8083]
         labels: {service: scheduler}
       - targets: [registry:8084]
         labels: {service: registry}

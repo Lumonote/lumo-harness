@@ -1,0 +1,7 @@
+# Applied by up.sh when no external MinIO image is configured.
+services:
+  minio:
+    build:
+      context: .
+      dockerfile: minio-source.Dockerfile
+    pull_policy: build
