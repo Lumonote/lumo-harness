@@ -3527,6 +3527,11 @@ function OrganizationManagement({ view }: { view: 'users' | 'departments' | 'rol
   </Section>
 }
 
+function StudioComposerTools({ format, command, submitLabel }: { format: ReactNode; command: string; submitLabel: string }) {
+  const { project } = useStudioScope()
+  return <div className="lumo-studio-tools"><span>{format}</span><span><i className="lumo-live-dot" />{project.label}</span><em>/{command}</em><button type="submit" className="lumo-studio-send" aria-label={submitLabel}>↑</button></div>
+}
+
 function OpenDesignSurface({ onConversationStart }: { onConversationStart: () => void }) {
   const { project } = useStudioScope()
   const bridge = useNativeConversationBridge()
@@ -3583,13 +3588,13 @@ function OpenDesignSurface({ onConversationStart }: { onConversationStart: () =>
     setNotice(`已载入 OpenDesign 示例「${page.title}」，可继续补充后发送。`)
   }
   const visibleCollections = category === '全部' ? collections : collections.filter(item => item.category === category)
-  return <div className="lumo-studio-page lumo-design-studio lumo-workspace-page">
+  return <div className="lumo-studio-page lumo-creative-studio lumo-design-studio lumo-workspace-page">
     <WorkspaceHero surface="design" onClose={onConversationStart} statement="从一句想法开始，生成可继续编辑的设计方案。" description="选择产物类型和参考样例，再把创作意图发送到当前会话。">
       <div className={'lumo-workspace-status' + (bridge === null || runtime === null || designExamples.length === 0 ? ' degraded' : '')}><span>创作状态</span><b><i aria-hidden="true" />{bridge === null ? '等待会话' : runtime === null ? '同步技能目录' : designExamples.length ? '设计技能已就绪' : '暂无设计技能'}</b><dl><div><dt>技能</dt><dd>{designExamples.length}</dd></div><div><dt>官方示例</dt><dd>{collections.length}</dd></div><div><dt>当前类型</dt><dd>{active.label}</dd></div></dl><small>原生技能 /open-design</small></div>
     </WorkspaceHero>
     <section className="lumo-creation-section" aria-label="开放设计创作">
     <div className="lumo-studio-tabs" role="tablist" aria-label="开放设计产物类型">{designFormats.map(item => <button type="button" role="tab" aria-selected={item.id === format} aria-label={`选择开放设计类型：${item.label}`} key={item.id} className={item.id === format ? 'active' : ''} onClick={() => { setFormat(item.id); setNotice('') }}><i>{item.icon}</i>{item.label}</button>)}</div>
-    <form className="lumo-studio-composer" onSubmit={submit}>{selectedExample ? <span className="lumo-selected-example">{selectedExample.title}<button type="button" aria-label="移除设计样例" onClick={() => { setSelectedExample(null); setBrief('') }}>×</button></span> : null}<textarea aria-label="开放设计创作意图" rows={5} value={brief} onChange={event => setBrief(event.target.value)} placeholder="描述你想设计的产品、页面或流程" /><div className="lumo-studio-tools"><span><i>{active.icon}</i>{active.label}</span><span>⌁ 工作目录</span><em>{selectedExample ? `/${skillCommandName(selectedExample.skillName)}` : '/open-design'}</em><button type="submit" className="lumo-studio-send" aria-label="发送到 OpenDesign">↑</button></div></form>
+    <form className="lumo-studio-composer" onSubmit={submit}>{selectedExample ? <span className="lumo-selected-example">{selectedExample.title}<button type="button" aria-label="移除设计样例" onClick={() => { setSelectedExample(null); setBrief('') }}>×</button></span> : null}<textarea aria-label="开放设计创作意图" rows={5} value={brief} onChange={event => setBrief(event.target.value)} placeholder="描述你想设计的产品、页面或流程" /><StudioComposerTools format={<><i>{active.icon}</i>{active.label}</>} command={selectedExample ? skillCommandName(selectedExample.skillName) : 'open-design'} submitLabel="发送到 OpenDesign" /></form>
     {notice ? <div className="lumo-studio-notice" role="status">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div> : null}
     </section>
     <section className="lumo-inspiration" aria-label="OpenDesign 官方示例"><header><div><b>OpenDesign 完整示例</b><span>来自 open-design 仓库 README「演示」章节的真实产物截图，按原型 / 仪表盘 / 演示文稿 / 图片 / 视频分类；点开逐张查看，再送进创作意图</span></div>{gallery?.available ? <a href={gallery.gallery.source} target="_blank" rel="noreferrer noopener">上游原文 ↗</a> : null}</header>
@@ -3678,14 +3683,14 @@ function PresentationSurface({ onConversationStart }: { onConversationStart: () 
     else if (popup && event.key === 'Escape') { event.preventDefault(); setPopup(false) }
     else if (!popup && event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() }
   }
-  return <div className="lumo-studio-page lumo-presentation-studio lumo-workspace-page">
+  return <div className="lumo-studio-page lumo-creative-studio lumo-presentation-studio lumo-workspace-page">
     <WorkspaceHero surface="presentation" onClose={onConversationStart} statement="先选故事结构，再和 AI 一起完成整套演示。" description="选一个样例，补充听众和时长，再发送到当前会话。">
       <div className={'lumo-workspace-status' + (bridge === null ? ' degraded' : '')}><span>创作状态</span><b><i aria-hidden="true" />{bridge === null ? '等待会话' : '会话已就绪'}</b><dl><div><dt>技能样例</dt><dd>{presentationExamples.length}</dd></div><div><dt>官方示例</dt><dd>{collections.length}</dd></div><div><dt>已选择</dt><dd>{selected ? '1' : '0'}</dd></div></dl><small>原生技能 /ppt-master</small></div>
     </WorkspaceHero>
     <ol className="lumo-presentation-steps"><li className="active"><i>1</i>选择样例</li><li><i>2</i>对话完善</li><li><i>3</i>生成文稿</li></ol>
     <div className="lumo-presentation-layout"><main><section className="lumo-creation-section" aria-label="演示文稿创作"><div className="lumo-assistant-prompt"><Glyph surface="skills" /><p>告诉我这次演示的主题、听众和预计时长。你也可以输入 <b>#</b> 从样例开始。</p></div><div className={`lumo-presentation-composer-wrap ${popup ? 'popup-open' : ''}`}>
       {popup ? <section className="lumo-example-popup" role="dialog" aria-label="选择演示样例"><header><b># 选择演示样例</b><span>{query ? `筛选：${query}` : '输入样例名可筛选'}</span></header><div>{matches.map((example, index) => <button type="button" key={example.id} className={activeIndex === index ? 'active' : ''} onMouseEnter={() => setActiveIndex(index)} onClick={() => choose(example)}><i className={example.className} /><span><b>{example.title}</b><small>{example.description}</small></span></button>)}</div><footer>↑↓ 选择 · Enter 插入 · Esc 关闭</footer></section> : null}
-      <form className="lumo-presentation-composer" onSubmit={submit}>{selected ? <span className="lumo-selected-example">#{selected.title}<button type="button" aria-label="移除演示样例" onClick={() => { setSelected(null); setDraft('') }}>×</button></span> : null}<textarea autoFocus aria-label="PPT 对话输入" rows={5} value={draft} onChange={event => changeDraft(event.target.value)} onKeyDown={onKeyDown} placeholder="输入 # 选择样例，然后继续描述听众、时长和重点" /><div className="lumo-studio-tools"><span>▤ 演示文稿</span><span><i className="lumo-live-dot" /> {project.label}</span><em>/ppt-master</em><button type="submit" className="lumo-studio-send" aria-label="发送到 PPT Master">↑</button></div></form>
+      <form className="lumo-presentation-composer" onSubmit={submit}>{selected ? <span className="lumo-selected-example">#{selected.title}<button type="button" aria-label="移除演示样例" onClick={() => { setSelected(null); setDraft('') }}>×</button></span> : null}<textarea autoFocus aria-label="PPT 对话输入" rows={5} value={draft} onChange={event => changeDraft(event.target.value)} onKeyDown={onKeyDown} placeholder="输入 # 选择样例，然后继续描述听众、时长和重点" /><StudioComposerTools format={<>▤ 演示文稿</>} command={selected ? skillCommandName(selected.skillName) : 'ppt-master'} submitLabel="发送到 PPT Master" /></form>
     </div>{notice ? <div className="lumo-studio-notice" role="status">{notice}<button type="button" aria-label="关闭提示" onClick={() => setNotice('')}>×</button></div> : null}</section>
     <section className="lumo-inspiration" aria-label="PPT Master 官方示例"><header><div><b>PPT Master 完整示例</b><span>来自 ppt-master 示例站的真实生成结果，每个示例都能逐页翻看全部幻灯片并下载 PPTX</span></div>{gallery?.available ? <a href={gallery.gallery.source} target="_blank" rel="noreferrer noopener">示例站 ↗</a> : null}</header>
       {gallery === null ? <p role="status">正在拉取 PPT Master 示例…</p> : gallery.available ? <>

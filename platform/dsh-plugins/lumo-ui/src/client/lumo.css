@@ -1132,7 +1132,9 @@ html [data-dsh-frame][data-sidebar-collapsed] [data-dsh-part='sidebar-entry'] { 
 .lumo-inspiration > header { display: flex; justify-content: space-between; gap: 18px; margin-bottom: 10px; }
 .lumo-inspiration > header b { font-size: var(--lumo-fs-xs-13); }
 .lumo-inspiration > header span { color: var(--lumo-faint); font-size: var(--lumo-fs-xxxs-11); }
-.lumo-inspiration > div { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 11px; }
+/* Layout belongs to each content grid. A blanket `> div` rule also matches
+   the category toolbar, forcing its chips into columns and overriding the
+   gallery/demo grids by specificity. */
 .lumo-inspiration-card { overflow: hidden; padding: 0; border: 1px solid var(--lumo-line); border-radius: 10px; color: var(--lumo-ink); background: var(--lumo-accent-2); cursor: pointer; text-align: left; transition: border-color .18s, transform .18s; }
 .lumo-inspiration-card:hover { border-color: var(--lumo-accent-36); transform: translateY(-2px); }
 .lumo-inspiration-card > .lumo-design-preview { min-height: 130px; border: 0; border-radius: 0; }
@@ -1251,7 +1253,7 @@ html [data-dsh-frame][data-sidebar-collapsed] [data-dsh-part='sidebar-entry'] { 
 .lumo-automation-principles span { color: var(--lumo-faint); font-size: var(--lumo-fs-xxxs-11); line-height: var(--lumo-lh-body); }
 
 @media (max-width: 980px) {
-  .lumo-home-example-grid, .lumo-inspiration > div, .lumo-demo-grid, .lumo-gallery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lumo-home-example-grid, .lumo-demo-grid, .lumo-gallery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lumo-gallery-stage { grid-template-columns: 32px minmax(0, 1fr) 32px; }
   .lumo-home-presentation > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lumo-header-location small { display: none; }
@@ -1260,7 +1262,7 @@ html [data-dsh-frame][data-sidebar-collapsed] [data-dsh-part='sidebar-entry'] { 
 @media (max-width: 700px) {
   .lumo-home-creative { width: calc(100vw - 24px); }
   .lumo-home-creative > header { align-items: flex-start; flex-direction: column; }
-  .lumo-home-example-grid, .lumo-home-presentation > div, .lumo-inspiration > div, .lumo-demo-grid, .lumo-gallery-grid, .lumo-example-popup > div, .lumo-automation-summary, .lumo-automation-principles { grid-template-columns: 1fr; }
+  .lumo-home-example-grid, .lumo-home-presentation > div, .lumo-demo-grid, .lumo-gallery-grid, .lumo-example-popup > div, .lumo-automation-summary, .lumo-automation-principles { grid-template-columns: 1fr; }
   .lumo-studio-page { padding: 16px 14px 42px; }
   .lumo-studio-tools > span:nth-of-type(n+2), .lumo-studio-tools > em { display: none; }
   .lumo-presentation-steps li { min-width: 0; flex: 1; }
@@ -2881,6 +2883,23 @@ body *::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-brand-primar
 .lumo-workspace-page .lumo-studio-composer,
 .lumo-workspace-page .lumo-presentation-composer { border-radius: 13px; background: var(--lumo-panel); box-shadow: none; }
 .lumo-workspace-page .lumo-studio-notice { border-radius: 9px; }
+
+/* OpenDesign and PPT share the same creative controls and host theme. */
+.lumo-creative-studio .lumo-studio-composer,
+.lumo-creative-studio .lumo-presentation-composer,
+.lumo-creative-studio .lumo-example-popup { border-radius: var(--lumo-radius); background: var(--lumo-panel); }
+.lumo-creative-studio :is(.lumo-studio-composer, .lumo-presentation-composer):focus-within { border-color: var(--lumo-mint); }
+.lumo-creative-studio .lumo-studio-tools { flex-wrap: wrap; padding: 10px 12px; }
+.lumo-creative-studio .lumo-studio-tools > em { flex: 1; margin-left: 0; text-align: right; }
+.lumo-creative-studio .lumo-studio-send,
+.lumo-creative-studio .lumo-presentation-steps .active i { color: var(--dsw-alias-label-primary-inverted, var(--lumo-bg)); }
+.lumo-creative-studio .lumo-studio-send { margin-left: auto; transition: background .18s ease, transform .18s ease; }
+.lumo-creative-studio .lumo-studio-send:hover { background: var(--lumo-accent-hover); }
+.lumo-creative-studio .lumo-studio-send:active { transform: scale(.96); }
+.lumo-creative-studio :is(button, a):focus-visible { outline: 2px solid var(--lumo-mint); outline-offset: 3px; }
+.lumo-creative-studio .lumo-studio-categories button { min-height: 32px; border-radius: var(--lumo-radius-sm); font-size: var(--lumo-fs-xxs-12); transition: background .18s ease, color .18s ease; }
+.lumo-creative-studio .lumo-studio-categories button:hover { color: var(--lumo-ink); background: var(--lumo-panel-raised); }
+.lumo-creative-studio .lumo-assistant-prompt > .lumo-glyph { color: var(--lumo-mint); }
 
 @media (max-width: 1000px) {
   .lumo-workspace-page .lumo-skill-layout,
