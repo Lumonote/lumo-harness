@@ -17,6 +17,7 @@
   "dependencies": {
     "@deepseek-ai/cordis": "link:../../../deepseek-harness/vendor/cordis",
     "@deepseek-ai/dsh-jobs": "link:../../../deepseek-harness/packages/jobs/jobs",
+    "@deepseek-ai/dsh-session": "link:../../../deepseek-harness/packages/core/session",
     "@deepseek-ai/schemastery": "link:../../../deepseek-harness/vendor/schemastery",
     "pg": "^8.13.0"
   }

@@ -26,8 +26,6 @@ export interface JobSnapshotLike {
 export interface JobsLike {
   list(owner?: JobOwner): JobSnapshotLike[]
   kill(id: string, owner: JobOwner, reason?: string): 'requested' | 'already-finished'
-  onJobsChanged(listener: (owner: JobOwner | undefined) => void): () => void
-  onJobDone(listener: (snapshot: JobSnapshotLike, owner: JobOwner | undefined) => void): () => void
 }
 
 type LocalEntry = { owner: JobOwner; snapshot: JobSnapshotLike }

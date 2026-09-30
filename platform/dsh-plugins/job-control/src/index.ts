@@ -9,8 +9,9 @@ import { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-jobs'
 import z from '@deepseek-ai/schemastery'
 
-import { JobControlExecutor, type JobsLike } from './executor.ts'
+import { JobControlExecutor } from './executor.ts'
 import { PgJobControlSeam, RoleJobControlPolicy } from './pg-job-control.ts'
+import { adaptDshJobs, observeDshJobs } from './registry.ts'
 import type { JobControlSeam } from '../../../shared/seam-contracts/job-virtualization.ts'
 import type { JobControlRuntime } from '../../../shared/seam-contracts/job-virtualization.ts'
 
@@ -40,7 +41,7 @@ export const Config: z<JobControlConfig> = z.object({
 export function apply(ctx: Context, config: JobControlConfig): void {
   if (!config.nodeId) throw new Error('job-control: nodeId 不能为空')
   const seam = new PgJobControlSeam(config.connectionString, new RoleJobControlPolicy(config.allowedRoles))
-  const executor = new JobControlExecutor(config.nodeId, ctx.jobs as unknown as JobsLike, seam)
+  const executor = new JobControlExecutor(config.nodeId, adaptDshJobs(ctx.jobs), seam)
   const interval = config.pollIntervalMs ?? 250
 
   ctx.provide('jobControl', seam)
@@ -51,16 +52,9 @@ export function apply(ctx: Context, config: JobControlConfig): void {
     ctx.logger.error('lumo/job-control: 初始化失败: %s', error instanceof Error ? error.message : String(error))
   })
 
-  // Listeners are dsh effect-scoped; no manual unregistration is needed.
-  ctx.jobs.onJobsChanged((owner) => {
-    void executor.observe(owner as never).catch((error: unknown) => {
-      ctx.logger.warn('lumo/job-control: job 投影失败: %s', error instanceof Error ? error.message : String(error))
-    })
-  })
-  ctx.jobs.onJobDone((snapshot, owner) => {
-    void executor.done(snapshot as never, owner as never).catch((error: unknown) => {
-      ctx.logger.warn('lumo/job-control: job 终态投影失败: %s', error instanceof Error ? error.message : String(error))
-    })
+  // Controller and event subscription are dsh effect-scoped.
+  observeDshJobs(ctx.jobs, executor, (error) => {
+    ctx.logger.warn('lumo/job-control: job 投影失败: %s', error instanceof Error ? error.message : String(error))
   })
 
   const timer = setInterval(() => {

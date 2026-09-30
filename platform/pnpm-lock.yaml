@@ -179,6 +179,9 @@ importers:
       '@deepseek-ai/dsh-jobs':
         specifier: link:../../../deepseek-harness/packages/jobs/jobs
         version: link:../../../deepseek-harness/packages/jobs/jobs
+      '@deepseek-ai/dsh-session':
+        specifier: link:../../../deepseek-harness/packages/core/session
+        version: link:../../../deepseek-harness/packages/core/session
       '@deepseek-ai/schemastery':
         specifier: link:../../../deepseek-harness/vendor/schemastery
         version: link:../../../deepseek-harness/vendor/schemastery
@@ -240,12 +243,12 @@ importers:
       '@deepseek-ai/dsh-client-ui-renderer':
         specifier: link:../../../deepseek-harness/packages/client/ui-renderer
         version: link:../../../deepseek-harness/packages/client/ui-renderer
-      '@deepseek-ai/dsh-client-ui-sidebar-documentpreview':
-        specifier: link:../../../deepseek-harness/packages/client/ui-sidebar-documentpreview
-        version: link:../../../deepseek-harness/packages/client/ui-sidebar-documentpreview
       '@deepseek-ai/dsh-client-ui-sidebar':
         specifier: link:../../../deepseek-harness/packages/client/ui-sidebar
         version: link:../../../deepseek-harness/packages/client/ui-sidebar
+      '@deepseek-ai/dsh-client-ui-sidebar-documentpreview':
+        specifier: link:../../../deepseek-harness/packages/client/ui-sidebar-documentpreview
+        version: link:../../../deepseek-harness/packages/client/ui-sidebar-documentpreview
       '@deepseek-ai/dsh-client-ui-slots':
         specifier: link:../../../deepseek-harness/packages/client/ui-slots
         version: link:../../../deepseek-harness/packages/client/ui-slots
