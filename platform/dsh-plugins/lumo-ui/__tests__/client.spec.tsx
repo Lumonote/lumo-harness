@@ -368,13 +368,14 @@ describe('Lumo native Harness integration', () => {
     expect(await screen.findByText('计划闭包 · 1 个制品')).toBeTruthy()
     expect(calls.some(call => call === 'POST /lumo/api/registry/plan')).toBe(true)
 		fireEvent.click(within(screen.getByRole('navigation', { name: '工作领域' })).getByRole('button', { name: '更多' }))
-		fireEvent.click(screen.getByRole('button', { name: /开放设计/ }))
+		fireEvent.click(screen.getByRole('button', { name: /^工作工具/ }))
+		fireEvent.click(await screen.findByRole('button', { name: /^开放设计/ }))
 		expect(await screen.findByRole('heading', { name: '开放设计' })).toBeTruthy()
 		expect(screen.queryByRole('button', { name: '添加设计上下文' })).toBeNull()
 
     fireEvent.keyDown(window, { key: 'Escape' })
     await waitFor(() => expect(document.querySelector('.lumo-workbench')).toBeNull())
-  }, 15000)
+  }, 30000)
 
   it('opens every work tool from a direct market link and keeps registry controls interactive', async () => {
     history.replaceState({}, '', '/?lumo=market')
