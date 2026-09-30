@@ -8,7 +8,7 @@ describe('first-party login surface', () => {
     expect(html).toContain('id="captcha-grid"')
     expect(html).toContain('name="captcha"')
     expect(html).toContain('data-index="0"')
-    expect(html).toContain('每张验证码仅可使用一次')
+    expect(html).toContain('按上方提示顺序点击数字')
     expect(html).toContain('id="mfa"')
     expect(html).toContain('pattern="[0-9]{6}"')
     expect(html).not.toContain('captcha-image')
@@ -16,10 +16,10 @@ describe('first-party login surface', () => {
   })
 
   it('uses fixed messages instead of reflecting query input', () => {
-    expect(loginPage({ state: 'invalid' })).toContain('用户名、密码或验证码不正确')
-    expect(loginPage({ state: 'locked' })).toContain('暂时锁定')
+    expect(loginPage({ state: 'invalid' })).toContain('账号、密码或验证码不正确')
+    expect(loginPage({ state: 'locked' })).toContain('登录尝试次数过多')
     expect(loginPage({ theme: 'orbital-glass' })).toContain('data-lumo-theme="orbital-glass"')
-    expect(loginPage({ theme: 'infrared-grid' })).toContain('--mint:#ff6685')
+    expect(loginPage({ theme: 'infrared-grid' })).toContain('--accent: #ff7799')
     expect(loginScript).toContain("fetch('/auth/captcha")
     expect(loginScript).toContain('请按顺序点击')
   })
