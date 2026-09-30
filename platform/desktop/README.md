@@ -101,32 +101,36 @@ CLI 或设置 `LUMO_SKILLHUB_COMMAND`。构建从 [SkillHub 官方安装源](htt
 
 | 中文入口 | 上游包 | 版本 | 用途 |
 | --- | --- | --- | --- |
-| 插件市场 | `dshmarket` | `1.41.0` | 浏览和管理 DSH 插件 |
-| 视觉理解 | `@liustack/modlens` | `3.25.2` | 图片读取、OCR 与视觉证据 |
-| 上下文洞察 | `dsh-context` | `0.41.3` | 上下文组成、趋势与事件 |
-| 费用统计 | `dsh-cost-meter` | `1.7.29` | 会话、预算、价格和历史费用 |
-| 梦幻皮肤 | `dsh-dream-skin` | `8.30.1` | 8 套高质感主题、弥散光壁纸与每用户强调色（原生 `--dsw-*` 实现） |
-| 任务看板（社区版） | `@linxin666/dsh-client-ui-task-board` | 基线未收录 | 客户端半边硬等 `settingsScope` 客户端服务，会在 web 启动期一直 `pending`（boot 页报 `1 entry did not activate`）；可从市场自行安装 |
+| 插件市场 | `dshmarket` | `1.66.6` | 浏览和管理 DSH 插件 |
+| 视觉理解 | `@liustack/modlens` | `3.26.5` | 图片读取、OCR 与视觉证据 |
+| 上下文洞察 | `dsh-context` | `0.60.0` | 上下文组成、趋势与事件 |
+| 费用统计 | `dsh-cost-meter` | `1.7.45` | 会话、预算、价格和历史费用 |
+| 梦幻皮肤 | `dsh-dream-skin` | `9.29.0` | 主题、弥散光壁纸与每用户强调色（原生 `--dsw-*` 实现） |
+| 任务看板（社区版） | `@linxin666/dsh-client-ui-task-board` | 基线未收录 | 旧版因等待 `settingsScope` 移出基线；外置版已更新到 `0.4.4`，移除了该直接依赖 |
 | 多智能体团队 | `@nanmicoder/dsh-agent-teams` | `0.1.15` | 自然语言编排多智能体团队：船长/成员、带依赖任务与消息，Web 树状监控 |
 | Univer 办公文档（社区版） | `dsh-univer-office` | `0.2.14` | 基线未收录：客户端半边与 master 代差过大，会在 web 启动期失败；可从市场自行安装 |
 
 > 浏览器自动化（`@anweat/dsh-browser` 0.1.10）因依赖已被 dsh 现行版本移除的
 > dsh-settings 旧导出，且上游无适配版本，暂不固定进桌面基线——市场页面也不展示。
 >
-> Univer 办公文档（`dsh-univer-office` 0.2.14）的 peer 只声明到 0.1.2-rc.1，而运行时随 master
-> 走 0.1.6-alpha.2。它的**浏览器半边**因此在 web 启动期激活失败，boot 页停在
+> Univer 办公文档（`dsh-univer-office` 0.2.14）的 peer 只声明到 0.1.2-rc.1，曾在
+> 0.1.6-alpha.2 的**浏览器半边**激活失败，boot 页停在
 > `web boot: 1 entry did not activate / dsh-univer-office: failed`——整块工作台打不开。
 > 这类失效构建期查不出来，故从桌面基线移除（依赖仍留可自行安装）。同时客户端启动已改为
-> 尽力而为：`@deepseek-ai/*`、`@lumo/*` 之外的条目激活失败只跳过并在控制台告警，
+> 尽力而为：单个插件导入失败、激活失败或缺少服务时跳过并在控制台记录原因，
 > 不再把一个社区插件升级成整站停摆（见 `dsh-overrides/apply.mjs` 的 `LUMO_BEST_EFFORT_BOOT`）。
+> 判断依据是 Loader 最终状态，包含没有发出状态变化事件的 `pending` 插件。失败条目保留，
+> 服务恢复或插件重试后仍可激活；引导失败或界面渲染服务不可用时仍报告启动错误。
+> 2026-09-30 查询到的办公插件 `0.3.5` 也未声明兼容当前 `0.2.0-rc.2`，因此没有升级外置办公插件。
 >
-> 任务看板（`@linxin666/dsh-client-ui-task-board`）退役的原因不同：它**不是** peer 版本代差，
-> 而是客户端半边把 `settingsScope` 写进了**硬 inject 列表**（`lib/client.js` 的
+> 任务看板（`@linxin666/dsh-client-ui-task-board`）旧版客户端把 `settingsScope` 写进了
+> **硬 inject 列表**（`lib/client.js` 的
 > `inject = ['slots','sessions','workspaces','connection','settingsScope','locale','remote']`）。
 > 实测该条目在 web 装配里永远停在 `pending`，boot 页报
 > `web boot: 1 entry did not activate / @linxin666/dsh-client-ui-task-board: pending
-> (waiting for service: settingsScope)`。0.3.14（原 pin）与 0.3.20（当前市场最新）形状相同，
-> 上游是第三方包、改不了它的 inject，故移出基线。提供 `settingsScope` 的
+> (waiting for service: settingsScope)`。0.3.14（原 pin）与 0.3.20 形状相同，故移出基线。
+> 2026-09-30 外置任务看板与远程 Web UI 已更新到 `0.4.4`，客户端代码不再直接引用
+> `settingsScope`；任务看板暂未重新纳入基线。旧版提供 `settingsScope` 的
 > `@deepseek-ai/dsh-client-ui-settings`（loader id `ui-settings`）自己 inject
 > `remote` + `remote.settings`，且**只在 `apply()` 里**才构造该 Service —— 整条链是
 > 「宿主 settings 域 → `remote.settings` → `ui-settings.apply()` → `settingsScope` → 任务看板」，
@@ -156,8 +160,7 @@ OpenDesign 仍作为输入框下方的嵌入式创作面板提供；项目和空
 
 ## 主题
 
-界面皮肤优先由标准换肤插件 `dsh-dream-skin`（`8.30.1`）提供：8 套 iOS / Linear 式
-清透冷调高质感主题、弥散光壁纸与每用户强调色，走 DSH 原生 `--dsw-*` token 系统。
+界面皮肤优先由标准换肤插件 `dsh-dream-skin`（`9.29.0`）提供：高质感主题、弥散光壁纸与每用户强调色，走 DSH 原生 `--dsw-*` token 系统。
 工作台右上角的界面主题选择器读取**主题服务当前注册的全部主题**（含该插件），因此
 切到它的任何一个主题都会驱动整套 Lumo 工作台外观。
 

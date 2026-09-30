@@ -55,8 +55,8 @@ describe('profile plugin installation', () => {
       '@lumo/web-fetch-fakeip',
       'dshmarket', '@liustack/modlens', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
     ])
-    expect(local).toContainEqual({ name: 'dshmarket', spec: 'dshmarket@1.41.0' })
-    expect(local).toContainEqual({ name: 'dsh-context', spec: 'dsh-context@0.41.3' })
+    expect(local).toContainEqual({ name: 'dshmarket', spec: 'dshmarket@1.66.6' })
+    expect(local).toContainEqual({ name: 'dsh-context', spec: 'dsh-context@0.60.0' })
   })
 
   it('installs only dependencies missing from the profile manifest', () => {

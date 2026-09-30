@@ -26,33 +26,33 @@ export interface BaselinePluginPin {
 export const BASELINE_PLUGIN_PINS: readonly BaselinePluginPin[] = [
   {
     name: 'dshmarket',
-    version: '1.65.4',
-    spec: 'dshmarket@1.65.4',
-    note: '插件市场：浏览、搜索、安装和更新 DSH 社区插件。1.41.0 能读取目录，但与当前 Web 客户端装配存在版本差距；固定到已发布的 1.65.4，其客户端依赖声明已收敛到 locale、settings 和 theme。',
+    version: '1.66.6',
+    spec: 'dshmarket@1.66.6',
+    note: '插件市场：浏览、搜索、安装和更新 DSH 社区插件。客户端依赖 locale、settings 和 theme。',
   },
   {
     name: '@liustack/modlens',
-    version: '3.25.2',
-    spec: '@liustack/modlens@3.25.2',
-    note: '视觉理解：把图片、截图与附件转换成可追溯的视觉证据，为纯文本编码 agent 提供视觉桥接。',
+    version: '3.26.5',
+    spec: '@liustack/modlens@3.26.5',
+    note: '视觉理解：图片读取、OCR 与视觉证据；要求 Node >=22.19。',
   },
   {
     name: 'dsh-context',
-    version: '0.41.3',
-    spec: 'dsh-context@0.41.3',
-    note: '上下文洞察：上下文组成、趋势、注入、压缩与每一步消息。原钉 0.38.1，与 dshmarket 同一原因随 master 升到 0.41.3。',
+    version: '0.60.0',
+    spec: 'dsh-context@0.60.0',
+    note: '上下文洞察：上下文组成、趋势、注入、压缩与每一步消息。',
   },
   {
     name: 'dsh-cost-meter',
-    version: '1.7.29',
-    spec: 'dsh-cost-meter@1.7.29',
-    note: '费用统计：会话、当日与历史费用，含预算、模型价格与用量。原钉 1.6.7，因 dsh e459e32637（2026-09-15，perf(typert): materialize generated schemas on first use）把 strict codec 由 `schema` 改成懒物化的 `create()` 工厂，1.6.7 的 16 处 codec 仍是旧形状，被 dsh-typert-loader 的 validateTypertManifest 在启动期拒绝；该拒绝会让 typert 注册面整体回滚，症状表现为 session/list 等端点「定义已撤回」、其余插件连带「未激活」，随 master 升到 1.7.29。',
+    version: '1.7.45',
+    spec: 'dsh-cost-meter@1.7.45',
+    note: '费用统计：会话、当日与历史费用，含预算、模型价格与用量；支持 DSH 0.2 的凭证与 home-paths API。',
   },
   {
     name: 'dsh-dream-skin',
-    version: '8.30.1',
-    spec: 'dsh-dream-skin@8.30.1',
-    note: '桌面换肤：8 套 iOS / Linear 式清透冷调主题加弥散光壁纸，每用户可调强调色。纯原生 --dsw-* token 实现，经其 cordis.patch.yml 在 Web 壳激活。',
+    version: '9.29.0',
+    spec: 'dsh-dream-skin@9.29.0',
+    note: '桌面换肤：主题、壁纸与每用户强调色，使用原生 theme、locale、slots 服务。',
   },
 ]
 
@@ -68,11 +68,11 @@ export const BASELINE_EXCLUDED_PLUGINS: readonly { name: string; reason: string 
   },
   {
     name: 'dsh-univer-office',
-    reason: '0.2.14（2026-09-18，最新版）的 peerDependencies 只声明 dsh-attachment/session/settings/llm/tools/skill 的 0.1.1-rc.2 || 0.1.2-rc.1，而 runtime 实际随 master 走 0.1.6-alpha.2（四个 alpha 代差）。失效发生在**浏览器半边**：它的 dsh.client 半边在 web 启动期激活失败，boot 页停在「web boot: 1 entry did not activate / dsh-univer-office: failed」，整块工作台打不开。这类失效构建期查不出来（只有真的在浏览器里装配才会撞上），上游也没有适配版本，故先从桌面基线移除；市场仍可自行安装（那里可以钉与插件同龄的 dsh）。2026-09-18 起客户端启动已改为尽力而为（apply.mjs 的 LUMO_BEST_EFFORT_BOOT），同类插件再坏只会被跳过并告警，不会再拖垮工作台。',
+    reason: '0.2.14 曾因只支持 DSH 0.1 的 peerDependencies 在浏览器半边激活失败，导致工作台无法启动，因此移出桌面基线。2026-09-30 查询到的新版本 0.3.5 仍未声明兼容当前 DSH 0.2.0-rc.2，暂不升级外置办公插件，也未授予版本风险豁免。客户端启动现按 Loader 最终状态跳过单个失败或 pending 条目，记录原因并继续挂载可用界面。',
   },
   {
     name: '@linxin666/dsh-client-ui-task-board',
-    reason: '0.3.14（原 pin）与 0.3.20（2026-09-23 市场最新）**形状相同**：客户端半边把 `settingsScope` 写进硬 inject 列表（`lib/client.js` 的 `inject = [\'slots\',\'sessions\',\'workspaces\',\'connection\',\'settingsScope\',\'locale\',\'remote\']`），实测在该 runtime 的 web 装配里该条目永远停在 `pending`，boot 页报「web boot: 1 entry did not activate / @linxin666/dsh-client-ui-task-board: pending (waiting for service: settingsScope)」。失效面在**浏览器半边**（服务端 runtime.log 无对应 warning），构建期无门禁可查。注意 `settingsScope` 的提供方 `@deepseek-ai/dsh-client-ui-settings`（loader id `ui-settings`）自己 inject `remote` + `remote.settings`，且**只在 apply() 里**才构造该 Service —— 即服务链是「宿主 settings 域 → remote.settings → ui-settings.apply() → settingsScope → 任务看板」，任一环缺失就整条停摆；本次只确认了看板停在末端，上游链路的哪一环断的**尚未定论**，别把这条 reason 当成已定位到根因。上游是第三方包、改不了它的 inject，故移出桌面基线；市场仍可自行安装，LUMO_BEST_EFFORT_BOOT 已保证它只被跳过、不再拖垮工作台。',
+    reason: '0.3.14（原 pin）与 0.3.20 的客户端硬依赖 settingsScope，曾在 Web 装配中一直 pending（waiting for service: settingsScope），因此移出桌面基线。2026-09-30 外置版已更新到 0.4.4，客户端代码已移除该直接依赖；本次没有进行浏览器功能测试，暂未重新纳入基线。客户端启动现按 Loader 最终状态跳过单个未激活插件，保留诊断和重试身份。',
   },
 ]
 

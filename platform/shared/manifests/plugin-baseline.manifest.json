@@ -1,32 +1,32 @@
 {
   "title": "桌面基线插件清单（跨文件单一真相源）",
   "description": "2026-09-14。本文件是「桌面包固定安装哪些上游社区插件、各自钉哪个版本」的数值唯一来源。此前同一份名单存在于两处并靠注释要求手工保持一致：data-plane/dsh-node/src/plugins.ts 的 BASE_PROFILE_PLUGINS 与 PACKAGED_PROFILE_MODULES、desktop/build-runtime.mjs 的 upstreamPluginSpecs。消费方式按「能不能在运行期读仓库文件」分两档：build-runtime.mjs 在构建期、在仓库内运行，直接读本文件（零复制，结构上不可能漂移）；dsh-node 用 tsx 直跑源码、打包后目录布局与仓库不同，运行期读不到本文件，故由 tools/gen-plugin-baseline.mjs 生成 src/generated/plugin-baseline.ts 并提交，由 shared/manifests/__tests__/plugin-baseline.spec.ts 的漂移锁保证与原件一致。改清单 = 改本文件 + 跑 pnpm run codegen:plugin-baseline + 锁绿。语义注释（为什么钉这些版本、为什么排除某几个）写在本文件里，不在消费方重复。",
-  "policy": "每个 pin 必须与当前 dsh master 的公共 API 兼容。dsh-settings 在 0.1.2 移除了 installSettingsSection 与 settingsNamespace（由 SettingsProvider 取代），凡在运行期 import 这两个符号的插件都会让 Loader 拒绝整树启动，因此基线版本随 master 一起上移。升版前先在 master 上验证 import 校验通过，再改本文件。第二类同样致命：typert strict codec 的宿主形状（e459e32637 起必须带 `create()` 工厂，见 dsh-typert-loader 的 requireStrictCodec）。它发生在**启动期注册阶段**而非 import 阶段，症状会伪装成别的问题——某端点「定义已撤回」、其余插件「未激活」——不要从症状倒推；识别方式是把每个插件的 `./typert` 产物按 loader 的规则离线校验一遍。第三类只出现在**浏览器半边**：带 `dsh.client` 的插件即使宿主侧一切正常，其 lib/client.js 仍可能在 web 启动期激活失败（症状是 boot 页停在「web boot: N entries did not activate」，服务端反而没有 warning），成因同样是宿主版本代差。这类失效构建期无门禁可查——只有真的在浏览器里装配才会撞上——因此客户端启动按 LUMO_BEST_EFFORT_BOOT（见 dsh-overrides/apply.mjs）尽力而为：`@deepseek-ai/*`、`@lumo/*` 之外的条目失败只跳过并告警，不再让一个社区插件把整块工作台拖停摆；发现某个 pin 长期如此就从 baseline 移到 excluded。",
+  "policy": "每个 pin 必须与当前 dsh master 的公共 API 兼容。dsh-settings 在 0.1.2 移除了 installSettingsSection 与 settingsNamespace（由 SettingsProvider 取代），凡在运行期 import 这两个符号的插件都会让 Loader 拒绝整树启动，因此基线版本随 master 一起上移。升版前先在 master 上验证 import 校验通过，再改本文件。第二类同样致命：typert strict codec 的宿主形状（e459e32637 起必须带 `create()` 工厂，见 dsh-typert-loader 的 requireStrictCodec）。它发生在**启动期注册阶段**而非 import 阶段，症状会伪装成别的问题——某端点「定义已撤回」、其余插件「未激活」——不要从症状倒推；识别方式是把每个插件的 `./typert` 产物按 loader 的规则离线校验一遍。第三类只出现在**浏览器半边**：带 `dsh.client` 的插件即使宿主侧一切正常，其 lib/client.js 仍可能在 web 启动期激活失败（症状是 boot 页停在「web boot: N entries did not activate」，服务端反而没有 warning），成因同样是宿主版本代差。这类失效构建期无门禁可查——只有真的在浏览器里装配才会撞上——因此客户端启动按 LUMO_BEST_EFFORT_BOOT（见 dsh-overrides/apply.mjs）尽力而为：单个条目导入失败、激活失败或缺少服务时，按 Loader 最终状态跳过并告警；引导和界面渲染服务缺失仍报告启动错误，不再让一个社区插件把整块工作台拖停摆；发现某个 pin 长期如此就从 baseline 移到 excluded。",
   "baseline": [
     {
       "name": "dshmarket",
-      "version": "1.65.4",
-      "note": "插件市场：浏览、搜索、安装和更新 DSH 社区插件。1.41.0 能读取目录，但与当前 Web 客户端装配存在版本差距；固定到已发布的 1.65.4，其客户端依赖声明已收敛到 locale、settings 和 theme。"
+      "version": "1.66.6",
+      "note": "插件市场：浏览、搜索、安装和更新 DSH 社区插件。客户端依赖 locale、settings 和 theme。"
     },
     {
       "name": "@liustack/modlens",
-      "version": "3.25.2",
-      "note": "视觉理解：把图片、截图与附件转换成可追溯的视觉证据，为纯文本编码 agent 提供视觉桥接。"
+      "version": "3.26.5",
+      "note": "视觉理解：图片读取、OCR 与视觉证据；要求 Node >=22.19。"
     },
     {
       "name": "dsh-context",
-      "version": "0.41.3",
-      "note": "上下文洞察：上下文组成、趋势、注入、压缩与每一步消息。原钉 0.38.1，与 dshmarket 同一原因随 master 升到 0.41.3。"
+      "version": "0.60.0",
+      "note": "上下文洞察：上下文组成、趋势、注入、压缩与每一步消息。"
     },
     {
       "name": "dsh-cost-meter",
-      "version": "1.7.29",
-      "note": "费用统计：会话、当日与历史费用，含预算、模型价格与用量。原钉 1.6.7，因 dsh e459e32637（2026-09-15，perf(typert): materialize generated schemas on first use）把 strict codec 由 `schema` 改成懒物化的 `create()` 工厂，1.6.7 的 16 处 codec 仍是旧形状，被 dsh-typert-loader 的 validateTypertManifest 在启动期拒绝；该拒绝会让 typert 注册面整体回滚，症状表现为 session/list 等端点「定义已撤回」、其余插件连带「未激活」，随 master 升到 1.7.29。"
+      "version": "1.7.45",
+      "note": "费用统计：会话、当日与历史费用，含预算、模型价格与用量；支持 DSH 0.2 的凭证与 home-paths API。"
     },
     {
       "name": "dsh-dream-skin",
-      "version": "8.30.1",
-      "note": "桌面换肤：8 套 iOS / Linear 式清透冷调主题加弥散光壁纸，每用户可调强调色。纯原生 --dsw-* token 实现，经其 cordis.patch.yml 在 Web 壳激活。"
+      "version": "9.29.0",
+      "note": "桌面换肤：主题、壁纸与每用户强调色，使用原生 theme、locale、slots 服务。"
     }
   ],
   "excluded": [
@@ -40,11 +40,11 @@
     },
     {
       "name": "dsh-univer-office",
-      "reason": "0.2.14（2026-09-18，最新版）的 peerDependencies 只声明 dsh-attachment/session/settings/llm/tools/skill 的 0.1.1-rc.2 || 0.1.2-rc.1，而 runtime 实际随 master 走 0.1.6-alpha.2（四个 alpha 代差）。失效发生在**浏览器半边**：它的 dsh.client 半边在 web 启动期激活失败，boot 页停在「web boot: 1 entry did not activate / dsh-univer-office: failed」，整块工作台打不开。这类失效构建期查不出来（只有真的在浏览器里装配才会撞上），上游也没有适配版本，故先从桌面基线移除；市场仍可自行安装（那里可以钉与插件同龄的 dsh）。2026-09-18 起客户端启动已改为尽力而为（apply.mjs 的 LUMO_BEST_EFFORT_BOOT），同类插件再坏只会被跳过并告警，不会再拖垮工作台。"
+      "reason": "0.2.14 曾因只支持 DSH 0.1 的 peerDependencies 在浏览器半边激活失败，导致工作台无法启动，因此移出桌面基线。2026-09-30 查询到的新版本 0.3.5 仍未声明兼容当前 DSH 0.2.0-rc.2，暂不升级外置办公插件，也未授予版本风险豁免。客户端启动现按 Loader 最终状态跳过单个失败或 pending 条目，记录原因并继续挂载可用界面。"
     },
     {
       "name": "@linxin666/dsh-client-ui-task-board",
-      "reason": "0.3.14（原 pin）与 0.3.20（2026-09-23 市场最新）**形状相同**：客户端半边把 `settingsScope` 写进硬 inject 列表（`lib/client.js` 的 `inject = ['slots','sessions','workspaces','connection','settingsScope','locale','remote']`），实测在该 runtime 的 web 装配里该条目永远停在 `pending`，boot 页报「web boot: 1 entry did not activate / @linxin666/dsh-client-ui-task-board: pending (waiting for service: settingsScope)」。失效面在**浏览器半边**（服务端 runtime.log 无对应 warning），构建期无门禁可查。注意 `settingsScope` 的提供方 `@deepseek-ai/dsh-client-ui-settings`（loader id `ui-settings`）自己 inject `remote` + `remote.settings`，且**只在 apply() 里**才构造该 Service —— 即服务链是「宿主 settings 域 → remote.settings → ui-settings.apply() → settingsScope → 任务看板」，任一环缺失就整条停摆；本次只确认了看板停在末端，上游链路的哪一环断的**尚未定论**，别把这条 reason 当成已定位到根因。上游是第三方包、改不了它的 inject，故移出桌面基线；市场仍可自行安装，LUMO_BEST_EFFORT_BOOT 已保证它只被跳过、不再拖垮工作台。"
+      "reason": "0.3.14（原 pin）与 0.3.20 的客户端硬依赖 settingsScope，曾在 Web 装配中一直 pending（waiting for service: settingsScope），因此移出桌面基线。2026-09-30 外置版已更新到 0.4.4，客户端代码已移除该直接依赖；本次没有进行浏览器功能测试，暂未重新纳入基线。客户端启动现按 Loader 最终状态跳过单个未激活插件，保留诊断和重试身份。"
     }
   ],
   "packagedFirstParty": [
