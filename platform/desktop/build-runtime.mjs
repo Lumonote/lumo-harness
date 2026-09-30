@@ -103,6 +103,7 @@ const modulesRoot = resolve(stagingRoot, 'node_modules')
 // 代价是 CI 每轮重装一次这几个插件（本地目录还在时仍走快路径，零成本）。
 const upstreamPluginRoot = resolve(desktopRoot, 'lumo-upstream-plugins')
 const upstreamPluginModulesRoot = resolve(upstreamPluginRoot, 'node_modules')
+const upstreamPluginPackageManager = 'pnpm@11.7.0'
 const packagedTypeScriptPlugins = new Set(['@lumo/agent-teams', '@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/web-fetch-fakeip'])
 // RuVector's current published manifest still lists MetaHarness packages in
 // `dependencies`, although the integration is intentionally removable and all
@@ -144,15 +145,18 @@ if (!existsSync(resolve(dshRoot, 'package.json'))) {
 // The host half is compiled before the package-closure walk below. A partially
 // linked upstream workspace therefore used to fail inside stream-server.ts
 // with a misleading chain of TS2307/implicit-any diagnostics (most commonly
-// after an interrupted cross-architecture pnpm install). Keep this small
-// preflight before buildDshHostPackages so direct `cargo tauri build` invocations
-// repair the same state that build.sh's install-components step repairs.
+// after an interrupted cross-architecture pnpm install). Check declared build
+// dependencies before Host and Client emits so direct `cargo tauri build`
+// invocations repair the same state as build.sh's install-components step.
 const dshHostDependencyProbes = [
   ['.', 'typescript', 'TypeScript'],
   ['packages/api/gateway', 'ws', 'ws'],
   ['packages/api/gateway', '@types/ws', '@types/ws'],
   ['packages/util/chunked-list', 'zod', 'zod'],
   ['packages/settings/settings-file', 'chokidar', 'chokidar'],
+  // Desktop Host's CLI entry includes the Windows console bridge. Its Koffi
+  // types are needed during emit on every build host, including macOS.
+  ['apps/desktop-host', 'koffi', 'koffi'],
   // 上游 master 新增的工作区包（2026-09）：test-support/remote-mock 的 @vitest/spy
   // 是 production dependency，而整包 node_modules 在旧安装里根本不存在；
   // test-support/client-runtime 源码 import 了 @deepseek-ai/dsh-client-web/src/*.ts
@@ -161,7 +165,41 @@ const dshHostDependencyProbes = [
   // 在 Client 面类型刷新，而不是给出「依赖没装」的可读诊断。
   ['packages/test-support/remote-mock', '@vitest/spy', '@vitest/spy'],
   ['packages/test-support/client-runtime', '@deepseek-ai/dsh-client-web', '@deepseek-ai/dsh-client-web'],
+  ...declaredDshBuildDependencyProbes(),
 ]
+
+function declaredDshBuildDependencyProbes() {
+  const directories = ['.', 'apps/cli', 'apps/desktop-host', 'apps/web']
+  for (const root of ['vendor', 'packages']) {
+    const directory = resolve(sourceDshRoot, root)
+    if (!existsSync(directory)) continue
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      if (root === 'vendor') {
+        directories.push(join(root, entry.name))
+        continue
+      }
+      for (const pkg of readdirSync(resolve(directory, entry.name), { withFileTypes: true })) {
+        if (pkg.isDirectory()) directories.push(join(root, entry.name, pkg.name))
+      }
+    }
+  }
+  const probes = []
+  for (const directory of directories) {
+    const path = resolve(sourceDshRoot, directory, 'package.json')
+    if (!existsSync(path)) continue
+    const manifest = JSON.parse(readFileSync(path, 'utf8'))
+    // Package-level links can lag behind upstream manifest changes even when
+    // pnpm's virtual store still contains the dependencies. Probe the declared
+    // build graph before tsc reaches any newly added value or type import.
+    const required = { ...manifest.devDependencies, ...manifest.dependencies }
+    for (const name of Object.keys(required)) {
+      if (manifest.optionalDependencies?.[name] !== undefined) continue
+      probes.push([directory, name, `${manifest.name ?? directory}: ${name}`])
+    }
+  }
+  return probes
+}
 
 function findDshPackageManifest(relativeRoot, name) {
   const parts = name.split('/')
@@ -239,6 +277,7 @@ ensureDshHostDependencies()
 
 // Overridden packages have no projected lib/. Emit each face before tsdown
 // consumes it, including API packages with separate Host and Client programs.
+refreshDshHostApplicationTypes()
 buildDshHostPackages()
 rebuildDshHostArtifacts()
 // 快照对被覆盖的客户端包不投影 lib/（其产物必须从打补丁后的
@@ -943,7 +982,7 @@ function prepareUpstreamPlugins() {
   writeFileSync(resolve(upstreamPluginRoot, 'package.json'), `${JSON.stringify({
     name: 'lumo-desktop-upstream-plugins',
     private: true,
-    packageManager: 'pnpm@11.7.0',
+    packageManager: upstreamPluginPackageManager,
     dependencies: Object.fromEntries(upstreamPluginSpecs.map((spec) => {
       const at = spec.lastIndexOf('@')
       return [spec.slice(0, at), spec.slice(at + 1)]
@@ -956,7 +995,7 @@ function prepareUpstreamPlugins() {
   // 出来的范围（>=0.1.1 <0.2.0）匹配不上只有预发布号的 dsh-settings。这些 peer 本就该由
   // 下面的闭包遍历从本地 dsh 快照解析——从 registry 再装一份会让包里出现两套 dsh。
   const result = spawnExecutable(process.platform === 'win32' ? 'corepack.cmd' : 'corepack', [
-    'pnpm', 'install', '--prod', '--ignore-scripts', '--no-frozen-lockfile',
+    upstreamPluginPackageManager, 'install', '--prod', '--ignore-scripts', '--no-frozen-lockfile',
     '--ignore-workspace', '--config.auto-install-peers=false',
     '--registry', process.env.LUMO_NPM_REGISTRY ?? 'https://registry.npmjs.org',
     '--network-concurrency=8', '--fetch-retries=2', '--fetch-retry-mintimeout=2000', '--fetch-retry-maxtimeout=10000',
@@ -1076,12 +1115,38 @@ function buildLumoUiPlugin() {
 // 附加入口形状）。依赖开发树旧 lib 是这个构建链最大的坑——旧产物会同包。
 // 快照的 node_modules 软链指向开发树 packages/*（linkWorkspaceModules），
 // 因此再生产物必须回拷开发树，否则闭包遍历/TS 解析落回旧 lib。
-// 未覆盖的包复用投影的 lib/types，避免全量 tsc 跨越快照与开发树的两套类型声明。
-// 被覆盖的 host 包先由 buildDshHostPackages 单包编译。
+// Host 应用入口及其依赖先由 refreshDshHostApplicationTypes 按快照重编；
+// 被覆盖的 host 包再由 buildDshHostPackages 单包编译。
 function rebuildDshHostArtifacts() {
   console.log('重建 DSH host 面产物（tsdown 包与 typert remote 投影）...')
   runWorkspaceBinary('.', 'tsdown', ['--env.DSH_BUILD_FACE', 'host'], 'DSH host 面产物重建失败')
   mirrorSnapshotLibsBackToSource()
+}
+
+function refreshDshHostApplicationTypes() {
+  const stage = readFileSync(resolve(dshRoot, '.lumo-stage'), 'utf8').trim()
+  const marker = resolve(dshRoot, '.lumo-host-application-types-stage')
+  const entries = [
+    'apps/cli/lib/types/bin.js',
+    'apps/cli/lib/types/profile-boot.js',
+    'apps/desktop-host/lib/types/index.js',
+    'apps/desktop-host/lib/types/cli.js',
+  ]
+  if (existsSync(marker) && readFileSync(marker, 'utf8').trim() === stage
+    && entries.every((entry) => existsSync(resolve(dshRoot, entry)))) return
+  // Host workspace bundling includes both applications. Their projected output
+  // can predate a new entry such as desktop-host/src/cli.ts; emit their reference
+  // graphs from this snapshot instead of trusting upstream lib/ or buildinfo.
+  rmSync(marker, { force: true })
+  console.log('刷新 DSH Host 应用类型产物（CLI 与 Desktop Host）...')
+  runWorkspaceBinary('.', 'tsc', [
+    '-b', 'apps/cli/tsconfig.json', 'apps/desktop-host/tsconfig.json',
+    '--force', '--pretty', 'false',
+  ], 'DSH Host 应用类型产物刷新失败')
+  if (entries.some((entry) => !existsSync(resolve(dshRoot, entry)))) {
+    throw new Error('DSH Host 应用编译成功但打包入口仍缺失；请检查上游应用入口布局')
+  }
+  writeFileSync(marker, `${stage}\n`)
 }
 
 // Compile only the overridden Host programs against projected dependencies.
@@ -1153,8 +1218,18 @@ function buildDshClientPackages() {
 }
 
 function refreshDshClientTypePrerequisites() {
-  const staleConfigs = dshClientTypeConfigs(dshRoot).filter((config) => !hasUsableDshClientTypes(dshRoot, config))
+  const stage = readFileSync(resolve(dshRoot, '.lumo-stage'), 'utf8').trim()
+  const marker = resolve(dshRoot, '.lumo-client-types-stage')
+  const emittedForStage = existsSync(marker) && readFileSync(marker, 'utf8').trim() === stage
+  const configs = dshClientTypeConfigs(dshRoot)
+  // Projected lib/types may belong to an older upstream revision even when
+  // every entry and sourcemap exists. Emit the entire Client graph once per
+  // isolated snapshot; only a successful emit may mark these outputs current.
+  const staleConfigs = emittedForStage
+    ? configs.filter((config) => !hasUsableDshClientTypes(dshRoot, config))
+    : configs
   if (staleConfigs.length === 0) return
+  rmSync(marker, { force: true })
   console.log(`刷新 DSH 客户端基础声明（隔离快照：${staleConfigs.length} 个 Client 项目）...`)
   for (const config of staleConfigs) {
     // tsc does not remove files that belonged to a deleted source module. Clear
@@ -1167,6 +1242,7 @@ function refreshDshClientTypePrerequisites() {
     '--force',
     '--pretty', 'false',
   ], 'DSH 客户端基础声明刷新失败')
+  writeFileSync(marker, `${stage}\n`)
 }
 
 // 快照里的每个 node_modules 都是软链回源树的同一份目录，所以绝不能在快照里跑
