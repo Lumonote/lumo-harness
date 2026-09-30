@@ -84,6 +84,7 @@ export const SEAM_GRADES: Readonly<Record<string, SeamGrade>> = {
       ingest: { idempotent: true },
       remove: { idempotent: true },
       rebuild: { idempotent: true },
+      canAccessLibraryFile: { idempotent: true },
     },
     perTurnCallBudget: 8,
     latencyBudgetMs: 800,

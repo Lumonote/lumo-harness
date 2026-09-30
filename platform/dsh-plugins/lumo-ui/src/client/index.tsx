@@ -163,7 +163,6 @@ interface KnowledgeSources { realm: string; state: 'synchronized'; sources: Know
 interface KnowledgeLibraryFolder { folderId: string; realm: string; parentId: string | null; name: string; ownerUserId: string; createdAt: string }
 interface KnowledgeLibraryFile { docId: string; realm: string; folderId: string | null; filename: string; mimeType: string; byteSize: number; ownerUserId: string; extractionState: string; ocrState: string; createdAt: string }
 interface KnowledgeLibraryGrant { type: 'user' | 'role'; id: string; access: 'viewer' | 'editor' }
-interface KnowledgeLibrarySnapshot { folders: KnowledgeLibraryFolder[]; files: KnowledgeLibraryFile[] }
 interface RuntimeSkill { name: string; description: string; whenToUse?: string; invocation: { modelInvocable: boolean; userInvocable: boolean }; source: string; provider: string }
 interface SkillSnapshot { complete: boolean; skills: RuntimeSkill[]; error?: string }
 interface SkillHubSkill { id: string; name: string; tag: string; description: string; rating: number; downloads: number; source: string; verified: boolean; command: string; apiKey: boolean; icon?: string; publisher?: string; tags?: string[]; homepage?: string }

@@ -225,6 +225,8 @@ describe('Lumo native Harness integration', () => {
         }] } :
 		path === '/lumo/api/knowledge/sources/doc-ops' ? { source: { doc: { docId: 'doc-ops', realm: 'dev', space: 'operations', title: '连接器审批边界', sourceVersion: 4, embeddingModel: 'bge-m3' }, chunks: [{ text: '连接器需要审批。', metadata: { owner: 'platform' } }] }, state: 'synchronized' } :
 		path === '/lumo/api/knowledge/sources' ? { realm: 'dev', state: 'synchronized', sources: [{ docId: 'doc-ops', realm: 'dev', space: 'operations', title: '连接器审批边界', sourceVersion: 4, embeddingModel: 'bge-m3', chunkCount: 1, updatedAt: '2026-09-01T00:00:00Z' }] } :
+        path === '/lumo/api/knowledge/library/folders' ? { folders: [] } :
+        path === '/lumo/api/knowledge/library/files' ? { files: [] } :
         path === '/lumo/api/knowledge/query' ? { query: '审批', scope: 'published', hits: [{ docId: 'doc-ops', sourceVersion: 4, score: .92, text: '连接器需要审批。' }] } :
         path === '/auth/account' ? { mode: 'session', provider: 'lumo-governance', username: 'palmer', displayName: 'Palmer', userId: 'palmer', realm: 'dev', roles: ['operator'], department: 'platform', clientIp: '127.0.0.1', captchaMode: 'always' } :
         {}

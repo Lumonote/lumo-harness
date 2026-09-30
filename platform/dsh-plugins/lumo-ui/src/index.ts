@@ -988,7 +988,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     try {
       const body = await readJson(req)
       const parentId = body['parentId'] === null || body['parentId'] === undefined ? null : safeID(typeof body['parentId'] === 'string' ? body['parentId'] : undefined)
-      if (body['parentId'] !== null && body['parentId'] !== undefined && parentId === undefined) throw new TypeError('parentId 无效')
+      if (parentId === undefined) throw new TypeError('parentId 无效')
       if (parentId !== null && !isRealmAdmin(identity) && !await manager.canAccessLibraryFolder({ realm: identity.realm, folderId: parentId, userId: identity.userId, roles: identity.roles, isAdmin: false, access: 'editor' })) {
         writeJson(res, 403, { error: '没有在此资料文件夹中创建子目录的权限' }); return
       }
@@ -1046,7 +1046,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     const params = new URL(req.url ?? '/', 'http://lumo.local').searchParams
     const folderValue = params.get('folder_id')
     const folderId = folderValue === null ? null : safeID(folderValue)
-    if (folderValue !== null && folderId === undefined) { writeJson(res, 400, { error: '资料文件夹 ID 无效' }); return }
+    if (folderId === undefined) { writeJson(res, 400, { error: '资料文件夹 ID 无效' }); return }
     if (folderId !== null && !await manager.canAccessLibraryFolder({ realm: identity.realm, folderId, userId: identity.userId, roles: identity.roles, isAdmin: isRealmAdmin(identity), access: 'editor' })) {
       writeJson(res, 403, { error: '没有在此资料文件夹中上传资料的权限' }); return
     }
