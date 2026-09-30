@@ -42,7 +42,10 @@ const PATCHED = [
   'packages/api/gateway/src/stream-server.ts',
   'packages/api/gateway/src/client/remote-stream.ts',
   'packages/api/session-controller/src/client/sessions/session.ts',
-  // LUMO_BEST_EFFORT_BOOT：web 启动壳里可选插件的降级点（补丁顺序的最后一段）。
+  // Client activation audit and initial entry creation isolation.
+  'packages/client/web/src/boot-client.ts',
+  'packages/client/modules/src/client/entries.ts',
+  // LUMO_BEST_EFFORT_BOOT：web 启动壳里的插件降级点。
   'packages/client/web/src/boot.ts',
   // LUMO_LIBRARY_FILE_PREVIEW：导出 DSH 原生阅读器并重建该客户端包。
   'packages/client/ui-sidebar-documentpreview/src/client/index.ts',
@@ -152,25 +155,19 @@ describe('applyLumoDshOverrides', () => {
 
   })
 
-  it('web 启动壳改为尽力而为:可选插件失败只跳过,首方条目仍然 fail-loud', () => {
+  it('web 启动依据最终激活报告跳过坏插件,引导与渲染错误仍然报告', () => {
     const root = stagePristineUpstream('best-effort')
     applyLumoDshOverrides(root)
-    const source = read(root, PATCHED.at(-1)!)
+    const source = read(root, 'packages/client/web/src/boot.ts')
 
-    // 降级策略落在**调用方**（启动壳）里：上游 boot-client.ts 的 assertEntriesActive
-    // 与其单测语义原样保留，所以这里断言的是 try 包住了 bootClient。
+    const audit = read(root, 'packages/client/web/src/boot-client.ts')
     expect(source).toContain('LUMO_BEST_EFFORT_BOOT')
     expect(source).toMatch(/try \{\n\s+await bootClient\(\{/u)
-    // 账本记的是每条目的**终态**：loader.await() 之后仍停在 failed/pending 的就是没起来的。
-    expect(source).toContain('const entryStates = new Map<string, string>()')
-    expect(source).toContain('entryStates.set(name, state)')
-    expect(source).toContain(".filter(([, state]) => state === 'failed' || state === 'pending')")
-    // 首方包名是两个前缀（与宿主侧 isOptionalProfilePlugin 同一口径）。
-    expect(source).toContain("name.startsWith('@deepseek-ai/') || name.startsWith('@lumo/')")
-    // 降级条件收窄：点不出失败条目、或有一个属于平台契约，都必须照旧抛出。
-    expect(source).toContain('if (inactive.length === 0 || required.length > 0) throw bootFailure')
-    // 吞掉错误后仍要走到挂载，否则「跳过坏插件」等于换了个地方白屏。
-    expect(source).toMatch(/for \(const name of inactive\)[^]*await mountClient\(ctx, this\.container\)/u)
+    expect(source).not.toContain('entryStates')
+    expect(audit).toContain('throw new ClientActivationError(failures)')
+    expect(source).toContain('if (!(bootFailure instanceof ClientActivationError)) throw bootFailure')
+    expect(source).toContain("if (ctx.get('uiRenderer') === undefined)")
+    expect(source).toMatch(/for \(const failure of bootFailure.failures\)[^]*await mountClient\(ctx, this\.container\)/u)
   })
 
   it('覆盖层改过的包都被登记为「要重建」,否则补丁永远不会进产物', () => {

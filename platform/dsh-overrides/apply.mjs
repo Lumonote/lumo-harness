@@ -79,7 +79,9 @@ export const overriddenPackageDirectories = [
   // （服务端 WS mux 背压、客户端载波退避、Session 事件流自动重开）。
   'packages/api/gateway',
   'packages/api/session-controller',
-  // LUMO_BEST_EFFORT_BOOT: web 启动壳的注入点——可选插件激活失败不再终止启动。
+  // Initial plugin creation and the Web activation audit must isolate failures.
+  'packages/client/modules',
+  // LUMO_BEST_EFFORT_BOOT: 单个插件未激活不阻止可用界面启动。
   'packages/client/web',
 ]
 
@@ -461,21 +463,67 @@ export function applyLumoDshOverrides(root) {
     ],
   ], 'LUMO_STREAM_RESILIENCE')
 
-  // ── LUMO_BEST_EFFORT_BOOT ─────────────────────────────────────────────────
-  // 一个社区插件坏掉不该把整块工作台拖停摆。上游把「有条目未激活」一律当致命错误：
-  // bootClient 的 assertEntriesActive 抛错 → AppWebEntry.run 的 catch 把错误画在
-  // boot 页上 → mountClient 永远不执行，用户看到的是「web boot: N entries did not
-  // activate」而不是工作台。2026-09-18 的 dsh-univer-office 0.2.14 正是这样拦下整个
-  // 桌面端的（它的浏览器半边与 master 的 dsh 代差过大，构建期没有任何门禁查得出来）。
-  //
-  // 产品口径与宿主侧一致：dsh-node/src/plugins.ts 的 isOptionalProfilePlugin 把
-  // `@deepseek-ai/*` 与 `@lumo/*` 当平台契约，其余是独立发版的社区插件，装配失败时
-  // 可以只丢弃它自己。这里刻意在**调用方**收口，而不是改 boot-client.ts —— 上游的
-  // assertEntriesActive 连同它的单测语义原样保留，产品策略只落在启动壳这一处。
-  //
-  // 降级条件刻意收窄：必须「确实点得出是哪些条目没起来」且「一个都不属于平台契约」
-  // 才吞掉错误；清单本身损坏、或一条终态都没记到时照旧抛出，不掩盖真错误。
-  patchFile(root, 'packages/client/web/src/boot.ts', [[
+  // A fiber starts PENDING and emits internal/status only on transitions. The
+  // activation audit owns the final states; an event ledger can miss a plugin
+  // that never receives a required service such as settingsScope.
+  patchFile(root, 'packages/client/web/src/boot-client.ts', [
+    [
+      "import { STATE_LABELS } from './loader-status.ts'\n",
+      "import { STATE_LABELS } from './loader-status.ts'\n\n"
+        + "/** LUMO_CLIENT_ACTIVATION_ERROR: settled per-plugin failures, independent of bootstrap errors. */\n"
+        + "export class ClientActivationError extends Error {\n"
+        + "  constructor(readonly failures: readonly string[]) {\n"
+        + "    super(`web boot: ${String(failures.length)} entr${failures.length === 1 ? 'y' : 'ies'} did not activate\\n${failures.join('\\n')}`)\n"
+        + "    this.name = 'ClientActivationError'\n"
+        + "  }\n"
+        + "}\n",
+    ],
+    [
+      "    throw new Error(`web boot: ${String(failures.length)} entr${failures.length === 1 ? 'y' : 'ies'} did not activate\\n${failures.join('\\n')}`)\n",
+      "    throw new ClientActivationError(failures)\n",
+    ],
+  ], 'LUMO_CLIENT_ACTIVATION_ERROR')
+
+  // Invalid plugin exports can reject loader.create() after its entry has been
+  // inserted. Retain the entry for retry and settle the other creations before
+  // auditing; a single rejection must not abort the rest of the roster.
+  patchFile(root, 'packages/client/modules/src/client/entries.ts', [[
+    `      await Promise.all(this.desired.plugins.map(async ({ id }) => {
+        await this.create(loader, id)
+      }))
+      await loader.await()
+`,
+    `      // LUMO_INITIAL_ENTRY_ISOLATION: each rejected creation remains diagnosable and retryable.
+      const failures: { id: string; message: string }[] = []
+      await Promise.all(manifest.plugins.map(async ({ id }) => {
+        try {
+          await this.create(loader, id)
+        } catch (error) {
+          failures.push({ id, message: String(error) })
+          console.warn('client-modules: initial plugin creation failed', id, error)
+        }
+      }))
+      await loader.await()
+      this.publish({ syncing: false, failures })
+`,
+  ]], 'LUMO_INITIAL_ENTRY_ISOLATION')
+
+  // Only the typed activation audit is recoverable. Manifest/transport/kernel
+  // failures still reach the boot failure page, as does an unavailable renderer.
+  // Pending entries stay in the page controller so later service arrival or a
+  // plugin retry can activate them without changing Host enablement.
+  patchFile(root, 'packages/client/web/src/boot.ts', [
+    [
+      "import { bootClient } from './boot-client.ts'\n",
+      "import { bootClient, ClientActivationError } from './boot-client.ts'\n",
+    ],
+    [
+      "   * Load and activate every client entry, then hand the mount point to the\n"
+        + "   * UI renderer. Plugin failures remain visible on the boot page.\n",
+      "   * Activate available entries and mount the UI renderer. Individual plugin\n"
+        + "   * failures are logged; bootstrap and renderer failures remain fatal.\n",
+    ],
+    [
     `      await bootClient({
         ctx,
         modules: this.modules,
@@ -484,34 +532,29 @@ export function applyLumoDshOverrides(root) {
           if (onFailure === undefined || state !== 'failed') this.page.setState(name, state)
         },
       })
-      await mountClient(ctx, this.container)
 `,
-    `      // LUMO_BEST_EFFORT_BOOT: 终态记账 —— loader.await() 之后仍停在 failed /
-      // pending 的条目就是「没起来」的那些（pending = 等一个永远不会到的服务）。
-      const entryStates = new Map<string, string>()
+    `      // LUMO_BEST_EFFORT_BOOT: use the authoritative audit, including fibers that never emit a status change.
       try {
         await bootClient({
           ctx,
           modules: this.modules,
           manifest: this.manifest,
           onEntryState: (name, state) => {
-            entryStates.set(name, state)
-            if (onFailure === undefined || state !== 'failed') this.page.setState(name, state)
+            if (state !== 'failed') this.page.setState(name, state)
           },
         })
       } catch (bootFailure) {
-        const inactive = [...entryStates]
-          .filter(([, state]) => state === 'failed' || state === 'pending')
-          .map(([name]) => name)
-        const required = inactive.filter(name => name.startsWith('@deepseek-ai/') || name.startsWith('@lumo/'))
-        if (inactive.length === 0 || required.length > 0) throw bootFailure
-        for (const name of inactive) {
-          console.warn('dsh web: 可选插件 ' + name + ' 未能激活，已跳过；工作台继续启动')
+        if (!(bootFailure instanceof ClientActivationError)) throw bootFailure
+        for (const failure of bootFailure.failures) {
+          console.warn('dsh web: 插件未能激活，已跳过；工作台继续启动：', failure)
         }
       }
-      await mountClient(ctx, this.container)
+      if (ctx.get('uiRenderer') === undefined) {
+        throw new Error('无法启动工作台：界面渲染服务未就绪。请重启应用或检查插件配置。')
+      }
 `,
-  ]], 'LUMO_BEST_EFFORT_BOOT')
+    ],
+  ], 'LUMO_BEST_EFFORT_BOOT')
 }
 
 /**

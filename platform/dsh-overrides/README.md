@@ -38,7 +38,8 @@ workspace 链接把编译产物写回 `deepseek-harness/packages`——仓库里
 | `packages/client/ui-theme/src/client/settings-store.ts` | `lumo-ui/src/theme-catalog.ts` `LUMO_DEFAULT_THEME` | 默认主题 |
 | `packages/client/ui-theme/src/boot-theme.ts` | `lumo-ui/src/boot-theme.ts` | 在 `webserver/index-inject` 事件上再推一条 body 脚本。body 行按 table 顺序拼接，本插件晚于 ui-theme 注册，后写的 DOM 字段赢 |
 | `packages/client/ui-theme/tests/*.spec`（5 个） | —— | 上述上游改动的配套用例，随之还原 |
-| `packages/client/web/src/boot.ts` | `apply.mjs` | 启动壳改为**尽力而为**：`@deepseek-ai/*`、`@lumo/*` 之外的条目激活失败只跳过并告警，首方条目照旧 fail-loud（2026-09-18，dsh-univer-office 0.2.14 曾让整块工作台停摆）。改**调用方**而不是 `boot-client.ts`，上游的 `assertEntriesActive` 与其单测语义原样保留 |
+| `packages/client/web/src/boot.ts`、`boot-client.ts` | `apply.mjs` | 单个插件导入、激活失败或缺少服务时，按 Loader 最终状态生成 `ClientActivationError`，启动壳记录诊断并挂载可用界面。一直处于 `pending` 且未发出状态变化事件的插件同样可跳过；引导失败和渲染服务缺失仍报告错误 |
+| `packages/client/modules/src/client/entries.ts` | `apply.mjs` | 初次创建插件条目时逐个隔离错误，等待其他条目完成，保留失败条目的诊断和重试身份 |
 
 主题 id、标签、配色模式的唯一真相源是 `lumo-ui/src/theme-catalog.ts`：宿主侧的引导脚本
 和浏览器侧的注册都读它。将来加一套浅色主题，引导脚本会自动跟着变，而不是继续硬编码
