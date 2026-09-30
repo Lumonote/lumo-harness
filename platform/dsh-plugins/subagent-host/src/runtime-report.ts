@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { assertExecutionPreset, assertWorkerBinding, type ExecutionPreset, type WorkerBinding } from './worker-binding.ts'
+import { loadPromptReference, type PromptSource } from './prompt-source.ts'
 
 export interface RuntimeReportConfig {
   governanceUrl: string
@@ -8,6 +9,7 @@ export interface RuntimeReportConfig {
   nodeId: string
   binding: WorkerBinding
   capacity: number
+  promptSource?: PromptSource
 }
 
 /** Start only after the execution listener is accepting requests. */
@@ -43,6 +45,7 @@ export function startRuntimeReports(config: RuntimeReportConfig, onError: (error
         const preset = await (await request(`/v1/runtime/agent-presets/${encodeURIComponent(binding.agentId)}`)).json() as ExecutionPreset
         if (closed) return
         assertExecutionPreset(binding, config.realm, preset)
+        await loadPromptReference(preset.system_prompt_ref, config.promptSource)
         if (config.capacity > preset.max_concurrency) throw new Error('worker capacity exceeds preset concurrency')
         await report(binding.agentId, binding.presetRevision, 'active')
         reported = true

@@ -169,6 +169,10 @@ dshNode:
     presetRevision: 0
     provider: ""
     model: ""
+    # Optional protected prompt source, mounted from an existing Secret.
+    promptRef: ""
+    promptSecret: ""
+    promptSecretKey: ""
   hpa:
     enabled: true
     minReplicas: 2

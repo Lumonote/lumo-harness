@@ -46,7 +46,7 @@ it('never reports active when the configured preset cannot be loaded', async () 
 // ——`setCap` 会把已花清零，中途重设等于让上限永远不触发。
 it.each([
   { revision: 8 }, { owner_user_id: 'other' }, { model_ref: 'other' },
-  { connector_ids: ['connector'] }, { max_concurrency: 1 },
+  { connector_ids: ['connector', 'connector'] }, { max_concurrency: 1 },
 ])('withdraws the installed identity when the authority changes: %j', async patch => {
   vi.useFakeTimers()
   let current = structuredClone(preset)

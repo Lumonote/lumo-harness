@@ -45,7 +45,7 @@ export function readChildResult(child: Agent, runId: string): ChildResultBody {
   return {
     runId,
     ok: true,
-    ...(output.length > 0 ? { output } : {}),
+    ...(output.length > 0 ? { output: [...output] } : {}),
     stopReason: toStopReason(lastEnd?.data.reason),
   }
 }

@@ -57,6 +57,7 @@ export const Config: z<SubagentHostConfig> = z.object({
     capacity: z.number(),
     binding: z.object({ agentId: z.string(), userId: z.string(), projectId: z.string(),
       presetRevision: z.number(), provider: z.string(), model: z.string() }),
+    promptSource: z.object({ ref: z.string(), file: z.string() }),
   }),
 })
 

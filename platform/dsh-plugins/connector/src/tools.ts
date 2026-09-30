@@ -10,8 +10,18 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 import { GatewayError, type ConnectorClient } from './client.ts'
+import type { ConnectorSessionScope } from '../../../shared/seam-contracts/connector-scope.ts'
 
-export function defineConnectorTools(ctx: Context, client: ConnectorClient): () => void {
+function sessionScope(exec: ToolRunContext | undefined, scope: ConnectorSessionScope): readonly string[] | undefined {
+  const agent = (exec as { agent?: { session?: { id?: unknown } } } | undefined)?.agent
+  const raw = agent?.session?.id
+  if (agent && (raw === undefined || raw === null || String(raw) === '')) {
+    throw new Error('connector: agent session identity is unavailable')
+  }
+  return raw === undefined || raw === null ? undefined : scope.allowedFor(String(raw))
+}
+
+export function defineConnectorTools(ctx: Context, client: ConnectorClient, scope: ConnectorSessionScope): () => void {
   const listTool: ToolDefinition = {
     name: 'connector_list',
     description:
@@ -56,8 +66,10 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient): () 
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
-    async execute(): Promise<unknown> {
-      return { connectors: await client.list() }
+    async execute(_args: unknown, exec: ToolRunContext): Promise<unknown> {
+      const allowed = sessionScope(exec, scope)
+      const connectors = await client.list()
+      return { connectors: allowed === undefined ? connectors : connectors.filter(connector => allowed.includes(connector.id)) }
     },
   }
 
@@ -126,6 +138,16 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient): () 
       // 取不到就不发这个头（审计照记，只是 session_id 为 NULL），不阻断调用。
       const session = (exec as { agent?: { session?: { id?: unknown } } }).agent?.session?.id
       const sessionRef = session === undefined || session === null ? undefined : String(session)
+      const allowed = sessionScope(exec, scope)
+      if (allowed !== undefined && !allowed.includes(a.connectorId)) {
+        return {
+          provenance: `external:connector/${a.connectorId}`,
+          ok: false,
+          error: '该连接器不在本次受治理执行的预设许可范围内',
+          code: 'connector_scope_denied',
+          retryable: false,
+        }
+      }
 
       try {
         const result = await client.invoke({

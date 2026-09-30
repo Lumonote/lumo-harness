@@ -116,6 +116,12 @@ spec:
               value: {{ required "dshNode.governedWorker.provider is required" .Values.dshNode.governedWorker.provider | quote }}
             - name: LUMO_AGENT_MODEL
               value: {{ required "dshNode.governedWorker.model is required" .Values.dshNode.governedWorker.model | quote }}
+            {{- if .Values.dshNode.governedWorker.promptRef }}
+            - name: LUMO_AGENT_SYSTEM_PROMPT_REF
+              value: {{ .Values.dshNode.governedWorker.promptRef | quote }}
+            - name: LUMO_AGENT_SYSTEM_PROMPT_FILE
+              value: /run/lumo/prompt/system-prompt.txt
+            {{- end }}
             {{- end }}
             - name: LUMO_SUBAGENT_HOST_BIND
               value: 0.0.0.0
@@ -151,11 +157,19 @@ spec:
             - name: LUMO_SKILL_SNAPSHOT_FILE
               value: {{ printf "%s/skill-snapshot.json" .Values.provisioner.installDir | quote }}
             {{- end }}
-          {{- if .Values.provisioner.enabled }}
+          {{- if or .Values.provisioner.enabled (and .Values.dshNode.governedWorker.enabled .Values.dshNode.governedWorker.promptRef) }}
           volumeMounts:
+          {{- if .Values.provisioner.enabled }}
             - name: artifacts
               mountPath: {{ .Values.provisioner.installDir | quote }}
               readOnly: true
+          {{- end }}
+          {{- if and .Values.dshNode.governedWorker.enabled .Values.dshNode.governedWorker.promptRef }}
+            - name: governed-prompt
+              mountPath: /run/lumo/prompt/system-prompt.txt
+              subPath: system-prompt.txt
+              readOnly: true
+          {{- end }}
           {{- end }}
           readinessProbe: { tcpSocket: { port: subagent }, initialDelaySeconds: 8, periodSeconds: 10 }
           livenessProbe: { tcpSocket: { port: subagent }, initialDelaySeconds: 20, periodSeconds: 20 }
@@ -208,10 +222,20 @@ spec:
             limits: { cpu: 250m, memory: 256Mi }
       {{- end }}
       {{- end }}
-      {{- if .Values.provisioner.enabled }}
+      {{- if or .Values.provisioner.enabled (and .Values.dshNode.governedWorker.enabled .Values.dshNode.governedWorker.promptRef) }}
       volumes:
+      {{- if .Values.provisioner.enabled }}
         - name: artifacts
           emptyDir: {}
+      {{- end }}
+      {{- if and .Values.dshNode.governedWorker.enabled .Values.dshNode.governedWorker.promptRef }}
+        - name: governed-prompt
+          secret:
+            secretName: {{ required "dshNode.governedWorker.promptSecret is required" .Values.dshNode.governedWorker.promptSecret | quote }}
+            items:
+              - key: {{ required "dshNode.governedWorker.promptSecretKey is required" .Values.dshNode.governedWorker.promptSecretKey | quote }}
+                path: system-prompt.txt
+      {{- end }}
       {{- end }}
 ---
 apiVersion: v1

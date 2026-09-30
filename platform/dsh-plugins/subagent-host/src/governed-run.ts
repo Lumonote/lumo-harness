@@ -6,18 +6,22 @@ import { ExecutionConflictError, type PgGovernedDispatch, type GovernedExecution
 import { assertExecutionPreset, type WorkerBinding } from './worker-binding.ts'
 import { SCOPE_GOVERNED_RUN, type ScopeCapSeam } from '../../../shared/seam-contracts/metering.ts'
 import { KNOWLEDGE_TOOL_NAMES, type KnowledgeSessionScope } from '../../../shared/seam-contracts/knowledge.ts'
+import { CONNECTOR_TOOL_NAMES, type ConnectorSessionScope } from '../../../shared/seam-contracts/connector-scope.ts'
+import { loadPromptReference, type PromptSource } from './prompt-source.ts'
 import { readChildResult } from './tturn.ts'
 
 /** One explicitly scoped text turn. No host tools or parent cwd/model/policy
  * are inherited from the dispatch payload. The existing process plugins retain
  * the exact owner/project/Agent identity checked at admission. */
 export async function runGovernedTask(ctx: Context, execution: GovernedExecution, binding: WorkerBinding,
-  nodeId: string, stop: AbortSignal): Promise<GovernedResult> {
+  nodeId: string, stop: AbortSignal, promptSource?: PromptSource): Promise<GovernedResult> {
   const result: GovernedResult = { run_id: execution.runId, task_id: execution.task.id,
     session_ref: execution.sessionRef, node_id: nodeId, state: 'FAILED', summary: '' }
   let dispose: (() => Promise<void>) | undefined
   let detach: (() => void) | undefined
   let signal = stop
+  let knowledgeBound = false
+  let connectorBound = false
   try {
     if (execution.cancelled) return { ...result, state: 'CANCELLED', summary: 'Task cancelled before execution' }
     assertExecutionPreset(binding, execution.task.realm, execution.preset)
@@ -28,6 +32,13 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
     if (remaining <= 0) return { ...result, state: 'CANCELLED', summary: 'Task deadline elapsed before execution' }
     signal = AbortSignal.any([stop, AbortSignal.timeout(Math.min(remaining, execution.preset.timeout_seconds * 1000))])
     signal.throwIfAborted()
+    let referencedPrompt: string | undefined
+    try {
+      referencedPrompt = await loadPromptReference(execution.preset.system_prompt_ref, promptSource)
+    } catch (error) {
+      ctx.logger.warn('governed task %s prompt unavailable: %s', execution.runId, error)
+      return { ...result, summary: 'Execution refused before start: the preset prompt reference is unavailable or invalid on this node' }
+    }
     // 给这一次执行封顶（`max_budget_cents`，单位**分**）。
     //
     // **拿不到执法面就拒绝开跑，而不是照跑**：一个「设了上限但没人执法」的执行与一个
@@ -69,19 +80,42 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
             + 'Refusing to run without the enforcement the preset assumes.' }
       }
       knowledgeScope.set(execution.sessionRef, spaces)
+      knowledgeBound = true
       knowledgeScope.setUser?.(execution.sessionRef, binding.userId)
+    }
+    const connectorIds = execution.preset.connector_ids
+    if (connectorIds.length > 0) {
+      const connectorScope = (ctx as { connectorScope?: ConnectorSessionScope }).connectorScope
+      if (!connectorScope) {
+        return { ...result, state: 'FAILED', summary: 'Execution refused before start: connector scope enforcement is unavailable on this node' }
+      }
+      try {
+        await connectorScope.bind(execution.sessionRef, connectorIds, {
+          realm: execution.task.realm, userId: binding.userId,
+          projectId: binding.projectId, agentId: binding.agentId,
+        })
+        connectorBound = true
+      } catch (error) {
+        ctx.logger.warn('governed task %s connector scope unavailable: %s', execution.runId, error)
+        return { ...result, summary: 'Execution refused before start: the preset connectors are unavailable for this node identity' }
+      }
     }
     const handle = await ctx.agents.create({
       sessionId: SessionId(execution.sessionRef), signal,
       meta: { delegationDepth: depth },
       agentOptions: { provider: binding.provider, model: binding.model },
       setup(childCtx) {
-        // 工具白名单：**默认全拒**，只在预设列出了知识空间时放行那两个知识工具。
+        // 工具白名单：默认全拒，只放行预设列出的知识空间与连接器对应的工具。
         //
-        // `restrict` 对**不认识的名字会抛错**，所以这里能写死两个名字的前提是它们确实注册了
-        // ——而上面那道「没有 knowledgeScope 就拒绝开跑」已经保证了这一点：scope 与那两个工具
-        // 由同一个插件在同一次 apply 里提供，有其一必有其二。
-        childCtx.tools.restrict({ allow: spaces.length > 0 ? KNOWLEDGE_TOOL_NAMES : [] })
+        // `restrict` 对不认识的名字会抛错；上面的 scope 检查保证对应插件已经挂载，
+        // 每个 scope 与它约束的两个工具都由同一个插件提供。
+        childCtx.tools.restrict({ allow: [
+          ...(spaces.length > 0 ? KNOWLEDGE_TOOL_NAMES : []),
+          ...(connectorIds.length > 0 ? CONNECTOR_TOOL_NAMES : []),
+        ] })
+        if (referencedPrompt) childCtx.systemPrompt.context({
+          name: 'lumo:governed-preset-prompt', order: 110, text: referencedPrompt,
+        })
         childCtx.systemPrompt.context({ name: 'lumo:governed-task', order: 120,
           text: `Execution identity: ${JSON.stringify({ realm: execution.task.realm, worker: `agent:${binding.agentId}`,
             owner: binding.userId, project: binding.projectId, task: execution.task.id, run: execution.runId,
@@ -115,13 +149,23 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
     ctx.logger.warn('governed task %s stopped: %s', execution.runId, error)
     return { ...result, state: signal.aborted ? 'CANCELLED' : 'FAILED', summary: signal.aborted ? 'Execution cancelled or timed out' : 'Agent execution failed; inspect its session log' }
   } finally {
+    // Keep tool scopes until the child has stopped. Clearing first would turn an
+    // in-flight connector call into an ordinary, unrestricted session call.
+    let disposed = true
+    try { await dispose?.() } catch (error) {
+      disposed = false
+      ctx.logger.warn('governed session disposal failed: %s', error)
+    }
     detach?.()
     // 清掉这一次的收窄条件。**必须清**：受治理执行的会话 id 是从 run_id 确定性派生的，
     // 同一个 run 重试会算出同一个 sessionRef——不清就会读到上一次执行留下的空间清单。
-    if (execution.preset.knowledge_space_ids.length > 0) {
+    // 若 dispose 失败，保留白名单以免仍在运行的调用退化成无约束会话。
+    if (disposed && knowledgeBound) {
       (ctx as { knowledgeScope?: KnowledgeSessionScope }).knowledgeScope?.clear(execution.sessionRef)
     }
-    await dispose?.().catch(error => ctx.logger.warn('governed session disposal failed: %s', error))
+    if (disposed && connectorBound) {
+      (ctx as { connectorScope?: ConnectorSessionScope }).connectorScope?.clear(execution.sessionRef)
+    }
   }
 }
 
@@ -152,7 +196,8 @@ export function startGovernedDispatch(ctx: Context, store: GovernedStore, onErro
         if (!execution) break
         const stop = new AbortController()
         if (closed) stop.abort()
-        const done = runGovernedTask(ctx, execution, store.config.binding, store.config.nodeId, stop.signal)
+        const done = runGovernedTask(ctx, execution, store.config.binding, store.config.nodeId,
+          stop.signal, store.config.promptSource)
           .then(result => persist(execution, result)).catch(onError).finally(() => active.delete(execution.runId))
         active.set(execution.runId, { execution, stop, done })
       }

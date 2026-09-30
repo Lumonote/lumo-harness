@@ -300,6 +300,12 @@ ${workerBinding ? `        runtimeReport: ${JSON.stringify({
   governanceUrl: governanceURL, token: controlPlaneToken, realm: platformRealm, nodeId: jobControlNodeId,
   binding: workerBinding,
   capacity: integerEnv('LUMO_NODE_CAPACITY', 1),
+  ...(process.env['LUMO_AGENT_SYSTEM_PROMPT_REF'] || process.env['LUMO_AGENT_SYSTEM_PROMPT_FILE'] ? {
+    promptSource: {
+      ref: process.env['LUMO_AGENT_SYSTEM_PROMPT_REF'] ?? '',
+      file: process.env['LUMO_AGENT_SYSTEM_PROMPT_FILE'] ?? '',
+    },
+  } : {}),
 })}\n` : ''}
 `
   : `    - id: lumo-subagent-remote
@@ -523,6 +529,7 @@ ${agentTeamsRows}    - id: lumo-recovery
         userId: ${JSON.stringify(userID)}
         roles: [${JSON.stringify(userRole)}]
         projectId: ${JSON.stringify(projectID)}
+        agentId: ${JSON.stringify(agentID)}
     - id: lumo-web-gateway
       name: ${JSON.stringify(webGatewayEntry)}
       inject: [web]

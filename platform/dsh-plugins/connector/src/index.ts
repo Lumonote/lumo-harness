@@ -13,6 +13,8 @@ import type {} from '@deepseek-ai/dsh-tools'
 
 import { ConnectorClient } from './client.ts'
 import { defineConnectorTools } from './tools.ts'
+import { createConnectorSessionScope } from './session-scope.ts'
+import type { ConnectorSessionScope } from '../../../shared/seam-contracts/connector-scope.ts'
 
 export interface ConnectorConfig {
   /** 连接器网关地址（Local-lite: http://localhost:58082） */
@@ -23,6 +25,7 @@ export interface ConnectorConfig {
   userId: string
   roles: string[]
   projectId?: string
+  agentId?: string
   /** 单次调用超时（默认 30s；网关侧还有连接器级超时，取两者较小） */
   timeoutMs?: number
 }
@@ -30,6 +33,7 @@ export interface ConnectorConfig {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     connectors: ConnectorClient
+    connectorScope: ConnectorSessionScope
   }
 }
 
@@ -41,24 +45,29 @@ export const Config: z<ConnectorConfig> = z.object({
   userId: z.string(),
   roles: z.array(z.string()),
   projectId: z.string(),
+  agentId: z.string(),
   timeoutMs: z.number(),
 })
 
 export const inject = ['tools']
 
 export function apply(ctx: Context, config: ConnectorConfig): void {
-  const client = new ConnectorClient({
+  const clientConfig = {
     gatewayUrl: config.gatewayUrl,
     controlPlaneToken: config.controlPlaneToken,
     realm: config.realm,
     userId: config.userId,
     roles: config.roles,
     projectId: config.projectId,
+    agentId: config.agentId,
     timeoutMs: config.timeoutMs,
-  })
+  }
+  const client = new ConnectorClient(clientConfig)
+  const scope = createConnectorSessionScope(client, clientConfig)
   ctx.provide('connectors', client)
+  ctx.provide('connectorScope', scope)
 
-  const unregister = defineConnectorTools(ctx, client)
+  const unregister = defineConnectorTools(ctx, client, scope)
   ctx.effect(() => () => {
     unregister()
   })

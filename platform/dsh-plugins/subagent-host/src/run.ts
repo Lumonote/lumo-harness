@@ -101,6 +101,7 @@ export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunR
       },
       setup(childCtx, child) {
         appendDelegatedPolicyOverrides(child.session, {
+          permissionPreset: undefined,
           sandboxMode: req.parent.sandboxMode as SandboxMode | undefined,
           approvalPolicy: req.parent.approvalPolicy,
         })

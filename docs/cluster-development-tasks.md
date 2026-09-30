@@ -3,12 +3,13 @@
 Scope: the remaining code and assembly gaps in `cluster-gap-analysis.md`.
 The audit is a starting point; existing implementations are reused where its findings are outdated.
 
-Current scope: continue cluster development. Connector and MCP development,
-including the desktop connector Hub integration and E7, is paused by request.
+Current scope: continue cluster development. Connector development resumed by
+request on 2026-09-30; governed Agent connector scopes are written but not yet
+verified. Desktop connector Hub and MCP-specific integration remain separate work.
 
 | Area | Task | Status |
 | --- | --- | --- |
-| A1 | Real flow operators, discovery and definition validation | Implemented: `internal/engine/runtime.go` `registerRuntime` registers `llm.chat`/`llm.answer`/`connector.invoke`/`tool.invoke`/`knowledge.query`/`kb.query` and maintains an `unavailable` map so an unconfigured, malformed or unauthenticated upstream reports a readable reason instead of a runtime 422. Connector execution work remains paused by request |
+| A1 | Real flow operators, discovery and definition validation | Implemented: `internal/engine/runtime.go` `registerRuntime` registers `llm.chat`/`llm.answer`/`connector.invoke`/`tool.invoke`/`knowledge.query`/`kb.query` and maintains an `unavailable` map so an unconfigured, malformed or unauthenticated upstream reports a readable reason instead of a runtime 422. Governed Agent connector execution is now wired and awaits verification; flow connector execution remains a separate integration task. |
 | A2 | Durable cron automation scheduling | Implemented: `internal/cron` (5-field parser, DST-safe `Next`/`Due`), `internal/schedule` producer, `flow_cron_cursors` with atomic advance-and-enqueue, `source`-branched binding JOIN, project-scoped stall inspection endpoint. PostgreSQL integration verification pending (see "Cron scheduling: 2026-09-14") |
 | A3 | Published document outbox to knowledge indexing | Implemented: `internal/indexing` (deterministic chunker, dispatcher, seam HTTP adapter with signed per-realm identity), `PendingPublishes` now propagates realm/space/title, retry acknowledgment via `attempts`/`last_error`. PostgreSQL integration verification pending (see "Published document indexing: 2026-09-14") |
 | A4 | Authenticated Agent runtime reporting and expiry | Implemented; runtime and server unit tests passed; full dispatch remains E3 |

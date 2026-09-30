@@ -146,6 +146,8 @@ function nodeEnv() {
     LUMO_AGENT_PRESET_REVISION: process.env[`LUMO_CLUSTER_${suffix}_AGENT_PRESET_REVISION`] || '',
     LUMO_AGENT_PROVIDER: process.env[`LUMO_CLUSTER_${suffix}_AGENT_PROVIDER`] || '',
     LUMO_AGENT_MODEL: process.env[`LUMO_CLUSTER_${suffix}_AGENT_MODEL`] || '',
+    LUMO_AGENT_SYSTEM_PROMPT_REF: process.env[`LUMO_CLUSTER_${suffix}_AGENT_SYSTEM_PROMPT_REF`] || '',
+    LUMO_AGENT_SYSTEM_PROMPT_FILE: process.env[`LUMO_CLUSTER_${suffix}_AGENT_SYSTEM_PROMPT_FILE`] || '',
   }
 }
 

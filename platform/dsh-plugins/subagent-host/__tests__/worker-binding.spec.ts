@@ -21,9 +21,12 @@ it('binds exactly one installed Agent and never substitutes another Worker', () 
 })
 
 it.each([{ realm: 'other' }, { project_id: 'other' }, { revision: 8 }, { status: 'disabled' },
-  { system_prompt_ref: 'prompt' },
 ])('rejects uninstalled execution identity or unsupported capabilities: %j', patch => {
   expect(() => assertExecutionPreset(binding, 'realm', { ...preset, ...patch })).toThrow()
+})
+
+it('accepts a prompt reference as a lookup key for the protected node source', () => {
+  expect(() => assertExecutionPreset(binding, 'realm', { ...preset, system_prompt_ref: 'prompt' })).not.toThrow()
 })
 
 // 金额上限与知识空间**已从「一律拒绝」改为接受**——两者的执法面都建好了（前者：计量截面的

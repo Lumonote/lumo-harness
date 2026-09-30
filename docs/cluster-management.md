@@ -47,8 +47,13 @@ Agent 编辑使用 `PATCH /v1/agent-presets/{id}`，提交读取时的 `revision
 Scheduler/Governance 共享的 PostgreSQL。Helm 的对应入口是
 `dshNode.governedWorker`，默认关闭。
 
-当前执行范围为文本交付。带工具/连接器、知识空间、外部系统提示引用或金额
-预算的预设不会被此执行配置上报为可用。任务保留上级目标、继承约束和验收
+当前执行范围为文本交付。连接器与知识工具仅在预设列出对应 ID 时开放，
+并按执行会话限制可见范围；金额预算由节点计量面执行。预设的
+`system_prompt_ref` 仅作为查找键，需与节点上配置的
+`LUMO_AGENT_SYSTEM_PROMPT_REF` 精确匹配，并由
+`LUMO_AGENT_SYSTEM_PROMPT_FILE` 指向受保护的本地文件；Helm 可通过
+`dshNode.governedWorker.promptRef`、`promptSecret` 和 `promptSecretKey`
+提供只读 Secret 文件。上述新接线尚未运行测试。任务保留上级目标、继承约束和验收
 条件；执行器不开放宿主工具。每个 Run 的稳定会话 ID、领取记录和两侧运行态
 在同一事务中提交；重复轮询不会创建第二个 Agent。
 
