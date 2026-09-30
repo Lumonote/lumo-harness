@@ -1,6 +1,15 @@
 {
   "extends": "../../../deepseek-harness/tsconfig.base.client.json",
-  "compilerOptions": { "rootDir": "src", "outDir": "lib/types", "types": ["node"], "jsx": "react-jsx" },
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types",
+    "types": ["node"],
+    "jsx": "react-jsx",
+    // Platform plugins consume the patched, projected DSH declarations. The
+    // upstream source aliases would pull its unpatched source into this project.
+    "paths": {},
+    "disableSourceOfProjectReferenceRedirect": true
+  },
   "include": ["src", "src/**/*.d.ts"],
   "references": [
     { "path": "../../../deepseek-harness/packages/skill/skill" },

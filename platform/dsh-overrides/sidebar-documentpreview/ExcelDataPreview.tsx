@@ -23,5 +23,5 @@ export function ExcelDataPreview({ filename, data }: {
   const props = {
     content: { kind: 'bytes' as const, data }, format: excelFormat(filename), limits, t,
   } as unknown as LoadedExcelBodyProps
-  return <Suspense fallback={<LoadingIndicator className={css.status} label={t('loading')} />}><Loaded {...props} /></Suspense>
+  return <Suspense fallback={<div className={css.status}><LoadingIndicator label={t('loading')} /></div>}><Loaded {...props} /></Suspense>
 }

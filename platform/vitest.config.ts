@@ -1,6 +1,14 @@
 import { defaultExclude, defineConfig } from 'vitest/config'
+import { fileURLToPath } from 'node:url'
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      // 这两个公开 viewer 由隔离 DSH 覆盖层导出；平台 UI 单测只验证调用边界，
+      // 不依赖源树里不存在的覆盖层 client bundle 或浏览器 PDF/Excel 引擎。
+      '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client': fileURLToPath(new URL('./dsh-plugins/lumo-ui/__tests__/fixtures/document-preview.ts', import.meta.url)),
+    },
+  },
   test: {
     include: ['**/*.spec.{ts,tsx}'],
     // `.build/deepseek-harness` 是覆盖层暂存的上游副本（见 dsh-overrides/prepare-runtime.mjs）。

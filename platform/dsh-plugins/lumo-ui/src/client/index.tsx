@@ -9,6 +9,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { ExcelDataPreview, PdfDataPreview } from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client'
 import {
@@ -42,20 +43,6 @@ function activeClientRoots(): WeakSet<object> {
   return shared[LUMO_CLIENT_ROOTS] ??= new WeakSet<object>()
 }
 
-// Keep this UI package independently typecheckable. The running DSH shell
-// declares the same seats; importing its client entry here would pull the
-// entire conversation source project into this package's isolated compiler.
-interface ComposerInputOwner {
-  readonly session: unknown
-  readonly input: ConversationInputState
-  readonly inputActions?: ConversationInputActions
-}
-
-interface HeroComposerOwner {
-  readonly input?: ConversationInputState
-  readonly inputActions?: ConversationInputActions
-}
-
 interface ConversationInputState {
   readonly draft?: string
   readonly phase?: 'plain' | 'adjudicating' | 'claimed' | 'submitting'
@@ -64,17 +51,6 @@ interface ConversationInputState {
 interface ConversationInputActions {
   setDraft(text: string): void
   submit(): void
-}
-
-declare module '@deepseek-ai/dsh-client-ui-slots' {
-  interface SlotMap {
-    'conversation.input.left': { kind: 'list'; scope: 'session'; owner: ComposerInputOwner }
-    'conversation.input.dock': { kind: 'list'; scope: 'session'; owner: ComposerInputOwner }
-    'conversation.hero.input.left': { kind: 'list'; scope: 'root'; owner: HeroComposerOwner }
-    'conversation.hero.composer.dock': { kind: 'list'; scope: 'root'; owner: HeroComposerOwner }
-    // sidebar.navigation 由上游契约（dsh-overrides 补丁后，含 SidebarNavigationOwnerProps
-    // owner）经 ui-sidebar 合同声明——勿在此重复（同名字面量不同接口身份 → TS2717）。
-  }
 }
 
 type Surface = 'knowledge' | 'skills' | 'connectors' | 'operations' | 'design' | 'presentation' | 'account' | 'market' | 'skillhub' | 'collaboration'
