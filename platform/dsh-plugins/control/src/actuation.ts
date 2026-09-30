@@ -29,11 +29,17 @@
  * 这三个动作能被一个假 agent 直接覆盖——**本层自己的判据与顺序**是这里唯一有风险的部分；
  * 「dsh 会不会按契约把钩子发出来」由 dsh 自己的用例保证，本仓库的插件测试一向不重测它。
  */
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type ContextFormed } from '@deepseek-ai/dsh-llm'
 import type { InboxTarget } from '@deepseek-ai/dsh-agent'
 import type { AgentCancelCause, UserMessage } from '@deepseek-ai/dsh-session'
 
 import { controlActuation, type ControlActuation } from './gate.ts'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'lumo/control': { kind: 'lumo/control' } & ContextFormed
+  }
+}
 
 /** 生效面需要的最小 agent 形状（真 `Agent` 结构上满足它）。 */
 export interface ControllableAgent {
@@ -49,7 +55,7 @@ export interface ControllableAgent {
   steer(message: UserMessage): void
 }
 
-/** 本插件注入的上下文在模型侧的署名（`MessageSourceMap.plugin`）。 */
+/** 本插件注入的上下文在模型侧的来源种类。 */
 export const CONTROL_PLUGIN_ID = 'lumo/control'
 
 /**
@@ -157,7 +163,7 @@ export function wakeSession(agent: ControllableAgent, state: string): void {
       text: `会话 ${String(agent.session.id)} 的执行控制已恢复（当前状态 ${state}）。`
         + '此前的暂停由控制面下发，不是错误、也不是你的判断；现在可以继续未完成的工作。',
     }],
-    source: { kind: 'plugin', plugin: CONTROL_PLUGIN_ID },
+    source: { kind: CONTROL_PLUGIN_ID, form: 'notice', summary: `执行控制已恢复（${state}）` },
   }))
 }
 

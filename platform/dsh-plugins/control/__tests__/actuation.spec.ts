@@ -50,7 +50,7 @@ const SESSION = 'sess-1'
 function message(text: string): UserMessage {
   return createUserMessage({
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: 'test' },
+    source: { kind: 'user' },
   })
 }
 
@@ -229,7 +229,7 @@ describe('唤醒', () => {
 
     expect(calls.steer).toHaveLength(1)
     const note = calls.steer[0]!
-    expect(note.source).toEqual({ kind: 'plugin', plugin: CONTROL_PLUGIN_ID })
+    expect(note.source).toEqual({ kind: CONTROL_PLUGIN_ID, form: 'notice', summary: '执行控制已恢复（running）' })
     expect(JSON.stringify(note.content)).toContain(SESSION)
     expect(JSON.stringify(note.content)).toContain('running')
   })
