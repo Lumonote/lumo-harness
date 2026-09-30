@@ -295,6 +295,11 @@ const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource }> = [
     a: { files: [`${MIGRATION_DIR}/002_collaborator_realm_grants.sql`] },
     b: { files: ['control-plane/collaborator/internal/store/store.go'], constName: 'DDL' },
   },
+  {
+    label: 'session-control（Go 服务 ↔ 迁移 006）',
+    a: { files: [`${MIGRATION_DIR}/006_session_control_single_owner.sql`] },
+    b: { files: ['control-plane/session-control/internal/store/store.go'], constName: 'DDL' },
+  },
 ]
 
 const sharedCache = new Map<string, Promise<string[]>>()
@@ -417,17 +422,26 @@ function migrationFiles(): string[] {
 }
 
 function statementsOf(sql: string): string[] {
-  return sql
-    .split(';')
-    .map((s) => s.replace(/\s+/gu, ' ').trim())
-    .filter((s) => s !== '')
+  // 分号只在引号之外结束语句；DO 的 dollar quote 内部是一整段 PL/pgSQL。
+  const statements: string[] = []
+  let start = 0
+  for (const token of sql.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*|)\$[\s\S]*?\$\1\$|'(?:''|[^'])*'|"(?:""|[^"])*"|;/gu)) {
+    if (token[0] !== ';') continue
+    statements.push(sql.slice(start, token.index))
+    start = token.index + 1
+  }
+  statements.push(sql.slice(start))
+  return statements.map((s) => s.replace(/\s+/gu, ' ').trim()).filter((s) => s !== '')
 }
 
-function targetTable(stmt: string): string | null {
+function targetTables(stmt: string): string[] {
+  if (/^DO\s+\$/iu.test(stmt)) {
+    return [...new Set([...stmt.matchAll(/\b(?:ALTER\s+TABLE|UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+([A-Za-z_][A-Za-z0-9_]*)/giu)].map((m) => m[1]!))]
+  }
   const alter = /^ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)/iu.exec(stmt)
-  if (alter) return alter[1]!
+  if (alter) return [alter[1]!]
   const on = /\bON\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/iu.exec(stmt)
-  return on ? on[1]! : null
+  return on ? [on[1]!] : []
 }
 
 const flatCache = new Map<string, Promise<string>>()
@@ -442,6 +456,14 @@ function flattenedSource(rel: string): Promise<string> {
 }
 
 describe('迁移 ↔ 服务 DDL 收敛（常跑，不依赖 DSN）', () => {
+  it('保留带内部语句和引号分号的 DO 块，并检查每一张写入表', () => {
+    const block = "DO $upgrade$ BEGIN UPDATE state SET reason = 'operator''s; reason'; UPDATE audit SET outcome = 'applied'; END $upgrade$"
+    expect(statementsOf(`${block}; ALTER TABLE audit DROP COLUMN IF EXISTS legacy;`)).toEqual([
+      block, 'ALTER TABLE audit DROP COLUMN IF EXISTS legacy',
+    ])
+    expect(targetTables(block)).toEqual(['state', 'audit'])
+  })
+
   /**
    * 004 的注释承诺「服务侧 DDL 执行同样的语句，从不跑 migrate.sh 的 Compose 部署
    * 收敛到同一形状」。这条用例就是那个承诺的判据。
@@ -458,20 +480,22 @@ describe('迁移 ↔ 服务 DDL 收敛（常跑，不依赖 DSN）', () => {
       for (const stmt of statementsOf(await readText(file))) {
         if (/^CREATE\s+TABLE/iu.test(stmt)) continue
 
-        const table = targetTable(stmt)
-        if (table === null) {
+        const tables = targetTables(stmt)
+        if (tables.length === 0) {
           missing.push(`${file}: 认不出目标表 → ${stmt}`)
           continue
         }
-        const declarers = [...(decls.get(table) ?? [])].filter((f) => !f.startsWith(`${MIGRATION_DIR}/`))
-        if (declarers.length === 0) {
-          missing.push(`${file}: ${table} 没有任何非迁移建表方 → ${stmt}`)
-          continue
-        }
-        checked.push(`${file} → ${table}`)
-        for (const declarer of declarers) {
-          if (!(await flattenedSource(declarer)).includes(stmt)) {
-            missing.push(`${file}: ${declarer} 里找不到 → ${stmt}`)
+        for (const table of tables) {
+          const declarers = [...(decls.get(table) ?? [])].filter((f) => !f.startsWith(`${MIGRATION_DIR}/`))
+          if (declarers.length === 0) {
+            missing.push(`${file}: ${table} 没有任何非迁移建表方 → ${stmt}`)
+            continue
+          }
+          checked.push(`${file} → ${table}`)
+          for (const declarer of declarers) {
+            if (!(await flattenedSource(declarer)).includes(stmt)) {
+              missing.push(`${file}: ${declarer} 里找不到 → ${stmt}`)
+            }
           }
         }
       }
