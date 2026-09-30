@@ -3,6 +3,78 @@
 本文件记录本项目所有值得注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] - 2026-09-30
+
+自 v1.0.0 起的 26 条变更：集群形态补齐最后一段，桌面端基线随 dsh 0.2 升版，
+受治理执行开放连接器与受控提示引用。
+
+### 版本亮点
+
+- **集群形态收尾**：edge-gateway / terminal-gateway / session-control 三个控制面服务落地；
+  多集群联邦调度（两段式失联判定、放置闸门、down 后任务漂移、跨集群偏好与版本前置、
+  集群本地降级）；设备结果通道（`execute_task` / `task_result` / `cancel_task`，重启后无回执的
+  run 上报 FAILED）与协作空间视图（员工上下游图、任务流向图）。修掉一处 P0：
+  `persistTaskInbox` 与 `persistTaskReceipt` 写同一路径，`task_result` 在生产上从未被发出过。
+- **多智能体协调器 fleet**：collaborator 线程域、governance 协调者域、flows 唤醒域、
+  projects 决策与合并域、session-control 发布复核、heartbeat 节点失联判定，配套
+  `@lumo/agent-teams` 线程注册/工具/唤醒与 lumo-ui 线程看板、会话控制面板。
+- **受治理执行放开两档**：连接器按预设白名单、按执行会话执法（开跑前核对固定身份与
+  可见目录）；预设 `system_prompt_ref` 只作查找键，内容取自节点上受保护的文件
+  （绝对路径、非符号链接、权限收敛、≤64 KiB），执行与心跳都先校验。Helm 以只读 Secret
+  挂载，Compose 透传环境变量。**该接线尚未做集成验证，参见 `docs/cluster-management.md`。**
+- **控制面单镜像 + 会话单 owner**：12 份逐服务 Dockerfile 合并为一份装 12 个二进制的镜像，
+  入口归部署形态（缺 command 即刻报错）；`006_session_control_single_owner.sql` 收敛插件时代
+  遗留的异构同名表，含幽灵状态 `stopping` → `stopped`。
+- **集群控制面收敛为 platform-cluster 单实例**：不再起第二组 scheduler/collaborator
+  （8184/8182 不再监听），api-bundle 补健康检查与网络别名，dsh-node 等其健康；
+  端口门禁与集群探针随拓扑更新。
+- **桌面端**：插件基线随 dsh 0.2 升版（dshmarket 1.66.6、modlens 3.26.5、dsh-context 0.60.0、
+  cost-meter 1.7.45、dream-skin 9.29.0）；客户端插件改为按 Loader 最终激活状态隔离失败，
+  一个社区插件不再把整块工作台拖停摆；构建期校验 dsh 声明依赖并刷新 Host/Client 类型产物。
+- **Lumo UI**：平台团队服务改名 `lumoAgentTeams`，与 DSH 原生 `ctx.agentTeams` 并存；
+  开放设计与 PPT 创作页共用工具栏与主题控件；样例画廊图片失败可重试，OpenDesign 改用公开
+  图片源；会话契约改用上游投影类型。
+
+### 新功能（10）
+
+- **cluster**: 集群模式剩余功能收尾 —— 三个控制面服务、多集群调度、设备结果通道、协作空间视图与镜像构建修复 (`46726949`)
+- **cluster**: 多智能体协调器 fleet —— 线程/协调/唤醒/决策/发布与节点失联 (`b407127d`)
+- **control-plane**: 控制面合并单镜像、会话单 owner 收敛，并补三条 CI 门禁 (`0459d5d4`)
+- **agent-teams**: 平台团队服务改用 lumoAgentTeams，与原生团队并存 (`6488eea1`)
+- **subagent-host**: 受治理执行放开连接器作用域与受保护的系统提示引用 (`e3bf7ca3`)
+- **deploy**: 集群控制面收敛为 platform-cluster 单实例并补齐探针 (`1ad7c494`)
+- **lumo-ui**: 开放设计与 PPT 创作页共用工具栏与主题控件 (`eac65948`)
+- **platform**: 部署合并、运维、协作与登录体验改进 (`64030dc9`)
+- **兼容与样式**: 优化升级最新版本兼容 (`55efa2c8`)、更多模块样式优化 (`ca99ac6f`)
+
+### 修复（11）
+
+- **deploy**: minio 换源、两处解析门禁 fail-open、rocketmq topic 预建并入容器 (`c9b96b56`)
+- **dsh-overrides**: 客户端插件按最终激活状态隔离失败 (`54f66224`)
+- **dsh-overrides**: 模型目录补丁适配 groups 形状并补 typert 新鲜度探针 (`f77ddef6`)
+- **desktop**: 构建期校验 dsh 声明依赖并刷新 Host/Client 类型产物 (`db87973d`)
+- **lumo-ui**: 样例画廊图片失败可重试，OpenDesign 改用公开图片源 (`8bf429b4`)
+- **lumo-ui**: 资料库参数校验与文件访问能力登记 (`a00dcea4`)
+- **lumo-ui**: 任务运行 ID 支持 attempt 段并校验解码值 (`c38ca2a8`)
+- **job-control**: 适配当前 DSH Job registry 的会话作用域 API (`a66c431d`)
+- **control**: 唤醒消息改用宿主 ContextFormed 来源 (`4e263095`)
+- **shared**: DDL 收敛用例支持 DO 块并纳入 session-control (`c457266c`)
+- **llm-gateway**: 禁用汇聚的负例改判排队与成批计数 (`23fde1d7`)
+
+### 重构（1）
+
+- **lumo-ui**: 客户端会话契约改用上游投影，隔离编译与测试依赖 (`20179098`)
+
+### 测试（3）
+
+- **subagent-remote**: 用例迁移到 workflow-ptc 引擎 (`30732add`)
+- **user-auth**: 对齐登录页文案与主题断言 (`43f956a3`)
+- **lumo-ui**: 对齐工作工具导航与用例超时 (`d5d79281`)
+
+### 工程与杂项（1）
+
+- **plugins**: 桌面基线插件升版到与 dsh 0.2 兼容的版本 (`9c685ef8`)
+
 ## [1.0.0] - 2026-09-13
 
 首个正式版本，收录 2026-08-23 起的全部 204 条变更。
@@ -251,4 +323,5 @@
 - **lumo-ui**: 放大 SkillHub 市场字号与控件尺寸 (`c6d963d0`)
 - Initial commit (`41dbf440`)
 
+[1.1.0]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.0.0
