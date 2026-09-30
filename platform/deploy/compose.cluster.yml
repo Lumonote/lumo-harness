@@ -1,6 +1,5 @@
-# Cluster 形态专属服务与覆盖项。共享基础设施和控制面 API 定义分别在
-# compose.shared.yml 与 compose.control-plane.bundle.yml；默认本地启动再叠加 compact bundle。
-# 显式完整启动：LUMO_CLUSTER_TOPOLOGY=full ./platform/deploy/up.sh cluster -d --build
+# Cluster 形态：一个逻辑集群、两个 dsh-node；其余服务保持单实例。
+# 共享基础设施和控制面定义分别在 compose.shared.yml 与 compose.control-plane.bundle.yml。
 # Go 控制面镜像由仓库内 Dockerfile 构建；dsh-node 源码位于同项目下被 Git 忽略的
 # deepseek-harness/。Compose 默认使用已构建的 LUMO_DSH_IMAGE，便于替换发布镜像。
 name: lumo-platform
@@ -16,11 +15,12 @@ volumes:
 
 services:
   api-bundle:
-    # full 模式仅运行 API；compact overlay 会切换为合并后的平台进程组。
-    command: ["/usr/local/bin/lumo-control-plane-bundle", "api"]
+    command: ["/usr/local/bin/lumo-control-plane-bundle", "platform-cluster"]
     ports:
       - "18080:8080"
+      - "18081:8081"
       - "18082:8082"
+      - "18083:8083"
       - "18084:8084"
       - "18085:8085"
       - "18086:8086"
@@ -30,6 +30,20 @@ services:
       - "18091:8090"
       - "18092:8092"
     environment:
+      LUMO_NACOS_ADDR: http://nacos:8848
+      LUMO_NACOS_SERVICE: lumo-dsh-node
+      LUMO_NACOS_GROUP: DEFAULT_GROUP
+      LUMO_REDIS_ADDR: redis:6379
+      LUMO_NACOS_COLLABORATOR_SERVICE: lumo-collaborator
+      LUMO_KNOWLEDGE_SEAM_URL: http://dsh-web:8090
+      LUMO_KNOWLEDGE_EMBEDDING_MODEL: "${LUMO_EMBEDDING_MODEL:-BAAI/bge-m3}"
+      LUMO_IDENTITY_ASSERTION_SECRET: "${LUMO_IDENTITY_ASSERTION_SECRET:-}"
+      LUMO_BUNDLE_COLLABORATOR_0_LUMO_NODE_ADVERTISE_HOST: collaborator-0
+      LUMO_BUNDLE_COLLABORATOR_0_LUMO_NACOS_PORT: "8081"
+      LUMO_BUNDLE_SCHEDULER_0_LUMO_CLUSTER_ENFORCE: "true"
+      LUMO_BUNDLE_SCHEDULER_0_LUMO_CLUSTER_VERSION_GATE: "${LUMO_CLUSTER_VERSION_GATE:-false}"
+      LUMO_BUNDLE_SCHEDULER_0_LUMO_PLACEMENT_LOAD_WEIGHT: "${LUMO_PLACEMENT_LOAD_WEIGHT:-1}"
+      LUMO_BUNDLE_SCHEDULER_0_LUMO_PLACEMENT_AFFINITY_WEIGHT: "${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"
       LUMO_BUNDLE_CONNECTOR_GATEWAY_LUMO_INSTANCE: connector-gateway-0
       LUMO_BUNDLE_CONNECTOR_GATEWAY_LUMO_OPA_ADDR: http://opa:8181
       LUMO_BUNDLE_CONNECTOR_GATEWAY_LUMO_VAULT_ADDR: http://vault:8200
@@ -58,6 +72,15 @@ services:
     depends_on:
       opa: { condition: service_started }
       vault: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/lumo-control-plane-bundle", "healthcheck", "platform-cluster"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 180s
+    networks:
+      default:
+        aliases: [scheduler-0, collaborator-0]
   etcd:
     image: quay.io/coreos/etcd:v3.5.25
     environment:
@@ -258,7 +281,6 @@ services:
       api-bundle: { condition: service_healthy }
 
   cluster-a-dsh-0:
-    profiles: [cluster-full]
     build: { context: ../.., dockerfile: platform/data-plane/dsh-node/Dockerfile }
     image: "${LUMO_DSH_IMAGE:-lumo/dsh-node:dev}"
     restart: unless-stopped
@@ -293,9 +315,8 @@ services:
     volumes:
       - provisionerdata:/var/lib/lumo/artifacts:ro
     depends_on:
-      scheduler-0: { condition: service_started }
+      api-bundle: { condition: service_healthy }
   cluster-a-dsh-1:
-    profiles: [cluster-full]
     build: { context: ../.., dockerfile: platform/data-plane/dsh-node/Dockerfile }
     image: "${LUMO_DSH_IMAGE:-lumo/dsh-node:dev}"
     restart: unless-stopped
@@ -313,9 +334,7 @@ services:
       - LUMO_SESSION_CONTROL_URL=http://session-control:8092
       # 版本一致性前置（§7.4.1）的**声明方**。与存活同理：说「这个集群现在跑的是哪个
       # 版本」的必须是承载节点（跑着的那个东西的版本），不是调度器自己的版本。
-      # 每个集群一个变量，是为了让「滚动升级升到一半」可以在本机复现：
-      #   LUMO_CLUSTER_B_VERSION=v2 docker compose up
-      # 默认两边都是 dev，于是闸门打开时判定为一致（放行）。
+      # 本集群的版本由承载节点报告。
       - LUMO_CLUSTER_VERSION=${LUMO_CLUSTER_A_VERSION:-dev}
       - LUMO_REALM=dev
       - "LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}"
@@ -342,11 +361,13 @@ services:
       - "LUMO_AGENT_PRESET_REVISION=${LUMO_CLUSTER_A_AGENT_PRESET_REVISION:-}"
       - "LUMO_AGENT_PROVIDER=${LUMO_CLUSTER_A_AGENT_PROVIDER:-}"
       - "LUMO_AGENT_MODEL=${LUMO_CLUSTER_A_AGENT_MODEL:-}"
+      - "LUMO_AGENT_SYSTEM_PROMPT_REF=${LUMO_CLUSTER_A_AGENT_SYSTEM_PROMPT_REF:-}"
+      - "LUMO_AGENT_SYSTEM_PROMPT_FILE=${LUMO_CLUSTER_A_AGENT_SYSTEM_PROMPT_FILE:-}"
       - "PROVISIONER_ARTIFACT_NAME=${PROVISIONER_ARTIFACT_NAME:-}"
     volumes:
       - provisionerdata:/var/lib/lumo/artifacts:ro
     depends_on:
-      scheduler-0: { condition: service_started }
+      api-bundle: { condition: service_healthy }
   cluster-b-dsh-0:
     profiles: [cluster-full]
     build: { context: ../.., dockerfile: platform/data-plane/dsh-node/Dockerfile }
@@ -431,6 +452,8 @@ services:
       - "LUMO_AGENT_PRESET_REVISION=${LUMO_CLUSTER_B_AGENT_PRESET_REVISION:-}"
       - "LUMO_AGENT_PROVIDER=${LUMO_CLUSTER_B_AGENT_PROVIDER:-}"
       - "LUMO_AGENT_MODEL=${LUMO_CLUSTER_B_AGENT_MODEL:-}"
+      - "LUMO_AGENT_SYSTEM_PROMPT_REF=${LUMO_CLUSTER_B_AGENT_SYSTEM_PROMPT_REF:-}"
+      - "LUMO_AGENT_SYSTEM_PROMPT_FILE=${LUMO_CLUSTER_B_AGENT_SYSTEM_PROMPT_FILE:-}"
       - "PROVISIONER_ARTIFACT_NAME=${PROVISIONER_ARTIFACT_NAME:-}"
     volumes:
       - provisionerdata:/var/lib/lumo/artifacts:ro

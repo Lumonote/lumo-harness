@@ -60,9 +60,7 @@ var bundles = map[string][]service{
 	),
 	"platform-cluster": withServices(apiServices,
 		service{name: "scheduler", instance: "scheduler-0", port: "8083"},
-		service{name: "scheduler", instance: "scheduler-1", port: "8184"},
 		service{name: "collaborator", instance: "collaborator-0", port: "8081"},
-		service{name: "collaborator", instance: "collaborator-1", port: "8182"},
 	),
 }
 

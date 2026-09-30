@@ -246,7 +246,7 @@ probe_edge_routes_face() {
   routes="$(string_count '"prefix"' "$body")"
   if [[ "${routes:-0}" -eq 0 ]]; then
     fail "probe-edge-route-table-empty: edge-gateway 回了 200，但已加载的路由表里**一条路由都没有**" \
-      "—— 每个请求都会 404，而进程健康、日志干净。查挂载（$topology 里 /etc/lumo/edge-routes.json）"
+      "—— 每个请求都会 404，而进程健康、日志干净。查挂载（$topology_label 里 /etc/lumo/edge-routes.json）"
     return 0
   fi
   pass "探针 2：edge-gateway 已加载并通过编译的路由 ${routes} 条"
@@ -347,7 +347,7 @@ probe_metric_present() {
 # 跑
 # ---------------------------------------------------------------------------
 
-echo "probes: 拓扑 ${topology}（派生 $(printf '%s\n' "$targets" | wc -l | tr -d ' ') 个控制面目标）"
+echo "probes: 拓扑 ${topology_label}（派生 $(printf '%s\n' "$targets" | wc -l | tr -d ' ') 个控制面目标）"
 
 probe_edge_to_terminal
 probe_edge_routes_face

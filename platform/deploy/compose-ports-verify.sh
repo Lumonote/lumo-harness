@@ -84,8 +84,7 @@ elif op == "rename-ports-key":
     text = text.replace("ports:", "portz:")
 elif op == "insert-long-syntax":
     anchor = extra[0]
-    long_form = ('    ports:\n'
-                 '      - target: 9999\n'
+    long_form = ('      - target: 9999\n'
                  '        published: "19999"')
     if text.count(anchor) == 0:
         print(f"锚点未命中: {anchor!r}", file=sys.stderr)
@@ -210,7 +209,7 @@ expect_fail "拓扑里不再有任何 ports 键（解析失效的形态）" \
 # --- 反向 4：解析不出来的端口写法必须报错，不能跳过 --------------------------------
 # 长语法（`- target:` / `- published:`）落在这一支。跳过它的后果很具体：解析盲区与
 # 「真的没有冲突」在输出上完全一样。
-mutate insert-long-syntax "$CLUSTER" "$WORK/long-syntax.yml" '    ports: ["18080:8080"]'
+mutate insert-long-syntax "$CLUSTER" "$WORK/long-syntax.yml" '      - "18080:8080"'
 expect_fail "长语法端口项（解析不了就必须喊，不能跳过）" \
   "port-entry-unparsed" --file "$WORK/long-syntax.yml"
 
