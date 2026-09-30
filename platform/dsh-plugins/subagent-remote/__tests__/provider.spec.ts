@@ -7,7 +7,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import SubagentRuntime, { SubagentError } from '@deepseek-ai/dsh-subagent'
 import type { ResolvedSubagentStartRequest } from '@deepseek-ai/dsh-subagent'
-import WorkerThreadWorkflowEngine from '../../../../deepseek-harness/packages/workflow/workflow-worker-thread/src/index.ts'
+import PtcWorkflowEngine from '../../../../deepseek-harness/packages/workflow/workflow-ptc/src/index.ts'
+import { fakeParent as workflowParent, mountWorkflowRuntime } from '../../../../deepseek-harness/packages/workflow/workflow-ptc/tests/setup.ts'
 import { SeamError } from '../../../shared/seam-contracts/errors.ts'
 import { assertStartChildRequest } from '../../../shared/seam-contracts/subagent-host.ts'
 import type { ChildResultBody, StartChildRequest } from '../../../shared/seam-contracts/subagent-host.ts'
@@ -263,16 +264,21 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
   it('FlowEngine agent() 经 ctx.subagents 扇出到 lumo-remote，而非默认 spawn', async () => {
     const h = await setup()
     const ctx = new Context()
+    all.push({ async close() { await ctx.fiber.dispose() } })
+    await mountWorkflowRuntime(ctx, { cwd: '/tmp' })
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider(h.provider)
-    await ctx.plugin(WorkerThreadWorkflowEngine, { provider: 'lumo-remote', maxConcurrentAgents: 1 })
+    await ctx.plugin(PtcWorkflowEngine, { provider: 'lumo-remote', maxConcurrentAgents: 1 })
 
     const flow = ctx.workflowEngine.start({
       meta: { name: 'remote-fanout', description: 'one remotely placed child' },
       script: "return await agent('inspect remote node')",
-      parent: fakeParent(),
+      parent: Object.assign(workflowParent(ctx), { ctx }),
     })
-    const hostStart = await waitFor(() => h.hostCalls.starts[0], 'FlowEngine child reaches remote host')
+    const hostStart = await Promise.race([
+      waitFor(() => h.hostCalls.starts[0], 'FlowEngine child reaches remote host', 25_000),
+      flow.result.then(result => { throw new Error(`workflow ended before remote dispatch: ${JSON.stringify(result)}`) }),
+    ])
     expect(hostStart.body).toMatchObject({
       prompt: [{ type: 'text', text: 'inspect remote node' }],
       descriptor: { provider: 'lumo-remote', mode: 'one-shot' },
@@ -290,7 +296,7 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
       agentsStarted: 1,
     })
     await flow.dispose()
-  })
+  }, 30_000)
 
   it('happy path:place 201 → host start 200 → 回执结集;父描述真实采集;终态上报 scheduler', async () => {
     const h = await setup()
