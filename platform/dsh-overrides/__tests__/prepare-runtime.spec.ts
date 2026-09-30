@@ -57,9 +57,10 @@ const files = [
   ['packages/core/agent/lib/types/types.d.ts', 'export declare const InboxState: unknown\\n'],
   ['packages/core/agent/lib/types/index.d.ts', '(agentCtx: Context, agent: Agent)\\n'],
   ['packages/util/native-command/lib/types/index.d.ts', 'export { nativeFileManager, revealNativePath } from "./path-opener.ts"\\n'],
-  // LIB_FRESHNESS_PROBES 的最后一处（SkillSummary.path）：漏写它会让「新鲜源树」
+  // SkillSummary.path：漏写它会让「新鲜源树」
   // 永远判不新鲜，重复构建用例因此每轮都重跑 tsc。
   ['packages/skill/skill/lib/types/index.d.ts', '/** Absolute instruction file path when supplied by the provider */\\n'],
+  ['packages/typert/protocol/lib/types/types.d.ts', 'create: () => TypertSchema\\n'],
 ]
 for (const [relative, content] of files) {
   const target = path.join(root, relative)

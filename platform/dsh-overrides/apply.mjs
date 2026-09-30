@@ -244,15 +244,15 @@ export function applyLumoDshOverrides(root) {
         + "    if (catalog.status !== 'ready' || catalog.value === null) {\n",
     ],
     [
-      "    const current = projected.next ?? catalog.value.default\n",
+      "    const selection = projected.next ?? catalog.value.default\n",
       "    // A missing projection is unknown, not an empty durable selection.\n"
-        + "    const current = projected === undefined\n"
+        + "    const selection = projected === undefined\n"
         + "      ? this.store.getSnapshot().current\n"
         + "      : projected.next ?? catalog.value.default\n",
     ],
     [
-      "      routable: catalog.value.routableProviders.includes(current.provider),\n",
-      "      routable: current === null ? null : catalog.value.routableProviders.includes(current.provider),\n",
+      "    const routable = catalog.value.groups.some(group => group.id === selection.provider\n",
+      "    const routable = selection === null ? null : catalog.value.groups.some(group => group.id === selection.provider\n",
     ],
   ], 'LUMO_MODEL_CATALOG')
 
