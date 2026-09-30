@@ -380,6 +380,18 @@ function safeID(value: string | undefined): string | undefined {
   return value
 }
 
+function safeRunID(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  try {
+    // Legacy runs use `${taskID}:attempt:1`. URL.pathname leaves encoded
+    // separators intact, so validate the decoded identifier before forwarding.
+    const decoded = decodeURIComponent(value)
+    return /^[A-Za-z0-9._:-]{1,160}$/u.test(decoded) ? decoded : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function isRealmAdmin(identity: RequestIdentity): boolean {
   return identity.roles.some(role => role === 'platform_admin' || role === 'realm_admin' || role === 'admin')
 }
@@ -1680,7 +1692,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
 
   const taskArtifacts = pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/runs\/([^/]+)\/artifacts(?:\/([^/]+)(?:\/(content|publish))?)?$/u)
   if (taskArtifacts !== null) {
-    const taskID = safeID(taskArtifacts[1]); const runID = safeID(taskArtifacts[2])
+    const taskID = safeID(taskArtifacts[1]); const runID = safeRunID(taskArtifacts[2])
     const artifactID = taskArtifacts[3] === undefined ? undefined : safeID(taskArtifacts[3])
     const action = taskArtifacts[4]
     if (taskID === undefined || runID === undefined || (taskArtifacts[3] !== undefined && artifactID === undefined)) { writeJson(res, 400, { error: 'invalid task, run or artifact id' }); return }
@@ -1801,7 +1813,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   const taskRunResult = pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/runs\/([^/]+)\/result$/u)
   if (req.method === 'GET' && taskRunResult !== null) {
     const taskID = safeID(taskRunResult[1])
-    const runID = safeID(taskRunResult[2])
+    const runID = safeRunID(taskRunResult[2])
     if (taskID === undefined || runID === undefined) { writeJson(res, 400, { error: 'invalid task or run id' }); return }
     writeUpstream(res, await upstream(config, identity, 'governance', `/v1/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/result`, req))
     return
