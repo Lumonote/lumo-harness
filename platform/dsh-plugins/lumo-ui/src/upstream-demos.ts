@@ -68,8 +68,21 @@ export const ALLOWED_ASSET_HOSTS: ReadonlySet<string> = new Set([
   'raw.githubusercontent.com',
   'repo-assets.open-design.ai',
   'cms-assets.youmind.com',
+  'pbs.twimg.com',
   'static.heygen.ai',
 ])
+
+/** README 的 YouMind 缩略图返回 403；使用同一图片的公开原始 CDN 地址。 */
+const OPEN_DESIGN_IMAGE_SOURCES = new Map([
+  ['1776662673014_nf0taw_HGRMNDybsAAGG88.jpg', 'HGRMNDybsAAGG88'],
+  ['1777453149026_gd2k50_HHCSvymboAAVscc.jpg', 'HHCSvymboAAVscc'],
+  ['1777453164993_mt5b69_HHDoWfeaUAEA6Vt.jpg', 'HHDoWfeaUAEA6Vt'],
+  ['1776661968404_8a5flm_HGQc_KOaMAA2vt0.jpg', 'HGQc_KOaMAA2vt0'],
+  ['1777453184257_vb9hvl_HG9tAkOa4AAuRrn.jpg', 'HG9tAkOa4AAuRrn'],
+].map(([file, media]) => [
+  `https://cms-assets.youmind.com/media/${file}`,
+  `https://pbs.twimg.com/media/${media}?format=jpg&name=large`,
+]))
 
 const ASSET_PROXY_PATH = '/lumo/api/skills/demos/upstream/asset'
 const GALLERY_TTL_MS = 10 * 60 * 1000
@@ -171,7 +184,8 @@ function stripTags(html: string): string {
 function resolveReadmeAsset(src: string, readmeUrl: string): string | undefined {
   try {
     const url = new URL(src, readmeUrl)
-    return allowedAssetUrl(url.href) === undefined ? undefined : url.href
+    const source = OPEN_DESIGN_IMAGE_SOURCES.get(url.href) ?? url.href
+    return allowedAssetUrl(source) === undefined ? undefined : source
   } catch {
     return undefined
   }
@@ -295,7 +309,8 @@ export function createUpstreamDemoService(options: UpstreamDemoServiceOptions = 
       }
     },
     async asset(upstream) {
-      const key = upstream.href
+      // 旧画廊快照也能恢复预览，且与新地址共用同一份图片缓存。
+      const key = OPEN_DESIGN_IMAGE_SOURCES.get(upstream.href) ?? upstream.href
       const cached = assets.get(key)
       if (cached !== undefined && cached.expiresAt > now()) return cached.value
       let response: Response

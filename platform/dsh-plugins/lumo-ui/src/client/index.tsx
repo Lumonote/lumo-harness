@@ -961,6 +961,15 @@ function galleryCategories(collections: GalleryCollection[]): string[] {
 
 type GalleryFocus = { collection: GalleryCollection; index: number }
 
+/** 资源失败时保留样例信息；查看器内可以重新请求当前图片。 */
+function GalleryImage({ src, title, lazy = false, retry = false }: { src: string; title: string; lazy?: boolean; retry?: boolean }) {
+  const [failed, setFailed] = useState(false)
+  const [attempt, setAttempt] = useState(0)
+  return <span className="lumo-gallery-image">{failed
+    ? <span className="lumo-gallery-image-error" role="status"><span>预览图片暂时无法加载</span>{retry ? <button type="button" className="lumo-secondary lumo-small" onClick={() => { setFailed(false); setAttempt(value => value + 1) }}>重新加载图片</button> : null}</span>
+    : <img key={attempt} src={src} alt={title} loading={lazy ? 'lazy' : 'eager'} onError={() => setFailed(true)} />}</span>
+}
+
 /**
  * 完整样例查看器：逐页翻看上游样例（PPT 的每一页幻灯片 / OpenDesign 的每张截图），
  * 底部可直接把当前样例送进创作意图。嵌在工作台对话框内部，Esc 只关闭自己。
@@ -980,8 +989,8 @@ function GalleryViewer({ focus, useLabel, onIndex, onClose, onUse }: { focus: Ga
   return <div className="lumo-gallery-layer" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
     <section ref={ref} tabIndex={-1} className="lumo-gallery-viewer" role="dialog" aria-modal="true" aria-label={`样例：${collection.title}`} onKeyDown={onKeyDown}>
       <header><div><span className="lumo-eyebrow">{collection.category}</span><b>{collection.title}</b>{collection.description ? <small>{collection.description}</small> : null}</div><div><span className="lumo-gallery-counter" aria-live="polite">{index + 1} / {pages.length}</span><button type="button" className="lumo-quiet" aria-label="关闭样例查看器" onClick={onClose}>×</button></div></header>
-      <div className="lumo-gallery-stage"><button type="button" className="lumo-gallery-nav prev" aria-label="上一页" disabled={pages.length < 2} onClick={() => step(-1)}>‹</button><figure><img src={page.url} alt={page.title} /><figcaption><b>{page.title}</b>{page.description ? <span>{page.description}</span> : null}</figcaption></figure><button type="button" className="lumo-gallery-nav next" aria-label="下一页" disabled={pages.length < 2} onClick={() => step(1)}>›</button></div>
-      {pages.length > 1 ? <div className="lumo-gallery-strip" role="tablist" aria-label="样例页面">{pages.map((item, position) => <button type="button" role="tab" key={`${collection.id}:${String(position)}`} aria-selected={position === index} aria-label={`第 ${String(position + 1)} 页：${item.title}`} className={position === index ? 'active' : ''} onClick={() => onIndex(position)}><img src={item.url} alt="" loading="lazy" /></button>)}</div> : null}
+      <div className="lumo-gallery-stage"><button type="button" className="lumo-gallery-nav prev" aria-label="上一页" disabled={pages.length < 2} onClick={() => step(-1)}>‹</button><figure><GalleryImage key={page.url} src={page.url} title={page.title} retry /><figcaption><b>{page.title}</b>{page.description ? <span>{page.description}</span> : null}</figcaption></figure><button type="button" className="lumo-gallery-nav next" aria-label="下一页" disabled={pages.length < 2} onClick={() => step(1)}>›</button></div>
+      {pages.length > 1 ? <div className="lumo-gallery-strip" role="tablist" aria-label="样例页面">{pages.map((item, position) => <button type="button" role="tab" key={`${collection.id}:${String(position)}`} aria-selected={position === index} aria-label={`第 ${String(position + 1)} 页：${item.title}`} className={position === index ? 'active' : ''} onClick={() => onIndex(position)}><GalleryImage key={item.url} src={item.url} title="" lazy /></button>)}</div> : null}
       <footer><div>{collection.downloads.map(item => <a key={item.url} href={item.url} target="_blank" rel="noreferrer noopener">{item.label}</a>)}</div><button type="button" className="lumo-primary" onClick={() => onUse(collection, page)}>{useLabel}</button></footer>
     </section>
   </div>
@@ -989,7 +998,7 @@ function GalleryViewer({ focus, useLabel, onIndex, onClose, onUse }: { focus: Ga
 
 function GalleryCollectionCard({ collection, onOpen }: { collection: GalleryCollection; onOpen: (collection: GalleryCollection, index: number) => void }) {
   return <button type="button" className="lumo-gallery-card" aria-label={`查看样例：${collection.title}`} onClick={() => onOpen(collection, 0)}>
-    <span className="lumo-demo-frame"><img src={collection.cover} alt="" loading="lazy" /></span>
+    <span className="lumo-demo-frame"><GalleryImage key={collection.cover} src={collection.cover} title="" lazy /></span>
     <span><small>{collection.category} · {collection.pages.length} 页</small><b>{collection.title}</b>{collection.description ? <em>{collection.description}</em> : null}{collection.tags.length ? <span className="lumo-gallery-tags">{collection.tags.slice(0, 4).map(tag => <i key={tag}>{tag}</i>)}</span> : null}</span>
   </button>
 }
@@ -997,7 +1006,7 @@ function GalleryCollectionCard({ collection, onOpen }: { collection: GalleryColl
 function GalleryPageCard({ collection, index, onOpen }: { collection: GalleryCollection; index: number; onOpen: (collection: GalleryCollection, index: number) => void }) {
   const page = collection.pages[index]!
   return <button type="button" className="lumo-gallery-card" aria-label={`查看样例：${page.title}`} onClick={() => onOpen(collection, index)}>
-    <span className="lumo-demo-frame"><img src={page.url} alt="" loading="lazy" /></span>
+    <span className="lumo-demo-frame"><GalleryImage key={page.url} src={page.url} title="" lazy /></span>
     <span><small>{collection.category}</small><b>{page.title}</b>{page.description ? <em>{page.description}</em> : null}</span>
   </button>
 }

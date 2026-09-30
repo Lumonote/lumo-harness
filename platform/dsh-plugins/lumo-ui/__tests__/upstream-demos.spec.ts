@@ -68,6 +68,28 @@ const readme = `# OpenDesign
 `
 
 describe('upstream demo galleries', () => {
+  it.each([
+    ['1776662673014_nf0taw_HGRMNDybsAAGG88.jpg', 'HGRMNDybsAAGG88'],
+    ['1777453149026_gd2k50_HHCSvymboAAVscc.jpg', 'HHCSvymboAAVscc'],
+    ['1777453164993_mt5b69_HHDoWfeaUAEA6Vt.jpg', 'HHDoWfeaUAEA6Vt'],
+    ['1776661968404_8a5flm_HGQc_KOaMAA2vt0.jpg', 'HGQc_KOaMAA2vt0'],
+    ['1777453184257_vb9hvl_HG9tAkOa4AAuRrn.jpg', 'HG9tAkOa4AAuRrn'],
+  ])('restores the blocked OpenDesign image %s from its original public source', async (file, media) => {
+    const blocked = `https://cms-assets.youmind.com/media/${file}`
+    const source = `https://pbs.twimg.com/media/${media}?format=jpg&name=large`
+    const collections = parseOpenDesignShowcase(`## 演示\n\n### 4 · 图片\n<td><img src="${blocked}" /><sub><b>图片样例</b></sub></td>`)
+    expect(collections[0]!.pages[0]!.url).toBe(proxiedAssetUrl(source))
+    expect(allowedAssetUrl(source)?.hostname).toBe('pbs.twimg.com')
+
+    const fetchImpl = vi.fn(async () => new Response(new Uint8Array([0xff, 0xd8, 0xff]), { headers: { 'content-type': 'image/jpeg' } }))
+    const service = createUpstreamDemoService({ fetch: fetchImpl as unknown as typeof fetch })
+    // 已打开的旧画廊仍携带 YouMind 地址，也应取得图片并复用新地址的缓存。
+    const restored = await service.asset(new URL(blocked))
+    expect(restored?.contentType).toBe('image/jpeg')
+    expect(await service.asset(new URL(source))).toBe(restored)
+    expect(fetchImpl).toHaveBeenCalledExactlyOnceWith(source, expect.objectContaining({ headers: expect.objectContaining({ accept: 'image/*,*/*;q=0.5' }) }))
+  })
+
   it('turns the PPT Master manifest into full-deck collections behind the same-origin proxy', () => {
     const collections = parsePptMasterExamples(manifest)
     expect(collections.map(item => item.id)).toEqual(['ppt169_pritzker_2026_quick', 'ppt169_what_is_ppt'])

@@ -1146,6 +1146,9 @@ html [data-dsh-frame][data-sidebar-collapsed] [data-dsh-part='sidebar-entry'] { 
 .lumo-demo-card:hover, .lumo-demo-card:focus-visible { border-color: var(--lumo-accent-36); transform: translateY(-2px); }
 .lumo-demo-frame { position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden; background: var(--lumo-accent-4); }
 .lumo-demo-frame > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.lumo-gallery-image { display: grid; width: 100%; height: 100%; min-height: 0; place-items: center; overflow: hidden; }
+.lumo-gallery-image > img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.lumo-gallery-image-error { display: grid; justify-items: center; gap: 10px; padding: 12px; color: var(--lumo-faint); font-size: var(--lumo-fs-xxs-12); text-align: center; }
 .lumo-demo-frame > iframe { display: block; width: 200%; height: 200%; border: 0; transform: scale(.5); transform-origin: 0 0; pointer-events: none; background: #fff; }
 .lumo-demo-card > span:last-child { display: grid; gap: 3px; padding: 9px 11px 11px; }
 .lumo-demo-card small { color: var(--lumo-faint); font-size: var(--lumo-fs-xxxs-11); }
@@ -1176,7 +1179,8 @@ html [data-dsh-frame][data-sidebar-collapsed] [data-dsh-part='sidebar-entry'] { 
 .lumo-gallery-counter { color: var(--lumo-faint); font: var(--lumo-fs-xxxs-11) /var(--lumo-lh-flat) var(--lumo-mono); }
 .lumo-gallery-stage { display: grid; grid-template-columns: 40px minmax(0, 1fr) 40px; align-items: center; gap: 8px; min-height: 0; padding: 14px; }
 .lumo-gallery-stage figure { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 8px; min-height: 0; margin: 0; }
-.lumo-gallery-stage img { display: block; width: 100%; max-height: min(62vh, 640px); border: 1px solid var(--lumo-line); border-radius: 8px; object-fit: contain; background: #fff; }
+.lumo-gallery-stage .lumo-gallery-image { height: auto; min-height: 180px; }
+.lumo-gallery-stage img { display: block; width: 100%; height: auto; max-height: min(62vh, 640px); border: 1px solid var(--lumo-line); border-radius: 8px; object-fit: contain; background: #fff; }
 .lumo-gallery-stage figcaption { display: grid; gap: 2px; text-align: center; }
 .lumo-gallery-stage figcaption b { font-size: var(--lumo-fs-xxxs-11); }
 .lumo-gallery-stage figcaption span { color: var(--lumo-faint); font-size: var(--lumo-fs-xxxs-11); }
@@ -1185,6 +1189,8 @@ html [data-dsh-frame][data-sidebar-collapsed] [data-dsh-part='sidebar-entry'] { 
 .lumo-gallery-strip { display: flex; gap: 6px; overflow-x: auto; padding: 0 14px 12px; }
 .lumo-gallery-strip button { flex: none; width: 88px; padding: 0; border: 2px solid transparent; border-radius: 6px; overflow: hidden; background: #fff; cursor: pointer; opacity: .6; transition: opacity .15s, border-color .15s; }
 .lumo-gallery-strip button.active, .lumo-gallery-strip button:hover { border-color: var(--lumo-mint); opacity: 1; }
+.lumo-gallery-strip .lumo-gallery-image { aspect-ratio: 16 / 9; }
+.lumo-gallery-strip .lumo-gallery-image-error { padding: 4px; font-size: var(--lumo-fs-xxxs-11); }
 .lumo-gallery-strip img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
 .lumo-gallery-viewer > footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 18px; border-top: 1px solid var(--lumo-line); }
 .lumo-gallery-viewer > footer > div { display: flex; flex-wrap: wrap; gap: 10px; }
