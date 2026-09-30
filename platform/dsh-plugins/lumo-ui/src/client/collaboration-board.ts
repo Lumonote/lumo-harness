@@ -4,7 +4,7 @@
  * 与 `collaboration-layout.ts`（员工视图）的分工：那边回答「谁在等谁」，这边回答
  * 「哪一条卡住了」。两者共用同一套几何常量，所以切换视图时同一件事不会跳到别处。
  *
- * 数据直接来自 `ctx.agentTeams.status()` 的 `team.tasks` 与 `progress`——**依赖是真的**，
+ * 数据直接来自 `ctx.lumoAgentTeams.status()` 的 `team.tasks` 与 `progress`——**依赖是真的**，
  * 不是从别的字段推出来的。这一点值得写在文件头：本仓库曾经因为「只在 governance 里搜」
  * 而把依赖记成「没有数据源」，而它一直都在这里。
  *

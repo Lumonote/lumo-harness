@@ -67,6 +67,11 @@ Windows 包内使用 `runtime/lumo-runtime.cmd`、`node.exe` 和 `python/python.
 
 ## 桌面基础插件
 
+原生「自动化任务」来自 `@deepseek-ai/dsh-experimental-schedule-bundle`，随 DSH 打包，
+在「扩展」中启用后由 `ui-schedule` 注册侧边栏菜单；它是可选扩展，默认关闭。
+原生「智能体团队」同样可按需启用。平台团队使用 `lumoAgentTeams` 服务，
+原生团队使用 `agentTeams` 服务；两者分别注册，平台协作页面读取前者。
+
 历史对话支持「全部对话」和「按工作区」两个直接入口。全部对话展开跨工作区的会话列表；
 归档规则保持不变。切换工作区或视图不会移动、删除会话文件。旧版 `session.jsonl.zstd`
 和新版 `session.v2.jsonl.zstd` 可以并存，读取时由 DSH 格式迁移链恢复；诊断日志必须读取
@@ -202,6 +207,13 @@ Windows 直接使用仓库中的 PNG 图标，不依赖 bash、Swift 或 macOS �
   同时被 `dsh-overrides/brand-web.mjs` 拷成 `/branding/logo.png`（favicon 与工作台品牌标）。
 
 ## 构建期护栏
+
+平台团队服务使用 `ctx.lumoAgentTeams`，原生 DSH 团队插件独占 `ctx.agentTeams`。
+旧安装包若在发送对话后新建会话时报 `ctx.agentTeams.tryMembership is not a function`，
+需重新构建并替换应用；工作区源码的改名不会更新 `/Applications` 内的 runtime。
+`agent-teams/__tests__/runtime-compat.spec.ts` 使用真实 DSH AgentLoop、原生团队插件和
+本地模拟回复，覆盖两种插件加载顺序下「回复完成后连续新建会话」。
+PPT 和开放设计页面共用创作工具栏及主题控件样式，示例分类栏与内容网格分别布局。
 
 `build-runtime.mjs` 在拷贝依赖闭包前会检查两类只在运行时才暴露的回归：
 

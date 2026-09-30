@@ -1,5 +1,5 @@
 /**
- * @lumo/agent-teams 的编排服务 —— §7.3 的 `ctx.agentTeams` 本体。
+ * @lumo/agent-teams 的编排服务 —— §7.3 的 `ctx.lumoAgentTeams` 本体。
  *
  * 三层组装：
  *   roster（谁能执行、在哪执行）× task board（做什么、依赖谁）× courier（怎么会合）

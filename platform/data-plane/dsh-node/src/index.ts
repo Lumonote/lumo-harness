@@ -353,7 +353,7 @@ const webFetchFakeIpPatchRow = localMode && isWebProfile
 `
   : ''
 
-// 多智能体团队（`ctx.agentTeams`）：一份插件同时覆盖单机与集群两种形态。
+// 多智能体团队（`ctx.lumoAgentTeams`，与原生 `ctx.agentTeams` 并存）：一份插件同时覆盖单机与集群两种形态。
 // 形态差异不在装配层分支，而在插件内部按优先级探测成员 provider
 // （集群父节点命中 `lumo-remote`，单机回落 `spawn`/`fork`）；团队状态走 dsh
 // storage hub（单机 sqlite、集群 PG），会合面在有 mailbox 时自动升级到 PG。

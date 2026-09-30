@@ -1,5 +1,5 @@
 /**
- * @lumo/agent-teams —— `docs/architecture.md` §7.3 的 `ctx.agentTeams`：
+ * @lumo/agent-teams —— `docs/architecture.md` §7.3 的 `ctx.lumoAgentTeams`：
  * roster + 任务板(DAG) + 会合面，**一份代码同时成立在单机与集群两种部署形态上**。
  *
  * ## 为什么不用现成的两个实现
@@ -9,7 +9,7 @@
  * | 实现 | 成员派发 | 为什么不行 |
  * |---|---|---|
  * | `@nanmicoder/dsh-agent-teams` 0.1.15 | `registerContinuableSetup` | 平台集群 wire（`shared/seam-contracts/subagent-host.ts`）只覆盖 one-shot spawn；且 0.1.15 调用了 master 已移除的 API，已被排除出插件基线 |
- * | `@deepseek-ai/dsh-experimental-agent-team` 0.1.5-rc.2 | `ctx.subagents.startContinuable`（`roster.ts:282`） | 同样是 continuable，且绑定 session log + projection，实验态，平台未挂载 |
+ * | `@deepseek-ai/dsh-experimental-agent-team` 0.1.5-rc.2 | `ctx.subagents.startContinuable`（`roster.ts:282`） | 同样是 continuable，且绑定 session log + projection，实验态，可按需启用，服务名由原生插件独占 |
  *
  * 本插件把成员建模成**可重复派发的 one-shot**（理由见 `roster.ts`），于是同一份代码
  * 在三种形态下都成立：
@@ -106,7 +106,8 @@ export const Config: z<AgentTeamsConfig> = z.object({
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
-    agentTeams: AgentTeamsService
+    /** Platform team API; native DSH reserves agentTeams for its TeamService. */
+    lumoAgentTeams: AgentTeamsService
     /** 线程档位（§24.2）：注册表 + 唤醒 + 工作目录解析。 */
     agentThreads: ThreadsRuntime
   }
@@ -236,7 +237,7 @@ export function apply(ctx: Context, config: AgentTeamsConfig): void {
     warn: message => ctx.logger.warn('%s', message),
   })
 
-  ctx.provide('agentTeams', service)
+  ctx.provide('lumoAgentTeams', service)
 
   // 线程档位（§24.2）：注册表（协作服务）+ 唤醒（会合面）+ 本节点事实（身份、工作区根）+ 执行面。
   //

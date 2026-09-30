@@ -117,7 +117,7 @@ function boot(config: Parameters<typeof apply>[1] = {}, preset: { subagents?: st
   return {
     ctx,
     tools,
-    service: () => ctx.get('agentTeams') as AgentTeamsService,
+    service: () => ctx.get('lumoAgentTeams') as AgentTeamsService,
   }
 }
 
@@ -205,7 +205,7 @@ describe('装配', () => {
     apply(ctx, { memberProvider: 'lumo-remote' })
     await flush()
 
-    expect((ctx.get('agentTeams') as AgentTeamsService).capabilitiesOrNull()).toBeNull()
+    expect((ctx.get('lumoAgentTeams') as AgentTeamsService).capabilitiesOrNull()).toBeNull()
     expect(lines.some(line => line.includes('探测失败') && line.includes('只能读写团队状态'))).toBe(true)
     await ctx.fiber.dispose()
   })
@@ -218,7 +218,7 @@ describe('装配', () => {
     apply(ctx, {})
     await flush()
 
-    expect((ctx.get('agentTeams') as AgentTeamsService).capabilitiesOrNull()).toBeNull()
+    expect((ctx.get('lumoAgentTeams') as AgentTeamsService).capabilitiesOrNull()).toBeNull()
     expect(lines.some(line => line.includes('没有任何成员 provider 可用'))).toBe(true)
     await ctx.fiber.dispose()
   })

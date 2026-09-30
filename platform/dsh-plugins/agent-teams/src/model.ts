@@ -1,6 +1,6 @@
 /**
  * @lumo/agent-teams 领域模型 —— docs/architecture.md §7.3「协同拓扑
- * （`ctx.agentTeams`：roster + task board(DAG) + mailbox）」的任务板与名册部分。
+ * （`ctx.lumoAgentTeams`：roster + task board(DAG) + mailbox）」的任务板与名册部分。
  *
  * 本模块**只有纯函数与纯数据**：入参 `TeamState`，返回**新的** `TeamState`；
  * 零 IO、零 ctx、零时钟（`now` 由调用方传入）。

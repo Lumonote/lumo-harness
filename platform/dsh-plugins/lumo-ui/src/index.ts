@@ -775,9 +775,9 @@ function upstreamDemos(): UpstreamDemoService {
 }
 
 /**
- * `ctx.agentTeams` 里本服务用得上的那一部分。
+ * `ctx.lumoAgentTeams` 里本服务用得上的那一部分。
  *
- * 声明成窄接口而不是 import 插件类型：两者都是 dsh 公开面（`ctx.provide('agentTeams')`），
+ * 声明成窄接口而不是 import 插件类型：两者都是 dsh 公开面（`ctx.provide('lumoAgentTeams')`），
  * 而窄接口让路由可以拿一个假服务直接测——本层唯一有风险的地方是「取哪些字段、怎么拼」，
  * 而不是「dsh 会不会按契约把它注进来」。
  */
@@ -1496,7 +1496,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     if (agentTeams === undefined) {
       // 缺席要说成缺席。回一个空列表读起来是「没有团队」——那是一个结论，
       // 而这个部署可能只是没装 agent-teams。
-      writeJson(res, 503, { error: 'agent_teams_unavailable', detail: 'ctx.agentTeams 未装配' })
+      writeJson(res, 503, { error: 'agent_teams_unavailable', detail: 'ctx.lumoAgentTeams 未装配' })
       return
     }
     try {
@@ -2247,10 +2247,10 @@ export function apply(ctx: Context, config: Config): void {
           runtimeCtx.get('knowledgeVault') as VaultService | undefined,
           req, res, skillhubRuntime,
           // 与 knowledgeVault 同样是**机会式**的取法，不进上面的 inject 列表：
-          // inject 会等到列出的服务全部就绪才注册路由，把 agentTeams 加进去就等于
+          // inject 会等到列出的服务全部就绪才注册路由，把 lumoAgentTeams 加进去就等于
           // 「没装 agent-teams 的形态整个 /lumo/api 都不工作」——一个可选功能拖垮全部。
           // 取不到时路由回 503 并说明缺席，其余面照常。
-          runtimeCtx.get('agentTeams') as AgentTeamsService | undefined,
+          runtimeCtx.get('lumoAgentTeams') as AgentTeamsService | undefined,
           runtimeCtx.get('objectStore') as ObjectStoreService | undefined,
           runtimeCtx.get('officeToPdf') as OfficeToPdfService | undefined,
         ),

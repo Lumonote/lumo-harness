@@ -688,6 +688,10 @@ pull Task → 在 Slot 挂载 preset(cordis patch, isolate realm) → loop:
 
 ### 7.3 协同拓扑（`ctx.agentTeams`：roster + task board(DAG) + mailbox）
 
+平台实现 `@lumo/agent-teams` 使用 `ctx.lumoAgentTeams` 提供本节的协同能力；
+`ctx.agentTeams` 保留给 DSH 原生实验团队的 `TeamService`。两个服务接口不同，
+必须分别注册，原生团队扩展才能与平台团队同时启用。
+
 | 拓扑 | 适用 | 实现 |
 |------|------|------|
 | 层级 Planner-Worker | 可分解目标（分析/编码） | 一个 planner 拆 DAG，多 worker claim |
