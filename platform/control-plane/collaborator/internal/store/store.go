@@ -138,6 +138,13 @@ CREATE TABLE IF NOT EXISTS threads (
 -- 同时活在两个节点上」——那种行一旦存在，线程亲和就无从判定（读侧不知道该信哪一行）。
 CREATE UNIQUE INDEX IF NOT EXISTS threads_session ON threads (realm, session_ref);
 
+-- 重派谱系：旧线程保持终态，同一前身只能有一个直接后继。
+ALTER TABLE threads ADD COLUMN IF NOT EXISTS replaces TEXT REFERENCES threads(id);
+CREATE UNIQUE INDEX IF NOT EXISTS threads_replacement ON threads (realm, replaces)
+  WHERE replaces IS NOT NULL;
+CREATE INDEX IF NOT EXISTS threads_active_nodes ON threads (node_id, realm)
+  WHERE state IN ('idle', 'running', 'awaiting');
+
 -- 节点失联通知（§24.2.3(4)：标记 failed 之后要**通知协调者**）。
 --
 -- 为什么通知是**本服务的一行**而不是 Mailbox 的一次 resolve：mailbox_future 表由

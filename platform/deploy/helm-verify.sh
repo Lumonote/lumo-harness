@@ -243,6 +243,14 @@ if render_ok "cluster profile" "$cluster_render" -f "$cluster_profile"; then
     fail "cluster profile has $session_control_refs dsh workload(s) with LUMO_SESSION_CONTROL_URL=$expected_session_control_url, expected 2"
   fi
 
+  expected_collaborator_url="http://lumo-platform-collaborator:8081"
+  collaborator_refs="$(grep -A1 '^ *- name: LUMO_COLLABORATOR_URL$' "$cluster_render" | grep -cF "$expected_collaborator_url" || true)"
+  if [[ "$collaborator_refs" == "2" ]]; then
+    pass "cluster profile points both dsh workloads at $expected_collaborator_url"
+  else
+    fail "cluster profile must wire both thread registries to collaborator (found $collaborator_refs)"
+  fi
+
   # --- A3: the knowledge projection must name a seam host that exists ------
   # collaborator pushes its published-document outbox to `POST
   # /seam/knowledge/ingest` on a seam host. Without the URL it logs a warning and

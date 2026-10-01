@@ -32,6 +32,7 @@ type threadCreateRequest struct {
 	// Workspace 省略时按 `thread/<id>/` 派生（§24.3.2 的唯一合法值）。
 	// 给出了就必须逐字等于派生值——**归属判据是等值判据**，见 domain.ValidateThreadWorkspace。
 	Workspace string `json:"workspace"`
+	Replaces  string `json:"replaces"`
 }
 
 func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +58,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 		SessionRef:            body.SessionRef,
 		NodeID:                body.NodeID,
 		Workspace:             workspace,
+		Replaces:              body.Replaces,
 		// 新建即 idle：domain 会把别的值拒掉（一出生就 running = 还没放上去就先报在跑）。
 		State: domain.ThreadStateIdle,
 	})
@@ -209,7 +211,7 @@ func (s *Server) handleNodeLossNotices(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
-	notices, err := s.store.ListNodeLossNotices(r.Context(), string(ident.Realm), since, limit)
+	notices, err := s.store.ListNodeLossNoticesForThread(r.Context(), string(ident.Realm), r.URL.Query().Get("thread_id"), since, limit)
 	if err != nil {
 		writeThreadErr(w, err)
 		return
@@ -239,6 +241,8 @@ func writeThreadErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrThreadSessionTaken):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 	case errors.Is(err, store.ErrThreadIDTaken):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+	case errors.Is(err, store.ErrThreadReplacementTaken):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 	case errors.Is(err, store.ErrThreadConflict):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})

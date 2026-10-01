@@ -79,6 +79,7 @@ export interface AgentTeamsConfig {
   realm?: string
   /** 协作服务基址（`control-plane/collaborator`，线程注册表）。缺省 = 线程面读不到行。 */
   collaboratorUrl?: string
+  controlPlaneToken?: string
   /** 调用协作服务时使用的身份（生产由边缘网关注入，直连时用配置）。 */
   actingUserId?: string
   /** 本节点身份（线程亲和判据的输入）。缺省 = 线程面拒绝一切唤醒。 */
@@ -98,6 +99,7 @@ export const Config: z<AgentTeamsConfig> = z.object({
   maxWaitMs: z.number(),
   realm: z.string(),
   collaboratorUrl: z.string(),
+  controlPlaneToken: z.string(),
   actingUserId: z.string(),
   nodeId: z.string(),
   workspaceRoot: z.string(),
@@ -165,6 +167,7 @@ function createThreadRegistry(
       baseUrl: config.collaboratorUrl,
       userId: config.actingUserId,
       realm,
+      ...config.controlPlaneToken === undefined ? {} : { controlPlaneToken: config.controlPlaneToken },
     })
   } catch (error: unknown) {
     ctx.logger.error('agent-teams: 线程注册表装配失败，线程面不可用：%s', describe(error))

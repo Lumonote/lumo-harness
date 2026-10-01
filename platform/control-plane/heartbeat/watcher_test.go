@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,11 +65,11 @@ type fakeReader struct {
 	err  error
 	// scanErrAt fails the Nth Scan of each result set.
 	scanErrAt int
-	calls     int
+	calls     atomic.Int64
 }
 
 func (f *fakeReader) Query(ctx context.Context, _ string, _ ...any) (pgx.Rows, error) {
-	f.calls++
+	f.calls.Add(1)
 	// Honour the context, as a real driver does. Without this the timeout and
 	// cancellation paths would look like successes.
 	if err := ctx.Err(); err != nil {
@@ -262,7 +263,7 @@ func TestRunEvaluatesImmediatelyThenKeepsRefreshing(t *testing.T) {
 	// The first evaluation must not wait for the first tick, otherwise every
 	// restart would leave the gate unknown for a whole interval.
 	waitFor(t, "first evaluation", func() bool { return w.Snapshot().Ready })
-	waitFor(t, "a second evaluation", func() bool { return reader.calls >= 2 })
+	waitFor(t, "a second evaluation", func() bool { return reader.calls.Load() >= 2 })
 
 	cancel()
 	<-done

@@ -17,12 +17,197 @@ package integration_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/lumo-harness/platform/collaborator/internal/domain"
+	"github.com/lumo-harness/platform/collaborator/internal/nodeloss"
 	"github.com/lumo-harness/platform/collaborator/internal/store"
+	"github.com/lumo-harness/platform/heartbeat"
 )
+
+func TestNacosAbsenceDrivesDurableThreadLoss(t *testing.T) {
+	st, _ := newPGStore(t)
+	ctx := context.Background()
+	thread, err := st.CreateThread(ctx, threadRow("observed-thread", "observed-session", "lost-node"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Real HTTP transport with the Nacos response shape; only the Nacos process
+	// and the observer clock are simulated. Thread mutations use real Postgres.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"hosts":[]}`)
+	}))
+	defer server.Close()
+	startedAt := time.Now()
+	now := startedAt
+	source, err := heartbeat.NewNacosLiveness(heartbeat.NacosLivenessOptions{
+		BaseURL: server.URL, Candidates: st.ActiveThreadNodes,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reporter, err := heartbeat.NewNodeLossReporter(heartbeat.NodeLossReporterOptions{Sink: nodeloss.Sink{Store: st}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, age := range []time.Duration{0, 30 * time.Second, 89 * time.Second, 90 * time.Second} {
+		now = startedAt.Add(age)
+		rows, err := source.ReadNodes(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report := reporter.ReportLiveness(ctx, rows)
+		current, err := st.GetThread(ctx, thread.Realm, thread.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if age < 90*time.Second && (current.State != domain.ThreadStateIdle || len(report.Reported) != 0) {
+			t.Fatalf("thread terminated before grace elapsed: %+v, %+v", current, report)
+		}
+		if age == 90*time.Second && (current.State != domain.ThreadStateFailed || len(report.Reported) != 1) {
+			t.Fatalf("down node did not fail its thread: %+v, %+v", current, report)
+		}
+	}
+	notices, err := st.ListNodeLossNoticesForThread(ctx, thread.Realm, thread.ID, 0, 1)
+	if err != nil || len(notices) != 1 || notices[0].CoordinatorSessionRef != thread.CoordinatorSessionRef {
+		t.Fatalf("thread loss did not notify its coordinator: %+v, %v", notices, err)
+	}
+}
+
+func TestThreadReplacementLineageAndConcurrentClaims(t *testing.T) {
+	st, _ := newPGStore(t)
+	ctx := context.Background()
+	previous, err := st.CreateThread(ctx, threadRow("lineage-old", "lineage-session", "lost-node"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.FailThreadOnNodeLoss(ctx, previous.Realm, previous.ID, previous.NodeID); err != nil {
+		t.Fatal(err)
+	}
+	// Different caller-chosen IDs must not bypass single-successor protection.
+	var wg sync.WaitGroup
+	errorsOut := make(chan error, 2)
+	for _, id := range []string{"lineage-next-a", "lineage-next-b"} {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			next := threadRow(id, "session-"+id, "healthy-node")
+			next.Replaces = previous.ID
+			created, err := st.CreateThread(ctx, next)
+			if err == nil && created.Replaces != previous.ID {
+				err = errors.New("replacement lineage was lost")
+			}
+			errorsOut <- err
+		}(id)
+	}
+	wg.Wait()
+	close(errorsOut)
+	winners, conflicts := 0, 0
+	for err := range errorsOut {
+		if err == nil {
+			winners++
+		} else if errors.Is(err, store.ErrThreadReplacementTaken) {
+			conflicts++
+		} else {
+			t.Fatalf("unexpected replacement failure: %v", err)
+		}
+	}
+	if winners != 1 || conflicts != 1 {
+		t.Fatalf("parallel replacement: %d winners, %d conflicts", winners, conflicts)
+	}
+	old, err := st.GetThread(ctx, previous.Realm, previous.ID)
+	if err != nil || old.State != domain.ThreadStateFailed || old.SessionRef != previous.SessionRef || old.NodeID != previous.NodeID {
+		t.Fatalf("predecessor was changed: %+v, %v", old, err)
+	}
+	all, err := st.ListThreads(ctx, previous.Realm, "", "", 10)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("replacement list: %+v, %v", all, err)
+	}
+}
+
+func TestThreadReplacementValidatesStoredPredecessor(t *testing.T) {
+	st, _ := newPGStore(t)
+	ctx := context.Background()
+	previous, err := st.CreateThread(ctx, threadRow("replace-old", "replace-session", "node-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := threadRow("replace-next", "replace-session-new", "node-b")
+	next.Replaces = previous.ID
+	if _, err := st.CreateThread(ctx, next); !errors.Is(err, domain.ErrInvalidThread) {
+		t.Fatalf("live predecessor accepted: %v", err)
+	}
+	if _, err := st.FailThreadOnNodeLoss(ctx, previous.Realm, previous.ID, previous.NodeID); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*domain.Thread){
+		func(t *domain.Thread) { t.ProjectID = "other-project" },
+		func(t *domain.Thread) { t.TaskID = "other-task" },
+		func(t *domain.Thread) { t.CoordinatorSessionRef = "other-coordinator" },
+		func(t *domain.Thread) { t.NodeID = previous.NodeID },
+		func(t *domain.Thread) { t.SessionRef = previous.SessionRef },
+		func(t *domain.Thread) { t.Replaces = t.ID },
+	} {
+		invalid := next
+		mutate(&invalid)
+		if _, err := st.CreateThread(ctx, invalid); !errors.Is(err, domain.ErrInvalidThread) {
+			t.Fatalf("invalid replacement accepted: %+v, %v", invalid, err)
+		}
+	}
+	crossRealm := next
+	crossRealm.Realm = "other-realm"
+	if _, err := st.CreateThread(ctx, crossRealm); !errors.Is(err, store.ErrThreadNotFound) {
+		t.Fatalf("cross-realm predecessor must look absent: %v", err)
+	}
+	if _, err := st.CreateThread(ctx, next); err != nil {
+		t.Fatalf("valid replacement rejected after invalid attempts: %v", err)
+	}
+}
+
+func TestNodeLossSinkFindsAllRealmsAndNoticeFilter(t *testing.T) {
+	st, _ := newPGStore(t)
+	ctx := context.Background()
+	for _, id := range []string{"notice-a", "notice-b", "notice-c"} {
+		thread := threadRow(id, "session-"+id, "lost-node")
+		if id == "notice-c" {
+			thread.Realm = "realm-2"
+		}
+		if _, err := st.CreateThread(ctx, thread); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nodes, err := st.ActiveThreadNodes(ctx)
+	if err != nil || len(nodes) != 1 || nodes[0] != "lost-node" {
+		t.Fatalf("candidate directory: %+v, %v", nodes, err)
+	}
+	sink := nodeloss.Sink{Store: st}
+	receipt, err := sink.ReportNodeLoss(ctx, "lost-node", "down")
+	if err != nil || receipt.Failed != 3 {
+		t.Fatalf("multi-realm node loss: %+v, %v", receipt, err)
+	}
+	// Filtering must find a newer notice even with limit=1, and respect realm.
+	notices, err := st.ListNodeLossNoticesForThread(ctx, "realm-1", "notice-b", 0, 1)
+	if err != nil || len(notices) != 1 || notices[0].ThreadID != "notice-b" {
+		t.Fatalf("specific notice hidden by first page: %+v, %v", notices, err)
+	}
+	notices, err = st.ListNodeLossNoticesForThread(ctx, "realm-1", "notice-c", 0, 1)
+	if err != nil || len(notices) != 0 {
+		t.Fatalf("notice crossed realm: %+v, %v", notices, err)
+	}
+	if receipt, err := sink.ReportNodeLoss(ctx, "lost-node", "down"); err != nil || receipt.Failed != 0 {
+		t.Fatalf("repeated report changed terminal threads: %+v, %v", receipt, err)
+	}
+	if nodes, err := st.ActiveThreadNodes(ctx); err != nil || len(nodes) != 0 {
+		t.Fatalf("terminal threads remain candidates: %+v, %v", nodes, err)
+	}
+}
 
 func threadRow(id, sessionRef, nodeID string) domain.Thread {
 	return domain.Thread{
@@ -373,7 +558,7 @@ func TestThreadsColumnsMatchDesign(t *testing.T) {
 		got = append(got, name)
 	}
 	want := []string{"id", "realm", "project_id", "task_id", "coordinator_session_ref",
-		"session_ref", "node_id", "workspace", "state", "created_at", "updated_at"}
+		"session_ref", "node_id", "workspace", "state", "created_at", "updated_at", "replaces"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("threads 列与设计 §11 不一致:\n got %v\nwant %v", got, want)
 	}
@@ -384,5 +569,32 @@ func TestThreadsColumnsMatchDesign(t *testing.T) {
 		SELECT indexname FROM pg_indexes
 		WHERE schemaname = current_schema() AND indexname = 'threads_session'`).Scan(&index); err != nil {
 		t.Fatalf("threads_session 索引不存在: %v", err)
+	}
+	if err := pool.QueryRow(context.Background(), `
+		SELECT indexname FROM pg_indexes
+		WHERE schemaname = current_schema() AND indexname = 'threads_replacement'`).Scan(&index); err != nil {
+		t.Fatalf("threads_replacement 索引不存在: %v", err)
+	}
+}
+
+func TestThreadLineageUpgradePreservesExistingRows(t *testing.T) {
+	st, pool := newPGStore(t)
+	ctx := context.Background()
+	original, err := st.CreateThread(ctx, threadRow("pre-upgrade", "upgrade-session", "node-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Emulate the deployed schema before lineage existed, with an existing row.
+	if _, err := pool.Exec(ctx, `ALTER TABLE threads DROP COLUMN replaces`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := st.Init(ctx); err != nil {
+			t.Fatalf("upgrade init %d: %v", i, err)
+		}
+	}
+	upgraded, err := st.GetThread(ctx, original.Realm, original.ID)
+	if err != nil || upgraded != original || upgraded.Replaces != "" {
+		t.Fatalf("existing row changed during nullable-column upgrade: %+v, %v", upgraded, err)
 	}
 }

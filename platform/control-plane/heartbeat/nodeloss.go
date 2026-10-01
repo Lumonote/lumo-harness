@@ -56,11 +56,8 @@ const (
 	DefaultSuspectAfter = 30 * time.Second
 	// DefaultDownAfter 距最后一次自报超过它才允许判定失联（90s）。
 	DefaultDownAfter = 90 * time.Second
-	// DefaultNodeService 节点在心跳表里上报时使用的 service 名。
-	//
-	// 承载节点（dsh-node）以这个 service 名自报，`instance` 就是 `threads.node_id` ——
-	// 线程行里的 node_id 与心跳行里的 instance 是**同一个标识**，正因为如此，本包不需要
-	// 任何映射表：判定失联的标识可以直接拿去问协作服务「这个节点上有哪些线程」。
+	// DefaultNodeService 仅供旧心跳输入适配使用。生产节点存活来自 Nacos，
+	// dsh-node 不写控制面服务心跳表。
 	DefaultNodeService = "dsh-node"
 )
 
@@ -68,8 +65,7 @@ const (
 type NodeLiveness struct {
 	NodeID string
 	State  NodeState
-	// Age 距最后一次自报的时长（由**库端时钟**算出，见包注释：多处主机上报，跨机比较
-	// 本地时钟的偏差无界，会让判定结果无法复现）。
+	// Age 由来源用单一时钟计算；Nacos 来源记录本观察者持续确认缺席的时长。
 	Age time.Duration
 	// Reason 供上报与看板引用。
 	Reason string
@@ -124,25 +120,21 @@ func EvaluateNode(nodeID string, age, suspectAfter, downAfter time.Duration) Nod
 		node.Reason = fmt.Sprintf("最近一次自报的时间在库端时钟之后（%s）：无法判定，按可疑处理", age)
 	case age < suspectAfter:
 		node.State = NodeHealthy
-		node.Reason = fmt.Sprintf("距最后一次自报 %s（可疑阈值 %s）", roundDuration(age), roundDuration(suspectAfter))
+		node.Reason = fmt.Sprintf("未获健康证据的时长 %s（可疑阈值 %s）", roundDuration(age), roundDuration(suspectAfter))
 	case age < downAfter:
 		node.State = NodeSuspect
-		node.Reason = fmt.Sprintf("距最后一次自报 %s，已超过可疑阈值 %s：停止向其新放置，"+
+		node.Reason = fmt.Sprintf("持续未获健康证据 %s，已超过可疑阈值 %s：停止向其新放置，"+
 			"但已有线程不动（§7.4.1：跨节点迁移的代价远高于等待）", roundDuration(age), roundDuration(suspectAfter))
 	default:
 		node.State = NodeDown
-		node.Reason = fmt.Sprintf("距最后一次自报 %s，已超过确认阈值 %s：承载其上的线程现场已消失"+
+		node.Reason = fmt.Sprintf("持续未获健康证据 %s，已超过确认阈值 %s：承载其上的线程现场已消失"+
 			"（工作目录不迁移），线程转入 failed 并交给协调者决定是否重派新 Run",
 			roundDuration(age), roundDuration(downAfter))
 	}
 	return node
 }
 
-// EvaluateNodes 从心跳行里筛出节点行并逐个判定（结果按 node_id 排序，便于测试与日志比对）。
-//
-// `service` 为空时取 `DefaultNodeService`：节点行与控面服务的行**同一张表**，用 service 名
-// 区分。混在一起判会有一个极坏的后果——某个控面服务重启（`stopping` + 过期）会被当成
-// 「承载节点失联」，于是它上面**根本没有**线程的节点名被拿去上报，而真正失联的节点没人报。
+// EvaluateNodes 适配显式心跳输入。生产节点不使用控制面服务心跳表。
 func EvaluateNodes(rows []Heartbeat, service string, suspectAfter, downAfter time.Duration) []NodeLiveness {
 	if strings.TrimSpace(service) == "" {
 		service = DefaultNodeService
@@ -325,9 +317,23 @@ func NewNodeLossReporter(opts NodeLossReporterOptions) (*NodeLossReporter, error
 
 // ReportOnce 判定一轮并按需要上报。ctx 取消时停止（未上报的节点留待下一轮）。
 func (r *NodeLossReporter) ReportOnce(ctx context.Context, rows []Heartbeat) NodeLossReport {
+	return r.reportNodes(ctx, EvaluateNodes(rows, r.opts.Service, r.opts.SuspectAfter, r.opts.DownAfter))
+}
+
+// ReportLiveness 消费存活来源的观察，不依赖控制面服务心跳表。
+func (r *NodeLossReporter) ReportLiveness(ctx context.Context, rows []NodeObservation) NodeLossReport {
+	nodes := make([]NodeLiveness, 0, len(rows))
+	for _, row := range rows {
+		nodes = append(nodes, EvaluateNode(row.NodeID, row.Age, r.opts.SuspectAfter, r.opts.DownAfter))
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].NodeID < nodes[j].NodeID })
+	return r.reportNodes(ctx, nodes)
+}
+
+func (r *NodeLossReporter) reportNodes(ctx context.Context, nodes []NodeLiveness) NodeLossReport {
 	report := NodeLossReport{Down: []string{}, Reported: []string{}, Retried: []string{}, Recovered: []string{}}
-	alive := make(map[string]bool, len(rows))
-	for _, node := range EvaluateNodes(rows, r.opts.Service, r.opts.SuspectAfter, r.opts.DownAfter) {
+	alive := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
 		alive[node.NodeID] = true
 		if node.State != NodeDown {
 			if r.reported[node.NodeID] {
@@ -371,11 +377,8 @@ func (r *NodeLossReporter) ReportOnce(ctx context.Context, rows []Heartbeat) Nod
 	return report
 }
 
-// RunNodeLossLoop 按间隔读心跳、判定并上报，直到 ctx 取消。
-//
-// 读的是**心跳表**而不是别的服务的私有表：判定年龄必须来自同一个时钟源（库端 `now()`），
-// 而心跳表就是平台里唯一一处「谁还活着」的权威记录。
-func RunNodeLossLoop(ctx context.Context, reader Reader, reporter *NodeLossReporter, interval time.Duration, log *slog.Logger) {
+// RunNodeLossLoop 按间隔读取存活来源、判定并上报，直到 ctx 取消。
+func RunNodeLossLoop(ctx context.Context, source LivenessSource, reporter *NodeLossReporter, interval time.Duration, log *slog.Logger) {
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
@@ -391,16 +394,16 @@ func RunNodeLossLoop(ctx context.Context, reader Reader, reporter *NodeLossRepor
 		case <-ticker.C:
 		}
 		queryCtx, cancel := context.WithTimeout(ctx, DefaultTimeout)
-		rows, err := ReadAll(queryCtx, reader)
+		rows, err := source.ReadNodes(queryCtx)
 		cancel()
 		if err != nil {
 			// 读不到心跳时**不上报任何节点**：把「读不到」当成「全都失联」，一次数据库抖动
 			// 就会终止全集群的线程。这正是两段式要挡的那类反应。
 			if ctx.Err() == nil {
-				log.Warn("节点失联判定跳过：读取心跳失败", "err", err)
+				log.Warn("节点失联判定跳过：读取存活来源失败", "err", err)
 			}
 			continue
 		}
-		reporter.ReportOnce(ctx, rows)
+		reporter.ReportLiveness(ctx, rows)
 	}
 }

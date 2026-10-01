@@ -122,7 +122,6 @@ const DEFAULT_NOTICE_POLL_MS = 2_000
 /** 等一轮唤醒的缺省上限。与唤醒等待项的默认 TTL 同量级，见 `thread.ts`。 */
 const DEFAULT_AWAIT_TIMEOUT_MS = 10 * 60_000
 /** 每次拉通知的条数上限（有界：一个节点掉线时会有成批通知，一次全拉会把消息面撑爆）。 */
-const NOTICE_SCAN_LIMIT = 100
 
 /** 构造参数。 */
 export interface ThreadsRuntimeOptions {
@@ -571,7 +570,7 @@ export class ThreadsRuntime {
     warn: (message: string) => void,
   ): Promise<NodeLossNotice | undefined> {
     try {
-      const notices = await registry.nodeLossNotices({ limit: NOTICE_SCAN_LIMIT })
+      const notices = await registry.nodeLossNotices({ limit: 1, thread_id: threadId })
       return notices.find(notice => notice.thread_id === threadId)
     } catch (error: unknown) {
       warn(
@@ -645,6 +644,7 @@ export class ThreadsRuntime {
         session_ref: plan.session_ref,
         node_id: plan.node_id,
         workspace: plan.workspace,
+        replaces: input.thread.id,
       })
     } catch (error: unknown) {
       const status = (error as { status?: unknown }).status

@@ -34,6 +34,7 @@ export interface CreateThreadInput {
   node_id: string
   /** 省略时由服务端按 `thread/<id>/` 派生（唯一合法值，见 §24.3.2）。 */
   workspace?: string
+  replaces?: string
 }
 
 /** 线程注册表门面（故意只声明本插件真正用到的五个动作）。 */
@@ -52,7 +53,7 @@ export interface ThreadRegistryLike {
    * 多条线程会在同一毫秒里各产生一条通知，时间戳游标会把同毫秒的其余几条**永久跳过**，
    * 而那些线程已经 failed、协调者却永远收不到通知。
    */
-  nodeLossNotices(query?: { since?: number; limit?: number }): Promise<NodeLossNotice[]>
+  nodeLossNotices(query?: { since?: number; limit?: number; thread_id?: string }): Promise<NodeLossNotice[]>
 }
 
 /** 注册表调用失败（协议层：非 2xx、超时、返回体不合法）。 */
@@ -73,6 +74,7 @@ export interface HttpThreadRegistryOptions {
   /** 注入点（测试用）。 */
   fetch?: typeof globalThis.fetch
   timeoutMs?: number
+  controlPlaneToken?: string
 }
 
 /** 默认超时 5 秒：线程面是控制面调用，卡住比失败更贵（会把唤醒路径一起拖住）。 */
@@ -118,6 +120,7 @@ export function createHttpThreadRegistry(options: HttpThreadRegistryOptions): Th
     // 身份与 realm 走请求头：服务端**不接受**请求体里的 realm（防越权）。
     'x-lumo-user': options.userId,
     'x-lumo-realm': options.realm,
+    ...options.controlPlaneToken ? { authorization: `Bearer ${options.controlPlaneToken}` } : {},
   })
 
   async function call(method: string, path: string, body?: unknown): Promise<{ status: number; text: string }> {
@@ -192,6 +195,7 @@ export function createHttpThreadRegistry(options: HttpThreadRegistryOptions): Th
       const params = new URLSearchParams()
       if (query?.since !== undefined) params.set('since', String(query.since))
       if (query?.limit !== undefined) params.set('limit', String(query.limit))
+      if (query?.thread_id !== undefined) params.set('thread_id', query.thread_id)
       const suffix = params.size === 0 ? '' : `?${params.toString()}`
       const result = await call('GET', `/threads/node-loss-notices${suffix}`)
       assertStatus(result, 200, '读节点失联通知失败')

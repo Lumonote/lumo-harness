@@ -341,6 +341,7 @@ describe('节点失联通知与重派计划（§24.2.3(4)）', () => {
     expect(refusalOf(plan({ newThreadId: 't-1' }))).toBe('thread-id-reused')
     expect(refusalOf(plan({ newThreadId: 'bad/id' }))).toBe('round-invalid')
     expect(refusalOf(plan({ previousRound: { task_id: 'task-7', attempt: 0 } }))).toBe('round-invalid')
+    expect(refusalOf(plan({ previousRound: { task_id: 'other-task', attempt: 1 } }))).toBe('round-invalid')
   })
 
   it('通过时给出完整的计划：新线程 idle + 新会话 + 新节点 + 新工作目录 + 代数 +1', () => {
@@ -349,6 +350,7 @@ describe('节点失联通知与重派计划（§24.2.3(4)）', () => {
     expect(decision.plan.round).toEqual({ task_id: 'task-7', attempt: 2 })
     expect(decision.plan.thread).toEqual({
       id: 't-1-r2',
+      replaces: 't-1',
       realm: 'realm-1',
       project_id: 'proj-1',
       task_id: 'task-7',

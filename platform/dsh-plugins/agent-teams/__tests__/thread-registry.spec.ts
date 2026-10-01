@@ -64,6 +64,32 @@ function registry(fetch: typeof globalThis.fetch) {
 }
 
 describe('协议面', () => {
+  it('线程注册与通知查询携带控制面认证，重派保留前身', async () => {
+    const spy = fetchSpy([{ status: 201, body: ROW }, { status: 200, body: '[]' }])
+    const client = createHttpThreadRegistry({
+      baseUrl: 'http://collaborator:8081', userId: 'u-1', realm: 'realm-1',
+      controlPlaneToken: 'test-credential', fetch: spy.fetch,
+    })
+    await client.create({
+      id: 't-1', project_id: 'proj-1', task_id: 'task-7',
+      coordinator_session_ref: 'coord-1', session_ref: 'sess-1', node_id: 'node-a', replaces: 't-old',
+    })
+    await client.nodeLossNotices({ thread_id: 't-old', limit: 1 })
+    expect(spy.calls[0]!.headers['authorization']).toBe('Bearer test-credential')
+    expect(spy.calls[0]!.body).toMatchObject({ replaces: 't-old' })
+    expect(spy.calls[1]!.url).toBe('http://collaborator:8081/threads/node-loss-notices?limit=1&thread_id=t-old')
+    expect(spy.calls[1]!.headers['authorization']).toBe('Bearer test-credential')
+  })
+
+  it('读取后继时保留谱系，拒绝自指或非法前身', async () => {
+    const valid = { ...JSON.parse(ROW), replaces: 't-old' }
+    expect(await registry(fetchSpy([{ status: 200, body: JSON.stringify(valid) }]).fetch).get('t-1'))
+      .toMatchObject({ replaces: 't-old' })
+    for (const replaces of ['t-1', '../t-old', 7]) {
+      const spy = fetchSpy([{ status: 200, body: JSON.stringify({ ...valid, replaces }) }])
+      await expect(registry(spy.fetch).get('t-1')).rejects.toThrow(/replaces/)
+    }
+  })
   it('realm 与身份走请求头，不进请求体', async () => {
     // 一个能自报 realm 的写入口等于没有租户边界 —— 服务端也是这么读的
     // （见 cmd/collaborator/main.go 的 headerAuth）。

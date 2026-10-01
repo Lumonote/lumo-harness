@@ -53,6 +53,8 @@ export interface ThreadRow {
   node_id: string
   workspace: string
   state: ThreadState
+  /** 重派时指向失败前身；初始线程没有此字段。 */
+  replaces?: string
   created_at: string
   updated_at: string
 }
@@ -123,6 +125,11 @@ export function parseThreadRow(value: unknown, threadId?: string): ThreadRow {
       throw new ThreadRowError(`线程 ${id} 的 ${field} 不是可解析的时间：${stamp}`, id)
     }
   }
+  const replaces = raw['replaces']
+  if (replaces !== undefined && replaces !== null
+    && (typeof replaces !== 'string' || !THREAD_ID_RE.test(replaces) || replaces === id)) {
+    throw new ThreadRowError(`线程 ${id} 的 replaces 必须引用另一个合法线程 id`, id)
+  }
   return {
     id,
     realm: requireString(raw, 'realm', id),
@@ -133,6 +140,7 @@ export function parseThreadRow(value: unknown, threadId?: string): ThreadRow {
     node_id: requireString(raw, 'node_id', id),
     workspace: requireString(raw, 'workspace', id),
     state: state as ThreadState,
+    ...typeof replaces === 'string' ? { replaces } : {},
     created_at: String(raw['created_at']),
     updated_at: String(raw['updated_at']),
   }
@@ -644,6 +652,9 @@ export function planThreadReplacement(input: {
   }
   let round: ThreadRound
   try {
+    if (previousRound.task_id !== thread.task_id) {
+      throw new ThreadRowError(`上一轮任务 ${previousRound.task_id} 与线程任务 ${thread.task_id} 不一致`, thread.id)
+    }
     round = nextRoundAfterLoss(previousRound)
   } catch (error: unknown) {
     return { allow: false, reason: 'round-invalid', detail: error instanceof Error ? error.message : String(error) }
@@ -683,6 +694,7 @@ export function planThreadReplacement(input: {
         // 已经没人维护的现场）。
         workspace: `thread/${newThreadId}/`,
         state: 'idle',
+        replaces: thread.id,
       },
       round,
     },

@@ -4,6 +4,37 @@
 
 > 集群模式下**代码与装配层面**的功能缺口清单见 [`cluster-gap-analysis.md`](./cluster-gap-analysis.md)（首版 2026-09-08，**2026-09-14 逐项复核、2026-09-15 再复核、2026-09-16 修正计数并复核 C 组、2026-09-17 改判 E7b**：现合计 34 项 = **28 已闭合 / 3 部分闭合 / 0 仍未闭合 / 3 非缺口**。首版 A/B 两组已全部闭合；E2 与 E3 经再复核**改判为误读**，不是缺口；C8 于 2026-09-16 闭合；**C7 流程血缘同样于 2026-09-16 判为已闭合**（血缘事实落 PG outbox、Nebula 降为可选呈现层）；**C3 边缘网关 / C4 终端网关为部分闭合**——代码与两种 compose 形态早已落地，是清单没跟上；那次逐点核对接线面还发现二者**不在 Helm chart 的 `services` 里**，所以当时是「已实现但没接线」。**这两个服务当天就补进了 chart**（路由表由模板从 release 名与各服务端口派生、以目录挂载；入口层的 Service 类型保持 ClusterIP、需要暴露时按服务覆盖），于是它们的残留换成了同一条：**真集群端到端验收**——`acceptance-cluster.sh` 对 C3/C4/C7 三者零探针）。**计数以缺口清单文末的表为准**——此处此前写的 18/2/11 与那份表自相矛盾（把 C 组的「部分闭合」当成「未闭合」多加了一次），凡引用请回去加一遍；**2026-09-17 又发现同一处第四次分叉**：E6 的行早在 09-16 就写着「已闭合」而表没跟改，与 E7b 一起从「仍未闭合」移出，故由 26/3/2/3 变为 28/3/0/3。**「以表为准」这条规则本身是有条件的**——那一次是**表错、行对**（行带行号与用例名，表只有一个数字），冲突时先看哪一边带了证据。本文记录的是外部集成边界与生产验收事项，两者互补。
 
+## 2026-09-30 集群协同：节点失联、通知与重派谱系
+
+- `heartbeat.NacosLiveness` 从 Nacos 查询 `lumo-dsh-node`，候选节点来自活跃
+  `threads`，因此临时实例消失后仍能定位失联节点。只比较本观察者的单调时钟；
+  持续缺席 30s 为 suspect、90s 为 down。读取错误或不完整响应会重置缺席计时，
+  注册表故障不计为节点失联；健康但 `enabled=false` 的节点保留已有线程。
+- collaborator 启动时挂载观察循环。按数据库里的节点归属处理各 realm，复用
+  `FailThreadsOnNodeLoss` 的事务，把 `failed` 与协调者通知一起落库。
+  HTTP 读取、判定、真实 PG 状态与通知的联测覆盖了启动缺席和 30/89/90s 边界。
+- 新增可空 `threads.replaces` 与唯一后继索引。服务端锁定真实前身，验证失败状态、
+  realm/project/task/coordinator、新节点与新会话；并发使用不同新 id 重派也只有一次成功。
+  旧行保持终态，旧库加列幂等且不改变既有数据。
+- `GET /threads/node-loss-notices` 增加 `thread_id` 过滤，避免较新通知被第一页的历史
+  通知遮住。TS 轮询使用此过滤；注册表客户端携带 Bearer 控制面令牌。
+- 节点启动器补齐 `collaboratorUrl`、调用者、节点和工作区根；Compose/Helm 下发
+  `LUMO_COLLABORATOR_URL`。工作区根可用 `LUMO_THREAD_WORKSPACE_ROOT` 覆盖。
+
+验证：Go collaborator **76 PASS / 0 FAIL / 0 SKIP**（真实 PostgreSQL），
+agent-teams/节点/DDL 的 TS 套件 **348 PASS / 0 FAIL / 0 SKIP**（22 文件）；
+TypeScript 检查、heartbeat 竞态检查、Go vet、Helm 门禁及完整 Compose 配置解析通过。
+隔离 PG 已结束并清理。
+
+尚未验收或继续开发的边界：
+
+- 真实 Nacos 和多节点故障演练尚未运行。本轮 Nacos 使用真实 HTTP 传输的协议替身，
+  数据库使用真实 PostgreSQL；不能据此声称已通过真实集群端到端验收。
+- `startThreadRound` 仍复用 one-shot 成员执行面，当前仅在 `label` 上写线程与轮次；
+  注册表 `node_id/session_ref` 与实际执行节点、稳定会话的强绑定仍需继续补齐。
+- dsh Run/Thread 轮次计量归因、看板控制态列表/协作注册表读面、可证影响面的强制异构
+  审查、§24.7/§24.8 的跨语言矩阵仍属后续协同工作。
+
 ## 2026-09-21 实施：控制面构建的重试与缓存（`unexpected EOF` 不是被墙）
 
 **一句话**：`go mod download` 在 `proxy.golang.org` 上拿到一次 `unexpected EOF` 就废掉整次

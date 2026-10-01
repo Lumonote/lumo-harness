@@ -370,6 +370,11 @@ const agentTeamsRows = `    - id: lumo-agent-teams
       config:
         realm: ${JSON.stringify(platformRealm)}
         storageBackend: ${JSON.stringify(localMode ? 'sqlite' : 'pg')}
+        collaboratorUrl: ${JSON.stringify(process.env['LUMO_COLLABORATOR_URL'] ?? '')}
+        controlPlaneToken: ${JSON.stringify(controlPlaneToken)}
+        actingUserId: ${JSON.stringify(userID)}
+        nodeId: ${JSON.stringify(process.env['LUMO_NODE_ID'] ?? nodeHolder)}
+        workspaceRoot: ${JSON.stringify(resolve(process.env['LUMO_THREAD_WORKSPACE_ROOT'] ?? join(process.env['DSH_HOME'] ?? join(homedir(), '.dsh'), 'workspaces')))}
 `
 
 // 平台插件 patch（官方 patch 语法：insert 数组 = 追加条目）

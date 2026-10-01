@@ -23,6 +23,7 @@ import (
 	"github.com/lumo-harness/platform/collaborator/internal/domain"
 	"github.com/lumo-harness/platform/collaborator/internal/hub"
 	"github.com/lumo-harness/platform/collaborator/internal/indexing"
+	"github.com/lumo-harness/platform/collaborator/internal/nodeloss"
 	"github.com/lumo-harness/platform/collaborator/internal/ownership"
 	"github.com/lumo-harness/platform/collaborator/internal/server"
 	"github.com/lumo-harness/platform/collaborator/internal/store"
@@ -85,6 +86,31 @@ func main() {
 		Service: "collaborator", Instance: *instance, Logger: log,
 		Depends: heartbeat.PgDependency(st.Pool()),
 	})
+
+	if addr := os.Getenv("LUMO_NACOS_ADDR"); addr != "" {
+		source, err := heartbeat.NewNacosLiveness(heartbeat.NacosLivenessOptions{
+			BaseURL: addr, Service: os.Getenv("LUMO_NACOS_SERVICE"),
+			Group: os.Getenv("LUMO_NACOS_GROUP"), Namespace: os.Getenv("LUMO_NACOS_NAMESPACE"),
+			Candidates: st.ActiveThreadNodes,
+			HTTPClient: observability.ConfiguredHTTPClient(3 * time.Second),
+		})
+		if err != nil {
+			log.Error("线程节点存活来源配置不合法", "err", err)
+			os.Exit(2)
+		}
+		reporter, err := heartbeat.NewNodeLossReporter(heartbeat.NodeLossReporterOptions{
+			Sink: nodeloss.Sink{Store: st}, Logger: log,
+		})
+		if err != nil {
+			log.Error("线程节点失联上报器配置不合法", "err", err)
+			os.Exit(2)
+		}
+		go heartbeat.RunNodeLossLoop(ctx, source, reporter, heartbeat.DefaultInterval, log)
+		log.Info("线程节点失联判定已启用", "source", "nacos",
+			"suspect_after", heartbeat.DefaultSuspectAfter, "down_after", heartbeat.DefaultDownAfter)
+	} else {
+		log.Info("未配置 Nacos，线程节点失联判定未启用")
+	}
 
 	limits := domain.DefaultLimits()
 	h := hub.New(st, limits)

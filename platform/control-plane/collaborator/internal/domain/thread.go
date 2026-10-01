@@ -370,6 +370,7 @@ type Thread struct {
 	NodeID                string      `json:"node_id"`
 	Workspace             string      `json:"workspace"`
 	State                 ThreadState `json:"state"`
+	Replaces              string      `json:"replaces,omitempty"`
 	CreatedAt             time.Time   `json:"created_at"`
 	UpdatedAt             time.Time   `json:"updated_at"`
 }
@@ -454,6 +455,14 @@ func ValidateThreadWorkspace(id, workspace string) error {
 func ValidateThreadCreate(t Thread) error {
 	if err := ValidateThreadID(t.ID); err != nil {
 		return err
+	}
+	if t.Replaces != "" {
+		if err := ValidateThreadID(t.Replaces); err != nil {
+			return err
+		}
+		if t.Replaces == t.ID {
+			return fmt.Errorf("%w: 线程不能取代自身", ErrInvalidThread)
+		}
 	}
 	if strings.TrimSpace(t.Realm) == "" {
 		return fmt.Errorf("%w: realm 不可为空（它是首要授权边界）", ErrInvalidThread)

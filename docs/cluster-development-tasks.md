@@ -7,6 +7,19 @@ Current scope: continue cluster development. Connector development resumed by
 request on 2026-09-30; governed Agent connector scopes are written but not yet
 verified. Desktop connector Hub and MCP-specific integration remain separate work.
 
+Cluster collaboration continuation (2026-09-30): the thread node-loss monitor
+now reads Nacos, is mounted by collaborator, and emits the existing durable
+coordinator notices through the store's transactional failure path. Registry
+outages reset absence timers; a successfully observed absence receives the full
+30s/90s grace period. Thread replacement lineage (`replaces`) is persisted with
+one successor per predecessor, checked against stored realm/project/task/
+coordinator ownership. Notice polling filters by thread rather than scanning
+only the oldest page. The node launcher, Compose and Helm now pass the thread
+registry URL, caller identity and control-plane authentication.
+
+Verification and remaining collaboration work are recorded in the
+[2026-09-30 implementation entry](implementation-status.md#2026-09-30-集群协同节点失联通知与重派谱系).
+
 | Area | Task | Status |
 | --- | --- | --- |
 | A1 | Real flow operators, discovery and definition validation | Implemented: `internal/engine/runtime.go` `registerRuntime` registers `llm.chat`/`llm.answer`/`connector.invoke`/`tool.invoke`/`knowledge.query`/`kb.query` and maintains an `unavailable` map so an unconfigured, malformed or unauthenticated upstream reports a readable reason instead of a runtime 422. Governed Agent connector execution is now wired and awaits verification; flow connector execution remains a separate integration task. |

@@ -39,7 +39,8 @@ var (
 	// ErrThreadIDTaken 该 id 已被占用（主键冲突）。
 	//
 	// 与上一条分开：改个 id 就能继续，而 session_ref 冲突改 id 也救不了。
-	ErrThreadIDTaken = errors.New("该线程 id 已被占用")
+	ErrThreadIDTaken          = errors.New("该线程 id 已被占用")
+	ErrThreadReplacementTaken = errors.New("该失败线程已有后继，请读取既有后继后再决定")
 	// ErrThreadConflict 并发状态变更：预读到写入之间，状态被另一个写者改了。
 	ErrThreadConflict = errors.New("并发状态变更：该线程的状态刚被另一处改写，请重新读数后再决定")
 	// ErrThreadNodeMismatch 上报的承载节点与线程行不符。
@@ -51,12 +52,12 @@ var (
 
 // threadColumns 读面列清单（一处定义，免得各查询各写一遍后漂移）。
 const threadColumns = `id, realm, project_id, task_id, coordinator_session_ref, session_ref,
-	node_id, workspace, state, created_at, updated_at`
+	node_id, workspace, state, COALESCE(replaces, ''), created_at, updated_at`
 
 func scanThread(row pgx.Row) (domain.Thread, error) {
 	var t domain.Thread
 	err := row.Scan(&t.ID, &t.Realm, &t.ProjectID, &t.TaskID, &t.CoordinatorSessionRef,
-		&t.SessionRef, &t.NodeID, &t.Workspace, &t.State, &t.CreatedAt, &t.UpdatedAt)
+		&t.SessionRef, &t.NodeID, &t.Workspace, &t.State, &t.Replaces, &t.CreatedAt, &t.UpdatedAt)
 	return t, err
 }
 
@@ -71,19 +72,41 @@ func (s *Store) CreateThread(ctx context.Context, t domain.Thread) (domain.Threa
 	if err := domain.ValidateThreadCreate(t); err != nil {
 		return domain.Thread{}, err
 	}
-	created, err := scanThread(s.pg.QueryRow(ctx, `
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return domain.Thread{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if t.Replaces != "" {
+		previous, err := scanThread(tx.QueryRow(ctx,
+			`SELECT `+threadColumns+` FROM threads WHERE realm=$1 AND id=$2 FOR UPDATE`, t.Realm, t.Replaces))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Thread{}, ErrThreadNotFound
+		}
+		if err != nil {
+			return domain.Thread{}, err
+		}
+		if previous.State != domain.ThreadStateFailed || previous.ProjectID != t.ProjectID ||
+			previous.TaskID != t.TaskID || previous.CoordinatorSessionRef != t.CoordinatorSessionRef ||
+			previous.NodeID == t.NodeID || previous.SessionRef == t.SessionRef {
+			return domain.Thread{}, fmt.Errorf("%w: 重派须取代同项目、任务和协调者的失败线程，且使用新节点与新会话", domain.ErrInvalidThread)
+		}
+	}
+	created, err := scanThread(tx.QueryRow(ctx, `
 		INSERT INTO threads (id, realm, project_id, task_id, coordinator_session_ref,
-			session_ref, node_id, workspace, state)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			session_ref, node_id, workspace, state, replaces)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULLIF($10,''))
 		RETURNING `+threadColumns,
 		t.ID, t.Realm, t.ProjectID, t.TaskID, t.CoordinatorSessionRef,
-		t.SessionRef, t.NodeID, t.Workspace, string(t.State)))
+		t.SessionRef, t.NodeID, t.Workspace, string(t.State), t.Replaces))
 	if constraint := threadUniqueViolation(err); constraint != "" {
 		switch constraint {
 		case "threads_session":
 			return domain.Thread{}, ErrThreadSessionTaken
 		case "threads_pkey":
 			return domain.Thread{}, ErrThreadIDTaken
+		case "threads_replacement":
+			return domain.Thread{}, ErrThreadReplacementTaken
 		default:
 			// 撞上一个本文件不认识的唯一约束 = schema 漂移。**不猜**：原样带出约束名，
 			// 让它在 500 里露出来，好过把它归到某个已知桶里继续自洽。
@@ -92,6 +115,9 @@ func (s *Store) CreateThread(ctx context.Context, t domain.Thread) (domain.Threa
 	}
 	if err != nil {
 		return domain.Thread{}, fmt.Errorf("新建线程失败: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Thread{}, err
 	}
 	return created, nil
 }
@@ -107,6 +133,35 @@ func (s *Store) GetThread(ctx context.Context, realm, id string) (domain.Thread,
 		return domain.Thread{}, err
 	}
 	return t, nil
+}
+
+// ActiveThreadNodes supplies candidates for Nacos liveness observation. Dead
+// ephemeral instances disappear from Nacos but remain identifiable here.
+func (s *Store) ActiveThreadNodes(ctx context.Context) ([]string, error) {
+	return s.threadNodeValues(ctx, `SELECT DISTINCT node_id FROM threads
+		WHERE state IN ('idle','running','awaiting') ORDER BY node_id`)
+}
+
+func (s *Store) ActiveThreadRealmsForNode(ctx context.Context, nodeID string) ([]string, error) {
+	return s.threadNodeValues(ctx, `SELECT DISTINCT realm FROM threads
+		WHERE node_id=$1 AND state IN ('idle','running','awaiting') ORDER BY realm`, nodeID)
+}
+
+func (s *Store) threadNodeValues(ctx context.Context, query string, args ...any) ([]string, error) {
+	rows, err := s.pg.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		out = append(out, value)
+	}
+	return out, rows.Err()
 }
 
 // ListThreads 列一个项目（或整个 realm）下的线程行；`state` 为空表示不过滤。
@@ -368,6 +423,12 @@ func failThreadRow(ctx context.Context, tx pgx.Tx, current domain.Thread) (domai
 // 有界：`limit` 夹在 1..500（默认 100）。这是给协调者的轮询面，无界的列表会在一个节点
 // 掉线时把整个 realm 的线程一次拉回来。
 func (s *Store) ListNodeLossNotices(ctx context.Context, realm string, since int64, limit int) ([]domain.NodeLossNotice, error) {
+	return s.ListNodeLossNoticesForThread(ctx, realm, "", since, limit)
+}
+
+// ListNodeLossNoticesForThread prevents a busy realm's oldest notices from
+// hiding a specific thread's loss behind the first page forever.
+func (s *Store) ListNodeLossNoticesForThread(ctx context.Context, realm, threadID string, since int64, limit int) ([]domain.NodeLossNotice, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -377,9 +438,9 @@ func (s *Store) ListNodeLossNotices(ctx context.Context, realm string, since int
 	rows, err := s.pg.Query(ctx, `
 		SELECT seq, realm, thread_id, node_id, session_ref, coordinator_session_ref, reason, created_at
 		FROM thread_node_loss_notices
-		WHERE realm = $1 AND seq > $2
+		WHERE realm = $1 AND seq > $2 AND ($4 = '' OR thread_id = $4)
 		ORDER BY seq
-		LIMIT $3`, realm, since, limit)
+		LIMIT $3`, realm, since, limit, threadID)
 	if err != nil {
 		return nil, err
 	}

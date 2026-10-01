@@ -239,6 +239,7 @@ services:
       - "LUMO_IDENTITY_ASSERTION_SECRET=${LUMO_IDENTITY_ASSERTION_SECRET:-}"
       - LUMO_WEB_PORT=3080
       - LUMO_NODE_ID=lumo-web
+      - LUMO_COLLABORATOR_URL=http://collaborator-0:8081
       - LUMO_ROLE=agent
       - "LUMO_REALM=${LUMO_REALM:-dev}"
       - "LUMO_USER_ID=${LUMO_USER_ID:-dev-user}"
@@ -288,6 +289,7 @@ services:
     environment:
       - LUMO_SEAM_ENDPOINTS=http://cluster-a-dsh-1:8090
       - LUMO_NODE_ID=cluster-a-dsh-0
+      - LUMO_COLLABORATOR_URL=http://collaborator-0:8081
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       - LUMO_CLUSTER_ID=cluster-a
       - LUMO_ROLE=agent
@@ -323,6 +325,7 @@ services:
     env_file: [./cluster-runtime.env]
     environment:
       - LUMO_NODE_ID=cluster-a-dsh-1
+      - LUMO_COLLABORATOR_URL=http://collaborator-0:8081
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       - LUMO_CLUSTER_ID=cluster-a
       - LUMO_ROLE=node
@@ -377,6 +380,7 @@ services:
     environment:
       - LUMO_SEAM_ENDPOINTS=http://cluster-b-dsh-1:8090
       - LUMO_NODE_ID=cluster-b-dsh-0
+      - LUMO_COLLABORATOR_URL=http://collaborator-0:8081
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       - LUMO_CLUSTER_ID=cluster-b
       - LUMO_ROLE=agent
@@ -418,6 +422,7 @@ services:
     env_file: [./cluster-runtime.env]
     environment:
       - LUMO_NODE_ID=cluster-b-dsh-1
+      - LUMO_COLLABORATOR_URL=http://collaborator-0:8081
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       - LUMO_CLUSTER_ID=cluster-b
       - LUMO_ROLE=node

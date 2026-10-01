@@ -133,6 +133,10 @@ spec:
               value: {{ .Values.postgres.dsn | quote }}
             - name: LUMO_REDIS_URL
               value: {{ printf "redis://%s" .Values.redis.address | quote }}
+            {{- if .Values.services.collaborator.enabled }}
+            - name: LUMO_COLLABORATOR_URL
+              value: {{ printf "http://%s-collaborator:%v" (include "lumo-platform.name" .) .Values.services.collaborator.port | quote }}
+            {{- end }}
             - name: LUMO_NACOS_ADDR
               value: {{ .Values.nacos.address | quote }}
             - name: LUMO_NACOS_SERVICE
@@ -383,6 +387,10 @@ spec:
               value: {{ .Values.dshWeb.edgeGatewayUrl | quote }}
             - name: LUMO_TERMINAL_GATEWAY_URL
               value: {{ .Values.dshWeb.terminalGatewayUrl | quote }}
+            {{- if .Values.services.collaborator.enabled }}
+            - name: LUMO_COLLABORATOR_URL
+              value: {{ printf "http://%s-collaborator:%v" (include "lumo-platform.name" .) .Values.services.collaborator.port | quote }}
+            {{- end }}
             - name: LUMO_NACOS_ADDR
               value: {{ .Values.dshWeb.nacosAddress | quote }}
             - name: LUMO_NACOS_SERVICE

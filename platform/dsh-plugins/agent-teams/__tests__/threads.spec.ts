@@ -87,6 +87,7 @@ function registrySpy(initial: ThreadRow, options: {
           session_ref: input.session_ref,
           node_id: input.node_id,
           workspace: input.workspace ?? `thread/${input.id}/`,
+          ...input.replaces === undefined ? {} : { replaces: input.replaces },
           state: 'idle',
         }
       },
@@ -394,6 +395,7 @@ describe('节点失联通知的消费与重派（§24.2.3(4)）', () => {
     expect(result.thread.node_id).toBe('node-b')
     expect(result.thread.session_ref).toBe('sess-2')
     expect(result.round).toEqual({ task_id: 'task-7', attempt: 2 })
+    expect(result.thread.replaces).toBe('t-1')
     expect(result.runId).toBe('child-9')
     // 先建行、再开跑：顺序反了会造出一个不可见的执行者（占着机器、烧着配额、没人知道它是谁）。
     expect(spy.calls).toEqual(['create:t-1-r2'])

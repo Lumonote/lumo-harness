@@ -15,6 +15,12 @@
   （下称**文章**）
 - 状态：设计定稿；实现按 §13 的 P6a–P6f 切片推进，各片独立可验收
 
+> **2026-09-30 续开发**：已实现重派谱系、Nacos 存活来源与启动接线、按线程过滤的
+> 失联通知、客户端控制面认证及 Compose/Helm 注册表地址接线。
+> 09-20 的实施记录保留为历史；当前验证范围与剩余项以
+> [implementation-status.md 的 09-30 条目](../../implementation-status.md#2026-09-30-集群协同节点失联通知与重派谱系)为准。
+> 真实 Nacos/多节点演练与稳定执行会话强绑定仍未验收。
+
 ---
 
 ## 0. 定位：这一层补的是什么
@@ -217,7 +223,8 @@ Thread **不新增业务态**。§23.3 的业务态机
 - **为什么值得加**：§24.9 的成本结构里，重来一次是**真金白银的重复工作**——
   「这个任务重来了几次」必须是算得出来的数，否则成本异常没有第一现场。
 - **实现归属**：`control-plane/collaborator`（`threads` 的唯一建表方，
-  `ADD COLUMN IF NOT EXISTS` + `init()` 幂等，遵 §22.3）。**尚未实现**，登记在 §14.5。
+  `ADD COLUMN IF NOT EXISTS` + `init()` 幂等，遵 §22.3）。**已实现（2026-09-30）**，
+  同一前身只有一个直接后继；服务端验证存储的失败状态、归属和新节点/新会话。
 
 > **⚠️ 实现期发现的来源订正（2026-09-20）。** 下面写的「心跳上报」在实现时被落成了
 > `heatbeat` 包读 `lumo_service_heartbeats` 里 `service='dsh-node'` 的行。**那张表承载节点
@@ -692,6 +699,11 @@ CREATE TABLE IF NOT EXISTS threads (
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS threads_session ON threads (realm, session_ref);
+ALTER TABLE threads ADD COLUMN IF NOT EXISTS replaces TEXT REFERENCES threads(id);
+CREATE UNIQUE INDEX IF NOT EXISTS threads_replacement ON threads (realm, replaces)
+  WHERE replaces IS NOT NULL;
+CREATE INDEX IF NOT EXISTS threads_active_nodes ON threads (node_id, realm)
+  WHERE state IN ('idle', 'running', 'awaiting');
 
 -- ③ 动作放行记录（§24.5）：三档 + 兜底计数
 CREATE TABLE IF NOT EXISTS action_reviews (
@@ -955,8 +967,8 @@ reviewerEligibility(input: {
 | `acceptanceVerdict` 的**证据入参** | 成员写回只有 `TeamTask.output: string` 一个通道，**没有结构化的证据通道** | ✅ **已闭合。** 证据**不需要成员自报**——派发方本来就拿着 `MemberRun.id`，只是在折叠结局时丢了（`foldMemberResult` 的签名里根本没接住它）。补回后：`MemberOutcome.runId` → `evidenceOfRun()` → `TeamTask.evidence` → 派发结果里的 `acceptance`。**证据是系统已知的事实，成员没有伪造空间** |
 | `ReviewerEligibility`（Go 侧） | 治理面没有「指派审查者」路径 | ✅ **已闭合（记录式消费）。** 两个身份都是既有事实，不需要调用方声明：dispatcher = `assignee_worker_id`，reviewer = 本次 `complete` 的 `actor`。落 `governance_task_audit.detail.reviewer_self_review`。**只记 `self-review` 不记 `homogeneous`**：后者要 model/preset/node 三组事实才能证「不同源」，治理面没有这三组数据，于是它会在**每一次正常完成**上触发，是噪音不是发现 |
 | 集群内做 fork | —— | ⛔ **改判：不是缺口，是设计边界。** 见 §24.3.1 §4.2 —— `startInProcessRun` 需要**活的父 `Agent`**，而 `seed` 只是可选附加输入。承载节点上重建父会话会让同一份日志出现两个写者。**若将来要做集群续跑，正确的问题是「怎样让子会话从复制日志的某个前缀起步」，不是「怎样把 fork 搬过网」** |
-| `threads.replaces`（重来谱系） | 决策已定（§24.2.3(3)），**实现未做** | `control-plane/collaborator` 加可空列 + `ADD COLUMN IF NOT EXISTS`，遵 §22.3；新 Thread 取代失败前身时写入。**门槛很低，只是没排在已完成的切片里** |
-| **节点失联的存活来源** | 实现读的是 `lumo_service_heartbeats`，而承载节点**按设计不写那张表** | **来源订正见 §24.2.3(4) 的 ⚠️ 块**：正确来源是 Nacos。改造要**新抽一层 `LivenessSource`**（现有 `Reader` 是 pgx 形状的）。**未做的理由是无法验证**（本机无 Nacos），不是难度 |
+| `threads.replaces`（重来谱系） | ✅ 实现闭合（2026-09-30） | 可空列、前身锁定与真实归属检查、单后继唯一约束；真实 PG 已覆盖并发重派及旧库幂等升级 |
+| **节点失联的存活来源** | ✅ 实现与启动接线闭合（2026-09-30）；真实集群待验 | `LivenessSource` + Nacos HTTP 来源，候选来自活跃线程；读取失败重置缺席计时。HTTP 协议/时序与 PG 通知链已验，真实 Nacos/多节点演练仍未运行 |
 | §24.6 看板的「待轻量答」格 | lumo-ui 够不到「控制态列表读面」与 `collaborator` 的 `GET /threads` | 两条读面：① 控制态列表（session-control 目前只能按会话逐个读，任务行里没有 `session_ref`）② lumo-ui 代理 collaborator（host 的 `ServiceName` 里没有它）。看板已**如实显示「读不到」**而不是 0 条 |
 | §24.8 审查的**强制**版 | 影响面无可证来源 | 见上表末「一处值得记下的设计缺陷」——`ReviewDispositionFor` 判据已就位且只有一份，卡在事实来源 |
 
