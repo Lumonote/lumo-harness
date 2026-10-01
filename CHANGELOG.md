@@ -3,6 +3,44 @@
 本文件记录本项目所有值得注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.1] - 2026-10-01
+
+自 v1.1.0 起的 2 条变更：集群协同把节点失联判定换成真实存活来源，并补齐线程重派谱系；
+README 补充 AI 定制服务与联系方式。
+
+### 版本亮点
+
+- **节点失联判定换用真实存活来源**：新增 `heartbeat.NacosLiveness`，从 Nacos 查询
+  `lumo-dsh-node`，候选节点取自活跃 `threads`——临时实例被 Nacos 摘除后仍能定位失联节点
+  （原先读的 `lumo_service_heartbeats` 按设计就不承载节点，等于永远看不到失联）。
+  只比较本观察者的单调时钟，**不跨主机比时间**；持续缺席 30s 判 suspect、90s 判 down，
+  且**读取失败或不完整响应会重置缺席计时**（注册表故障不是节点失联的证据），
+  健康但 `enabled=false` 的节点保留已有线程。collaborator 启动时挂载该观察循环，
+  按库里的节点归属逐 realm 处理，复用 `FailThreadsOnNodeLoss` 的事务把 `failed`
+  与协调者通知一起落库。
+- **线程重派谱系落库**：`threads.replaces` 可空列 + 单后继唯一索引（同一前身只有一个直接
+  后继）。服务端锁定真实前身，并校验失败状态、realm/project/task/coordinator 归属、
+  新节点与新会话；并发用不同新 id 重派也只有一次成功。旧行保持终态，旧库加列幂等。
+- **失联通知与部署接线补齐**：`GET /threads/node-loss-notices` 增加 `thread_id` 过滤
+  （否则较新的通知会被第一页的历史通知遮住），TS 轮询改用该过滤，注册表客户端携带
+  Bearer 控制面令牌；节点启动器补齐 `collaboratorUrl`、调用者、节点与工作区根
+  （可用 `LUMO_THREAD_WORKSPACE_ROOT` 覆盖），Compose 与 Helm 下发
+  `LUMO_COLLABORATOR_URL`。
+
+> **未验收边界（勿当作已通过）**：真实 Nacos 与多节点故障演练尚未运行——本轮 Nacos 走的是
+> 真实 HTTP 传输的**协议替身**，数据库是真实 PostgreSQL，因此**不能据此声称已通过真实集群
+> 端到端验收**；`startThreadRound` 仍复用 one-shot 成员执行面，当前只在 `label` 上写线程与
+> 轮次，注册表 `node_id`/`session_ref` 与实际执行节点、稳定会话的强绑定仍需补齐。
+> 详见 [`docs/implementation-status.md`](docs/implementation-status.md)。
+
+### 新功能（1）
+
+- **cluster**: 完善节点失联判定与协同线程重派 —— Nacos 存活来源、重派谱系、按线程过滤的失联通知与部署接线 (`4ff64146`)
+
+### 文档（1）
+
+- **readme**: 添加 AI 定制服务广告与微信二维码 (`a8150159`)
+
 ## [1.1.0] - 2026-09-30
 
 自 v1.0.0 起的 26 条变更：集群形态补齐最后一段，桌面端基线随 dsh 0.2 升版，
@@ -323,5 +361,6 @@
 - **lumo-ui**: 放大 SkillHub 市场字号与控件尺寸 (`c6d963d0`)
 - Initial commit (`41dbf440`)
 
+[1.1.1]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.1.1
 [1.1.0]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.0.0
