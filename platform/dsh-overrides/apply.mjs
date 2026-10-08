@@ -97,8 +97,14 @@ export function applyLumoDshOverrides(root) {
   // 缺失。改为 index 单入口：invariant/startup 的附加入口由 synthesize-dsh-libs.mjs
   // 以再导出形状补齐，dsh-root 本就不进运行时。typert 投影由 build-runtime.mjs 的
   // rebuildDshHostArtifacts() 在快照上重产出。
+  // 上游后来移除了 invariant 入口；两种已知布局都仍需收敛为 index 单入口。
+  // 只选择已知锚点，未知布局仍由 patchFile 报错，诊断模式也照常收集失配。
+  const tsdownSource = readFileSync(resolve(root, 'tsdown.config.ts'), 'utf8')
+  const tsdownHostEntries = tsdownSource.includes('lib/types/{index,invariant,startup}.js')
+    ? 'index,invariant,startup'
+    : 'index,startup'
   patchFile(root, 'tsdown.config.ts', [[
-    "    entry: client ? '' : ['lib/types/{index,invariant,startup}.js'],\n",
+    `    entry: client ? '' : ['lib/types/{${tsdownHostEntries}}.js'],\n`,
     "    entry: client ? '' : ['lib/types/index.js'], // LUMO_DSH_TYSDOWN_ENTRY: 花括号 entry 在重构期对 dsh-root 解析断裂,见 apply.mjs 注释\n",
   ]], 'LUMO_DSH_TYSDOWN_ENTRY')
 

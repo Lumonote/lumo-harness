@@ -92,6 +92,39 @@ describe('applyLumoDshOverrides', () => {
     expect(diagnoseOverlayAnchors(stagePristineUpstream('diagnose'))).toEqual([])
   })
 
+  it.each(['index,invariant,startup', 'index,startup'])('tsdown 兼容上游 %s 入口,保留 client 面且重复执行幂等', (entries) => {
+    const root = stagePristineUpstream('tsdown-entry')
+    const target = resolve(root, 'tsdown.config.ts')
+    // 固定两代上游入口，避免 HEAD 前进后旧布局的兼容性失去覆盖。
+    writeFileSync(target, `export default defineConfig(({ env }) => {
+  const client = isBuildFaceClient(env?.DSH_BUILD_FACE)
+  return {
+    entry: client ? '' : ['lib/types/{${entries}}.js'],
+    plugins: client ? [] : [typertPlugin({ mode: 'workspace', faces: ['host'] })],
+  }
+})
+`)
+
+    expect(diagnoseOverlayAnchors(root)).toEqual([])
+    const patched = read(root, 'tsdown.config.ts')
+    expect(patched).toContain("entry: client ? '' : ['lib/types/index.js'],")
+    expect(patched).not.toContain('lib/types/{')
+    expect(patched).toContain("plugins: client ? [] : [typertPlugin({ mode: 'workspace', faces: ['host'] })]")
+
+    applyLumoDshOverrides(root)
+    expect(read(root, 'tsdown.config.ts')).toBe(patched)
+  })
+
+  it('tsdown 出现未知入口布局时仍拒绝并报告失配', () => {
+    const root = stagePristineUpstream('tsdown-unknown')
+    writeFileSync(resolve(root, 'tsdown.config.ts'), "export default { entry: ['lib/types/renamed.js'] }\n")
+
+    expect(() => { applyLumoDshOverrides(root) }).toThrow(/tsdown\.config\.ts does not contain the expected upstream anchor/u)
+    expect(diagnoseOverlayAnchors(root)).toEqual([
+      expect.objectContaining({ file: 'tsdown.config.ts', kind: 'missing' }),
+    ])
+  })
+
   it('锚点在当前上游 HEAD 里仍然存在,会话与侧边栏都被打上扩展位', () => {
     const root = stagePristineUpstream('anchors')
     applyLumoDshOverrides(root)

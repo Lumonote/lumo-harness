@@ -70,6 +70,7 @@ node platform/dsh-overrides/assert-pristine.mjs deepseek-harness
 | 类别 | 这次的实例 | 谁兜住 |
 |---|---|---|
 | **锚点漂移** | `InputZone.session` 的类型从 `ConversationSnapshot` 改回 `SessionSnapshot`，把整块当锚的写法失配。改成锚在稳定的 `export interface InputZone {` 声明行上并插到它之前 | `__tests__/overlay.spec.ts`（对着 `git show HEAD:` 的原文跑） |
+| **锚点漂移（构建入口）** | 根 `tsdown.config.ts` 的 host 入口从 `{index,invariant,startup}` 改为 `{index,startup}`，旧锚点导致桌面打包在准备隔离副本时失败。`apply.mjs` 兼容两种已知布局，继续改为 `index` 单入口；未知布局仍拒绝并报告失配 | 同上，另固定测试两代入口的兼容与幂等 |
 | **锚点漂移（座位搬家）** | `e62587c163` 把 hero composer 的渲染点从 `ConversationRoot.tsx` 搬进 `ConversationContent.tsx`（前者退化成 13 行转发壳），同时把 hero 座位从 `ConversationSlotProps` 的 `PropsRenderSlots` 联合挪进 `SlotFactoryMap.children`、把 `hero.agentPreset` 的 scope 从 `root` 改成 `session-maybe` | 同上。**锚点一律只锚座位名、不锚 scope**：带 scope 的整行锚每次 scope 调整都会失配 |
 | **上游删包** | `be531688f3` 移除了整个 `@deepseek-ai/dsh-client-runtime`，`ctx.slots`(`SlotRegistry`) 迁到 `@deepseek-ai/dsh-client-ui-renderer`。lumo-ui 跟着改了 5 个声明面：两处 `ClientContext` 类型导入改走 `import type { Context as ClientContext } from '@deepseek-ai/cordis'`（上游 `ui-theme` 的同款写法）、`package.json` 的 `dependencies` 与 `dsh.client.inject`、`tsconfig.json` 的 `references`、`tsdown.config.ts` 的 `external` | `pnpm test` |
 
