@@ -188,9 +188,23 @@ fi
 
 # run_entry <入口脚本> <状态目录> <最多等多少秒> [环境赋值...]
 # 结果写在 <状态目录>/entry.rc 与 entry.out。
+# 停止条件有两种，取决于这条用例要观察什么：
+#   proxy   —— proxy 一启动就停（成功路径：它已经走到 `wait -n`，再等也没新事件）
+#   settle  —— 等到「有 topic 建好」或「脚本自己退出」才停
+# 差别不是洁癖：倒序反例里 proxy **第一个**启动，用 proxy 条件会当场腰斩整个
+# 入口脚本（kill -TERM），建 topic 那段根本没机会跑 —— 于是反例自己把自己废掉了：
+# 观察到的是「脚本被提前杀掉」，而不是「顺序错了」，看着像闸门没牙齿。
 run_entry() {
   local entry="$1" state="$2" wait_seconds="$3"
+  # 第 4 位（可选）是停止条件，第 5 位起是给入口脚本的环境变量。取完这三个
+  # 定位参数后再统一 shift 3，剩下的 $@ 原样透传给 env —— 用 `shift N` 在
+  # bash 3.2 下与预期不一致，会把环境变量一起丢掉（表现为「重试上界」这类
+  # 用例读到错误的 ROCKETMQ_TOPIC_INIT_MAX_ATTEMPTS）。
+  local stop_on="${4:-proxy}"
   shift 3
+  if [[ $# -gt 0 && ( "$1" == proxy || "$1" == settle ) ]]; then
+    shift
+  fi
   mkdir -p "$state"
   : >"$state/events.log"
   env FAKE_STATE="$state" PATH="$BIN:$PATH" "$@" \
@@ -202,7 +216,10 @@ run_entry() {
       exited=1
       break
     fi
-    if grep -Fqx 'proxy:start' "$state/events.log" 2>/dev/null; then
+    if [[ "$stop_on" == proxy ]] && grep -Fqx 'proxy:start' "$state/events.log" 2>/dev/null; then
+      break
+    fi
+    if [[ "$stop_on" == settle ]] && grep -qE '^topic:' "$state/events.log" 2>/dev/null; then
       break
     fi
     sleep 0.2
@@ -372,7 +389,10 @@ moved = text[:start] + text[end:at + len(proxy)] + "\n" + text[start:end] + text
 open(dst, "w", encoding="utf-8").write(moved)
 PY
 REVERSED="$WORK/reversed"
-run_entry "$WORK/reversed.sh" "$REVERSED" 30
+# 停止条件用 settle 而不是 proxy：倒序里 proxy 先启动，按 proxy 停会当场
+# kill -TERM 掉整个入口脚本，topic 那段永远跑不到 —— 反例会变成「脚本被杀了」
+# 而不是「顺序错了」。settle 等到 topic 建好或脚本自行退出，才是真的在观察顺序。
+run_entry "$WORK/reversed.sh" "$REVERSED" 30 settle
 rev_events="$REVERSED/events.log"
 rev_proxy="$(first_line_of 'proxy:start' "$rev_events")"
 rev_topic="$(last_line_matching '^topic:' "$rev_events")"
