@@ -54,6 +54,15 @@
 # 「这个拓扑本来就没有控制面服务」，而门禁的全部价值就是发现漏看。
 #
 # 多文件表示**合并语义**（后者叠加在前者之上），同一 service+container 只保留一条。
+#
+# ## profile 感知
+#
+# 派生默认**采集全部服务**（含带 `profiles:` 的），这样既有调用方的行为不变。
+# 但合并拓扑文件时，不同形态的服务会一起进来：`compose.cluster.yml` 里
+# `scheduler-0`（cluster-full 的独立容器）与 compact overlay 里 api-bundle 内的
+# 8083 是**同一个逻辑实例的两套宿主端口**，派生就会给出两条探针目标。
+# 断言某个形态时用 `LUMO_PROBE_PROFILES` 限定（如 `cluster-compact`），
+# 语义与 `docker compose --profile` 一致：无 `profiles:` 键的服务恒启用。
 
 # 控制面 HTTP 段的边界（见上：这是约定，不是推导出来的事实）。
 LUMO_CONTROL_PLANE_PORT_LO="${LUMO_CONTROL_PLANE_PORT_LO:-8080}"
@@ -90,7 +99,24 @@ function logical_service(svc, cont) {
   return svc
 }
 
+# 某服务在本次启用的 profile 下是否参与。PROFILE_ACTIVATED 为空 → 全采集（默认行为）。
+function service_active(svc,   n, items, i, item, hit) {
+  if (PROFILE_ACTIVATED == "") return 1
+  # 键存在但值为空 == 该服务没有 `profiles:` 键 → 恒启用（与 docker compose 一致）。
+  if (!(svc in SERVICE_PROFILES) || SERVICE_PROFILES[svc] == "") return 1
+  n = split(SERVICE_PROFILES[svc], items, /[ \t]+/)
+  for (i = 1; i <= n; i++) {
+    item = items[i]
+    gsub(/^["'\'']|["'\'']$/, "", item)     # YAML 允许带引号的 profile 名
+    if (item == "") continue
+    hit = index("," PROFILE_ACTIVATED ",", "," item ",")
+    if (hit) return 1
+  }
+  return 0
+}
+
 function emit(svc, raw,   e, parts, n, last, cont, host, hp, logical) {
+  if (!service_active(svc)) return
   e = raw
   gsub(/["' \t]/, "", e)             # 去掉引号与空白
   sub(/\/[a-z]+$/, "", e)            # /tcp /udp
@@ -114,7 +140,7 @@ function emit(svc, raw,   e, parts, n, last, cont, host, hp, logical) {
   print logical "\t" host "\t" cont
 }
 
-BEGIN { svc = ""; inports = 0 }
+BEGIN { svc = ""; inports = 0; PROFILE_ACTIVATED = ENVIRON["LUMO_PROBE_PROFILES"] }
 
 # 服务键：缩进 2 的 `name:`（可带尾随注释）
 /^  [a-z0-9][a-z0-9_-]*:[[:space:]]*(#.*)?$/ {
@@ -122,7 +148,24 @@ BEGIN { svc = ""; inports = 0 }
   sub(/^  /, "", svc)
   sub(/:.*$/, "", svc)
   inports = 0
+  # 服务级的 `profiles:` 键紧跟在服务键之后，落在同一缩进层（4 空格）。
+  # 这里就地记录，读到 ports 时已能判定；改到 emit 里再回看会漏掉块序。
+  if (!(svc in SERVICE_PROFILES)) SERVICE_PROFILES[svc] = ""
+  svc_profile_line = 0
   next
+}
+
+# 记录服务的 `profiles: [a, b]`。注意只在「服务键之后、任何 ports 之前」这一段生效，
+# 避免把 volume / networks 等无关块里的 profiles 误记到当前服务上。
+{
+  if (svc != "" && svc_profile_line == 0 && $0 ~ /^    profiles:[[:space:]]*\[/ && inports == 0) {
+    rest = $0
+    sub(/^    profiles:[[:space:]]*\[/, "", rest)
+    sub(/\][[:space:]]*(#.*)?$/, "", rest)
+    SERVICE_PROFILES[svc] = rest
+    svc_profile_line = 1
+    next
+  }
 }
 
 # 顶层键：离开服务区

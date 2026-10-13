@@ -370,8 +370,27 @@ fi
 # 反向用例同样是必需的：如果派生对端口段完全不敏感（例如正则失效、恒返回全部服务），
 # 那么正向的两条照样绿。所以下面把 edge-gateway 的容器端口挪出控制面段，断言派生**跟着变**。
 DERIVED=""
+# 末尾可跟一个「启用的 Compose profile 名」（如 cluster-compact），据此限定采集范围。
+# 派生的输入是**未渲染文本**，它按文本采集所有 profile 下的服务，这本身是对的
+# （它不该猜哪套端口在该形态下生效）；要断言某个形态就得显式限定。
 derive_of() {
-  DERIVED="$(bash -c 'source "$1/lib/probes.sh"; shift; derive_probe_targets "$@"' _ "$HERE" "$@")" || return 1
+  local topology shape last
+  # 取末位参数**不能**用 ${!#}：macOS 自带 bash 3.2 不支持这种间接展开（它返回 0），
+  # 而本脚本的 shebang 是 `env bash` —— 于是本地跑出来 shape 为空、profile 限定失效，
+  # CI 的 Ubuntu（bash 5）却「碰巧」正常。这类写法在本仓是纯负债。
+  for last in "$@"; do :; done
+  # 名字必须与 compose 里写的完全一致：cluster.yml / compact overlay 用的是
+  # `cluster-compact` / `cluster-full`。写 `compact` 会匹配不到任何服务 —— 而派生
+  # 不会因此报错，只会安静地少给几条，正是这条用例最难查的那种失败。
+  if [[ "$last" == cluster-* ]]; then
+    shape="$last"
+    set -- "${@:1:$(($# - 1))}"
+  fi
+  topology="$*"
+  # profile 限定必须在**子 shell 内部**设置：命令替换会开子 shell，外层 export
+  # 的变量传不进去，派生会静默退化成「全采集」。
+  DERIVED="$(LUMO_PROBE_PROFILES="$shape" bash -c \
+    'source "$1/lib/probes.sh"; shift; derive_probe_targets "$@"' _ "$HERE" $topology)" || return 1
   return 0
 }
 
@@ -439,16 +458,24 @@ PINNED
 )"
 
 SHARED_FILES=("$HERE/compose.shared.yml" "$HERE/compose.control-plane.bundle.yml")
+# 断言的是 **compact** 形态的探针面，必须按 profile 限定：合并进来的
+# `compose.cluster.yml` 里 `scheduler-0`(18096) / `collaborator-0`(18097) 是
+# cluster-full 的独立容器，与 compact 的 api-bundle 属于同一逻辑实例的两套
+# 宿主端口。合并拓扑而不限定 profile 时两者都会出现（这正是派生的正确行为 ——
+# 它按文本采集，不该猜哪套端口在该形态下生效），于是派生 17 条 ≠ 写死的 15 条。
 expect_derivation "Cluster compact bundle 的探针目标 == 写死的 15 条" "$CLUSTER_PINNED" \
-  "${SHARED_FILES[@]}" "$HERE/compose.cluster.yml" "$HERE/compose.cluster.compact.yml"
+  "${SHARED_FILES[@]}" "$HERE/compose.cluster.yml" "$HERE/compose.cluster.compact.yml" cluster-compact
 expect_derivation "Standalone 共用 bundle 的探针目标 == 写死的 12 条" "$STANDALONE_PINNED" \
   "${SHARED_FILES[@]}" "$HERE/compose.standalone.yml"
 
 # 反向 1：把 edge-gateway 的容器端口挪出控制面段（8080 → 9080）→ 派生必须跟着变。
 sed 's/"18080:8080"/"18080:9080"/' "$HERE/compose.cluster.yml" >"$WORK/port-moved.yml"
 if grep -q '"18080:9080"' "$WORK/port-moved.yml"; then
+  # 同上：这条反向用例比对的基线是 compact 形态的 15 条，因此也要限定 profile，
+  # 否则它只是因为「多了 cluster-full 那两条」而不等于基线 —— 那样这条用例
+  # 会在被测服务根本没变的情况下变绿，等于什么都没验。
   expect_derivation_differs "容器端口挪出控制面段 → 派生跟着变（不是恒返回全部）" \
-    "${SHARED_FILES[@]}" "$WORK/port-moved.yml" "$HERE/compose.cluster.compact.yml"
+    "${SHARED_FILES[@]}" "$WORK/port-moved.yml" "$HERE/compose.cluster.compact.yml" cluster-compact
 else
   fail "反向用例：无法把 edge-gateway 的容器端口挪出控制面段（锚点失效？拓扑被改过？）"
 fi

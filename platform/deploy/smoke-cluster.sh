@@ -19,12 +19,17 @@ for file in "${compose_files[@]}"; do compose+=(-f "$file"); done
 if [[ "$cluster_topology" == "compact" ]]; then
   compose_files+=("$script_dir/compose.cluster.compact.yml")
   compose+=(-f "$script_dir/compose.cluster.compact.yml" --profile cluster-compact)
+  # compact：scheduler 折叠进 api-bundle，宿主端口仍是 18083。
+  LUMO_SCHEDULER_PROBE_PORT="${LUMO_SCHEDULER_PROBE_PORT:-18083}"
 elif [[ "$cluster_topology" == "full" ]]; then
   compose+=(--profile cluster-full)
+  # full：scheduler-0 是独立容器，宿主端口 18096（避开 api-bundle 的 18080-18095）。
+  LUMO_SCHEDULER_PROBE_PORT="${LUMO_SCHEDULER_PROBE_PORT:-18096}"
 else
   echo "smoke: LUMO_CLUSTER_TOPOLOGY must be compact or full" >&2
   exit 64
 fi
+export LUMO_SCHEDULER_PROBE_PORT
 if [[ -f "$env_file" ]]; then
   compose=(docker compose --env-file "$env_file")
   for file in "${compose_files[@]}"; do compose+=(-f "$file"); done
@@ -153,8 +158,13 @@ if (( probe_count == 0 )); then
 fi
 echo "smoke: $cluster_topology 拓扑控制面存活探针 ${probe_count} 条（从拓扑派生）"
 
-wait_http "scheduler leader" "http://127.0.0.1:18083/v1/leader" yes
-wait_http "scheduler nodes" "http://127.0.0.1:18083/v1/nodes" yes
+# Scheduler 的 leader/nodes 探测端口**随拓扑走**：compact 形态 scheduler 在
+# api-bundle 内部（宿主 18083），full 形态是独立容器（宿主 18096，见
+# compose.cluster.yml 里 scheduler-0 的注释）。这里曾写死 18083，等于把 full
+# 形态的 scheduler 探测指向 compact 的端口 —— 而上面刚强调过「名单不手写」，
+# 紧跟着就手写，正是这条注释要反对的那种事。
+wait_http "scheduler leader" "http://127.0.0.1:${LUMO_SCHEDULER_PROBE_PORT:-18083}/v1/leader" yes
+wait_http "scheduler nodes" "http://127.0.0.1:${LUMO_SCHEDULER_PROBE_PORT:-18083}/v1/nodes" yes
 wait_http "DSH web" "http://127.0.0.1:${LUMO_CONSOLE_PORT:-4173}/"
 wait_http "Prometheus ready" "http://127.0.0.1:${LUMO_PROMETHEUS_PORT:-9090}/-/ready"
 

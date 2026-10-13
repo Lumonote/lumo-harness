@@ -465,6 +465,12 @@ services:
     depends_on:
       scheduler-0: { condition: service_started }
 
+  # cluster-full 把 Scheduler/Collaborator 拆成独立容器，与 api-bundle 里
+  # bundle 化的那些**同时**存在（api-bundle 是 prometheus/provisioner/dsh-web/
+  # 两个 cluster-a-dsh-0 的 depends_on 目标，摘不掉）。因此这一形态的宿主端口
+  # 必须避开 api-bundle 占用的 18080-18095 —— 上一批实例（-1、cluster-a、cluster-b）
+  # 正是这么各自错开的。全局主备对里的 -0 曾沿用 18083，与 api-bundle 抢同一端口，
+  # `docker compose up` 会直接 `port is already allocated`。
   scheduler-0:
     profiles: [cluster-full]
     build: { context: ../control-plane, dockerfile: Dockerfile }
@@ -474,7 +480,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       nacos: { condition: service_healthy }
-    ports: ["18083:8083"]
+    ports: ["18096:8083"]
   scheduler-1:
     profiles: [cluster-full]
     build: { context: ../control-plane, dockerfile: Dockerfile }
@@ -530,7 +536,8 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
       nacos: { condition: service_healthy }
-    ports: ["18081:8081"]
+    # 同上：避开 api-bundle 的 18080-18095，理由见 scheduler-0 的注释。
+    ports: ["18097:8081"]
   collaborator-1:
     profiles: [cluster-full]
     build: { context: ../control-plane, dockerfile: Dockerfile }
