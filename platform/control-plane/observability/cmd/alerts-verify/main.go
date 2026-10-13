@@ -45,11 +45,11 @@ var metricContract = map[string][]string{
 	"lumo_http_inflight":                             nil,
 	"lumo_http_request_duration_seconds":             {"le"},
 	// scheduler（internal/server/metrics.go 的常量）。
-	"lumo_scheduler_pending_tasks":                nil,
-	"lumo_scheduler_tasks":                        {"state", "cluster_id"},
-	"lumo_scheduler_oldest_pending_seconds":       {"cluster_id"},
-	"lumo_scheduler_nodes":                        {"cluster_id"},
-	"lumo_scheduler_orphaned_active_tasks":        nil,
+	"lumo_scheduler_pending_tasks":          nil,
+	"lumo_scheduler_tasks":                  {"state", "cluster_id"},
+	"lumo_scheduler_oldest_pending_seconds": {"cluster_id"},
+	"lumo_scheduler_nodes":                  {"cluster_id"},
+	"lumo_scheduler_orphaned_active_tasks":  nil,
 	// 「节点已不在目录里、且永远不会再有结果」的受治理执行数。无标签：它是一条
 	// 台账卫生信号，按 realm/worker 下钻会让基数跟着租户数长，而处置是先去看台账。
 	"lumo_scheduler_orphaned_governed_executions": nil,
