@@ -270,6 +270,8 @@ function refreshIsolatedDshModuleLinks() {
 // The packaged app must not run pnpm or reach the registry on first launch.
 // Resolve the upstream plugin packages once while building, then copy their
 // complete production dependency closure into the app bundle below.
+// 记录实际取到归档的地址：备用源与 LUMO_SKILLHUB_ARCHIVE 都会让 runtime-manifest
+// 的 skillhub.source 与写死的主源不同，日志/清单得能还原真实来源。
 const skillhubArchive = prepareSkillHubArchive(resolve(repoRoot, 'platform', '.build', 'skillhub'))
 prepareUpstreamPlugins()
 await assertUpstreamPluginTypertCodecs()
@@ -554,7 +556,7 @@ assertBinaryArchitecture(runtimeNode, '打包 Node')
 stageNodeTooling(nodeSource, resolve(stagingRoot, 'bin'), resolve(stagingRoot, 'lib', 'node_modules'))
 // Both launchers export bin/skillhub.mjs. Ship the actual CLI and check it using
 // the final, pruned Python runtime before Tauri is allowed to bundle resources.
-const skillhub = stageSkillHub(stagingRoot, skillhubArchive, targetPlatform)
+const skillhub = stageSkillHub(stagingRoot, skillhubArchive.archive, targetPlatform, skillhubArchive.source)
 
 const runtimeNodeSource = resolve(dshNodeRoot)
 assertDshNodeSelfContained()
@@ -1437,7 +1439,13 @@ function stageNodeTooling(nodeBinary, binDir, libDir) {
 }
 
 function curl(url, destination) {
-  const result = spawnSync('curl', ['-fsSL', '--retry', '3', '-o', destination, url], { encoding: 'utf8' })
+  // 与 SkillHub 归档同一类单点：只试一个地址、短窗口，DNS 抖动即构建失败。
+  // 口径与 skillhub-tooling.mjs 一致 —— 只对连接类失败退避重试（--retry-connrefused），
+  // 404 这类永久性错误立刻失败，不靠退避硬扛。
+  const result = spawnSync('curl', [
+    '-fsSL', '--retry', '4', '--retry-connrefused', '--retry-delay', '5', '--retry-max-time', '240',
+    '--connect-timeout', '20', '--max-time', '300', '-o', destination, url,
+  ], { encoding: 'utf8', timeout: 360_000 })
   if (result.error !== undefined || result.status !== 0) {
     throw new Error(`下载失败：${url}\n${result.stderr || result.error?.message || ''}`.trim())
   }

@@ -91,9 +91,14 @@ CLI 或设置 `LUMO_SKILLHUB_COMMAND`。构建从 [SkillHub 官方安装源](htt
 `runtime/bin/skillhub.mjs` 一起打包，复用包内 Node 和 Python。构建会在裁剪完成后执行
 `--version` 和 `install --help` 校验；缺少任一依赖即构建失败。
 
+归档默认依次尝试两个同源地址（`cos.ap-guangzhou` 与 `cos.accelerate`）：只试一个地址时，
+共享 CI runner 偶发的 DNS 解析超时会直接判成构建失败。对应的连接类重试预算约 4 分钟，
+404 一类永久性错误则立即换下一个地址。可用 `LUMO_SKILLHUB_ARCHIVE_URLS`（逗号分隔，
+优先在前）整体替换源列表。
+
 离线构建可以设置 `LUMO_SKILLHUB_ARCHIVE` 指向预先下载的官方 `latest.tar.gz`。
-删除缓存归档可获取新版本；实际打入的 CLI 版本、归档 SHA-256 和来源记录在
-`runtime/runtime-manifest.json` 的 `skillhub` 字段。技能下载仍需联网，安装目录继续使用
+删除缓存归档可获取新版本；实际打入的 CLI 版本、归档 SHA-256 和**真正取到归档的地址**
+记录在 `runtime/runtime-manifest.json` 的 `skillhub` 字段。技能下载仍需联网，安装目录继续使用
 应用的数据目录。旧安装包缺少 CLI 时需要重新构建并替换应用，修改源码不会修复已安装的副本。
 
 桌面版在构建阶段固定并打包以下 DSH 基础插件，打开应用时直接从包内 runtime 加载，
