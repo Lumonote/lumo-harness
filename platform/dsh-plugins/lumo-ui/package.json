@@ -40,7 +40,7 @@
   },
   "devDependencies": {
     "@types/node": "link:../../../deepseek-harness/node_modules/@types/node",
-    "@types/react": "link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/@types/react"
+    "@types/react": "~18.3.1"
   },
   "files": ["lib/index.js", "lib/client.js", "lib/types/**/*.d.ts"]
 }
