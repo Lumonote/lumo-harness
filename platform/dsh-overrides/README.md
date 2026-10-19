@@ -73,6 +73,7 @@ node platform/dsh-overrides/assert-pristine.mjs deepseek-harness
 | **锚点漂移（构建入口）** | 根 `tsdown.config.ts` 的 host 入口从 `{index,invariant,startup}` 改为 `{index,startup}`，旧锚点导致桌面打包在准备隔离副本时失败。`apply.mjs` 兼容两种已知布局，继续改为 `index` 单入口；未知布局仍拒绝并报告失配 | 同上，另固定测试两代入口的兼容与幂等 |
 | **锚点漂移（座位搬家）** | `e62587c163` 把 hero composer 的渲染点从 `ConversationRoot.tsx` 搬进 `ConversationContent.tsx`（前者退化成 13 行转发壳），同时把 hero 座位从 `ConversationSlotProps` 的 `PropsRenderSlots` 联合挪进 `SlotFactoryMap.children`、把 `hero.agentPreset` 的 scope 从 `root` 改成 `session-maybe` | 同上。**锚点一律只锚座位名、不锚 scope**：带 scope 的整行锚每次 scope 调整都会失配 |
 | **上游删包** | `be531688f3` 移除了整个 `@deepseek-ai/dsh-client-runtime`，`ctx.slots`(`SlotRegistry`) 迁到 `@deepseek-ai/dsh-client-ui-renderer`。lumo-ui 跟着改了 5 个声明面：两处 `ClientContext` 类型导入改走 `import type { Context as ClientContext } from '@deepseek-ai/cordis'`（上游 `ui-theme` 的同款写法）、`package.json` 的 `dependencies` 与 `dsh.client.inject`、`tsconfig.json` 的 `references`、`tsdown.config.ts` 的 `external` | `pnpm test` |
+| **锚点漂移（流韧性）** | 2026-10 上游把 gateway `stream-server.ts` 的 `send()` 回调体从 `if (error) reject(error) / else resolve()` 改成 early-return + `alive()` 活跃度记账（并在 send 前后加 `queued` 判定）。`LUMO_STREAM_BACKPRESSURE` 原先把整块（含回调体）当锚 → 桌面打包在 `beforeBuildCommand` 上失配 | `__tests__/overlay.spec.ts` 的「两代回调体」用例。补丁改为**只锚 send() 的结构骨架**（`delivery = this.writes.then(...)`、readyState 守卫、`socket.send(text, cb)` 调用行、`writes = delivery.catch(...)`），销表从回调内挪到 promise 的 `finally` —— 语义等价，且不再需要知道回调体长什么样 |
 
 一次重构常同时漂移多处锚点，而 `replaceExactlyOnce` 在第一个失配处就抛错——逐个修要跑
 N 遍完整桌面构建才知道下一个卡在哪。`apply.mjs` 的 `diagnoseOverlayAnchors()` 把清单一次
@@ -85,6 +86,21 @@ corepack pnpm -C platform test dsh-overrides/__tests__/overlay.spec.ts
 锚点一漂，这条用例当场红，失败信息里直接给出文件、锚点文本与失配形态（`missing` /
 `ambiguous`），不必等到打桌面包。它跟其余用例一样对着 `git show HEAD:` 的原文跑，所以
 `git pull` 之后先跑它，比 `cargo tauri build` 快几个数量级。
+
+**但它只对着本地 checkout 的 HEAD 跑，而 CI 是 `actions/checkout` 拉 `ref: master`。**
+两者一旦分叉（2026-10 那次：本地停在 `dsh-v0.2.1-alpha.1`，master 已改过
+`stream-server.ts` 的回调体），护栏在本地全绿、Windows 打包却在 `beforeBuildCommand` 上
+失配——「本机结论是假的」那一类。所以：**动覆盖层之前先确认本地 dsh 树不落后于
+`origin/master`**（`git -C deepseek-harness log --oneline -1 origin/master` 与 `HEAD` 对比），
+落后就先快进再改；不便快进时，至少把上游**当前 master 的一份干净副本**拿来做诊断：
+
+```sh
+curl -sSL -o /tmp/dsh-master.tar.gz https://codeload.github.com/deepseek-ai/deepseek-harness/tar.gz/refs/heads/master
+mkdir -p /tmp/dsh-master && tar -xzf /tmp/dsh-master.tar.gz -C /tmp/dsh-master --strip-components=1
+node -e "import('./platform/dsh-overrides/apply.mjs').then(m => console.log(m.diagnoseOverlayAnchors('/tmp/dsh-master')))"
+```
+
+诊断会就地改坏传进去的那棵树（收集模式照常落盘），所以每次都重新解包一份，别复用。
 
 覆盖层本身**零补丁 rebase** —— 这正是第一铁律要证的那一条（`docs/architecture.md` §22.1）。
 

@@ -125,6 +125,85 @@ describe('applyLumoDshOverrides', () => {
     ])
   })
 
+  /**
+   * `send()` 回调体的两代形状。
+   *
+   * 上游 2026-10（master）把回调体从 `if (error) reject(error) / else resolve()` 改成
+   * early-return + `alive()` 活跃度记账。旧写法把整块（含回调体）当锚，于是本地 checkout
+   * 还停在 dsh-v0.2.1-alpha.1、CI 却 checkout master，**本机全绿而 Windows 桌面打包在
+   * `beforeBuildCommand` 上失配**。这条用例把两代回调体都钉住：补丁只许依赖 send() 的
+   * 结构骨架，不许依赖回调体长什么样。
+   */
+  const SEND_SHAPES: Record<string, { preamble: string; callback: string }> = {
+    '旧回调体（dsh-v0.2.1-alpha.1）': {
+      preamble: '',
+      callback: "      this.socket.send(text, (error) => {\n"
+        + "        if (error) reject(error)\n"
+        + "        else resolve()\n"
+        + "      })\n",
+    },
+    '新回调体（master 的 alive 记账）': {
+      // `queued` 的声明在 send 调用之前，补丁的插入点正好落在两者之间 —— 夹具按真实
+      // 布局分开写，否则「回调体原样保留」那条断言会因为插入点而被误判。
+      preamble: "      let queued = false\n",
+      callback: "      this.socket.send(text, (error) => {\n"
+        + "        if (error) {\n"
+        + "          reject(error)\n"
+        + "          return\n"
+        + "        }\n"
+        + "        if (queued) this.alive()\n"
+        + "        resolve()\n"
+        + "      })\n"
+        + "      // Read after send(): bytes still buffered mean the local send buffer was\n"
+        + "      // full, so their completion requires the peer to acknowledge data.\n"
+        + "      queued = this.socket.bufferedAmount > 0\n",
+    },
+  }
+
+  /**
+   * 只保留补丁真正触碰的骨架：常量行、readyState 守卫、send 调用、writes 链尾。
+   *
+   * 夹具里**不能出现**补丁的护栏标记本身（`patchFile` 用 `source.includes(marker)`
+   * 判「已打过」，标记出现在夹具里 = 整份文件被跳过，用例会以「补丁没落上」的形式
+   * 失败，而真实原因是幂等判据把夹具当成了已打补丁的上游）。
+   */
+  function streamServerFixture(shape: { preamble: string; callback: string }): string {
+    return "/** Fixture: the send() skeleton the stream-resilience patch anchors on. */\n"
+      + "import WebSocket from 'ws'\n\n"
+      + "const MAX_MISSED_HEARTBEATS = 2\n\n"
+      + "export class RemoteStreamMuxConnection {\n"
+      + "  private writes: Promise<void> = Promise.resolve()\n\n"
+      + "  private send(text: string): Promise<void> {\n"
+      + "    const delivery = this.writes.then(() => new Promise<void>((resolve, reject) => {\n"
+      + "      if (this.socket.readyState !== WebSocket.OPEN) {\n"
+      + "        reject(new Error('api gateway: Remote stream socket is closed'))\n"
+      + "        return\n"
+      + "      }\n"
+      + shape.preamble
+      + shape.callback
+      + "    }))\n"
+      + "    this.writes = delivery.catch(() => undefined)\n"
+      + "    return delivery\n"
+      + "  }\n"
+      + "}\n"
+  }
+
+  it.each(Object.entries(SEND_SHAPES))('stream-server 补丁不依赖 send() 回调体形状:%s', (_label, shape) => {
+    const root = stagePristineUpstream('stream-server-shape')
+    const relativePath = 'packages/api/gateway/src/stream-server.ts'
+    writeFileSync(resolve(root, relativePath), streamServerFixture(shape))
+
+    expect(diagnoseOverlayAnchors(root)).toEqual([])
+    const patched = read(root, relativePath)
+    // 背压上限、flush 截止时间、以及「落定即销表」三件事都要落在骨架上。
+    expect(patched).toContain('bufferedAmount > LUMO_SEND_BUFFERED_LIMIT')
+    expect(patched).toContain('LUMO_SEND_FLUSH_TIMEOUT_MS')
+    expect(patched).toContain('did not flush before the deadline')
+    expect(patched).toContain('const bounded = delivery.finally(')
+    // 回调体原样保留 —— 补丁不该顺手改写上游的活跃度记账。
+    expect(patched).toContain(shape.callback)
+  })
+
   it('锚点在当前上游 HEAD 里仍然存在,会话与侧边栏都被打上扩展位', () => {
     const root = stagePristineUpstream('anchors')
     applyLumoDshOverrides(root)

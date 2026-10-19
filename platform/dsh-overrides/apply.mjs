@@ -26,7 +26,7 @@ function replaceExactlyOnce(source, before, after, file) {
       missedAnchors.push({ file, anchor: before, kind: 'missing' })
       return source
     }
-    throw new Error(`Lumo DSH overlay: ${file} does not contain the expected upstream anchor`)
+    throw new Error(`Lumo DSH overlay: ${file} does not contain the expected upstream anchor: ${JSON.stringify(before.slice(0, 240))}`)
   }
   if (source.indexOf(before, first + before.length) !== -1) {
     if (collecting) {
@@ -310,20 +310,31 @@ export function applyLumoDshOverrides(root) {
         + "const LUMO_SEND_FLUSH_TIMEOUT_MS = 30_000\n"
         + "const LUMO_SEND_BUFFERED_LIMIT = 8 * 1024 * 1024\n",
     ],
+    // 下面四段都只锚 `send()` 的**结构骨架**，绝不锚回调体。
+    //
+    // 起因：上游 2026-10 把回调体从 `if (error) reject(error) / else resolve()` 改写成
+    // early-return + `alive()` 记账（还顺手在 send 前后加了 `queued` 判定），于是
+    // 「整块当锚」的写法在 CI 的 Windows 桌面打包里失配：`does not contain the expected
+    // upstream anchor`，整条 `cargo tauri build` 挂在 beforeBuildCommand 上。
+    //
+    // 教训同 README「锚点只锚座位名、不锚 scope」：**锚的是这件事发生在哪，不是它长什么样**。
+    // 回调体是上游正在演进的地方（背压、活跃度记账都往这里加），骨架才是稳定的：
+    // `delivery = this.writes.then(...)`、readyState 守卫、`socket.send(text, cb)` 调用行、
+    // `writes = delivery.catch(...)` 在这次重构里一行没动。
+    //
+    // 代价是「销表」从回调内挪到 promise 的 `finally` —— 语义等价（delivery 一落定就销表），
+    // 换来的是不需要知道回调体长什么样。`settled` 标志也随之不再需要：promise 只落定一次，
+    // 迟到的 send 回调再 reject 是空操作。
     [
-      "    const delivery = this.writes.then(() => new Promise<void>((resolve, reject) => {\n"
-        + "      if (this.socket.readyState !== WebSocket.OPEN) {\n"
-        + "        reject(new Error('api gateway: Remote stream socket is closed'))\n"
+      "    const delivery = this.writes.then(() => new Promise<void>((resolve, reject) => {\n",
+      "    let lumoSendDeadline: ReturnType<typeof setTimeout> | undefined\n"
+        + "    const delivery = this.writes.then(() => new Promise<void>((resolve, reject) => {\n",
+    ],
+    [
+      "        reject(new Error('api gateway: Remote stream socket is closed'))\n"
         + "        return\n"
-        + "      }\n"
-        + "      this.socket.send(text, (error) => {\n"
-        + "        if (error) reject(error)\n"
-        + "        else resolve()\n"
-        + "      })\n"
-        + "    }))\n",
-      "    const delivery = this.writes.then(() => new Promise<void>((resolve, reject) => {\n"
-        + "      if (this.socket.readyState !== WebSocket.OPEN) {\n"
-        + "        reject(new Error('api gateway: Remote stream socket is closed'))\n"
+        + "      }\n",
+      "        reject(new Error('api gateway: Remote stream socket is closed'))\n"
         + "        return\n"
         + "      }\n"
         + "      // LUMO_STREAM_BACKPRESSURE: a peer that stops draining the socket used\n"
@@ -334,21 +345,29 @@ export function applyLumoDshOverrides(root) {
         + "        this.socket.terminate()\n"
         + "        reject(new Error('api gateway: Remote stream socket backpressure exceeded'))\n"
         + "        return\n"
-        + "      }\n"
-        + "      let settled = false\n"
-        + "      const timer = setTimeout(() => {\n"
-        + "        settled = true\n"
+        + "      }\n",
+    ],
+    [
+      "      this.socket.send(text, (error) => {\n",
+      "      // LUMO_STREAM_BACKPRESSURE: bound the flush itself. A WebView that stops\n"
+        + "      // consuming leaves the send callback pending forever; terminate on the\n"
+        + "      // deadline so carrier retry, not a hung promise, owns recovery.\n"
+        + "      lumoSendDeadline = setTimeout(() => {\n"
         + "        this.socket.terminate()\n"
         + "        reject(new Error('api gateway: Remote stream send did not flush before the deadline'))\n"
         + "      }, LUMO_SEND_FLUSH_TIMEOUT_MS)\n"
-        + "      this.socket.send(text, (error) => {\n"
-        + "        if (settled) return\n"
-        + "        settled = true\n"
-        + "        clearTimeout(timer)\n"
-        + "        if (error) reject(error)\n"
-        + "        else resolve()\n"
-        + "      })\n"
-        + "    }))\n",
+        + "      this.socket.send(text, (error) => {\n",
+    ],
+    [
+      "    this.writes = delivery.catch(() => undefined)\n"
+        + "    return delivery\n",
+      "    // LUMO_STREAM_BACKPRESSURE: release the deadline whichever way the frame\n"
+        + "    // settles, so a flushed frame never leaves a 30s timer behind.\n"
+        + "    const bounded = delivery.finally(() => {\n"
+        + "      if (lumoSendDeadline !== undefined) clearTimeout(lumoSendDeadline)\n"
+        + "    })\n"
+        + "    this.writes = bounded.catch(() => undefined)\n"
+        + "    return bounded\n",
     ],
   ], 'LUMO_STREAM_BACKPRESSURE')
 
