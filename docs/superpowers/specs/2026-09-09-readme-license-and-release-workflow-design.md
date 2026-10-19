@@ -3,7 +3,8 @@
 - 日期：2026-09-09
 - 前置：`platform/build.sh`（一键构建入口）、`.github/workflows/ci.yml`（门禁，不产物）、
   [`2026-09-02-one-click-build-design.md`](./2026-09-02-one-click-build-design.md) §5（`release.yml` 的原始设计，未实现）
-- 状态：已实现；**触发方式已变更**：由 push/tag 自动触发改为仅 `workflow_dispatch` 手动触发（见 §3.1）。
+- 状态：已实现；**触发方式变更过两次**：先由 push/tag 自动触发收窄为仅 `workflow_dispatch` 手动触发，
+  2026-10 起改为「`v*` tag 自动发版 + `dev` 分支 push 自动出测试包 + 其余分支仍手动」（见 §3.1）。
 
 ---
 
@@ -100,8 +101,18 @@
 
 ```yaml
 on:
-  workflow_dispatch:   # 仅手动；push / tag 不自动触发
+  workflow_dispatch:
+  push:
+    branches: [dev]   # 只认活动分支：旧 ref 上缺 platform/deploy/lib/dsh-source.sh 等打包依赖
+    tags: ['v*']
 ```
+
+**2026-10 起 `dev` 分支 push 自动出测试包**（artifact 带 `-test` 后缀，不建 Release、不推镜像）。
+当初收窄成「仅手动」唯一要防的是「旧 ref 上自动触发必然失败」，而 `dev` 是活动分支，树里
+那些脚本一定在；其余分支仍需手动。同一 ref 的旧运行会被 `concurrency` 取消（tag 不取消）。
+
+本节表格里的 `images` job 是设计时的形态，实际实现只落了 `desktop` 与 `release`；触发与
+job 的权威定义始终是 `.github/workflows/release.yml` 本身。
 
 | job | runner | 手动选非 `main` 分支 | 手动选 `main` | 手动选 tag `v*` |
 |-----|--------|---------------|----------------------|-------------|

@@ -4,12 +4,14 @@
 # 触发语义：
 #   - 推送 v* tag **自动触发**（正式发版路径）：三个平台的桌面包全部成功后，安装包附到
 #     同名 GitHub Release（见下方 release job 的 fail-closed 依赖）。
+#   - 推送 **dev** 分支自动触发**测试包**：artifact 名带 -test 后缀，不建 Release、不推镜像。
+#     只认 dev 一个分支：打包依赖 platform/deploy/lib/dsh-source.sh 等脚本，旧 ref 上不存在，
+#     早先按 `branches: ['**']` 自动触发时会在这些 ref 上误触失败（见
+#     docs/superpowers/specs/2026-09-09-readme-license-and-release-workflow-design.md §3.1）。
+#     dev 是活动分支，树里这些脚本一定在；其余分支要产物仍走手动触发。
 #   - 也可在 Actions 页面 Run workflow 手动触发，选择要构建的分支或 tag：
 #       main / tag v*  → 正式产物（tag v* 另附到 GitHub Release）
 #       其他分支       → 桌面测试包（artifact 名带 -test）
-#   - **分支 push 依旧不触发**：打包依赖 platform/deploy/lib/dsh-source.sh 等脚本，旧 ref 上
-#     不存在，早先的自动 push 触发会在这些 ref 上误触失败。tag 是人主动打的，不适用该顾虑；
-#     这也是当初收窄成「仅手动」时唯一要防的场景。
 #
 # 门禁（typecheck / test / vet / 第一铁律）仍由 ci.yml 负责，本 workflow 只产物。
 #
@@ -29,8 +31,17 @@ name: release
 on:
   workflow_dispatch:
   push:
+    branches:
+      - dev
     tags:
       - 'v*'
+
+# 同一个 ref 只保留最新一次运行：dev 上连推几个提交时取消仍在跑的旧构建，避免三台
+# runner 同时排队（每个桌面产物都是 1.3GB 级）。tag 一律不取消 —— 发版中途被掐掉
+# 比排队更糟。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/dev' }}
 
 permissions:
   contents: read
@@ -151,6 +162,9 @@ jobs:
           name: lumo-desktop-${{ matrix.target }}${{ steps.suffix.outputs.suffix }}
           path: platform/desktop/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
+          # dev 每次 push 出三份 1.3GB 级产物，默认 90 天会把存储配额吃光。测试包 7 天、
+          # 正式产物 30 天足够：Release 本身另存安装包，artifact 只是中间件。
+          retention-days: ${{ steps.suffix.outputs.suffix == '-test' && 7 || 30 }}
 
       - name: Upload Windows installers
         if: runner.os == 'Windows'
@@ -159,6 +173,7 @@ jobs:
           name: lumo-desktop-${{ matrix.target }}${{ steps.suffix.outputs.suffix }}
           path: platform/desktop/target/release/bundle/nsis/*.exe
           if-no-files-found: error
+          retention-days: ${{ steps.suffix.outputs.suffix == '-test' && 7 || 30 }}
 
   # 只在 tag 上运行：桌面包全部成功后才发布 Release（fail-closed）。
   release:
