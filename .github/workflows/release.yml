@@ -54,10 +54,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-14 起基线镜像为 arm64；Intel 走 macos-15-intel（GitHub 最后一个
-          # x86_64 镜像，2027-08 退役，届时 Intel 桌面包将无 CI 产出能力）。
-          - runner: macos-14
+          # arm64 走 macos-15。原先写的 macos-14 已进入弃用尾声：GitHub 从 2026-07-06
+          # 起弃用、2026-11-02 彻底下线，中间安排多轮 brownout（窗口内用该标签的 job
+          # 直接失败）。2026-10-31 的 run 41212366668 就撞在 14:00-24:00 UTC 那一轮里，
+          # 报「failed because of a scheduled macOS 14 runner image brownout」。
+          # 不写 macos-latest：那个浮动标签当前指向 macOS 26，跨大版本升级会在某天
+          # 悄悄换掉 Xcode 与系统 SDK，本仓库的口径是显式钉版本。
+          # macos-15 是 arm64，-intel 后缀才是 x86_64（macos-15-large 也是 Intel，
+          # 名字里带 large 不代表 arm64，别混）。
+          - runner: macos-15
             target: darwin-arm64
+          # Intel 走 macos-15-intel（GitHub 最后一个 x86_64 镜像，2027-08 退役，
+          # 届时 Intel 桌面包将无 CI 产出能力）。
           - runner: macos-15-intel
             target: darwin-x64
           - runner: windows-latest
