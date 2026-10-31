@@ -13,8 +13,9 @@ import {
 } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { dirname, relative, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { applyLumoDshOverrides, overriddenPackageDirectories } from './apply.mjs'
 import { assertPristineProductSource, git } from './assert-pristine.mjs'
 
@@ -200,7 +201,60 @@ const LIB_FRESHNESS_PROBES = [
   // exist」——症状落在覆盖层包上，根因却在没被覆盖的 typert/protocol 产物上，很容易
   // 往补丁方向查错。探针盯住新形态的方法签名行。
   ['packages/typert/protocol/lib/types/types.d.ts', 'create: () => TypertSchema'],
+  // `@deepseek-ai/dsh-api-*/remote` 子路径的 .d.ts 是 typert 生成物，不是 tsc 产物。
+  // 上游的 host 编译链以 `tsx scripts/generate-typert.ts` 打头（见
+  // scripts/compile-referenced-projects.ts 的 typertStep：它 needs 为空，host 编译器
+  // needs 它），因为这份生成只读 workspace 源码、不消费任何编译产物。缺了它，
+  // `import type {} from '…/remote'` 处报 TS2307，并且 `ClientRemote` 的声明合并一起
+  // 失效（.job/.session/.productAnalytics 全变「不存在」，再连带出一串参数类型不匹配）。
+  // 本机开发树跑过一次全量构建，这些文件一直在，所以只有全新克隆（CI 桌面 job）才暴露。
+  ['packages/api/workspace-files/lib/typert.remote-client.d.ts', 'TypertRemoteNamespaceMap'],
 ]
+
+/**
+ * 该包是否已有 typert remote 投影（`@deepseek-ai/dsh-api-<包名>/remote` 的类型面）。
+ * 判定只看文件在不在，不看内容新旧：内容由 generateTypertArtifacts 保证与源码同步。
+ */
+export function hasTypertRemoteProjection(sourceRoot) {
+  return existsSync(resolve(sourceRoot, 'packages', 'api', 'workspace-files', 'lib', 'typert.remote-client.d.ts'))
+}
+
+/**
+ * 按源码生成全部 typert 投影（`lib/typert.host.*` 与 `lib/typert.remote-client.*`）。
+ *
+ * 为什么必须在上游编译**之前**跑：这些子路径的类型就是本脚本写出来的，而
+ * `tsc -b` 在 import 处解析不到就报 TS2307（2026-10-31 的 release run
+ * 41206681553 在 macOS 与 Windows 两台 runner 上各报 10 条，全部由这三条
+ * 缺模块级联而来）。上游把这一步放在 host 编译之前，我们也照同样的顺序。
+ *
+ * 只读源码、拒绝消费构建产物（generate-typert 的 rejectBuildOutputs），所以它可以在
+ * 一棵一个 lib/ 都没有的全新克隆上直接跑。耗时是分钟级（单线程分析整个 workspace），
+ * 因此只在缺投影时调用，不做无条件重算。
+ */
+export function generateTypertArtifacts(sourceRoot) {
+  const script = resolve(sourceRoot, 'scripts', 'generate-typert.ts')
+  if (!existsSync(script)) {
+    throw new Error(`Lumo DSH staging: ${sourceRoot} 缺 scripts/generate-typert.ts——上游把 typert 生成挪走了，请同步 prepare-runtime.mjs`)
+  }
+  // 与上游同一条命令（`node --import tsx/esm scripts/generate-typert.ts`）。--import 的
+  // 说明符按 cwd 解析，所以这里必须显式解析成 file:// URL，而不是留裸包名——cwd 一旦
+  // 换成别的目录，裸包名会静默解析失败。
+  const requireFromSource = createRequire(resolve(sourceRoot, 'package.json'))
+  let tsxUrl
+  try {
+    tsxUrl = pathToFileURL(requireFromSource.resolve('tsx/esm')).href
+  } catch (error) {
+    throw new Error(`Lumo DSH staging: ${sourceRoot} 里解析不到 tsx——typert 生成需要工作区依赖已安装（CI=true corepack pnpm install）：${String(error)}`)
+  }
+  const result = spawnSync(process.execPath, ['--import', tsxUrl, script], { cwd: sourceRoot, stdio: 'inherit' })
+  if (result.error !== undefined) throw result.error
+  if (result.status !== 0) {
+    throw new Error(`Lumo DSH staging: typert 投影生成失败（${String(result.status ?? result.signal)}）`)
+  }
+  if (!hasTypertRemoteProjection(sourceRoot)) {
+    throw new Error('Lumo DSH staging: typert 生成返回 0，但 packages/api/workspace-files/lib/typert.remote-client.d.ts 仍不存在')
+  }
+}
 
 export function ensureLibEntriesReexport(sourceRoot) {
   const brandTypes = resolve(sourceRoot, 'packages', 'util', 'brand', 'lib', 'types', 'index.js')
@@ -222,9 +276,15 @@ export function ensureLibEntriesReexport(sourceRoot) {
       // 自动安装；直接 `cargo tauri build` 绕过它的人在这里拿到可执行的指引。
       throw new Error(`Lumo DSH staging: ${sourceRoot} 缺少 node_modules/typescript——桌面构建要求 deepseek-harness 工作区依赖已安装。请先执行 \`CI=true corepack pnpm install\`（在该目录下）。`)
     }
-    // client 面依赖 host tsdown 稍后生成的 typert.remote-client.*；此处提前执行
-    // 会在全新 clone 上产生一批必然的“找不到 remote”错误。client 类型由
-    // refreshDshClientTypePrerequisites() 在 host 投影完成后刷新。
+    // 先出 typert 投影，再编 host：`@deepseek-ai/dsh-api-*/remote` 的 .d.ts 正是它的
+    // 产物，上游编译链也是这个顺序（typertStep → host compiler）。此前这里直接编译，
+    // 靠的是开发树里早就躺着的那批 lib/typert.*；全新克隆一个都没有，`tsc -b` 于是在
+    // `import type {} from '…/remote'` 处 TS2307（见 release run 41206681553）。
+    // client 面的类型仍由 refreshDshClientTypePrerequisites() 在 host 投影完成后刷新。
+    if (!hasTypertRemoteProjection(sourceRoot)) {
+      console.log('生成 dsh typert 投影（全新克隆没有这批 gitignored 产物）...')
+      generateTypertArtifacts(sourceRoot)
+    }
     for (const config of ['tsconfig.host.json']) {
       // dsh-root 的 host 构建本身也使用 4 GiB heap（见 package.json 的
       // build:lib:host）。全新 CI clone 会在这里首次编译整个引用图；Node

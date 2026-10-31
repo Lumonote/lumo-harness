@@ -32,7 +32,7 @@ function write(root: string, relativePath: string, content: string): void {
 }
 
 /** 形似 dsh 的最小源树：探针包 + 假 tsc（把探针点名的 lib 文件写出来）。 */
-function fakeDsh(label: string): { root: string; counter: string } {
+function fakeDsh(label: string, options: { typertProjection?: boolean } = {}): { root: string; counter: string } {
   const root = mkdtempSync(resolve(tmpdir(), `lumo-prepare-${label}-`))
   temporaries.push(root)
   const counter = resolve(root, 'tsc-runs')
@@ -44,6 +44,12 @@ function fakeDsh(label: string): { root: string; counter: string } {
   write(root, 'packages/core/agent/package.json', '{"name":"@fake/agent","type":"module"}\n')
   write(root, 'packages/util/native-command/package.json', '{"name":"@fake/native-command","type":"module"}\n')
   write(root, 'packages/skill/skill/package.json', '{"name":"@fake/skill","type":"module"}\n')
+  // typert 投影（`@deepseek-ai/dsh-api-<包名>/remote` 的类型面）。它是 typert 生成物，
+  // 不是 tsc 产物，所以假 tsc 不会写它——由夹具直接放好，表示「这棵树已经生成过」。
+  // 缺它的场景单独用 options.typertProjection = false 构造。
+  if (options.typertProjection !== false) {
+    write(root, 'packages/api/workspace-files/lib/typert.remote-client.d.ts', 'interface TypertRemoteNamespaceMap {}\n')
+  }
   // 假 tsc：按探针清单把 lib/types 写出来，并在 counter 里记录每次被调用。
   // root 用 __dirname 推出（tsc 位于 <root>/node_modules/typescript/bin/），
   // 避免跨 spawnSync 传环境变量。
@@ -191,5 +197,25 @@ describe('ensureLibEntriesReexport', () => {
       .toContain('brandString')
     // 三处探针不新鲜只应触发一次 host 重建，count 从 0 计。
     expect(readFileSync(counter, 'utf8')).toHaveLength(1)
+  })
+
+  // 探针清单里的 typert 一条是唯一能让「其余产物都新鲜、只缺 remote 投影」的树进入
+  // 重建分支的东西。少了它，fresh 判为真、函数直接返回，接着 build-runtime 的
+  // `tsc -b apps/cli apps/desktop-host` 会在 `import type {} from '…/remote'` 处
+  // TS2307 —— 正是 release run 41206681553 红掉的那 20 条。
+  // 这条用例不断言「生成成功」（那要跑真 tsx），只断言分支确实被走进：假树没有
+  // scripts/generate-typert.ts，所以它当场报一条可执行的错，而不是静默通过。
+  it('只有 typert 投影缺失也算不新鲜，会走进生成分支而不是直接返回', () => {
+    const { root } = fakeDsh('missing-typert-only', { typertProjection: false })
+    // 其余探针全部写新鲜：只要 typert 没进清单，fresh 就会为真。
+    write(root, 'packages/util/brand/lib/types/index.js', "export const brandString = 'runtime'\n")
+    write(root, 'packages/llm/llm/lib/types/assistant-stream.d.ts', 'export declare function assistantStreamChunks(): void\n')
+    write(root, 'packages/core/agent/lib/types/types.d.ts', 'export declare const InboxState: unknown\n')
+    write(root, 'packages/core/agent/lib/types/index.d.ts', '(agentCtx: Context, agent: Agent)\n')
+    write(root, 'packages/util/native-command/lib/types/index.d.ts', 'export { nativeFileManager, revealNativePath } from "./path-opener.ts"\n')
+    write(root, 'packages/skill/skill/lib/types/index.d.ts', '/** Absolute instruction file path when supplied by the provider */\n')
+    write(root, 'packages/typert/protocol/lib/types/types.d.ts', 'create: () => TypertSchema\n')
+
+    expect(() => ensureLibEntriesReexport(root)).toThrow(/generate-typert\.ts/)
   })
 })

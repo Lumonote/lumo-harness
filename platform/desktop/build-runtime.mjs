@@ -19,6 +19,7 @@ import { createRequire } from 'node:module'
 import { arch as hostArch, platform as hostPlatform } from 'node:os'
 import { createHash } from 'node:crypto'
 import { overriddenPackageDirectories } from '../dsh-overrides/apply.mjs'
+import { generateTypertArtifacts, hasTypertRemoteProjection } from '../dsh-overrides/prepare-runtime.mjs'
 import { resolveWorkspaceNodeTool } from './node-tools.mjs'
 import { dshClientTypeConfigs, hasUsableDshClientTypes } from './dsh-client-types.mjs'
 import { prepareSkillHubArchive, stageSkillHub } from './skillhub-tooling.mjs'
@@ -279,6 +280,7 @@ ensureDshHostDependencies()
 
 // Overridden packages have no projected lib/. Emit each face before tsdown
 // consumes it, including API packages with separate Host and Client programs.
+ensureDshTypertRemoteProjection()
 refreshDshHostApplicationTypes()
 buildDshHostPackages()
 rebuildDshHostArtifacts()
@@ -1125,6 +1127,25 @@ function rebuildDshHostArtifacts() {
   mirrorSnapshotLibsBackToSource()
 }
 
+/**
+ * `@deepseek-ai/dsh-api-<包名>/remote` 的类型面是 typert 生成物（lib/typert.remote-client.*），
+ * 不是 tsc 产物，而 `lib/` 是 gitignored —— 全新克隆一个都没有。紧接着的
+ * refreshDshHostApplicationTypes 用 `tsc -b --force` 编 apps/cli 与 apps/desktop-host，
+ * 这两棵引用图会拉到 client 面的包（remotes / product-analytics 等），它们开头就是
+ * `import type {} from '…/remote'`：缺投影时先报 TS2307，随后 ClientRemote 的声明合并
+ * 一起失效（.job/.session/.productAnalytics 变成「不存在」，再连出一串参数类型不匹配）。
+ *
+ * prepare-runtime 在「源树 lib/ 不新鲜」时已经补过这一步；这里再判一次，是因为快照
+ * 命中指纹缓存的分支会整段跳过它，而源树被手工清过 lib/ 时也未必走到。
+ * 判据落在「解析实际会落到的那棵树上有没有这个文件」，不落在「上游有没有跑过某个步骤」。
+ * 解析落点：快照的 node_modules 是软链回源树的，所以生成必须写进源树。
+ */
+function ensureDshTypertRemoteProjection() {
+  if (hasTypertRemoteProjection(sourceDshRoot)) return
+  console.log('生成 dsh typert 投影（host 应用编译需要 @deepseek-ai/dsh-api-<包名>/remote 的类型面）...')
+  generateTypertArtifacts(sourceDshRoot)
+}
+
 function refreshDshHostApplicationTypes() {
   const stage = readFileSync(resolve(dshRoot, '.lumo-stage'), 'utf8').trim()
   const marker = resolve(dshRoot, '.lumo-host-application-types-stage')
@@ -1144,7 +1165,12 @@ function refreshDshHostApplicationTypes() {
   runWorkspaceBinary('.', 'tsc', [
     '-b', 'apps/cli/tsconfig.json', 'apps/desktop-host/tsconfig.json',
     '--force', '--pretty', 'false',
-  ], 'DSH Host 应用类型产物刷新失败')
+  ], 'DSH Host 应用类型产物刷新失败', [
+    // 全新克隆上这是整张引用图的第一次编译；上游 build:lib:host 对同一步也开 8 GiB
+    // （见 package.json）。Node 默认堆在 macOS arm64 runner 上会耗尽并以 SIGABRT 退出，
+    // 而那看起来像「编译失败」而不是「内存不够」。
+    '--max-old-space-size=8192',
+  ])
   if (entries.some((entry) => !existsSync(resolve(dshRoot, entry)))) {
     throw new Error('DSH Host 应用编译成功但打包入口仍缺失；请检查上游应用入口布局')
   }
@@ -1251,10 +1277,10 @@ function refreshDshClientTypePrerequisites() {
 // `pnpm run` —— pnpm 会顺着链接把源树的 workspace 链接重写成指向快照，而快照只有
 // src/、没有构建好的 lib/，下一次 Vite 解析 experimental/webworker-runtime/worker
 // 就崩。直调二进制既跳过了这层重链，也跳过了 registry。
-function runWorkspaceBinary(packageDirectory, binaryName, args, failureMessage) {
+function runWorkspaceBinary(packageDirectory, binaryName, args, failureMessage, nodeArgs = []) {
   const cwd = resolve(dshRoot, packageDirectory)
   const binary = resolveWorkspaceNodeTool(cwd, dshRoot, binaryName)
-  const result = spawnSync(process.execPath, [binary, ...args], { cwd, stdio: 'inherit' })
+  const result = spawnSync(process.execPath, [...nodeArgs, binary, ...args], { cwd, stdio: 'inherit' })
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) throw new Error(`${failureMessage}：${String(result.status ?? result.signal)}`)
 }
