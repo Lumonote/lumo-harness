@@ -286,16 +286,26 @@ export function ensureLibEntriesReexport(sourceRoot) {
       generateTypertArtifacts(sourceRoot)
     }
     for (const config of ['tsconfig.host.json']) {
-      // dsh-root 的 host 构建本身也使用 4 GiB heap（见 package.json 的
-      // build:lib:host）。全新 CI clone 会在这里首次编译整个引用图；Node
-      // 默认堆在 macOS arm64 runner 上会耗尽并以 SIGABRT 退出。
-      const result = spawnSync(process.execPath, ['--max-old-space-size=4096', tsc, '-b', config], {
+      // 8 GiB 与上游 build:lib:host 对齐（package.json 里是
+      // `node --max-old-space-size=8192 tsc -p tsconfig.host.json`）。这里原先写 4 GiB，
+      // 注释还称「上游也用 4 GiB」——那是旧值。2026-10-31 的 run 41213627664 三台
+      // runner 全倒在这一步：`FATAL ERROR: Ineffective mark-compacts near heap limit`
+      // 后停在 4082.2 (4099.1) MB，SIGABRT（Windows 是 134）。全新克隆首次编译整张
+      // 引用图就是峰值场景，4 GiB 差一点点，一卡就是 3~9 分钟的空转。
+      const hostHeapMb = 8192
+      const result = spawnSync(process.execPath, [`--max-old-space-size=${String(hostHeapMb)}`, tsc, '-b', config], {
         cwd: sourceRoot,
         stdio: 'inherit',
       })
       if (result.error !== undefined) throw result.error
       if (result.status !== 0) {
-        throw new Error(`Lumo DSH staging: 重建 dsh host 类型产物失败（${String(result.status ?? result.signal)}）`)
+        // SIGABRT / 134 是 V8 堆耗尽（上面有 FATAL ERROR 行），不是编译错误。把这条
+        // 指引写进消息，免得下次又从 TypeScript 诊断的方向查起。
+        const how = String(result.signal ?? result.status)
+        const heapHint = result.signal === 'SIGABRT' || result.status === 134
+          ? `：V8 堆耗尽（见上面的 FATAL ERROR 行），调大 hostHeapMb（当前 ${String(hostHeapMb)}）`
+          : ''
+        throw new Error(`Lumo DSH staging: 重建 dsh host 类型产物失败（${how}）${heapHint}`)
       }
     }
     const synth = spawnSync(process.execPath, [script], { cwd: sourceRoot, stdio: 'inherit' })

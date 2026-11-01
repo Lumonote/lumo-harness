@@ -1269,7 +1269,13 @@ function refreshDshClientTypePrerequisites() {
     '-b', ...staleConfigs,
     '--force',
     '--pretty', 'false',
-  ], 'DSH 客户端基础声明刷新失败')
+  ], 'DSH 客户端基础声明刷新失败', [
+    // 与 host 面同一张规模的引用图，同一个 4 GiB 天花板。2026-10-31 的 run
+    // 41213627664 先在 host 面炸（FATAL ERROR: Ineffective mark-compacts near heap
+    // limit，4082 MB / SIGABRT），client 面还没走到；这里预先给足，免得下一轮换到
+    // 这里再炸一次。
+    '--max-old-space-size=8192',
+  ])
   writeFileSync(marker, `${stage}\n`)
 }
 
