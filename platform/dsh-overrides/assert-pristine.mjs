@@ -11,8 +11,15 @@ import { spawnSync } from 'node:child_process'
  * `.js/.d.ts/.map` 正是这么产生的；只查前不查后等于把这条路留着。
  */
 
+// spawnSync 的默认 maxBuffer 只有 1 MiB，超了不是「截断」而是直接 ENOBUFS 抛错。
+// `git ls-files -z` 在 dsh 这棵树上 2026-11-01 实测是 1,126,691 字节 / 19,188 条路径
+// （比默认线多 78 KB），于是 copyTrackedTree 当场炸：
+//   Error: spawnSync git ENOBUFS  at git (assert-pristine.mjs:15) ← copyTrackedTree
+// 报错长得像 git 崩了，其实是 Node 把管道读断了。这棵树只会越长越大，给足余量。
+const GIT_MAX_BUFFER = 64 * 1024 * 1024
+
 function git(root, args, encoding = 'utf8') {
-  const result = spawnSync('git', ['-C', root, ...args], { encoding })
+  const result = spawnSync('git', ['-C', root, ...args], { encoding, maxBuffer: GIT_MAX_BUFFER })
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${String(result.stderr).trim()}`)
   return result.stdout

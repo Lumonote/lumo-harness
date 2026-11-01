@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { assertPristineProductSource } from '../assert-pristine.mjs'
+import { assertPristineProductSource, git as gitWithBuffer } from '../assert-pristine.mjs'
 
 /**
  * 上游源码洁净度闸门。
@@ -92,5 +92,37 @@ describe('assertPristineProductSource', () => {
     write(root, 'packages/client/ui-theme/node_modules/dep/index.js', '')
     write(root, 'packages/client/ui-theme/lib/index.js', '')
     expect(() => { assertPristineProductSource(root) }).not.toThrow()
+  })
+})
+
+/**
+ * `git()` 的缓冲区上限。
+ *
+ * `spawnSync` 默认 maxBuffer 是 1 MiB，超了不是截断而是 **ENOBUFS 抛错**。
+ * dsh 这棵树的 `git ls-files -z` 在 2026-11-01 是 1,126,691 字节 / 19,188 条路径，
+ * 刚过线 —— release run 41271198766 就死在 copyTrackedTree 里那句
+ * `Error: spawnSync git ENOBUFS`，看起来像 git 崩了。
+ *
+ * 这里用「一个 2 MB 的 blob」而不是「造 5000 个小文件」来制造同样的超限输出：
+ * 要测的是这个 helper 读不读得回超过 1 MiB 的东西，跟输出是哪种 git 子命令无关，
+ * 而建 5000 个文件光写盘就要四分钟。
+ */
+describe('git() 的输出缓冲区', () => {
+  it('输出超过 spawnSync 默认 1 MiB 时仍然读得回来', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'lumo-git-buffer-'))
+    temporaries.push(root)
+    git(root, ['init', '--quiet'])
+    git(root, ['config', 'user.email', 'test@lumo.local'])
+    git(root, ['config', 'user.name', 'lumo test'])
+    // 2 MiB 的可压缩文本：远超默认 1 MiB 线。
+    const big = 'lumo-buffer-probe\n'.repeat(120_000)
+    write(root, 'big.txt', big)
+    git(root, ['add', '-A'])
+    git(root, ['commit', '--quiet', '-m', 'big blob'])
+
+    const output = String(gitWithBuffer(root, ['cat-file', '-p', 'HEAD:big.txt'], null))
+    expect(output).toBe(big)
+    // 确认这棵树确实越过了默认线，否则这条用例测不到要测的东西。
+    expect(Buffer.byteLength(output)).toBeGreaterThan(1024 * 1024)
   })
 })
