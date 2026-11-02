@@ -25,6 +25,7 @@ import { dshClientTypeConfigs, hasUsableDshClientTypes } from './dsh-client-type
 import { prepareSkillHubArchive, stageSkillHub } from './skillhub-tooling.mjs'
 import { acquireBuildLock } from './build-lock.mjs'
 import { findCrossTreeImports } from './dsh-node-self-contained.mjs'
+import { prepareSourcePlugins } from '../tools/prepare-source-plugins.mjs'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(desktopRoot, '..', '..')
@@ -132,6 +133,7 @@ const baselineManifest = JSON.parse(readFileSync(baselineManifestPath, 'utf8'))
 if (!Array.isArray(baselineManifest.baseline) || baselineManifest.baseline.length === 0) {
   throw new Error(`基线插件清单的 baseline 为空——清单不得为空：${baselineManifestPath}`)
 }
+const sourcePluginRoots = prepareSourcePlugins(resolve(repoRoot, 'platform'))
 const upstreamPluginSpecs = baselineManifest.baseline.map((entry) => {
   if (typeof entry?.name !== 'string' || typeof entry?.version !== 'string') {
     throw new Error(`基线插件清单有条目缺少 name/version：${JSON.stringify(entry)}`)
@@ -974,7 +976,9 @@ function prepareUpstreamPlugins() {
       const manifest = resolve(upstreamPluginModulesRoot, ...name.split('/'), 'package.json')
       if (!existsSync(manifest)) return false
       try {
-        return JSON.parse(readFileSync(manifest, 'utf8')).version === expected
+        const installed = JSON.parse(readFileSync(manifest, 'utf8'))
+        const sourcePin = baselineManifest.baseline.find(pin => pin.name === name)?.source
+        return installed.version === expected && (!sourcePin || installed.lumoSource?.commit === sourcePin.commit)
       } catch {
         return false
       }
@@ -989,7 +993,9 @@ function prepareUpstreamPlugins() {
     packageManager: upstreamPluginPackageManager,
     dependencies: Object.fromEntries(upstreamPluginSpecs.map((spec) => {
       const at = spec.lastIndexOf('@')
-      return [spec.slice(0, at), spec.slice(at + 1)]
+      const name = spec.slice(0, at)
+      const sourceRoot = sourcePluginRoots.get(name)
+      return [name, sourceRoot ? `file:${sourceRoot}` : spec.slice(at + 1)]
     })),
   }, null, 2)}\n`)
   console.log('准备桌面基础插件（市场 / 视觉 / 浏览器 / 上下文 / 费用）...')

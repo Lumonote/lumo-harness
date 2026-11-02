@@ -21,7 +21,7 @@ import { brandWebBuild } from '../brand-web.mjs'
  */
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
-const dshRoot = resolve(repoRoot, 'deepseek-harness')
+const dshRoot = resolve(process.env['LUMO_DSH_SOURCE_ROOT'] ?? resolve(repoRoot, 'deepseek-harness'))
 
 /** 覆盖层触碰的上游文件；保留旧项目顺序以稳定现有用例的读取下标。 */
 const PATCHED = [
@@ -158,6 +158,17 @@ describe('applyLumoDshOverrides', () => {
         + "      // full, so their completion requires the peer to acknowledge data.\n"
         + "      queued = this.socket.bufferedAmount > 0\n",
     },
+    '压缩选项（0.2.2）': {
+      preamble: '      let queued = false\n',
+      callback: '      this.socket.send(text, {\n'
+        + '        compress: this.compression && text.length >= 1024,\n'
+        + '      }, (error) => {\n'
+        + '        if (error) { reject(error); return }\n'
+        + '        if (queued) this.alive()\n'
+        + '        resolve()\n'
+        + '      })\n'
+        + '      queued = this.socket.bufferedAmount > 0\n',
+    },
   }
 
   /**
@@ -202,6 +213,21 @@ describe('applyLumoDshOverrides', () => {
     expect(patched).toContain('const bounded = delivery.finally(')
     // 回调体原样保留 —— 补丁不该顺手改写上游的活跃度记账。
     expect(patched).toContain(shape.callback)
+  })
+
+  it.each([
+    '      <div className={css.sectionHeader}>\n',
+    '      <div className={clsx(css.sectionHeader, wide && searchSpacingMotionEnabled && css.searchSpacingMotion)}>\n',
+  ])('历史切换兼容两代 header 并保留上游类名:%s', (header) => {
+    const root = stagePristineUpstream('history-header')
+    const file = 'packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx'
+    writeFileSync(resolve(root, file), `function History() { return (\n${header}        native header\n      </div>\n) }`)
+    expect(diagnoseOverlayAnchors(root)).toEqual([])
+    const patched = read(root, file)
+    expect(patched).toContain(header)
+    expect(patched).toContain("actions.setGroupBy('flat'); setQuery('')")
+    applyLumoDshOverrides(root)
+    expect(read(root, file)).toBe(patched)
   })
 
   it('锚点在当前上游 HEAD 里仍然存在,会话与侧边栏都被打上扩展位', () => {

@@ -54,9 +54,11 @@ describe('profile plugin installation', () => {
       '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/knowledge-vault', '@lumo/skill-local',
       '@lumo/web-fetch-fakeip',
       'dshmarket', '@liustack/modlens', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
+      'dsh-superagent',
     ])
     expect(local).toContainEqual({ name: 'dshmarket', spec: 'dshmarket@1.66.6' })
     expect(local).toContainEqual({ name: 'dsh-context', spec: 'dsh-context@0.60.0' })
+    expect(local).toContainEqual({ name: 'dsh-superagent', spec: 'link:/workspace/platform/.build/source-plugins/dsh-superagent' })
   })
 
   it('installs only dependencies missing from the profile manifest', () => {
@@ -192,6 +194,7 @@ describe('baseline bundle reconciliation', () => {
   it('carries the whole pinned baseline', () => {
     expect(baselineBundlePackages()).toEqual([
       'dshmarket', '@liustack/modlens', 'dsh-context', 'dsh-cost-meter', 'dsh-dream-skin',
+      'dsh-superagent',
     ])
   })
 
@@ -235,6 +238,7 @@ describe('baseline bundle reconciliation', () => {
       '@liustack/modlens': '1.0.0',
       'dsh-cost-meter': '1.0.0',
       'dsh-dream-skin': '1.0.0',
+      'dsh-superagent': '1.0.0',
     })
     // The market resolves presence and activation from the profile's own
     // node_modules, not the shared fallback directory.

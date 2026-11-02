@@ -25,6 +25,7 @@ interface BaselineEntry {
   name: string
   version: string
   note: string
+  source?: { repository: string; commit: string }
 }
 
 interface ExcludedEntry {
@@ -47,8 +48,8 @@ const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as BaselineManif
 
 describe('基线插件清单 —— 生成物与原件一致（漂移锁）', () => {
   it('baseline 逐条一致，含顺序', () => {
-    expect(BASELINE_PLUGIN_PINS.map(pin => ({ name: pin.name, version: pin.version, note: pin.note })))
-      .toEqual(manifest.baseline.map(entry => ({ name: entry.name, version: entry.version, note: entry.note })))
+    expect(BASELINE_PLUGIN_PINS.map(pin => ({ name: pin.name, version: pin.version, note: pin.note, source: pin.source })))
+      .toEqual(manifest.baseline.map(entry => ({ name: entry.name, version: entry.version, note: entry.note, source: entry.source })))
   })
 
   it('spec 由 name@version 拼出，不是第二处手写', () => {
@@ -75,6 +76,12 @@ describe('基线插件清单 —— 生成物与原件一致（漂移锁）', ()
 })
 
 describe('基线插件清单 —— 清单自身的完整性', () => {
+  it('Superagent 从官方仓库固定提交构建，不能误装未发布的 npm 包', () => {
+    expect(manifest.baseline.find(pin => pin.name === 'dsh-superagent')?.source).toEqual({
+      repository: 'https://github.com/deepseek-ai/dsh-superagent-prototype.git',
+      commit: '6337fc823ce20251c8de8085948165c81aaa701e',
+    })
+  })
   it('说明性字段非空（title / description / policy）', () => {
     for (const field of [manifest.title, manifest.description, manifest.policy]) {
       expect(field.trim().length).toBeGreaterThan(0)

@@ -32,6 +32,7 @@ import {
 } from './plugins.ts'
 import { assertLocalStoragePath, resolveDeploymentProfile, withClusterStatus } from './deployment.ts'
 import { FAKE_IP_PROVIDER_ID } from '@lumo/web-fetch-fakeip'
+import { superagentProfileOverlay } from './superagent.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const packagedRuntimeRoot = process.env['LUMO_RUNTIME_ROOT']
@@ -621,6 +622,7 @@ ${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
         skillhubSnapshotFile: ${JSON.stringify(localMode ? join(desktopStateDir, 'skill-snapshot.json') : '.lumo/skill-snapshot.json')}
 ` : ''}
 ${workflowEngineOverlay(role)}
+${superagentProfileOverlay(dshProfile, profileBundleNames(dshProfile, process.env))}
 ${skillFilesystemOverlay}
 ${profileLifetimeOverlay(dshProfile, extraArgs.length > 0)}
 `,

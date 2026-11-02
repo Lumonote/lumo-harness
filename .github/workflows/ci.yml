@@ -55,6 +55,9 @@ jobs:
           cache: 'pnpm'
           cache-dependency-path: platform/pnpm-lock.yaml
 
+      - name: Check all DSH overlay anchors
+        run: node dsh-overrides/check-compatibility.mjs ../deepseek-harness
+
       - name: Install upstream dsh dependencies
         run: pnpm --dir ../deepseek-harness install --frozen-lockfile
 

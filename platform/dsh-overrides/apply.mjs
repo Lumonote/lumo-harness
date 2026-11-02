@@ -220,8 +220,15 @@ export function applyLumoDshOverrides(root) {
     ],
   ], 'LUMO_SIDEBAR_NAVIGATION')
 
-  patchFile(root, 'packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx', [[
-    '      <div className={css.sectionHeader}>\n',
+  // Upstream added search-spacing motion to the header. Keep its class expression
+  // intact; the Lumo controls are siblings, not a replacement for native chrome.
+  const historyFile = 'packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx'
+  const historySource = readFileSync(resolve(root, historyFile), 'utf8')
+  const historyHeader = historySource.includes('      <div className={css.sectionHeader}>\n')
+    ? '      <div className={css.sectionHeader}>\n'
+    : '      <div className={clsx(css.sectionHeader, wide && searchSpacingMotionEnabled && css.searchSpacingMotion)}>\n'
+  patchFile(root, historyFile, [[
+    historyHeader,
     `      {wide && (
         <div data-lumo-history-toggle className={css.sectionHeader}>
           <button type="button" className={css.iconButton} style={{ width: 'auto', padding: '0 8px' }}
@@ -234,8 +241,7 @@ export function applyLumoDshOverrides(root) {
           </button>
         </div>
       )}
-      <div className={css.sectionHeader}>
-`,
+` + historyHeader,
   ]], 'data-lumo-history-toggle')
 
   patchFile(root, 'packages/client/ui-workspace/src/client/locales.ts', [
@@ -348,7 +354,7 @@ export function applyLumoDshOverrides(root) {
         + "      }\n",
     ],
     [
-      "      this.socket.send(text, (error) => {\n",
+      "      this.socket.send(text,",
       "      // LUMO_STREAM_BACKPRESSURE: bound the flush itself. A WebView that stops\n"
         + "      // consuming leaves the send callback pending forever; terminate on the\n"
         + "      // deadline so carrier retry, not a hung promise, owns recovery.\n"
@@ -356,7 +362,7 @@ export function applyLumoDshOverrides(root) {
         + "        this.socket.terminate()\n"
         + "        reject(new Error('api gateway: Remote stream send did not flush before the deadline'))\n"
         + "      }, LUMO_SEND_FLUSH_TIMEOUT_MS)\n"
-        + "      this.socket.send(text, (error) => {\n",
+        + "      this.socket.send(text,",
     ],
     [
       "    this.writes = delivery.catch(() => undefined)\n"

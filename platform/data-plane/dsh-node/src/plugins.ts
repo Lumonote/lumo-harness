@@ -160,6 +160,9 @@ export interface ProfilePluginSpec {
 
 /** Package specs installed into a DSH profile before its Loader tree starts. */
 export function profilePluginSpecs(profile: string, platformRoot: string, deploymentMode: 'local' | 'standalone' | 'cluster' = 'standalone'): ProfilePluginSpec[] {
+  const baseline = BASE_PROFILE_PLUGINS.map(plugin => BASELINE_PLUGIN_PINS.some(pin => pin.name === plugin.name && pin.source)
+    ? { name: plugin.name, spec: `link:${resolve(platformRoot, '.build/source-plugins', plugin.name)}` }
+    : plugin)
   const local = Object.entries(PLATFORM_PLUGIN_MODULES).map(([key, name]) => ({
     name,
     spec: `link:${resolve(platformRoot, 'dsh-plugins', PLATFORM_PLUGIN_DIRECTORIES[key as keyof typeof PLATFORM_PLUGIN_MODULES])}`,
@@ -170,12 +173,12 @@ export function profilePluginSpecs(profile: string, platformRoot: string, deploy
     const localOnly = new Set(['@lumo/agent-teams', '@lumo/dsh-platform-ui', '@lumo/knowledge-vault', '@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/skill-local', '@lumo/web-fetch-fakeip'])
     return [
       ...local.filter(({ name }) => localOnly.has(name)),
-      ...BASE_PROFILE_PLUGINS,
+      ...baseline,
     ]
   }
   return profile === 'web'
-    ? [...local, ...BASE_PROFILE_PLUGINS, ...WEB_COMMUNITY_PLUGINS]
-    : [...local, ...BASE_PROFILE_PLUGINS]
+    ? [...local, ...baseline, ...WEB_COMMUNITY_PLUGINS]
+    : [...local, ...baseline]
 }
 
 export function missingProfilePluginSpecs(
@@ -249,6 +252,10 @@ export function ensureProfilePlugins(options: {
     console.log(`dsh-node: installing profile plugin ${plugin.name}`)
     let result: ReturnType<typeof spawnSync>
     try {
+      if (BASELINE_PLUGIN_PINS.some(pin => pin.name === plugin.name && pin.source)) {
+        const built = spawnSync(process.execPath, [resolve(options.platformRoot, 'tools/prepare-source-plugins.mjs'), options.platformRoot, plugin.name], { env, stdio: 'inherit' })
+        if (built.error || built.status !== 0) throw new Error(`source plugin build failed: ${plugin.name}`)
+      }
       result = runProfileManager(options, env, ['add', plugin.spec])
     } catch (error: unknown) {
       if (isOptionalProfilePlugin(plugin.name)) {

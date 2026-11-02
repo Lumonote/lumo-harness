@@ -34,6 +34,15 @@
             "description": "精确版本，不接受范围写法：桌面构建不得因为 registry 上的 tag 移动而改变行为。",
             "pattern": "^\\d+\\.\\d+\\.\\d+$"
           },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["repository", "commit"],
+            "properties": {
+              "repository": { "type": "string", "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+              "commit": { "type": "string", "pattern": "^[a-f0-9]{40}$" }
+            }
+          },
           "note": {
             "type": "string",
             "minLength": 1,

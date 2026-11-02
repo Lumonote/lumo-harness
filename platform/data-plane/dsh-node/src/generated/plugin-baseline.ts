@@ -18,6 +18,8 @@ export interface BaselinePluginPin {
   version: string
   /** `name@version`，安装时直接使用。 */
   spec: string
+  /** 未发布 npm 的插件从固定源码提交构建。 */
+  source?: { repository: string; commit: string }
   /** 这个插件是什么、为什么钉这个版本。 */
   note: string
 }
@@ -53,6 +55,13 @@ export const BASELINE_PLUGIN_PINS: readonly BaselinePluginPin[] = [
     version: '9.29.0',
     spec: 'dsh-dream-skin@9.29.0',
     note: '桌面换肤：主题、壁纸与每用户强调色，使用原生 theme、locale、slots 服务。',
+  },
+  {
+    name: 'dsh-superagent',
+    version: '0.1.0',
+    spec: 'dsh-superagent@0.1.0',
+    source: { repository: 'https://github.com/deepseek-ai/dsh-superagent-prototype.git', commit: '6337fc823ce20251c8de8085948165c81aaa701e' },
+    note: 'DeepSeek 官方 Superagent 研究原型：GitHub 请求、策略、任务执行与管理面板。尚未发布 npm，构建期从固定提交编译。Web profile 默认提供独立状态目录，账户与仓库由用户在面板配置；Windows/headless 保留安装但停用需要 POSIX 与 Web 的宿主入口。',
   },
 ]
 

@@ -94,6 +94,14 @@ jobs:
           cache: 'pnpm'
           cache-dependency-path: platform/pnpm-lock.yaml
 
+      - name: Check all DSH overlay anchors before expensive build setup
+        shell: bash
+        run: node platform/dsh-overrides/check-compatibility.mjs deepseek-harness
+
+      - name: Build unpublished default plugins from pinned sources
+        shell: bash
+        run: node platform/tools/prepare-source-plugins.mjs
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 

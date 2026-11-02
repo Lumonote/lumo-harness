@@ -75,7 +75,9 @@ function normalize(manifest) {
     if (!VERSION_PATTERN.test(version)) {
       fail(`baseline[${index}].version 必须是精确版本（x.y.z），不接受范围写法：${version}`)
     }
-    return { name, version, note, spec: `${name}@${version}` }
+    if (entry.source !== undefined && (!/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(entry.source.repository)
+      || !/^[a-f0-9]{40}$/.test(entry.source.commit))) fail(`baseline[${index}].source 必须固定 GitHub 仓库和完整提交哈希`)
+    return { name, version, note, spec: `${name}@${version}`, ...(entry.source ? { source: entry.source } : {}) }
   })
 
   const excluded = manifest.excluded.map((entry, index) => {
@@ -121,6 +123,7 @@ function render({ baseline, excluded, packagedFirstParty }) {
       `    name: ${quote(entry.name)},`,
       `    version: ${quote(entry.version)},`,
       `    spec: ${quote(entry.spec)},`,
+      ...(entry.source ? [`    source: { repository: ${quote(entry.source.repository)}, commit: ${quote(entry.source.commit)} },`] : []),
       `    note: ${quote(entry.note)},`,
       '  },',
     ].join('\n'))
@@ -157,6 +160,8 @@ export interface BaselinePluginPin {
   version: string
   /** \`name@version\`，安装时直接使用。 */
   spec: string
+  /** 未发布 npm 的插件从固定源码提交构建。 */
+  source?: { repository: string; commit: string }
   /** 这个插件是什么、为什么钉这个版本。 */
   note: string
 }
