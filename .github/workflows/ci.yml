@@ -344,7 +344,7 @@ jobs:
       # `ERR_PNPM_BAD_PM_VERSION` 失败，症状是容器无限重启。这个缺陷只在**运行期**显形（本地
       # 不建镜像、不跑那个入口就永远看不到），判据却是纯静态的：pin 处处一致 + 每个入口都装默认版本。
       - name: Every corepack entry point pins a default pnpm version
-        run: platform/tools/check-corepack-pin.py
+        run: python3 platform/tools/check-corepack-pin.py
       - name: Render default chart (mTLS and controls disabled by default)
         run: helm template lumo platform/deploy/helm/lumo-platform >/dev/null
       - name: Render enforced production controls and Istio mTLS

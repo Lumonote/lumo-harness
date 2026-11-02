@@ -33,3 +33,5 @@ RocketMQ 门禁已在运行 `41405260712` 远端通过；下一项集群探针�
 `3653974a` 的平台 CI 已通过类型检查，单测剩余 2 条失败均读取了被 gitignore 排除的 `platform/upstream/skills`。Archify 与 creative-skills 的单元测试现在通过已有 `config.root` 接口读取临时文件，验证 frontmatter 剥离、正文保留、来源 pin 与入库清单一致、资源路径、Lumo 扩展及释放行为；缺失或损坏的技能仍必须报错且不得注册。测试不再依赖开发机预装技能，实际固定提交的获取与完整资源装配仍由桌面安装/打包链验证。
 
 同次桌面日志已完成 DSH Host/Client 构建及 386 包回拷，随后仅在 Lumo UI 报错：上游 InputState 新增 sending，但本地桥类型复制了旧 phase 联合。桥实际只读取 draft，发送及状态判断由上游 inputActions 完成；现用公开 slot 合同的 Pick<input, 'draft'> 定义消费面，避免未消费的枚举字段再次随上游变化而中断构建。
+
+同次 `production-gates` 的 RocketMQ 与集群探针均已通过，剩余失败位于 Corepack pin 门禁：工作流直接执行 git 模式为 100644 的 Python 文件，触发 permission denied；平台 build.sh 已使用 python3 调用同一脚本。CI 现与其保持一致，经 python3 执行检查通过，三个 install 与两个运行入口均固定 pnpm 11.7.0。
