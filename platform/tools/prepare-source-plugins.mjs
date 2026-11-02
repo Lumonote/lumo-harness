@@ -49,7 +49,11 @@ export function prepareSourcePlugins(platformRoot, onlyName) {
       const pkg = JSON.parse(readFileSync(resolve(checkout, 'package.json'), 'utf8'))
       if (pkg.name !== pin.name || pkg.version !== pin.version) throw new Error(`Source manifest differs from baseline pin: ${pin.name}`)
       const corepack = process.platform === 'win32' ? 'corepack.cmd' : 'corepack'
-      run(corepack, [pkg.packageManager, 'install', '--frozen-lockfile', '--ignore-scripts', '--config.manage-package-manager-versions=false'], checkout)
+      // This checkout sits below platform/.build. Without --ignore-workspace,
+      // pnpm installs the parent platform workspace and leaves this package
+      // without its own build tools despite exiting successfully.
+      run(corepack, [pkg.packageManager, 'install', '--frozen-lockfile', '--ignore-scripts',
+        '--ignore-workspace', '--config.manage-package-manager-versions=false'], checkout)
       // Invoke the JS entry directly: avoid workspace relinking and .bin shims.
       const tool = JSON.parse(readFileSync(resolve(checkout, 'node_modules/tsdown/package.json'), 'utf8'))
       const entry = typeof tool.bin === 'string' ? tool.bin : tool.bin.tsdown
