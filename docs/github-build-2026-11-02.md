@@ -13,3 +13,9 @@ Superagent 加入同一份默认插件基线：`dsh-superagent@0.1.0`，官方�
 Web profile 默认配置持久化状态目录 `<DSH_HOME>/profiles/web/superagent`；可用 `LUMO_SUPERAGENT_STATE_DIR` 指定其他目录。首次启动在 Superagent 面板配置仓库、专用 GitHub CLI 账号和策略，未配置前保持等待设置。上游原型使用 POSIX 路径、shell shim 与 Web 服务，因此 Windows 和 headless 默认安装但停用宿主条目。Feishu 仍按上游默认关闭。
 
 GitHub Actions 最终验证结果以修复提交对应的远端运行记录为准。
+
+## 平台 CI 后续失败（运行 41403261552）
+
+该运行是 `platform-ci`，提交 `34057a88`。`Build upstream dsh host outputs` 仍直接执行 4 GiB 的 `tsc -b`，没有先生成 Typert 投影，因此出现大量 `*/remote` 模块缺失及 `ClientRemote` 成员缺失的级联错误，随后在约 4 GiB 处 V8 堆耗尽，退出码 134。CI 现改为调用 `dsh-overrides/build-host.mjs`，复用桌面构建的 `ensureLibEntriesReexport`：先 Typert、再 8 GiB host 编译、最后合成 lib 入口。构建前后均检查上游源码洁净度。
+
+同次运行的 `production-gates` 失败在 RocketMQ 入口顺序检查。替身脚本放在临时 `bin` 并加入 PATH，但运行入口时仍位于仓库根；macOS 的 `/bin/sh` 会搜索 PATH，Ubuntu 的 dash 对 `sh mqnamesrv` 则从当前目录打开文件。检查脚本现先进入临时 `bin` 再启动入口，复现真实容器的工作目录。topic 必须先于 proxy 的生产契约保持原样，反例与失败路径检查继续执行。

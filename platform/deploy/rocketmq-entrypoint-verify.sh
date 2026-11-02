@@ -207,8 +207,14 @@ run_entry() {
   fi
   mkdir -p "$state"
   : >"$state/events.log"
-  env FAKE_STATE="$state" PATH="$BIN:$PATH" "$@" \
-    bash "$entry" run >"$state/entry.out" 2>&1 &
+  # The container runs inside RocketMQ's bin directory. Reproduce that here:
+  # Ubuntu's /bin/sh (dash) opens `sh mqnamesrv` relative to cwd, whereas macOS
+  # sh (bash) also searches PATH. PATH-only fixtures passed locally but failed
+  # in CI before any topic/proxy event could be observed.
+  (
+    cd "$BIN"
+    exec env FAKE_STATE="$state" PATH="$BIN:$PATH" "$@" bash "$entry" run
+  ) >"$state/entry.out" 2>&1 &
   local pid=$!
   local rc=0 deadline=$((SECONDS + wait_seconds)) exited=0
   while (( SECONDS < deadline )); do
