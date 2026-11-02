@@ -202,7 +202,7 @@ const surfaceMeta: Record<Surface, { label: string; eyebrow: string; description
   skillhub: { label: '技能中心', eyebrow: '专家与技能', description: '选择可直接协作的专家，或为工作区安装单项技能。', short: '技能中心' },
   connectors: { label: '连接器', eyebrow: '连接器网关', description: '检查能力清单、调用协议与受控 Web 出站。', short: '连接' },
   account: { label: '用户中心', eyebrow: '身份与安全', description: '查看治理用户身份、安全策略与当前会话。', short: '账户' },
-  market: { label: '更多', eyebrow: '工作领域', description: '从这里进入低频工作区，或查看制品目录与灰度状态。', short: '更多' },
+  market: { label: '工作工具', eyebrow: '工作领域', description: '从这里进入低频工作区，或查看制品目录与灰度状态。', short: '工作工具' },
 }
 const surfaces = Object.keys(surfaceMeta) as Surface[]
 function availableSurfaces(localMode: boolean): Surface[] {
@@ -786,7 +786,7 @@ function SidebarNavigation({ wide }: SidebarNavigationProps) {
         ) : null}
       </div>
     ) : null}
-    {visibleSurfaces.map(surface => <button type="button" key={surface} className={active === surface ? 'active' : ''} title={surfaceMeta[surface].label} aria-label={surfaceMeta[surface].label} onClick={() => openSurface(surface)}><Glyph surface={surface} />{wide ? <span>{surfaceMeta[surface].label}</span> : null}{wide && surface === 'market' ? <small>工作工具</small> : null}</button>)}
+    {visibleSurfaces.map(surface => <button type="button" key={surface} className={active === surface ? 'active' : ''} title={surfaceMeta[surface].label} aria-label={surfaceMeta[surface].label} onClick={() => openSurface(surface)}><Glyph surface={surface} />{wide ? <span>{surfaceMeta[surface].label}</span> : null}</button>)}
   </nav>
 }
 
@@ -2213,7 +2213,7 @@ function MarketSurface({ onClose }: { onClose: () => void }) {
         <small>每个入口会在自己的页面核验技能、权限和服务状态。</small>
       </div>
     </WorkspaceHero>
-    <DomainTabs label="更多领域" value={area} onChange={setArea} items={[
+    <DomainTabs label="工具分类" value={area} onChange={setArea} items={[
       { id: 'apps', title: '工作工具', description: '打开可操作的领域工作台' },
       ...(!localMode ? [{ id: 'registry' as const, title: '制品目录与灰度', description: '可发现版本、节点回报和目标版本' }] : []),
     ]} />
@@ -3730,7 +3730,6 @@ function WorkbenchRail({ surface, available, select }: { surface: Surface; avail
         >
           <Glyph surface={item} />
           <span>{surfaceMeta[item].label}</span>
-          {item === 'market' ? <small>工作工具</small> : null}
         </button>)}
       </div>
     </nav>
