@@ -35,7 +35,7 @@ it.each([false, true])('persists callback registration before starting the child
     const promise = provider.start({
       prompt: [{ type: 'text', text: 'task' }],
       signal: new AbortController().signal,
-      descriptor: { version: 2, mode: 'one-shot', provider: 'test', label: 'task' },
+      label: 'task', cwd: '/tmp',
       parent: { id: SessionId('parent'), options: {}, session: { header: { id: SessionId('parent') }, events: [] }, ctx } as unknown as Agent,
     })
     if (fail) {

@@ -374,7 +374,10 @@ DERIVED=""
 # 派生的输入是**未渲染文本**，它按文本采集所有 profile 下的服务，这本身是对的
 # （它不该猜哪套端口在该形态下生效）；要断言某个形态就得显式限定。
 derive_of() {
-  local topology shape last
+  # Bash 5 keeps a declared-but-unassigned local unset under `set -u`.
+  # Standalone and synthetic topologies have no profile suffix, so initialize
+  # the empty profile explicitly (macOS Bash 3.2 previously masked this).
+  local topology shape="" last
   # 取末位参数**不能**用 ${!#}：macOS 自带 bash 3.2 不支持这种间接展开（它返回 0），
   # 而本脚本的 shebang 是 `env bash` —— 于是本地跑出来 shape 为空、profile 限定失效，
   # CI 的 Ubuntu（bash 5）却「碰巧」正常。这类写法在本仓是纯负债。

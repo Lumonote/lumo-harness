@@ -213,10 +213,32 @@ const LIB_FRESHNESS_PROBES = [
 
 /**
  * 该包是否已有 typert remote 投影（`@deepseek-ai/dsh-api-<包名>/remote` 的类型面）。
- * 判定只看文件在不在，不看内容新旧：内容由 generateTypertArtifacts 保证与源码同步。
+ * 检查全部已声明的 Typert 类型面，避免把缺少被覆盖包产物的隔离快照误判成完整。
  */
 export function hasTypertRemoteProjection(sourceRoot) {
-  return existsSync(resolve(sourceRoot, 'packages', 'api', 'workspace-files', 'lib', 'typert.remote-client.d.ts'))
+  if (!existsSync(resolve(sourceRoot, 'packages', 'api', 'workspace-files', 'lib', 'typert.remote-client.d.ts'))) return false
+  // A staged tree projects unchanged lib/ directories but deliberately omits
+  // overridden packages. One workspace-files probe can therefore be present
+  // while session-controller/remote is missing. Check every advertised Typert
+  // face, including packages whose lib/ will be mirrored back to the source.
+  const packages = resolve(sourceRoot, 'packages')
+  for (const group of readdirSync(packages, { withFileTypes: true })) {
+    if (!group.isDirectory()) continue
+    const groupRoot = resolve(packages, group.name)
+    for (const pkg of readdirSync(groupRoot, { withFileTypes: true })) {
+      if (!pkg.isDirectory()) continue
+      const packageRoot = resolve(groupRoot, pkg.name)
+      const manifestPath = resolve(packageRoot, 'package.json')
+      if (!existsSync(manifestPath)) continue
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+      for (const entry of Object.values(manifest.exports ?? {})) {
+        const types = entry?.types
+        if (typeof types === 'string' && types.startsWith('./lib/typert.')
+          && !existsSync(resolve(packageRoot, types))) return false
+      }
+    }
+  }
+  return true
 }
 
 /**
@@ -252,13 +274,13 @@ export function generateTypertArtifacts(sourceRoot) {
     throw new Error(`Lumo DSH staging: typert 投影生成失败（${String(result.status ?? result.signal)}）`)
   }
   if (!hasTypertRemoteProjection(sourceRoot)) {
-    throw new Error('Lumo DSH staging: typert 生成返回 0，但 packages/api/workspace-files/lib/typert.remote-client.d.ts 仍不存在')
+    throw new Error('Lumo DSH staging: typert 生成返回 0，但部分声明的 lib/typert.* 类型面仍不存在')
   }
 }
 
 export function ensureLibEntriesReexport(sourceRoot) {
   const brandTypes = resolve(sourceRoot, 'packages', 'util', 'brand', 'lib', 'types', 'index.js')
-  const fresh = LIB_FRESHNESS_PROBES.every(([relativePath, marker]) => {
+  const fresh = hasTypertRemoteProjection(sourceRoot) && LIB_FRESHNESS_PROBES.every(([relativePath, marker]) => {
     const probe = resolve(sourceRoot, relativePath)
     return existsSync(probe) && readFileSync(probe, 'utf8').includes(marker)
   })

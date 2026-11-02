@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { ensureLibEntriesReexport, ensureNativeAddonsBuilt } from '../prepare-runtime.mjs'
+import { ensureLibEntriesReexport, ensureNativeAddonsBuilt, hasTypertRemoteProjection } from '../prepare-runtime.mjs'
 
 /**
  * prepare-runtime 的「源树自愈」回归护栏。
@@ -105,6 +105,26 @@ fs.appendFileSync(path.join(process.cwd(), 'tsx-runs'), 'x')
   chmodSync(resolve(root, 'node_modules', '.bin', 'tsx'), 0o755)
   return { root, counter, bin }
 }
+
+describe('Typert projection completeness', () => {
+  it('detects an omitted session-controller face even when workspace-files is present', () => {
+    const { root } = fakeDsh('partial-typert')
+    write(root, 'packages/api/session-controller/package.json', JSON.stringify({
+      name: '@deepseek-ai/dsh-api-session-controller',
+      exports: {
+        './remote': { types: './lib/typert.remote-client.d.ts', default: './lib/typert.remote-client.js' },
+        './typert': { types: './lib/typert.host.d.ts', default: './lib/typert.host.js' },
+      },
+    }))
+    expect(hasTypertRemoteProjection(root)).toBe(false)
+    write(root, 'packages/api/session-controller/lib/typert.remote-client.d.ts', 'interface TypertRemoteNamespaceMap {}\n')
+    expect(hasTypertRemoteProjection(root)).toBe(false)
+    write(root, 'packages/api/session-controller/lib/typert.host.d.ts', 'export declare const TYPERT: unknown\n')
+    expect(hasTypertRemoteProjection(root)).toBe(true)
+    rmSync(resolve(root, 'packages/api/session-controller/lib/typert.remote-client.d.ts'))
+    expect(hasTypertRemoteProjection(root)).toBe(false)
+  })
+})
 
 // win32 没有平台包（hostNativeAddonDirectoryName 返回 null），这段逻辑在 Windows 上不适用。
 const posixOnly = it.skipIf(process.platform === 'win32')

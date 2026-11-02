@@ -101,6 +101,17 @@ export class PgKvUnit implements KvUnit {
     })
   }
 
+  deleteRecords(table: string, keys: readonly string[]): Promise<void> {
+    return this.settle(async () => {
+      this.ensureOpen()
+      const physical = this.physicalFor(table)
+      if (keys.length === 0) return
+      // A single statement makes the whole batch atomic, including duplicates
+      // and absent keys. Keep caller-supplied keys out of the SQL text.
+      await this.pool.query(`DELETE FROM "${physical}" WHERE key = ANY($1::text[])`, [[...keys]])
+    })
+  }
+
   setGlobal(value: unknown): Promise<void> {
     return this.settle(async () => {
       this.ensureOpen()

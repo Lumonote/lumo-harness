@@ -5,7 +5,8 @@ import type { AddressInfo } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import SubagentRuntime, { SubagentError } from '@deepseek-ai/dsh-subagent'
+import SubagentRuntime, { SubagentError, SUBAGENT_DESCRIPTOR_VERSION } from '@deepseek-ai/dsh-subagent'
+import { provideWorkingDirectoryFixture } from '@deepseek-ai/dsh-agent-loop-testkit'
 import type { ResolvedSubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import PtcWorkflowEngine from '../../../../deepseek-harness/packages/workflow/workflow-ptc/src/index.ts'
 import { fakeParent as workflowParent, mountWorkflowRuntime } from '../../../../deepseek-harness/packages/workflow/workflow-ptc/tests/setup.ts'
@@ -256,7 +257,7 @@ function startRequest(): ResolvedSubagentStartRequest {
     prompt: [{ type: 'text', text: 'child 任务' }],
     parent: fakeParent(),
     signal: new AbortController().signal,
-    descriptor: { version: 2, mode: 'one-shot', provider: 'lumo-remote', label: 'child task' },
+    cwd: '/tmp',
   }
 }
 
@@ -266,6 +267,7 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
     const ctx = new Context()
     all.push({ async close() { await ctx.fiber.dispose() } })
     await mountWorkflowRuntime(ctx, { cwd: '/tmp' })
+    provideWorkingDirectoryFixture(ctx, '/tmp')
     await ctx.plugin(SubagentRuntime)
     ctx.subagents.registerProvider(h.provider)
     await ctx.plugin(PtcWorkflowEngine, { provider: 'lumo-remote', maxConcurrentAgents: 1 })
@@ -273,7 +275,7 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
     const flow = ctx.workflowEngine.start({
       meta: { name: 'remote-fanout', description: 'one remotely placed child' },
       script: "return await agent('inspect remote node')",
-      parent: Object.assign(workflowParent(ctx), { ctx }),
+      parent: await workflowParent(ctx),
     })
     const hostStart = await Promise.race([
       waitFor(() => h.hostCalls.starts[0], 'FlowEngine child reaches remote host', 25_000),
@@ -325,7 +327,7 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
       maxTokens: 4096,
     })
     expect(req.prompt).toEqual([{ type: 'text', text: 'child 任务' }])
-    expect(req.descriptor).toEqual({ version: 2, mode: 'one-shot', provider: 'lumo-remote', label: 'child task' })
+    expect(req.descriptor).toEqual({ version: SUBAGENT_DESCRIPTOR_VERSION, mode: 'one-shot', provider: 'lumo-remote', label: 'child task' })
     // callbackUrl 带 per-run secret 能力段(评审 Important:回调面最小鉴权;
     // host 原样 POST,secret 不重写不剥离)
     const cb = new URL(req.callbackUrl)
@@ -337,8 +339,8 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
       expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
     ])
 
-    // 句柄:远端 run,localAgent undefined
-    expect(run.localAgent).toBeUndefined()
+    // 远端 provider 仅返回执行句柄，不暴露本进程 Agent。
+    expect(run).not.toHaveProperty('localAgent')
 
     // 回执(模拟承载侧 deliverCallback) → result 结集
     const status = await postCallback(h, {

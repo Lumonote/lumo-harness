@@ -127,7 +127,28 @@ export const inject = ['tools']
  */
 interface SubagentsFacetLike {
   list(): string[]
-  start(name: string, request: MemberStartRequest): Promise<MemberRun>
+  startActivation(spec: {
+    provider: string
+    label: string
+    request: Omit<MemberStartRequest, 'label' | 'signal'>
+    signal: AbortSignal
+    delivery: 'parent' | 'caller'
+  }): Promise<Omit<MemberRun, 'id'> & { childId: string }>
+}
+
+/** 将上游托管 activation 接到团队内部的 one-shot 执行面。 */
+export function createMemberSeam(subagents: SubagentsFacetLike): MemberSeam {
+  return {
+    list: () => subagents.list(),
+    async start(provider, { label, signal, ...request }) {
+      const activation = await subagents.startActivation({ provider, label, request, signal, delivery: 'caller' })
+      return {
+        id: activation.childId,
+        result: activation.result,
+        dispose: () => activation.dispose(),
+      }
+    },
+  }
 }
 
 /** 校验一个正整数配置项。 */
@@ -304,18 +325,16 @@ export function apply(ctx: Context, config: AgentTeamsConfig): void {
 
   // 成员执行面：按优先级探测 provider。这一步是「单机 / 集群」在装配层的全部差异。
   ctx.inject(['subagents'], (subagentsCtx) => {
-    const subagents = subagentsCtx.get('subagents') as SubagentsFacetLike
+    const subagents: SubagentsFacetLike | undefined = subagentsCtx.get('subagents')
     try {
+      if (subagents === undefined) throw new Error('subagents runtime is unavailable')
       const provider = selectMemberProvider({
         available: subagents.list(),
         ...config.memberProvider === undefined ? {} : { configured: config.memberProvider },
       })
       surface = {
         provider,
-        seam: {
-          list: () => subagents.list(),
-          start: (name, request) => subagents.start(name, request),
-        },
+        seam: createMemberSeam(subagents),
       }
       // 只报 provider：存储与会合面的形态由 `agent_teams_status` 的能力画像给出
       // （那是按需读的，不会因为这里的挂载顺序而报一个过时的值）。

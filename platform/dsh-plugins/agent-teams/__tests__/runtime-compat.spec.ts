@@ -11,7 +11,7 @@ import { SessionId } from '../../../../deepseek-harness/packages/core/session/li
 import SubagentService from '../../../../deepseek-harness/packages/subagent/subagent/lib/index.js'
 import TeamService from '../../../../deepseek-harness/packages/experimental/agent-team/lib/index.js'
 import * as nativeTeamTools from '../../../../deepseek-harness/packages/experimental/tool-agent-team/lib/index.js'
-import JsonlSessionPersistence from '../../../../deepseek-harness/packages/session/session-persistence-jsonl/lib/index.js'
+import * as JsonlSessionPersistence from '../../../../deepseek-harness/packages/session/session-persistence-jsonl/lib/index.js'
 import SessionQueryEngine from '../../../../deepseek-harness/packages/session-query/session-query/lib/index.js'
 import { mountAgentLoopTestDependencies } from '../../../../deepseek-harness/packages/test-support/agent-loop-testkit/lib/index.js'
 import * as lumoTeams from '../src/index.ts'
@@ -32,7 +32,7 @@ describe('平台团队与原生会话兼容', () => {
     const ctx = new Context()
     const root = mkdtempSync(join(tmpdir(), 'lumo-team-compat-'))
     try {
-      await mountAgentLoopTestDependencies(ctx)
+      await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
       await ctx.plugin(JsonlSessionPersistence, { root })
       await ctx.plugin(TestSessionQuery)
       await ctx.plugin(AgentLoop, { agents: [] })

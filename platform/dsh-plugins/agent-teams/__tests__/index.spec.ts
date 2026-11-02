@@ -13,9 +13,9 @@
  * 结果（`defineAgentTeamsTools` 本身是同步的，所以工具名当场就能断言）。
  */
 import { Context } from '@deepseek-ai/cordis'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
-import { apply } from '../src/index.ts'
+import { apply, createMemberSeam } from '../src/index.ts'
 import type { AgentTeamsService } from '../src/service.ts'
 import type { KvUnitLike, StorageFacetLike } from '../src/store.ts'
 import type { ThreadsRuntime } from '../src/threads.ts'
@@ -47,11 +47,11 @@ function toolsSpy(): ToolsSpy {
   }
 }
 
-/** `ctx.subagents` 的结构等价子集：只给 `list()`，`start` 本用例不派发。 */
-function subagentsSpy(providers: string[]): { list: () => string[]; start: () => Promise<never> } {
+/** `ctx.subagents` 的结构等价子集：装配用例只探测，不派发 activation。 */
+function subagentsSpy(providers: string[]): { list: () => string[]; startActivation: () => Promise<never> } {
   return {
     list: () => providers,
-    start: () => Promise.reject(new Error('本用例不派发')),
+    startActivation: () => Promise.reject(new Error('本用例不派发')),
   }
 }
 
@@ -122,6 +122,23 @@ function boot(config: Parameters<typeof apply>[1] = {}, preset: { subagents?: st
 }
 
 describe('装配', () => {
+  it('adapts a managed activation with caller delivery and preserves disposal ownership', async () => {
+    const signal = new AbortController().signal
+    const parent = {}
+    const result = Promise.resolve({ output: [], stopReason: 'completed' })
+    const activation = { childId: 'child', result, async dispose() { expect(this).toBe(activation) } }
+    const startActivation = vi.fn(async () => activation)
+    const seam = createMemberSeam({ list: () => ['spawn'], startActivation })
+    const run = await seam.start('spawn', { label: 'task', parent, prompt: [], signal, maxDepth: 3 })
+    expect(startActivation).toHaveBeenCalledExactlyOnceWith({
+      provider: 'spawn', label: 'task', signal, delivery: 'caller',
+      request: { parent, prompt: [], maxDepth: 3 },
+    })
+    expect(run.id).toBe('child')
+    expect(run.result).toBe(result)
+    await run.dispose()
+  })
+
   it('只有 tools 也能装起来：工具面注册齐全，能力画像为「不能派发」', async () => {
     const { ctx, tools, service } = boot()
     // 11 个团队工具 + 6 个线程工具（§24.2：建/查/推进/暂停/等/重派）。

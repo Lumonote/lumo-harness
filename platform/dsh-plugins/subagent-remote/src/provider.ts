@@ -20,6 +20,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   NO_START_CAPABILITIES,
   SubagentError,
+  SUBAGENT_DESCRIPTOR_VERSION,
   captureDelegatedPolicyOverrides,
   delegationDepthOf,
 } from '@deepseek-ai/dsh-subagent'
@@ -128,7 +129,12 @@ export class RemoteSubagentProvider implements SubagentProvider {
       realm: this.realm,
       ...(request.label !== undefined ? { label: request.label } : {}),
       prompt: request.prompt,
-      descriptor: request.descriptor,
+      descriptor: {
+        version: SUBAGENT_DESCRIPTOR_VERSION,
+        mode: 'one-shot',
+        provider: this.name,
+        ...(request.label === undefined ? {} : { label: request.label }),
+      },
       parent,
       callbackUrl: `http://${this.callbackHost}:${this.config.callbackPort}/subagent/result/${childId}/${secret}`,
     }
@@ -259,12 +265,11 @@ function settleOf(
   }
 }
 
-/** 远端 run 句柄:`localAgent: undefined`,dispose 幂等(与 subprocessRunHandle 同款记忆化)。 */
+/** 远端执行句柄，dispose 幂等（与 subprocessRunHandle 同款记忆化）。 */
 function remoteRunHandle(id: string, result: Promise<SubagentResult>, stop: () => Promise<void>): SubagentRun {
   let disposal: Promise<void> | undefined
   return {
     id: SessionId(id),
-    localAgent: undefined,
     result,
     dispose(): Promise<void> {
       return (disposal ??= stop())

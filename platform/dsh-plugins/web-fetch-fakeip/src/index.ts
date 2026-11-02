@@ -1,11 +1,9 @@
 /**
  * @lumo/web-fetch-fakeip —— fake-ip 代理下 web_fetch 的桌面端自动修复。
  *
- * TCP 级 fake-ip 代理（Surge 增强模式/VIF、Clash/mihomo TUN、sing-box）把系统 DNS
- * 应答劫持进保留池（198.18.0.0/15、fd00::/8），上游 web-fetch-http 的 SSRF 公网
- * 预检因此在连接前拒绝一切域名。本插件复用上游公开类 `HttpFetchProvider` —— 其
- * 第二个构造参数就是官方公开的 resolver 扩展点 —— 只替换地址预检：公网单播之外,
- * 允许一个可配置的 CIDR 放行集合（默认覆盖 Surge/Clash 与 sing-box 的 fake-ip 池）。
+ * 保留既有 profile 选择的 provider id，传输交给官方 `HttpFetchProvider`。
+ * 新版上游通过进程 dispatcher 统一应用代理策略，已移除公网 DNS 预检及 resolver
+ * 构造参数，fake-ip 代理不再需要另换地址解析器。
  *
  * 注册 id `lumo-fetch-fakeip`;dsh-node 在打包桌面（local + web profile）时通过
  * 官方 patch 把官方 `web` 条目的 `fetchProvider` 钉到该 id。全部走官方扩展点
@@ -20,7 +18,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { WebFetchProvider, WebFetchRequest, WebFetchResult } from '@deepseek-ai/dsh-web'
 import { DEFAULT_USER_AGENT, HttpFetchProvider } from '@deepseek-ai/dsh-web-fetch-http'
 import type { HttpFetchLimits } from '@deepseek-ai/dsh-web-fetch-http'
-import { assertFakeIpCidrs, createFakeIpResolver } from './resolver.ts'
+import { assertFakeIpCidrs } from './resolver.ts'
 
 /** Cordis 插件名（loader 诊断用）。 */
 export const name = 'lumo-web-fetch-fakeip'
@@ -34,9 +32,9 @@ export const FAKE_IP_PROVIDER_ID = 'lumo-fetch-fakeip'
 /** 默认放行的 fake-ip 池:198.18.0.0/15 覆盖 Surge/Clash 默认段,fd00::/8 覆盖 sing-box ULA 段。 */
 export const DEFAULT_FAKE_IP_CIDRS = ['198.18.0.0/15', 'fd00::/8'] as const
 
-/** 插件配置:放行 CIDR 集合 + 与上游 web-fetch-http 相同的五个传输/限额字段。 */
+/** 插件配置：兼容旧 CIDR 字段，传输限额与上游 web-fetch-http 一致。 */
 export interface Config {
-  /** 除公网单播外额外放行的 CIDR（编入 fake-ip 池的保留段）。 */
+  /** 兼容旧配置；新版上游传输不再需要 CIDR 放行。 */
   fakeIpCidrs?: string[]
   /** 最大响应体字节数。 */
   maxResponseBytes?: number
@@ -124,7 +122,6 @@ export function apply(ctx: Context, config: Config): void {
     maxRedirects: resolved.maxRedirects,
     userAgent: resolved.userAgent,
   }
-  const resolver = createFakeIpResolver({ allowedCidrs: resolved.fakeIpCidrs })
-  const provider = new HttpFetchProvider(limits, resolver)
+  const provider = new HttpFetchProvider(limits)
   ctx.web.registerFetchProvider(new FakeIpFetchProvider(provider))
 }

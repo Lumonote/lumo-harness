@@ -1117,9 +1117,9 @@ function buildLumoUiPlugin() {
   }
 }
 
-// Host 面产物必须在快照上重产：`tsc -b` 只产出 lib/types，typert 的
-// lib/typert.remote-client.*（`@deepseek-ai/dsh-api-*/remote` 子路径）与
-// tsdown 的 host 包 bundle 只有 host 面的 tsdown 序能造；上游 master 重构期
+// Host 面产物必须在快照上重产：`tsc -b` 只产出 lib/types；Typert 的
+// lib/typert.* 由 ensureDshTypertRemoteProjection 提前独立生成，tsdown
+// host pass 负责包 bundle，不再负责补齐这些投影。上游 master 重构期
 // 根 tsdown.config.ts 的 dsh-root 花括号 entry 会卡死该序，apply.mjs 的
 // LUMO_DSH_TYSDOWN_ENTRY 补丁已在快照上修好入口（synthesize-dsh-libs 补
 // 附加入口形状）。依赖开发树旧 lib 是这个构建链最大的坑——旧产物会同包。
@@ -1128,7 +1128,7 @@ function buildLumoUiPlugin() {
 // Host 应用入口及其依赖先由 refreshDshHostApplicationTypes 按快照重编；
 // 被覆盖的 host 包再由 buildDshHostPackages 单包编译。
 function rebuildDshHostArtifacts() {
-  console.log('重建 DSH host 面产物（tsdown 包与 typert remote 投影）...')
+  console.log('重建 DSH host 面产物（tsdown 包，保留已生成的 typert 投影）...')
   runWorkspaceBinary('.', 'tsdown', ['--env.DSH_BUILD_FACE', 'host'], 'DSH host 面产物重建失败')
   mirrorSnapshotLibsBackToSource()
 }
@@ -1144,12 +1144,15 @@ function rebuildDshHostArtifacts() {
  * prepare-runtime 在「源树 lib/ 不新鲜」时已经补过这一步；这里再判一次，是因为快照
  * 命中指纹缓存的分支会整段跳过它，而源树被手工清过 lib/ 时也未必走到。
  * 判据落在「解析实际会落到的那棵树上有没有这个文件」，不落在「上游有没有跑过某个步骤」。
- * 解析落点：快照的 node_modules 是软链回源树的，所以生成必须写进源树。
+ * 快照的 node_modules 软链回源树；源码内的相对引用又会读取快照自身的 lib/。
+ * 两棵树都必须齐全，回拷 bundle 时才能保留被覆盖包的 Typert 产物。
  */
 function ensureDshTypertRemoteProjection() {
-  if (hasTypertRemoteProjection(sourceDshRoot)) return
-  console.log('生成 dsh typert 投影（host 应用编译需要 @deepseek-ai/dsh-api-<包名>/remote 的类型面）...')
-  generateTypertArtifacts(sourceDshRoot)
+  for (const root of new Set([sourceDshRoot, dshRoot])) {
+    if (hasTypertRemoteProjection(root)) continue
+    console.log(`生成 dsh typert 投影（补齐源树与隔离快照的全部 remote 类型：${root}）...`)
+    generateTypertArtifacts(root)
+  }
 }
 
 function refreshDshHostApplicationTypes() {

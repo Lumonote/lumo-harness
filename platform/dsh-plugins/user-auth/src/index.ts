@@ -52,6 +52,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (ctx.webServer.host !== '127.0.0.1') {
     throw new Error('lumo-user-auth: internal DSH WebServer must bind 127.0.0.1')
   }
+  const upstreamPort = ctx.webServer.port
+  if (upstreamPort === undefined) {
+    throw new Error('lumo-user-auth: internal DSH WebServer has not bound a listening port')
+  }
   if (Buffer.byteLength(config.identityAssertionSecret, 'utf8') < 32) {
     throw new Error('lumo-user-auth: identityAssertionSecret must contain at least 32 bytes')
   }
@@ -66,7 +70,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     authenticatedUrl: () => {
       const connection = ctx.get('connection') as ConnectionLike | undefined
       if (connection === undefined) return undefined
-      return connection.authenticatedUrl(`http://127.0.0.1:${String(ctx.webServer.port)}`)
+      return connection.authenticatedUrl(`http://127.0.0.1:${String(upstreamPort)}`)
     },
     logger: { warn: (format, ...args) => ctx.logger.warn(format, ...args) },
   })
@@ -79,7 +83,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     realm: config.realm,
     ...(config.projectId === undefined ? {} : { projectId: config.projectId }),
     identityAssertionSecret: config.identityAssertionSecret,
-    upstreamPort: ctx.webServer.port,
+    upstreamPort,
     carrierCookie: () => carrier.cookieHeader(),
     carrierRejected: () => carrier.invalidate(),
     client,

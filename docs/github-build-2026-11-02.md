@@ -19,3 +19,13 @@ GitHub Actions 最终验证结果以修复提交对应的远端运行记录为�
 该运行是 `platform-ci`，提交 `34057a88`。`Build upstream dsh host outputs` 仍直接执行 4 GiB 的 `tsc -b`，没有先生成 Typert 投影，因此出现大量 `*/remote` 模块缺失及 `ClientRemote` 成员缺失的级联错误，随后在约 4 GiB 处 V8 堆耗尽，退出码 134。CI 现改为调用 `dsh-overrides/build-host.mjs`，复用桌面构建的 `ensureLibEntriesReexport`：先 Typert、再 8 GiB host 编译、最后合成 lib 入口。构建前后均检查上游源码洁净度。
 
 同次运行的 `production-gates` 失败在 RocketMQ 入口顺序检查。替身脚本放在临时 `bin` 并加入 PATH，但运行入口时仍位于仓库根；macOS 的 `/bin/sh` 会搜索 PATH，Ubuntu 的 dash 对 `sh mqnamesrv` 则从当前目录打开文件。检查脚本现先进入临时 `bin` 再启动入口，复现真实容器的工作目录。topic 必须先于 proxy 的生产契约保持原样，反例与失败路径检查继续执行。
+
+后续桌面日志显示 Host bundle 成功后，Client 编译仍缺 `session-controller/remote`。隔离快照刻意不复制被覆盖包的整个 lib，因此只检查未覆盖的 workspace-files 会误判投影齐全；Host bundle 阶段并不会重新生成它们，回拷 lib 还会把源树原有投影一起删掉。现检查所有 package exports 声明的 Typert 类型面，并在 Host bundle 之前为源树和快照分别补齐。新增回归用例覆盖「workspace-files 存在，但 session-controller 的 host/remote 面缺失」及产物被删除后的再次检测。
+
+RocketMQ 门禁已在运行 `41405260712` 远端通过；下一项集群探针门禁暴露了 Bash 版本差异：没有 profile 后缀的拓扑会读取未赋值的 local `shape`。现在显式初始化为空串，保留未指定 profile 时采集全部服务的语义。
+
+同次运行的 Host 编译已通过，Typecheck 的 7 条错误来自平台与上游公开接口的版本漂移：团队执行改用 `startActivation`，以 caller delivery 取回结果并保留 activation 的释放所有权；PG KV 补充单条 SQL 原子批量删除；远程子代理自行生成 one-shot 描述、不再返回已移除的 localAgent；认证代理只接受已经绑定的内部监听端口；抓取 provider 使用上游统一 dispatcher，不再传入已移除的 resolver 参数。回归测试覆盖 activation 参数及释放、批量删除的空集/失败/特殊键、未绑定端口和快照投影完整性。
+
+全量单测随后检出 3 条旧夹具/运行入口失败：JSONL 持久化插件已改为命名导出的 apply、子代理服务新增 workingDirectory 依赖、工作流父代理夹具变为异步。夹具随公开接口更新。另一个实际构建缺口是 PTC 的 `process.js` 在包配置中由 `process-entry.js` 重命名，通用再导出会只加载实现、正常退出而不启动控制通道；CI host 准备入口现在使用该包自身 tsdown 配置生成真实 worker bundle。该路径的工作流与两种团队加载顺序的 12 条回归已通过。
+
+全量测试还检出浏览器环境依赖缺失：`client.spec.tsx` 指定 jsdom，但平台的直接依赖和锁文件未包含 jsdom，Vitest 无法启动该 worker。即便其余 1233 条断言全部通过，进程仍以 1 退出，JSON 报告中的 success 不能代表进程成功。现为平台显式声明与上游一致的 jsdom 29.1.1。按用户要求，本地上游已快进到官方 master `ce7073d512`（0.2.2-alpha.2），保留未跟踪的 .omc 文件，后续检查使用 Node 24。
