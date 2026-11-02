@@ -29,3 +29,7 @@ RocketMQ 门禁已在运行 `41405260712` 远端通过；下一项集群探针�
 全量单测随后检出 3 条旧夹具/运行入口失败：JSONL 持久化插件已改为命名导出的 apply、子代理服务新增 workingDirectory 依赖、工作流父代理夹具变为异步。夹具随公开接口更新。另一个实际构建缺口是 PTC 的 `process.js` 在包配置中由 `process-entry.js` 重命名，通用再导出会只加载实现、正常退出而不启动控制通道；CI host 准备入口现在使用该包自身 tsdown 配置生成真实 worker bundle。该路径的工作流与两种团队加载顺序的 12 条回归已通过。
 
 全量测试还检出浏览器环境依赖缺失：`client.spec.tsx` 指定 jsdom，但平台的直接依赖和锁文件未包含 jsdom，Vitest 无法启动该 worker。即便其余 1233 条断言全部通过，进程仍以 1 退出，JSON 报告中的 success 不能代表进程成功。现为平台显式声明与上游一致的 jsdom 29.1.1。按用户要求，本地上游已快进到官方 master `ce7073d512`（0.2.2-alpha.2），保留未跟踪的 .omc 文件，后续检查使用 Node 24。
+
+`3653974a` 的平台 CI 已通过类型检查，单测剩余 2 条失败均读取了被 gitignore 排除的 `platform/upstream/skills`。Archify 与 creative-skills 的单元测试现在通过已有 `config.root` 接口读取临时文件，验证 frontmatter 剥离、正文保留、来源 pin 与入库清单一致、资源路径、Lumo 扩展及释放行为；缺失或损坏的技能仍必须报错且不得注册。测试不再依赖开发机预装技能，实际固定提交的获取与完整资源装配仍由桌面安装/打包链验证。
+
+同次桌面日志已完成 DSH Host/Client 构建及 386 包回拷，随后仅在 Lumo UI 报错：上游 InputState 新增 sending，但本地桥类型复制了旧 phase 联合。桥实际只读取 draft，发送及状态判断由上游 inputActions 完成；现用公开 slot 合同的 Pick<input, 'draft'> 定义消费面，避免未消费的枚举字段再次随上游变化而中断构建。

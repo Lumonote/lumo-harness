@@ -1,27 +1,63 @@
-import { describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { apply, upstream } from '../src/index.ts'
 
-describe('@lumo/archify', () => {
-  it('registers the typed and validated diagram skill with upstream provenance', () => {
-    const register = vi.fn(() => vi.fn())
-    const effect = vi.fn()
-    apply({ get: () => ({ register }), effect } as never)
+const roots: string[] = []
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  vi.unstubAllEnvs()
+})
 
-    expect(upstream.repository).toBe('https://github.com/tt-a1i/archify')
+function skillFixture(markdown = '---\nname: archify\n---\n\nArchify fixture instructions.\n'): string {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'lumo-archify-test-')))
+  roots.push(root)
+  // Ignored repository snapshots must not be prerequisites for loader tests.
+  vi.stubEnv('LUMO_BUNDLED_SKILLS_ROOT', join(root, 'not-installed'))
+  writeFileSync(join(root, 'SKILL.md'), markdown)
+  return root
+}
+
+describe('@lumo/archify', () => {
+  it('registers file-backed instructions and the Lumo extension with pinned upstream provenance', () => {
+    const root = skillFixture()
+    const unregister = vi.fn()
+    const register = vi.fn(() => unregister)
+    const effect = vi.fn()
+    apply({ get: () => ({ register }), effect } as never, { root })
+
+    const sources = JSON.parse(readFileSync(new URL('../../../upstream/skill-sources.json', import.meta.url), 'utf8'))
+    expect(sources.skills.find((skill: { name: string }) => skill.name === 'archify')).toMatchObject(upstream)
     expect(register).toHaveBeenCalledWith(expect.objectContaining({
       name: 'archify',
       provider: 'lumo-archify',
       source: 'bundled',
       invocation: { modelInvocable: true, userInvocable: true },
+      resourceBase: { kind: 'directory', path: root },
+      path: join(root, 'SKILL.md'),
     }))
-    // 前两条锚在上游 SKILL.md 正文,证明 frontmatter 之后的 body 真被拼进来了;
-    // 后两条锚在 LUMO_EXTENSION。上游锚点是散文,升级 pin 版本时需要一并复核 ——
-    // 'JSON IR' 就是在升到 2.16.0-dev.0 后消失的(改称 typed JSON specification)。
-    expect(register.mock.calls[0]?.[0].content).toContain('typed JSON specification')
-    expect(register.mock.calls[0]?.[0].content).toContain('showcase')
+    expect(register.mock.calls[0]?.[0].content).toMatch(/^Archify fixture instructions\.\n/)
+    expect(register.mock.calls[0]?.[0].content).not.toContain('name: archify')
     expect(register.mock.calls[0]?.[0].content).toContain('infrared-grid')
     expect(register.mock.calls[0]?.[0].content).toContain('data-lumo-theme')
     expect(effect).toHaveBeenCalledOnce()
+    effect.mock.calls[0][0]()()
+    expect(unregister).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a missing skill before registering anything', () => {
+    const root = join(skillFixture(), 'not-installed')
+    const register = vi.fn()
+    expect(() => apply({ get: () => ({ register }) } as never, { root })).toThrow(/ENOENT/)
+    expect(register).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed frontmatter before registering anything', () => {
+    const root = skillFixture('not a skill document')
+    const register = vi.fn()
+    expect(() => apply({ get: () => ({ register }) } as never, { root })).toThrow(/lacks frontmatter/)
+    expect(register).not.toHaveBeenCalled()
   })
 })

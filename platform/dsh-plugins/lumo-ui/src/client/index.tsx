@@ -43,10 +43,9 @@ function activeClientRoots(): WeakSet<object> {
   return shared[LUMO_CLIENT_ROOTS] ??= new WeakSet<object>()
 }
 
-interface ConversationInputState {
-  readonly draft?: string
-  readonly phase?: 'plain' | 'adjudicating' | 'claimed' | 'submitting'
-}
+// The bridge only reads the draft; submission state and admission belong to
+// the upstream input actions. Derive the consumed field from the slot contract.
+type ConversationInputState = Pick<ComposerDockProps['input'], 'draft'>
 
 interface ConversationInputActions {
   setDraft(text: string): void
