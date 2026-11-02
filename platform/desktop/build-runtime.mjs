@@ -26,6 +26,7 @@ import { prepareSkillHubArchive, stageSkillHub } from './skillhub-tooling.mjs'
 import { acquireBuildLock } from './build-lock.mjs'
 import { findCrossTreeImports } from './dsh-node-self-contained.mjs'
 import { prepareSourcePlugins } from '../tools/prepare-source-plugins.mjs'
+import { copyRuntimePackage, planRuntimePackages, resolveInstalledPackage } from './runtime-dependencies.mjs'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(desktopRoot, '..', '..')
@@ -333,6 +334,7 @@ const moduleSearchRoots = [
   resolve(dshRoot, 'apps', 'web'),
 ]
 const packageSources = new Map()
+const packagesByRoot = new Map()
 const packageQueue = []
 
 function readManifest(packageRoot) {
@@ -371,11 +373,9 @@ for (const pattern of [['packages', '*', '*'], ['apps', '*'], ['vendor', '*']]) 
 }
 
 function packagePath(name, fromRoot) {
-  const parts = name.split('/')
-  const candidates = []
-  const alreadyQueued = packageSources.get(name)?.root
-  if (alreadyQueued !== undefined) return alreadyQueued
   if (name.startsWith(DSH_PACKAGE_SCOPE)) {
+    const alreadyQueued = packageSources.get(name)?.root
+    if (alreadyQueued !== undefined) return alreadyQueued
     const workspaceRoot = dshWorkspacePackages.get(name)
     if (workspaceRoot !== undefined) return workspaceRoot
     // 不在 workspace 里的 @deepseek-ai 包（如 vendor 之外的发布件）仍可从快照根解析，
@@ -386,14 +386,8 @@ function packagePath(name, fromRoot) {
     ? [fromRoot, cliRoot, dshRoot, dshNodeRoot]
     : [fromRoot, ...moduleSearchRoots]
   for (const root of searchRoots.filter((value) => value !== undefined)) {
-    for (let cursor = root; ; cursor = dirname(cursor)) {
-      candidates.push(resolve(cursor, 'node_modules', ...parts))
-      const parent = dirname(cursor)
-      if (parent === cursor) break
-    }
-  }
-  for (const candidate of candidates) {
-    if (existsSync(resolve(candidate, 'package.json'))) return realpathSync(candidate)
+    const installed = resolveInstalledPackage(name, root)
+    if (installed !== undefined) return installed
   }
   return undefined
 }
@@ -404,25 +398,16 @@ function isGracefullyOptionalDependency(name) {
 }
 
 function queuePackage(packageRoot) {
+  packageRoot = realpathSync(packageRoot)
+  const existing = packagesByRoot.get(packageRoot)
+  if (existing !== undefined) return existing
   const manifest = readManifest(packageRoot)
-  if (typeof manifest.name !== 'string' || packageSources.has(manifest.name)) return
-  packageSources.set(manifest.name, { root: packageRoot, manifest })
-  packageQueue.push({ root: packageRoot, manifest })
-}
-
-function copyPackage(packageName, packageRoot) {
-  const destination = resolve(modulesRoot, ...packageName.split('/'))
-  cpSync(packageRoot, destination, {
-    recursive: true,
-    dereference: true,
-    filter(source) {
-      const rel = relative(packageRoot, source)
-      if (rel === '') return true
-      const first = rel.split(sep)[0]
-      if (first === 'node_modules' || first === 'tests' || first === '__tests__' || first === '.git') return false
-      return true
-    },
-  })
+  if (typeof manifest.name !== 'string') throw new Error(`依赖包缺少 name：${packageRoot}`)
+  const info = { root: packageRoot, manifest, dependencies: new Map() }
+  packagesByRoot.set(packageRoot, info)
+  if (!packageSources.has(manifest.name)) packageSources.set(manifest.name, info)
+  packageQueue.push(info)
+  return info
 }
 
 // The official CLI manifest keeps the Web bundle in devDependencies because
@@ -521,18 +506,19 @@ for (let index = 0; index < packageQueue.length; index += 1) {
         repairWorkspaceDependencies(owner, name)
         const repaired = packagePath(name, current.root)
         if (repaired !== undefined) {
-          queuePackage(repaired)
+          current.dependencies.set(name, queuePackage(repaired))
           continue
         }
       }
       throw new Error(`无法构建桌面 runtime：${current.manifest.name} 缺少依赖 ${name}`)
     }
-    queuePackage(root)
+    current.dependencies.set(name, queuePackage(root))
   }
 }
 
 assertDshPackagesCameFromSnapshot()
-for (const [name, packageInfo] of packageSources) copyPackage(name, packageInfo.root)
+const runtimePackages = planRuntimePackages(modulesRoot, packageSources)
+for (const { root, destination } of runtimePackages) copyRuntimePackage(root, destination)
 assertOverridesCameFromSnapshot()
 compilePackagedTypeScriptPlugins()
 
@@ -585,7 +571,7 @@ writeFileSync(resolve(stagingRoot, 'runtime-manifest.json'), `${JSON.stringify({
   target: buildTarget,
   node: nodeVersion(nodeSource),
   nodeSource,
-  packageCount: packageSources.size,
+  packageCount: runtimePackages.length,
   python: pptPython,
   skillhub,
   prunedBytes,
@@ -595,7 +581,7 @@ writeFileSync(resolve(stagingRoot, 'runtime-manifest.json'), `${JSON.stringify({
   generatedAt: new Date().toISOString(),
 }, null, 2)}\n`)
 
-console.log(`桌面 runtime 已准备：${buildTarget}，${packageSources.size} 个包，Node ${nodeVersion(nodeSource)}，裁剪回收 ${(prunedBytes / 1024 / 1024).toFixed(0)} MB`)
+console.log(`桌面 runtime 已准备：${buildTarget}，${runtimePackages.length} 个包，Node ${nodeVersion(nodeSource)}，裁剪回收 ${(prunedBytes / 1024 / 1024).toFixed(0)} MB`)
 
 // 构建后复查上游洁净度。暂存副本的 node_modules 是软链回源树的，pnpm 有可能顺着
 // workspace 链接把编译产物写回 deepseek-harness/packages —— 那正是仓库里那批
@@ -741,11 +727,13 @@ function pruneStagedRuntime() {
 
 /** 用桌面单进程桩替换闭包里复制出的 fs-ext 原生包（原因见调用处注释）。 */
 function stageFsExtStub() {
-  const target = resolve(modulesRoot, 'fs-ext')
   const stubRoot = resolve(desktopRoot, 'runtime-stubs', 'fs-ext')
   if (!existsSync(stubRoot)) throw new Error(`缺少 fs-ext 桩目录：${stubRoot}`)
-  rmSync(target, { recursive: true, force: true })
-  cpSync(stubRoot, target, { recursive: true, dereference: true })
+  for (const { manifest, destination } of runtimePackages) {
+    if (manifest.name !== 'fs-ext') continue
+    rmSync(destination, { recursive: true, force: true })
+    cpSync(stubRoot, destination, { recursive: true, dereference: true })
+  }
 }
 
 function keepOnly(directory, keep, removeTree) {

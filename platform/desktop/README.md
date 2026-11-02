@@ -230,3 +230,7 @@ PPT 和开放设计页面共用创作工具栏及主题控件样式，示例分�
   老版本；一旦它混进闭包，dsh-credentials-local、dsh-llm-pi-ai 等包会在 import 时直接失败。
 - 体积裁剪只在包根一层删 `doc/docs/test/tests/example(s)`；`dist`、`lib` 里的同名目录往往是
   真代码（`yaml/dist/doc` 是 Document 的实现）。
+- 第三方依赖按来源目录分别遍历，冲突版本放在使用方自己的 `node_modules` 中，保留其
+  传递依赖和循环引用。例如 `proper-lockfile@4` 必须使用 `signal-exit@3`，不能被其他包
+  需要的 `signal-exit@4` 覆盖，否则安装后会报 `onExit is not a function`。旧安装包需
+  重新构建并替换应用，修改源码不会更新已安装的副本。
