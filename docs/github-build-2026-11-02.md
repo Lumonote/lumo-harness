@@ -45,3 +45,5 @@ RocketMQ 门禁已在运行 `41405260712` 远端通过；下一项集群探针�
 回归证据：真实构建入口测试修复前 4 失败、2 通过，修复后 6 项全通过；本机完整平台单测 1819 通过、0 失败、313 跳过（未配置数据库等外部依赖的现有门控），类型检查与实际 host 构建通过。Docker Debian 12 / Node 24 的 Linux arm64 环境先复现缺件，再由官方脚本编译真实 addon，验证独占锁、第二 fd 的 EAGAIN，以及关闭首 fd 后重获锁。Linux x64 路径有入口回归覆盖；远端 x64 实际结果以修复提交对应的 Actions 为准。上游源码与锁文件保持干净。
 
 修复提交 `9008360` 的远端运行 [42376294108](https://github.com/Lumonote/lumo-harness/actions/runs/42376294108) 已真实编出 `linux-x64/bin/glibc/system.node`，Typecheck 与完整 Unit tests 通过（1819 通过、313 跳过）。随后独立的数据库门禁首次走到知识库配额用例，暴露平台 job 的服务仍是普通 `postgres:16-alpine`，缺少 `vector.control`，两项知识库测试报 `0A000: extension "vector" is not available`；共享 DDL 的 34 项通过。平台 job 现与 Compose 和恢复演练统一采用 `pgvector/pgvector:pg16`，提供知识库实际依赖的 vector/HNSW，不删除或跳过这些测试。
+
+`a01182e` 的远端运行 [42376830186](https://github.com/Lumonote/lumo-harness/actions/runs/42376830186) 已通过上述数据库门禁，后续归档测试的 7 条失败来自写死的 macOS `/private/tmp` 路径。测试现使用 `node:os.tmpdir()`，并解析真实路径以保留归档拒绝符号链接的契约。真实 Linux Node 24 容器验证由 7 失败转为 12 项全通过，本机同样全通过。独立 PG16 + pgvector 验收中，配额/DDL 36 项、后续治理/恢复 61 项、含真实 PG 的归档 13 项和 Python 恢复演练 13 项均通过；最终 Ubuntu 结果仍由对应修复提交的 Actions 确认。

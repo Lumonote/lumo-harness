@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmod, lstat, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ArchiveError, manifestDigest, parseArgs, stripReplaySecrets, validateDataset, verifyArchive, writeArchive } from './archive-governance-results.mjs'
 
@@ -37,7 +38,7 @@ function bundle({ dependency = true, fileText = '\uFEFFhello <world> & 审计\n'
 }
 
 async function archive(t, value = bundle()) {
-  const parent = await mkdtemp('/private/tmp/lumo-archive-test-')
+  const parent = await mkdtemp(join(await realpath(tmpdir()), 'lumo-archive-test-'))
   t.after(() => rm(parent, { recursive: true, force: true }))
   const output = join(parent, 'archive')
   const result = await writeArchive(output, value)
@@ -51,10 +52,11 @@ async function rewriteManifest(output, update) {
 }
 
 test('CLI defaults to a bounded preview and normalizes precise UTC', () => {
+  const auditPath = join(tmpdir(), 'audit')
   assert.deepEqual(parseArgs(['--realm', realm, '--cutoff', '2026-11-07T00:00:00.1Z']), { mode: 'dry-run', realm, cutoff: '2026-11-07T00:00:00.100Z', limit: 100 })
-  assert.equal(parseArgs(['--realm', realm, '--cutoff', scope.cutoff, '--limit', '1', '--execute', '--output', '/private/tmp/new-audit']).mode, 'execute')
-  assert.deepEqual(parseArgs(['--verify', '/private/tmp/audit']), { mode: 'verify', output: '/private/tmp/audit' })
-  for (const args of [[], ['--help', '--execute'], ['--verify', 'relative'], ['--verify', '/private/tmp/audit', '--execute'], ['--realm', realm, '--cutoff', '2026-02-30T00:00:00Z'], ['--realm', realm, '--cutoff', scope.cutoff, '--limit', '101'], ['--realm', realm, '--cutoff', scope.cutoff, '--execute', '--dry-run'], ['--realm', realm, '--realm', realm, '--cutoff', scope.cutoff], ['--realm', realm, '--cutoff', scope.cutoff, '--output', '/private/tmp/audit'], ['--realm', realm, '--cutoff', scope.cutoff, '--execute', '--output', 'relative']]) assert.throws(() => parseArgs(args), ArchiveError)
+  assert.equal(parseArgs(['--realm', realm, '--cutoff', scope.cutoff, '--limit', '1', '--execute', '--output', join(tmpdir(), 'new-audit')]).mode, 'execute')
+  assert.deepEqual(parseArgs(['--verify', auditPath]), { mode: 'verify', output: auditPath })
+  for (const args of [[], ['--help', '--execute'], ['--verify', 'relative'], ['--verify', auditPath, '--execute'], ['--realm', realm, '--cutoff', '2026-02-30T00:00:00Z'], ['--realm', realm, '--cutoff', scope.cutoff, '--limit', '101'], ['--realm', realm, '--cutoff', scope.cutoff, '--execute', '--dry-run'], ['--realm', realm, '--realm', realm, '--cutoff', scope.cutoff], ['--realm', realm, '--cutoff', scope.cutoff, '--output', auditPath], ['--realm', realm, '--cutoff', scope.cutoff, '--execute', '--output', 'relative']]) assert.throws(() => parseArgs(args), ArchiveError)
 })
 
 test('structured receipt replay secrets are recursively removed without content replacement', () => {
