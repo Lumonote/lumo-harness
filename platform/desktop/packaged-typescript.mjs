@@ -54,9 +54,13 @@ function assertRelativeImportsEmitted(typescript, packageName, destination, emit
 }
 
 /** Compile one copied source plugin without executing the desktop build pipeline. */
-export function compilePackagedTypeScriptPlugin({ typescript, packageName, packageRoot, destination, dependencyRoot }) {
+export function compilePackagedTypeScriptPlugin({ typescript, packageName, packageRoot, destination, dependencyRoot, outputDirectory = 'lib' }) {
   const sourceRoot = resolve(packageRoot, 'src')
   dependencyRoot = resolve(dependencyRoot)
+  const outputRoot = resolve(destination, outputDirectory)
+  if (!isWithin(destination, outputRoot) || outputRoot === resolve(destination)) {
+    throw new Error(`无法构建桌面 runtime：${packageName} 的产物目录必须位于包内：${outputDirectory}`)
+  }
   const compilerOptions = {
     module: typescript.ModuleKind.ESNext,
     moduleResolution: typescript.ModuleResolutionKind.Bundler,
@@ -79,8 +83,8 @@ export function compilePackagedTypeScriptPlugin({ typescript, packageName, packa
     // Cross-root modules live inside this plugin's ESM/dependency scope, with
     // their source-root-relative shape; never emit into node_modules/shared.
     const outputPath = isWithin(sourceRoot, sourcePath)
-      ? resolve(destination, 'lib', emittedExtension(relative(sourceRoot, sourcePath)))
-      : resolve(destination, 'lib', '__lumo_runtime__', emittedExtension(relative(dependencyRoot, sourcePath)))
+      ? resolve(outputRoot, emittedExtension(relative(sourceRoot, sourcePath)))
+      : resolve(outputRoot, '__lumo_runtime__', emittedExtension(relative(dependencyRoot, sourcePath)))
     if (outputOwners.has(outputPath)) throw new Error(`无法构建桌面 runtime：${packageName} 的产物路径冲突：${outputPath}`)
     outputs.set(sourcePath, outputPath)
     outputOwners.set(outputPath, sourcePath)
@@ -133,9 +137,10 @@ export function compilePackagedTypeScriptPlugin({ typescript, packageName, packa
   const manifestPath = resolve(destination, 'package.json')
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   manifest.type = 'module'
-  manifest.main = './lib/index.js'
+  const entry = `./${relative(destination, resolve(outputRoot, 'index.js')).split(sep).join('/')}`
+  manifest.main = entry
   if (manifest.exports?.['.'] !== undefined && typeof manifest.exports['.'] === 'object') {
-    manifest.exports['.'] = { ...manifest.exports['.'], import: './lib/index.js', default: './lib/index.js' }
+    manifest.exports['.'] = { ...manifest.exports['.'], import: entry, default: entry }
   }
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
   return emitted

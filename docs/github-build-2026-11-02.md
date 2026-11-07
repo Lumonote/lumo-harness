@@ -63,3 +63,11 @@ RocketMQ 门禁已在运行 `41405260712` 远端通过；下一项集群探针�
 `RegisterCluster` 现用物化 CTE 采样一次数据库时钟供两列复用；心跳仅更新 `last_seen_at`、注册时间不可变、读取年龄继续使用实时数据库时钟，共享 `nowMS` 与其他租约语义未变。确定性真实 PG 回归在第一列 domain 赋值时延迟 50ms，旧实现稳定产生不同时间（实测差 56ms），新实现两列相同，且返回年龄仍包含该延迟。带独立 PG16 测试库的 `go test ./... -count=1`（含 integration）与 `go build ./...` 均通过，没有放宽原有断言。
 
 最终平台验收：提交 `024a2f9` 的 [platform-ci 42378487671](https://github.com/Lumonote/lumo-harness/actions/runs/42378487671) 已全部成功，19/19 个 job 通过。Linux x64 / Node 24 实际产出 flock addon；平台单测 1831 通过、313 按现有依赖门控跳过，后续带 PG 的配额/DDL 36 项、治理/恢复 61 项、归档 13 项和 Python 演练 13 项全部通过。所有 Go 模块（含 scheduler 确定性回归）、生产门禁及上游洁净度检查均通过。
+
+## 2026-11-07：dsh-node 启动器的跨目录值依赖
+
+桌面修复 `0c74a27` 的 [release 42378083637](https://github.com/Lumonote/lumo-harness/actions/runs/42378083637) 已通过插件编译、裁剪、官方 Node 下载与 shim 生成，随后被 `assertDshNodeSelfContained` 拦截：启动器新增四个 user-auth 会话配置模块，以及 `shared/nacos-registration` 的值导入，打包目录不包含这些源码。ONNX 原生 binding 的提示已使用 WASM fallback，不是本次退出原因。
+
+启动器现由 `stage-dsh-node.mjs` 使用同一运行依赖闭包编译器暂存：保留 `dsh-node/src/index.ts` 入口作为 `import './index.js'` 的薄 shim，编译后的启动器仍位于原 `src` 深度，跨目录模块放入 `src/__lumo_runtime__/`。macOS/Windows 启动器及 Rust 入口无需变化，`import.meta.url` 的目录语义保持不变，共享类的参数属性在构建时转译。构建继续检查产物中每条相对运行导入是否存在且位于包内，不是删除缺件门禁。
+
+真实运行图为 13 个 src 模块加 8 个跨目录模块，仅使用已打包的 `@lumo/web-fetch-fakeip` 和 Node 内置依赖。旧暂存实现的同一组回归 2 失败、1 通过；修复后启动器与插件回归 15 项全通过。隔离临时 runtime 使用实际 Node `--experimental-strip-types src/index.ts` 加载当前启动器源码的完整静态图，成功到达原有角色校验，没有模块缺失或 TypeScript 参数属性错误。完整平台回归 1834 通过、0 失败、313 按既有门控跳过，类型检查、语法检查和独立审阅通过；完整安装包结果以新 release 运行确认。
