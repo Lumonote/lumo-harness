@@ -2,7 +2,7 @@
 //
 // 两个写入侧的约定必须写在这里，否则很容易在别处被顺手改掉：
 //
-//	① **时间一律库端。** registered_at / last_seen_at 都用写语句里的 now()，读的时候
+//	① **时间一律库端。** registered_at / last_seen_at 共用写语句里的一次库端时钟采样，读的时候
 //	   直接由 SQL 给出**年龄**（`nowMS - last_seen_at`），应用侧不做任何时钟相减。
 //	   自报来自多台主机，拿读取方自己的时钟去减会引入无界偏差，产出任何测试都钉不住
 //	   的 flake。这样切分还有个好处：「年龄 → 状态」在 domain 里是纯函数，无库可测。
@@ -74,11 +74,16 @@ func (s *Store) RegisterCluster(ctx context.Context, c domain.Cluster) (domain.C
 	// 冲突分支的 WHERE 同时承担两件事：realm 已声明时不许被别的 realm 改写，
 	// 而任一为空时放行（未声明 realm 不是一种归属）。条件不成立 → 不返回行 →
 	// pgx.ErrNoRows，据此报 ErrClusterRealmConflict。
+	// clock_timestamp() 在同一条语句中也会前进；首次注册的两列必须共用一次采样。
+	// MATERIALIZED 保证这次采样不会被内联成两次求值，年龄仍用 RETURNING 时的库端时钟。
 	row := s.pool.QueryRow(ctx, `
+		WITH registration_clock AS MATERIALIZED (
+			SELECT `+nowMS+` AS now_ms
+		)
 		INSERT INTO scheduler_clusters
 			(cluster_id, realm, namespace, capabilities, capabilities_declared,
 			 version, registered_at, last_seen_at)
-		VALUES ($1, $2, $3, $4, $5, $6, `+nowMS+`, `+nowMS+`)
+		SELECT $1, $2, $3, $4, $5, $6, now_ms, now_ms FROM registration_clock
 		ON CONFLICT (cluster_id) DO UPDATE SET
 			namespace = CASE WHEN EXCLUDED.namespace = ''
 				THEN scheduler_clusters.namespace ELSE EXCLUDED.namespace END,

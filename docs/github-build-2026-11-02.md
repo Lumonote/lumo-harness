@@ -55,3 +55,9 @@ RocketMQ 门禁已在运行 `41405260712` 远端通过；下一项集群探针�
 现将同一编译步骤抽成 `desktop/packaged-typescript.mjs`，以转译后的 JavaScript AST 追踪相对运行导入与导出，递归编译依赖并重写路径。跨目录模块放入插件自身 `lib/__lumo_runtime__/`，保留插件的 ESM 与裸包依赖解析范围；原 `src → lib` 入口及资源相对路径保持稳定。类型导入由 TypeScript 擦除，不把类型引用的 pg 等依赖带入运行闭包。缺件检查继续执行。
 
 同一真实 TS/Node 回归修复前 4 失败、1 通过；补齐当前源码验收后 12 项通过，包括多层 shared、循环、多行 re-export、字面量动态导入、缺件拒绝、删除测试源码后加载产物，以及实际 `SessionOwnerClient → boundedJSON` 调用。六个实际插件共编译 25 个模块（23 个 src 模块、2 个 shared 模块），桌面相关 46 项通过；完整平台单测 1831 通过、0 失败、313 跳过。该验证覆盖此次失败的 emit 阶段，完整 macOS/Windows 安装包仍需对应 release 运行确认。
+
+## 2026-11-07：调度器首次注册时间的偶发分歧
+
+`de9011a` 的运行 [42377621301](https://github.com/Lumonote/lumo-harness/actions/runs/42377621301) 中，平台 job 已通过全部步骤；剩余 scheduler 集成测试发现初次注册的 `registered_at` 和 `last_seen_at` 偶发相差 1 毫秒。两列分别求值 `clock_timestamp()`，同一 INSERT 内数据库时钟也会前进，因此断言揭示的是实际数据分歧。
+
+`RegisterCluster` 现用物化 CTE 采样一次数据库时钟供两列复用；心跳仅更新 `last_seen_at`、注册时间不可变、读取年龄继续使用实时数据库时钟，共享 `nowMS` 与其他租约语义未变。确定性真实 PG 回归在第一列 domain 赋值时延迟 50ms，旧实现稳定产生不同时间（实测差 56ms），新实现两列相同，且返回年龄仍包含该延迟。带独立 PG16 测试库的 `go test ./... -count=1`（含 integration）与 `go build ./...` 均通过，没有放宽原有断言。

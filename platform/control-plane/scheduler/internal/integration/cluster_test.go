@@ -105,6 +105,48 @@ func TestClusterAgeIsComputedByTheDatabase(t *testing.T) {
 	}
 }
 
+// Delay assignment of the first timestamp inside PostgreSQL. Two independent
+// clock_timestamp() calls then necessarily disagree, instead of depending on
+// whether a fast INSERT happens to cross a millisecond boundary.
+func TestClusterRegistrationSamplesDatabaseClockOnce(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	if _, err := st.Pool().Exec(ctx, `
+		CREATE FUNCTION scheduler_delay_registration_stamp(BIGINT) RETURNS BOOLEAN
+		LANGUAGE plpgsql VOLATILE AS $$
+		BEGIN
+			PERFORM pg_sleep(0.05);
+			RETURN TRUE;
+		END;
+		$$;
+		CREATE DOMAIN scheduler_registration_stamp AS BIGINT
+			CHECK (scheduler_delay_registration_stamp(VALUE));
+		ALTER TABLE scheduler_clusters
+			ALTER COLUMN registered_at TYPE scheduler_registration_stamp`); err != nil {
+		t.Fatalf("安装库端时间采样探针失败: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := st.Pool().Exec(ctx, `
+			ALTER TABLE scheduler_clusters ALTER COLUMN registered_at TYPE BIGINT;
+			DROP DOMAIN scheduler_registration_stamp;
+			DROP FUNCTION scheduler_delay_registration_stamp(BIGINT)`); err != nil {
+			t.Errorf("清理库端时间采样探针失败: %v", err)
+		}
+	})
+
+	c, err := st.RegisterCluster(ctx, domain.Cluster{ClusterID: "single-clock-sample", Realm: "r1"})
+	if err != nil {
+		t.Fatalf("注册集群失败: %v", err)
+	}
+	if c.RegisteredAt != c.LastSeenAt {
+		t.Fatalf("首次注册的两列必须共用一次库端时间采样: %d vs %d", c.RegisteredAt, c.LastSeenAt)
+	}
+	// RETURNING still measures age using the live database clock after the delay.
+	if c.AgeMS < 40 {
+		t.Fatalf("年龄必须包含库端写入延时, got %dms", c.AgeMS)
+	}
+}
+
 // TestClusterRealmCannotBeOverwritten 跨 realm 的同名注册被拒，且不留半截写入。
 func TestClusterRealmCannotBeOverwritten(t *testing.T) {
 	st := newStore(t)
