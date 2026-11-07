@@ -61,3 +61,5 @@ RocketMQ 门禁已在运行 `41405260712` 远端通过；下一项集群探针�
 `de9011a` 的运行 [42377621301](https://github.com/Lumonote/lumo-harness/actions/runs/42377621301) 中，平台 job 已通过全部步骤；剩余 scheduler 集成测试发现初次注册的 `registered_at` 和 `last_seen_at` 偶发相差 1 毫秒。两列分别求值 `clock_timestamp()`，同一 INSERT 内数据库时钟也会前进，因此断言揭示的是实际数据分歧。
 
 `RegisterCluster` 现用物化 CTE 采样一次数据库时钟供两列复用；心跳仅更新 `last_seen_at`、注册时间不可变、读取年龄继续使用实时数据库时钟，共享 `nowMS` 与其他租约语义未变。确定性真实 PG 回归在第一列 domain 赋值时延迟 50ms，旧实现稳定产生不同时间（实测差 56ms），新实现两列相同，且返回年龄仍包含该延迟。带独立 PG16 测试库的 `go test ./... -count=1`（含 integration）与 `go build ./...` 均通过，没有放宽原有断言。
+
+最终平台验收：提交 `024a2f9` 的 [platform-ci 42378487671](https://github.com/Lumonote/lumo-harness/actions/runs/42378487671) 已全部成功，19/19 个 job 通过。Linux x64 / Node 24 实际产出 flock addon；平台单测 1831 通过、313 按现有依赖门控跳过，后续带 PG 的配额/DDL 36 项、治理/恢复 61 项、归档 13 项和 Python 演练 13 项全部通过。所有 Go 模块（含 scheduler 确定性回归）、生产门禁及上游洁净度检查均通过。
