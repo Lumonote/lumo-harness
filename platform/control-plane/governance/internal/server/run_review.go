@@ -14,8 +14,43 @@ import (
 
 func (s *Server) registerRunReviewRoutes(mux *http.ServeMux) {
 	mux.Handle("PUT /v1/runtime/task-runs/{runID}/prepare", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.prepareRunExecution)))
+	mux.Handle("GET /v1/runtime/task-runs/{runID}/review-files/{entryID}", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.readRunReviewFile)))
 	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/reviews", s.bindRunReview)
 	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/review-tasks", s.createRunReview)
+}
+
+func (s *Server) readRunReviewFile(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCluster(w) {
+		return
+	}
+	realm := r.Header.Get("X-Lumo-Realm")
+	if realm == "" {
+		writeError(w, http.StatusUnauthorized, "missing_realm", "X-Lumo-Realm required")
+		return
+	}
+	file, err := s.store.ReadRunReviewFile(r.Context(), realm, r.PathValue("runID"), r.Header.Get("X-Lumo-Node-ID"), r.Header.Get("X-Lumo-Session-Ref"), r.PathValue("entryID"))
+	if err != nil {
+		s.respondStoreError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, file)
+}
+
+// Only the trusted runtime result transport needs this bounded expansion for
+// escaped UTF-8 file bytes; ordinary authenticated JSON limits stay unchanged.
+func decodeControlledRunResult(w http.ResponseWriter, r *http.Request, target *domain.TaskResult) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid runtime result")
+		return false
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "bad_request", "one runtime result required")
+		return false
+	}
+	return true
 }
 
 func (s *Server) createRunReview(w http.ResponseWriter, r *http.Request) {

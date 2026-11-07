@@ -1,5 +1,8 @@
 /** Authenticated first-party Session transport. Never forwards a browser as the
- * shared carrier owner. The supported execution profile is text-only. */
+ * shared carrier owner. Attachments require an explicit receipt policy. */
+import { OwnedSessionAttachments, USER_SESSION_ATTACHMENT_TOOL, validateSessionAttachments } from './session-attachments.ts'
+import type { SessionAttachmentConfig, SessionAttachmentUpload, SessionAttachmentReceipt, SessionAttachmentDownload } from '../../../shared/seam-contracts/session-attachments.ts'
+import type {} from '@deepseek-ai/dsh-attachment'
 import { mkdir, lstat } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -18,6 +21,7 @@ import type { SessionModelBilling } from '../../../shared/seam-contracts/model-b
 import { SessionModelPolicy, SessionTurnModelGuard, modelSelection, type SessionModelChoice } from './session-model-policy.ts'
 import type { Principal } from './client.ts'
 import { installSessionKnowledge, USER_SESSION_KNOWLEDGE_TOOL, validateSessionKnowledge, type SessionKnowledgeConfig } from './session-knowledge.ts'
+import { SessionConnectorTools, USER_CONNECTOR_TOOLS, validateSessionConnectors, type SessionConnectorConfig } from './session-connectors.ts'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface PrincipalMap { 'lumo-user': { readonly kind: 'lumo-user'; readonly realm: string; readonly userId: string; readonly requestId: string } }
@@ -35,12 +39,16 @@ export interface SessionTransportConfig {
    * existing single-model profile and does not expose model mutation. */
   modelChoices?: SessionModelChoice[]
   knowledge?: SessionKnowledgeConfig
+  attachments?: SessionAttachmentConfig
+  connectors?: SessionConnectorConfig
   routing?: { routes: Record<string, string>; transportSecurity: 'tls' | 'mesh-mtls' | 'development'; nodeIdFromEnvironment?: boolean }
 }
 export type SessionAuthority = (() => Promise<Principal | void>) & { credential?: string }
 export interface AuthenticatedSessionTransport {
   execute(principal: Principal, action: string, request: Record<string, unknown>, signal: AbortSignal, authority?: SessionAuthority): Promise<unknown>
   stream(principal: Principal, action: string, request: Record<string, unknown>, signal: AbortSignal, authority?: SessionAuthority): Promise<AsyncIterable<unknown>>
+  uploadAttachment?(principal: Principal, ref: string, metadata: SessionAttachmentUpload, source: AsyncIterable<Uint8Array>, signal: AbortSignal, authority?: SessionAuthority): Promise<SessionAttachmentReceipt>
+  readAttachment?(principal: Principal, ref: string, receiptID: string, signal: AbortSignal, authority?: SessionAuthority): Promise<SessionAttachmentDownload>
   /** Internal ingress is never permitted to recurse through a routing wrapper. */
   internal?: { transport: AuthenticatedSessionTransport; destination(node: ExecutionNode): Promise<void> }
   runtime?: SessionExecutionRuntime
@@ -68,7 +76,7 @@ function target(request: Record<string, unknown>): string {
   return ref
 }
 function textOnly(content: unknown): void {
-  if (!Array.isArray(content) || content.some(part => !part || typeof part !== 'object' || part.type !== 'text' || typeof part.text !== 'string')) throw new Error('Authenticated Session accepts only text message parts')
+  if (!Array.isArray(content) || content.some(part => !part || typeof part !== 'object' || part.type !== 'text' || typeof part.text !== 'string' || part.text.includes('[lumo-attachment:') || Object.keys(part).some(key => !['type', 'text'].includes(key)))) throw new Error('Authenticated Session accepts only text message parts')
 }
 function completedPrefix(events: readonly SessionEvent[]): SessionEvent['seq'] {
   const last = events.findLast(event => event.type === 'turn/end')
@@ -104,6 +112,9 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
   if (models.dynamic && !billing) throw new Error('Dynamic model selection requires exact model billing admission')
   const persistence = ctx.get('sessionPersistence')
   validateSessionKnowledge(config.knowledge)
+  validateSessionAttachments(config.attachments, execution?.realm)
+  validateSessionConnectors(config.connectors, execution?.realm)
+  if (config.connectors && !ctx.get('userQuestions')) throw new Error('Owned Session connectors require the native userQuestions service')
   const knowledge = config.knowledge === undefined ? undefined : ctx.get('knowledgeAuthenticatedQuery')
   if (config.knowledge && !knowledge) throw new Error('Dynamic Session knowledge requires a current-user authenticated knowledge query capability')
   if (!connection || !gateway || !access || !meters || !persistence || !ctx.get('sessionQuery') || !ctx.get('agents')) throw new Error('Dynamic Session transport requires connection, Gateway, access, agents, persistence, query and metering')
@@ -122,6 +133,23 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
     // checks this generation atomically, including writes queued before expiry.
     void Promise.allSettled([...handles].map(handle => handle.dispose()))
   }) : undefined
+  const attachmentStore = config.attachments ? ctx.get('attachments') : undefined
+  if (config.attachments && (!attachmentStore || !runtime)) throw new Error('Session attachments require immutable shared storage and persistent execution fencing')
+  const attachments = config.attachments ? new OwnedSessionAttachments(attachmentStore!, config.attachments, runtime!, config.authorityUrl, token, fetcher) : undefined
+  if (config.connectors && !runtime) throw new Error('Owned Session connectors require persistent execution fencing')
+  const connectors = config.connectors ? new SessionConnectorTools(config.connectors, token, config.projectId, agent => ({
+    async principal() {
+      const owner = known.get(agent.id), authority = authorities.get(agent.id)
+      if (!owner || !authority || !prepared.has(agent) || ctx.agents.get(SessionId(agent.id)) !== agent) throw new Error('Connector call requires the exact live owned Session Agent')
+      const principal = await authority()
+      if (!principal || principal.user_id !== owner.owner_user_id || principal.realm !== owner.realm) throw new Error('Connector call requires the current authenticated Session owner')
+      await authorizeProject(principal); await own(principal, owner.session_ref)
+      return principal
+    },
+    credential: () => authorities.get(agent.id)?.credential,
+    async execution() { return runtime!.identity(agent.id) },
+    signal: runtime!.signal,
+  }), fetcher) : undefined
   const releasePolicy = access.registerPolicy('lumo-user', { bindings: p => grants.get(p.requestId) ?? [] })
   const remember = (ref: string, owner: SessionOwner): void => {
     if (!known.has(ref) && known.size >= 512) throw new Error('Authenticated Session identity capacity reached')
@@ -138,7 +166,8 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
     pendingInputs.delete(owner.session_ref)
     if (ctx.agents.list().filter(current => prepared.has(current)).length >= 64) throw new Error('Authenticated Session active capacity reached')
     agent.ctx.tools.restrict({ allow: [] })
-    agent.ctx.tools.guard(exec => config.knowledge && exec.name === USER_SESSION_KNOWLEDGE_TOOL ? undefined : 'Authenticated Session execution does not grant this tool access')
+    agent.ctx.tools.guard(exec => (config.knowledge && exec.name === USER_SESSION_KNOWLEDGE_TOOL || attachments && exec.name === USER_SESSION_ATTACHMENT_TOOL || connectors && USER_CONNECTOR_TOOLS.some(name => name === exec.name)) ? undefined : 'Authenticated Session execution does not grant this tool access')
+    connectors?.install(agent)
     if (config.knowledge && knowledge) installSessionKnowledge(agent, knowledge, config.knowledge, config.projectId, async () => {
       const authority = authorities.get(owner.session_ref)
       if (!authority) throw new Error('Knowledge query requires current login authority')
@@ -146,6 +175,14 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
       if (!principal || principal.user_id !== owner.owner_user_id || principal.realm !== owner.realm) throw new Error('Knowledge query requires the current authenticated Session owner')
       await authorizeProject(principal)
       await own(principal, owner.session_ref)
+      return principal
+    })
+    if (attachments) attachments.install(agent, owner.session_ref, async () => {
+      const authority = authorities.get(owner.session_ref)
+      if (!authority) throw new Error('Attachment read requires current login authority')
+      const principal = await authority()
+      if (!principal || principal.user_id !== owner.owner_user_id || principal.realm !== owner.realm) throw new Error('Attachment read requires the current Session owner')
+      await authorizeProject(principal); await own(principal, owner.session_ref)
       return principal
     })
     // Preserve native durable choices on resume/fork; a removed choice never
@@ -207,6 +244,8 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
       await persistence!.flush()
       signal.throwIfAborted()
       await authority()
+      if (attachments && parent && seed) await attachments.inherit(principal, owner.session_ref, parent, seed)
+      await authority()
       await owners.activate(owner.realm, owner.session_ref, reserved.creation_token)
       return { sessionId: owner.session_ref }
     } catch (error) {
@@ -233,6 +272,16 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
   }
   return {
     ...(runtime ? { runtime } : {}),
+    ...(attachments ? {
+      async uploadAttachment(principal: Principal, ref: string, metadata: SessionAttachmentUpload, source: AsyncIterable<Uint8Array>, signal: AbortSignal, authority?: SessionAuthority) {
+        const authorize = async () => { signal.throwIfAborted(); if (!authority) throw new Error('Attachment upload requires current login'); await authority(); await authorizeProject(principal); await own(principal, ref) }
+        return attachments.upload(principal, ref, metadata, source, signal, authorize)
+      },
+      async readAttachment(principal: Principal, ref: string, receiptID: string, signal: AbortSignal, authority?: SessionAuthority) {
+        const authorize = async () => { signal.throwIfAborted(); if (!authority) throw new Error('Attachment read requires current login'); await authority(); await authorizeProject(principal); await own(principal, ref) }
+        return attachments.download(principal, ref, receiptID, signal, authorize)
+      },
+    } : {}),
     async execute(principal, action, request, signal, authority) {
       if (execution && principal.realm !== execution.realm) throw new Error('Session Realm does not match this execution node')
       await authorizeProject(principal)
@@ -259,21 +308,35 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
         const page = await owners.list(principal.realm, principal.user_id, config.nodeId, request.after as string | undefined)
         return { ...page, owners: page.owners.filter(owner => owner.project_id === config.projectId) }
       }
-      if (!unary.has(action) && action !== 'models' && action !== 'selectModel') throw new Error('Session action is not available in the authenticated text profile')
+      if (!unary.has(action) && !['models', 'selectModel', 'interactionList', 'interactionAnswer'].includes(action)) throw new Error('Session action is not available in the authenticated text profile')
       const ref = target(request)
       await own(principal, ref)
+      if (action === 'interactionList' || action === 'interactionAnswer') {
+        if (!authority) throw new Error('Session interaction requires current login authority')
+        await authority()
+        if (Object.keys(request).some(key => key !== 'sessionId' && !(action === 'interactionAnswer' && key === 'answer'))) throw new Error('Invalid owned Session interaction request')
+        const agent = ctx.agents.get(SessionId(ref))
+        if (action === 'interactionList' && (!connectors || !agent)) return { questions: [] }
+        if (!connectors || !agent || !prepared.has(agent)) throw new Error('Owned Session interaction is unavailable')
+        return action === 'interactionList' ? connectors.list(agent) : connectors.answer(agent, request.answer)
+      }
       if (action === 'models' || action === 'selectModel') {
         if (!authority) throw new Error('Authenticated model selection requires current login authority')
         await authority()
         if (action === 'models' && Object.keys(request).some(key => key !== 'sessionId')) throw new Error('Model catalog accepts only its owned Session identity')
         const agent = await activeAgent(ref, signal)
-        if (action === 'models') return models.view(agent)
+        if (action === 'models') return { ...models.view(agent), attachment_policy: config.attachments ? { max_upload_bytes: config.attachments.maxUploadBytes ?? 8 * 1024 * 1024, max_text_bytes: config.attachments.maxTextBytes ?? 1024 * 1024, max_per_message: config.attachments.maxPerMessage ?? 4 } : null }
         return models.select(agent, request, {
           authorize: async () => { signal.throwIfAborted(); await authority(); await authorizeProject(principal); await own(principal, ref) },
           admit: route => billing!.quote(route), resolve: selection => ctx.llm.resolveCallConfig(selection, signal), flush: () => persistence!.flush(),
         })
       }
-      if (action === 'prompt') textOnly(request.content)
+      if (action === 'prompt') {
+        if (attachments) {
+          if (!authority) throw new Error('Attachment prompt requires current login authority')
+          request = { ...request, content: await attachments.promote(principal, ref, request.content, signal, async () => { await authority(); await authorizeProject(principal); await own(principal, ref) }) }
+        } else textOnly(request.content)
+      }
       if (action === 'updateQueue') {
         const update = object(request.action)
         if (update.kind === 'edit') textOnly(update.content)

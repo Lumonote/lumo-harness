@@ -125,6 +125,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/metrics", observability.Handler)
 	mux.HandleFunc("/v1/sessions/", s.handleSession)
 	mux.HandleFunc("/v1/session-controls", s.handleControls)
+	mux.HandleFunc("POST /v1/session-attachments/{ref}", s.handleSessionAttachments)
 	mux.HandleFunc("/v1/session-owners", s.handleSessionOwners)
 	mux.HandleFunc("/v1/session-owners/", s.handleSessionOwners)
 	mux.HandleFunc("GET /v1/session-execution/nodes/{nodeID}", s.handleExecutionNode)

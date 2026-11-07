@@ -18,6 +18,7 @@
 
 ### 最新续开发记录
 
+- [2026-11-07 会话应用流程与文件审核续开发](./remaining-applications-2026-11-07.md)：动态 owner 附件、连接器一次审批、受控文本文件的独立完整读取与异构审核，以及页面配置和验收范围。
 - [2026-11-07 剩余能力续开发与验收](./remaining-completion-2026-11-07.md)：托管内容、持久恢复审批、动态执行租约与跨副本路由、批准模型选择、附件 Provider 及真实依赖验收；准确待办见[剩余功能复核](./remaining-development-2026-11-07.md)。
 - [2026-11-07 管理能力交付](./management-optimization-2026-11-07.md)：知识整理、用户分页、项目预算、角色策略与 Space grant/实例隔离。
 - [2026-11-07 原生模型配置与 Docker 双节点验收](./model-and-docker-acceptance-2026-11-07.md)：沿用 DeepSeek Harness 配置、部署隔离修复、真实 Docker 故障结果及外部供应商拒绝边界。

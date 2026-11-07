@@ -74,7 +74,7 @@ func (s *Server) runtimeTaskResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var result domain.TaskResult
-	if !decodeJSON(w, r, &result) {
+	if !decodeControlledRunResult(w, r, &result) {
 		return
 	}
 	if result.RunID != r.PathValue("runID") || result.NodeID == "" || result.SessionRef == "" {

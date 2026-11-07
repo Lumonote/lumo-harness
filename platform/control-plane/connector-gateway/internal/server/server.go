@@ -17,6 +17,7 @@ import (
 	"github.com/lumo-harness/platform/connector-gateway/internal/domain"
 	"github.com/lumo-harness/platform/connector-gateway/internal/gateway"
 	"github.com/lumo-harness/platform/connector-gateway/internal/oauth"
+	"github.com/lumo-harness/platform/connector-gateway/internal/owned"
 	"github.com/lumo-harness/platform/connector-gateway/internal/registry"
 	"github.com/lumo-harness/platform/observability"
 )
@@ -33,6 +34,7 @@ type Server struct {
 	brk       *breaker.Group
 	approvals *approval.Store
 	oauth     *oauth.Manager
+	owned     *owned.Authority
 	auth      Authenticator
 	audit     auditReader
 	log       *slog.Logger
@@ -47,6 +49,7 @@ type Options struct {
 	Breakers    *breaker.Group
 	Approvals   *approval.Store
 	OAuth       *oauth.Manager
+	Owned       *owned.Authority
 	Auth        Authenticator
 	Audit       auditReader // 未配置时 GET /audit 返回 503：「查不到」与「没配」要能分开
 	Logger      *slog.Logger
@@ -76,7 +79,7 @@ func New(o Options) *Server {
 		o.Gateway.SetWebEgress(o.WebEgress)
 	}
 	return &Server{
-		gw: o.Gateway, reg: o.Registry, brk: o.Breakers, approvals: o.Approvals, oauth: o.OAuth,
+		gw: o.Gateway, reg: o.Registry, brk: o.Breakers, approvals: o.Approvals, oauth: o.OAuth, owned: o.Owned,
 		auth: o.Auth, audit: o.Audit, log: o.Logger,
 		maxBody: o.MaxBodyByte, AdminRoles: o.AdminRoles,
 	}
@@ -93,6 +96,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("DELETE /connectors/{id}", s.handleDisable)
 	mux.HandleFunc("POST /connectors/{id}/enable", s.handleEnable)
 	mux.HandleFunc("POST /connectors/{id}/invoke", s.handleInvoke)
+	mux.HandleFunc("POST /owned/sessions/{ref}/{action}", s.handleOwnedConnector)
 	mux.HandleFunc("GET /connectors/{id}/oauth", s.handleOAuthStatus)
 	mux.HandleFunc("POST /connectors/{id}/oauth/start", s.handleOAuthStart)
 	mux.HandleFunc("POST /connectors/{id}/oauth/callback", s.handleOAuthCallback)

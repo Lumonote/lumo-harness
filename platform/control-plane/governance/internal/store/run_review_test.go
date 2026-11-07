@@ -276,7 +276,7 @@ func TestRunReviewMigrationConvergesWithStartupSchema(t *testing.T) {
 		return raw
 	}
 	startup := schema()
-	if _, err := s.pool.Exec(ctx, `DROP TABLE governance_run_reviews,governance_run_output_manifests,governance_run_execution_snapshots`); err != nil {
+	if _, err := s.pool.Exec(ctx, `DROP TABLE governance_review_file_reads,governance_run_file_blobs,governance_run_reviews,governance_run_output_manifests,governance_run_execution_snapshots`); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "deploy", "migrations", "018_governance_run_reviews.sql"))

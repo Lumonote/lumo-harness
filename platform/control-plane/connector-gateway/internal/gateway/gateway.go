@@ -159,7 +159,45 @@ func isInternal(ip net.IP) bool {
 }
 
 // Invoke 跑完整条闸门链。任何一道闸拒绝都会落审计后再返回错误。
+// Validate checks the declared action and current role/egress policy without
+// resolving credentials or issuing an external request. Owned write consent
+// uses it before persisting a request; Invoke repeats these gates at dispatch.
+func (g *Gateway) Validate(ctx context.Context, caller domain.Caller, inv domain.Invocation) (domain.Connector, domain.Operation, error) {
+	conn, err := g.reg.Lookup(ctx, caller.Realm, inv.ConnectorID)
+	if err != nil {
+		return conn, domain.Operation{}, err
+	}
+	op, ok := conn.Operations[inv.Operation]
+	if !ok {
+		return conn, op, domain.ErrOperation
+	}
+	target, err := buildURL(conn, op, inv)
+	if err != nil {
+		return conn, op, domain.ErrOperation
+	}
+	decision, err := g.pol.Evaluate(ctx, policy.Request{Caller: caller, Connector: conn, Operation: op, Host: target.Host})
+	if err != nil || !decision.Allow {
+		return conn, op, domain.ErrForbidden
+	}
+	if decision.RequireApproval {
+		return conn, op, domain.ErrApproval
+	}
+	if len(inv.Headers) > 0 || conn.Limits.MaxRequestBytes > 0 && int64(len(inv.Body)) > conn.Limits.MaxRequestBytes {
+		return conn, op, domain.ErrOperation
+	}
+	return conn, op, nil
+}
+
 func (g *Gateway) Invoke(ctx context.Context, caller domain.Caller, inv domain.Invocation) (domain.Result, error) {
+	return g.invoke(ctx, caller, inv, 0)
+}
+
+// InvokeVersion pins dispatch to the precise manifest reviewed by an owned
+// receipt. A registry update between consent and execution cannot change it.
+func (g *Gateway) InvokeVersion(ctx context.Context, caller domain.Caller, inv domain.Invocation, version int) (domain.Result, error) {
+	return g.invoke(ctx, caller, inv, version)
+}
+func (g *Gateway) invoke(ctx context.Context, caller domain.Caller, inv domain.Invocation, expectedVersion int) (domain.Result, error) {
 	rec := audit.Record{
 		CorrelationID: inv.CorrelationID,
 		Realm:         string(caller.Realm),
@@ -175,6 +213,9 @@ func (g *Gateway) Invoke(ctx context.Context, caller domain.Caller, inv domain.I
 	conn, err := g.reg.Lookup(ctx, caller.Realm, inv.ConnectorID)
 	if err != nil {
 		return g.deny(ctx, rec, domain.ErrNotFound, err.Error())
+	}
+	if expectedVersion > 0 && conn.Version != expectedVersion {
+		return g.deny(ctx, rec, domain.ErrOperation, "reviewed connector version changed")
 	}
 	op, ok := conn.Operations[inv.Operation]
 	if !ok {

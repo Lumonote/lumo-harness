@@ -89,4 +89,15 @@ describe('local desktop skill and expert assets', () => {
     expect((await call('DELETE', `/lumo/api/agent-presets/${expert.id}`)).status).toBe(204)
     expect((await call('GET', '/lumo/api/agent-presets')).body).toMatchObject({ local: true, agent_presets: [] })
   })
+
+  it('rejects file profiles locally and leaves an existing expert unchanged', async () => {
+    const input = { name: '报告专家', provider: 'p', model_ref: 'm' }
+    expect((await call('POST', '/lumo/api/agent-presets', { ...input, output_profile: 'platform-closed-text-files-v1' })).status).toBe(422)
+    const created = await call('POST', '/lumo/api/agent-presets', { ...input, output_profile: 'platform-closed-text-v1' })
+    const expert = created.body as { id: string; revision: number }
+    const updated = await call('PATCH', `/lumo/api/agent-presets/${expert.id}`, { revision: expert.revision, name: '不应保存', output_profile: 'platform-closed-text-files-v1' })
+    expect(updated.status).toBe(422)
+    expect((await call('GET', '/lumo/api/agent-presets')).body).toMatchObject({ agent_presets: [{ id: expert.id, name: '报告专家', revision: 1, output_profile: 'platform-closed-text-v1' }] })
+    expect((await call('PATCH', `/lumo/api/agent-presets/${expert.id}`, { revision: expert.revision, output_profile: 'unknown' })).status).toBe(422)
+  })
 })

@@ -465,7 +465,35 @@ export function ConnectorAccountPanel({ request, connectorID }: { request: Reque
 export interface AgentPreset {
   id: string; project_id?: string; name: string; description?: string; owner_user_id: string; status: 'active' | 'disabled'
   version: string; revision: number; provider: string; model_ref: string; system_prompt_ref?: string; connector_ids: string[]; knowledge_space_ids: string[]
+  output_profile?: string
   max_concurrency: number; trust_level?: string; residency?: string; max_budget_cents: number; timeout_seconds: number; max_delegation_depth: number
+}
+
+export const TEXT_OUTPUT_PROFILE = 'platform-closed-text-v1'
+export const FILES_OUTPUT_PROFILE = 'platform-closed-text-files-v1'
+
+export function agentOutputProfileLabel(profile?: string): string {
+  if (!profile || profile === TEXT_OUTPUT_PROFILE) return '纯文本'
+  return profile === FILES_OUTPUT_PROFILE ? '文本与受控文件' : `未知产出类型：${profile}`
+}
+
+/** The API enforces this too; keeping the form intact lets the user resolve conflicts. */
+export function agentOutputProfileError(profile: string, resources: Pick<AgentPreset, 'system_prompt_ref' | 'connector_ids' | 'knowledge_space_ids'>, allowFiles = true): string {
+  if (profile !== TEXT_OUTPUT_PROFILE && profile !== FILES_OUTPUT_PROFILE) return '请选择受支持的产出类型。'
+  if (profile !== FILES_OUTPUT_PROFILE) return ''
+  if (!allowFiles) return '文本与受控文件需要已就绪的集群审核服务。'
+  if (resources.system_prompt_ref?.trim() || resources.connector_ids.length || resources.knowledge_space_ids.length) {
+    return '文本与受控文件不能配置系统提示引用、连接器或知识空间。请先移除这些引用，或选择纯文本。'
+  }
+  return ''
+}
+
+export function AgentOutputProfileField({ profile = TEXT_OUTPUT_PROFILE, allowFiles }: { profile?: string | undefined; allowFiles: boolean }) {
+  return <label className="wide">产出类型<select name="output_profile" aria-label="产出类型" defaultValue={profile}>
+    <option value={TEXT_OUTPUT_PROFILE}>纯文本</option>
+    <option value={FILES_OUTPUT_PROFILE} disabled={!allowFiles}>文本与受控文件</option>
+    {profile !== TEXT_OUTPUT_PROFILE && profile !== FILES_OUTPUT_PROFILE ? <option value={profile} disabled>{agentOutputProfileLabel(profile)}</option> : null}
+  </select><small>{allowFiles ? '受控文件支持 TXT、Markdown、CSV 和 JSON；最多 16 个，单个 32 KiB，总计 256 KiB。此类型不支持系统提示引用、连接器或知识空间，文件需由独立审核 Agent 读取。' : '当前部署提供纯文本配置；文本文件产出需要已就绪的集群审核服务。'}</small></label>
 }
 
 // ---------------------------------------------------------------------------
@@ -502,6 +530,7 @@ export interface TaskRunFacts { id: string; attempt: number; state: string; work
 export interface TaskResultFacts {
   task_id?: string; run_id: string; state: string; session_ref?: string; node_id?: string
   summary?: string; output?: unknown; created_at?: string
+  files?: Array<{ name: string; media_type: string; text: string }>
 }
 export interface ChildTaskProgress { task: TaskIntentFacts; run?: TaskRunFacts; result?: TaskResultFacts }
 export interface TaskCollaborationSummary {
@@ -776,6 +805,7 @@ export function TaskEvidencePanel({ taskID, request, runID, result, error, busy,
       <small className="lumo-form-note">上报摘要</small>
       <p className="lumo-cluster-feedback">{result.summary?.trim() || '该结果只带结构化交付物，没有文字摘要。'}</p>
       <details className="lumo-governed-source"><summary>{`交付物全文 · ${hasOutput ? `${output.length} 字符` : '无 output 字段'}`}</summary>{output ? <pre>{output}</pre> : <p>{hasOutput ? '交付物是空字符串。' : '该结果只带摘要，没有结构化交付物。'}</p>}</details>
+      {result.files?.length ? <section aria-label="受控文本文件"><small className="lumo-form-note">受控文本文件 · {result.files.length} 个</small>{result.files.map(file => <details className="lumo-governed-source" key={file.name}><summary>{file.name} · {file.media_type}</summary><pre>{file.text}</pre></details>)}<p className="lumo-form-note">这里显示执行结果中保存的文件正文；审核结论请在独立审核任务中查看。</p></section> : null}
       <small className="lumo-form-note">{`上报时间 ${result.created_at ? new Date(result.created_at).toLocaleString('zh-CN') : '未记录'} · 结果行不可变，重放不会覆盖`}</small>
     </> : null}
     <TaskArtifactsPanel request={request} taskID={taskID} runID={runID} />
@@ -912,12 +942,15 @@ export function AgentPresetEditor({ request, presets, refresh }: { request: Requ
     const body = {
       revision: editing.revision, name: value('name'), description: value('description'), status: value('status'), version: value('version'),
       provider: value('provider'), model_ref: value('model_ref'), system_prompt_ref: value('system_prompt_ref'),
+      output_profile: value('output_profile'),
       connector_ids: references('connector_ids'), knowledge_space_ids: references('knowledge_space_ids'),
       max_concurrency: Number(fields.get('max_concurrency')), max_budget_cents: Number(fields.get('max_budget_cents')),
       timeout_seconds: Number(fields.get('timeout_seconds')), max_delegation_depth: Number(fields.get('max_delegation_depth')),
       trust_level: value('trust_level'), residency: value('residency'),
       ...(capability?.organization ? { owner_user_id: value('owner_user_id'), project_id: value('project_id') } : {}),
     }
+    const profileError = agentOutputProfileError(body.output_profile, body, capability?.clusterReady === true)
+    if (profileError) { action.setError(profileError); return }
     await action.run(async () => {
       const updated = await request<AgentPreset>(`/lumo/api/agent-presets/${encodeURIComponent(editing.id)}`, { method: 'PATCH', body: JSON.stringify(body) })
       setEditing(updated)
@@ -935,6 +968,7 @@ export function AgentPresetEditor({ request, presets, refresh }: { request: Requ
         <label>状态<select name="status" defaultValue={editing.status}><option value="active">启用</option><option value="disabled">停用</option></select></label>
         <label>Provider<input name="provider" required maxLength={128} defaultValue={editing.provider} /></label>
         <label>模型引用<input name="model_ref" required maxLength={256} defaultValue={editing.model_ref} /></label>
+        <AgentOutputProfileField profile={editing.output_profile} allowFiles={capability?.clusterReady === true} />
         <label>所有者 ID<input name="owner_user_id" required readOnly={!capability?.organization} maxLength={128} defaultValue={editing.owner_user_id} /></label>
         <label>项目范围<input name="project_id" readOnly={!capability?.organization} maxLength={128} defaultValue={editing.project_id ?? ''} /></label>
         <label>最大并发<input name="max_concurrency" type="number" required min={1} step={1} defaultValue={editing.max_concurrency} /></label>

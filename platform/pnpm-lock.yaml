@@ -625,6 +625,9 @@ importers:
       '@deepseek-ai/dsh-api-remote-access':
         specifier: link:../../../deepseek-harness/packages/api/remote-access
         version: link:../../../deepseek-harness/packages/api/remote-access
+      '@deepseek-ai/dsh-attachment':
+        specifier: link:../../../deepseek-harness/packages/attachment/attachment
+        version: link:../../../deepseek-harness/packages/attachment/attachment
       '@deepseek-ai/dsh-host-webserver':
         specifier: link:../../../deepseek-harness/packages/host/webserver
         version: link:../../../deepseek-harness/packages/host/webserver
@@ -643,6 +646,9 @@ importers:
       '@deepseek-ai/dsh-typert-protocol':
         specifier: link:../../../deepseek-harness/packages/typert/protocol
         version: link:../../../deepseek-harness/packages/typert/protocol
+      '@deepseek-ai/dsh-user-questions':
+        specifier: link:../../../deepseek-harness/packages/interaction/user-questions
+        version: link:../../../deepseek-harness/packages/interaction/user-questions
       '@deepseek-ai/schemastery':
         specifier: link:../../../deepseek-harness/vendor/schemastery
         version: link:../../../deepseek-harness/vendor/schemastery

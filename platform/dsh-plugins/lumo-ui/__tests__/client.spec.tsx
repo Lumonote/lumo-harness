@@ -918,6 +918,43 @@ describe('Lumo native Harness integration', () => {
     expect(screen.queryByRole('tablist', { name: '技能中心目录' })).toBeNull()
   }, 15000)
 
+  it('creates a controlled-file expert only after conflicting references are resolved', async () => {
+    const baseFetch = fetch
+    const writes: Record<string, unknown>[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/lumo/api/capabilities') return Response.json({ clusterReady: true, organization: true })
+      if (path === '/lumo/api/agent-presets' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>
+        writes.push(body)
+        return Response.json({ ...body, id: 'controlled-expert', owner_user_id: 'palmer', revision: 1, version: '1', status: 'active' })
+      }
+      return baseFetch(input, init)
+    }))
+    const registered = mountLumo()
+    const Entry = registered.find(item => item.name === 'sidebar.navigation')!.Component
+    const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
+    render(<><Entry wide /><Overlay /></>)
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '技能中心' }))
+    await screen.findByText('我的专家')
+    fireEvent.click(screen.getByRole('button', { name: '＋ 新建专家' }))
+    const profile = screen.getByRole('combobox', { name: '产出类型' })
+    await waitFor(() => expect((within(profile).getByRole('option', { name: '文本与受控文件' }) as HTMLOptionElement).disabled).toBe(false))
+    fireEvent.change(profile, { target: { value: 'platform-closed-text-files-v1' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '专家名称' }), { target: { value: '报告专家' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '职责说明' }), { target: { value: '生成可独立审核的报告' } })
+    const reference = screen.getByRole('textbox', { name: /系统提示引用/u })
+    fireEvent.change(reference, { target: { value: 'protected' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建专家' }))
+    expect(await screen.findByText(/文本与受控文件不能配置系统提示引用/u)).toBeTruthy()
+    expect(writes).toHaveLength(0)
+    expect((reference as HTMLInputElement).value).toBe('protected')
+    fireEvent.change(reference, { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建专家' }))
+    await screen.findByText(/专家「报告专家」已创建/u)
+    expect(writes).toEqual([expect.objectContaining({ output_profile: 'platform-closed-text-files-v1', system_prompt_ref: '', connector_ids: [], knowledge_space_ids: [] })])
+  })
+
   it('keeps the home composer clean and opens creative workbenches only through /design and /ppt', async () => {
     const { registered, sources } = mountLumoWithSources()
 

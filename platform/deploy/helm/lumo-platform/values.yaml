@@ -88,6 +88,9 @@ connectorOAuth:
   vaultMount: secret
   vaultPrefix: lumo/connector-oauth
   adminRoles: admin,realm_admin,platform_admin
+# Optional exact current-owner connector action grants. Empty disables this API.
+# Example: [{realm: dev, project_id: demo, connector_id: issues, operation: create}]
+ownedSessionConnectors: []
 governance:
   botTeamsUrl: ""
   # Optional exact OPA boolean decision URL. Empty uses PostgreSQL role facts
@@ -318,6 +321,9 @@ dshWeb:
   # remain bound to their original node and its disk; no automatic migration.
   # Optional knowledge: {realm: dev, defaultTopK: 5, spaces: [space-id]} enables
   # only current-user published queries in this project; omit for text-only.
+  # Optional attachments: {realm: dev, maxUploadBytes: 8388608, maxTextBytes: 1048576, maxPerMessage: 4}
+  # enables immutable MinIO receipts for UTF-8 text and native raster images. Disabled by default.
+  # Optional connectors: {realm: dev, gatewayUrl: http://lumo-platform-connector-gateway:8082, actions: [{connectorId: issues, operations: [create]}]}
   userSessionExecution: {}
   registryUrl: http://lumo-platform-registry:8084
   llmGatewayUrl: http://lumo-platform-llm-gateway:8088

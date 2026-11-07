@@ -26,6 +26,8 @@
     "@deepseek-ai/dsh-session-persistence": "link:../../../deepseek-harness/packages/session/session-persistence",
     "@deepseek-ai/dsh-typert-protocol": "link:../../../deepseek-harness/packages/typert/protocol",
     "@deepseek-ai/dsh-api-gateway": "link:../../../deepseek-harness/packages/api/gateway",
-    "@deepseek-ai/dsh-api-remote-access": "link:../../../deepseek-harness/packages/api/remote-access"
+    "@deepseek-ai/dsh-api-remote-access": "link:../../../deepseek-harness/packages/api/remote-access",
+    "@deepseek-ai/dsh-attachment": "link:../../../deepseek-harness/packages/attachment/attachment",
+    "@deepseek-ai/dsh-user-questions": "link:../../../deepseek-harness/packages/interaction/user-questions"
   }
 }

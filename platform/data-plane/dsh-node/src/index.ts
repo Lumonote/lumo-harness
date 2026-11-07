@@ -32,6 +32,8 @@ import {
 import { assertLocalStoragePath, resolveDeploymentProfile, withClusterStatus } from './deployment.ts'
 import { FAKE_IP_PROVIDER_ID } from '@lumo/web-fetch-fakeip'
 import { superagentProfileOverlay } from './superagent.ts'
+import { validateSessionAttachments } from '../../../dsh-plugins/user-auth/src/session-attachments.ts'
+import { validateSessionConnectors } from '../../../dsh-plugins/user-auth/src/session-connectors.ts'
 import { validateSessionKnowledge } from '../../../dsh-plugins/user-auth/src/session-knowledge.ts'
 import { SessionModelPolicy, type SessionModelConfiguration } from '../../../dsh-plugins/user-auth/src/session-model-policy.ts'
 import { managedContentSettings } from './managed-content-config.ts'
@@ -167,6 +169,8 @@ if (userSessionExecution !== undefined) {
     || (userSessionExecution as { projectId: string }).projectId !== projectID) throw new Error('LUMO_USER_SESSION_EXECUTION requires a fixed authority/node/project/workspace/provider/model and the deployment project')
   if (deployment.mode === 'local' || !isWebProfile) throw new Error('Dynamic user Sessions require an authenticated server Web profile')
   validateSessionKnowledge((userSessionExecution as { knowledge?: unknown }).knowledge, platformRealm)
+  validateSessionAttachments((userSessionExecution as { attachments?: unknown }).attachments, platformRealm)
+  validateSessionConnectors((userSessionExecution as { connectors?: unknown }).connectors, platformRealm)
   new SessionModelPolicy(userSessionExecution as SessionModelConfiguration)
   if ((userSessionExecution as { routing?: { nodeIdFromEnvironment?: boolean } }).routing?.nodeIdFromEnvironment) {
     ;(userSessionExecution as { nodeId: string }).nodeId = jobControlNodeId
@@ -611,7 +615,7 @@ ${roleRows}
 ${skillLocalRows}
 ${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
       name: ${JSON.stringify(userAuthEntry)}
-      inject: ${userSessionExecution ? `[webServer, connection, remoteAccess, typertGateway, agents, sessionQuery, sessionPersistence, meteringScope${(userSessionExecution as { knowledge?: unknown }).knowledge ? ', knowledgeAuthenticatedQuery' : ''}]` : '[webServer]'}
+      inject: ${userSessionExecution ? `[webServer, connection, remoteAccess, typertGateway, agents, sessionQuery, sessionPersistence, meteringScope${(userSessionExecution as { knowledge?: unknown }).knowledge ? ', knowledgeAuthenticatedQuery' : ''}${(userSessionExecution as { attachments?: unknown }).attachments ? ', attachments' : ''}${(userSessionExecution as { connectors?: unknown }).connectors ? ', userQuestions' : ''}]` : '[webServer]'}
       config:
         host: ${JSON.stringify(process.env['LUMO_AUTH_HOST'] ?? '0.0.0.0')}
         port: ${authPort}

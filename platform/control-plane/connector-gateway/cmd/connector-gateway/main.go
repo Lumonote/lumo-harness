@@ -9,9 +9,11 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -31,6 +33,7 @@ import (
 	"github.com/lumo-harness/platform/connector-gateway/internal/domain"
 	"github.com/lumo-harness/platform/connector-gateway/internal/gateway"
 	"github.com/lumo-harness/platform/connector-gateway/internal/oauth"
+	"github.com/lumo-harness/platform/connector-gateway/internal/owned"
 	"github.com/lumo-harness/platform/connector-gateway/internal/policy"
 	"github.com/lumo-harness/platform/connector-gateway/internal/ratelimit"
 	"github.com/lumo-harness/platform/connector-gateway/internal/registry"
@@ -135,6 +138,40 @@ func main() {
 		log.Error("初始化连接器审批存储失败", "err", err)
 		os.Exit(1)
 	}
+	var ownedAuthority *owned.Authority
+	if raw := os.Getenv("LUMO_OWNED_SESSION_CONNECTORS"); raw != "" {
+		var grants []owned.Grant
+		decoder := json.NewDecoder(strings.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err = decoder.Decode(&grants); err != nil || len(grants) == 0 || decoder.Decode(&struct{}{}) != io.EOF {
+			log.Error("invalid owned Session connector allowlist")
+			os.Exit(2)
+		}
+		store := owned.New(pool)
+		if err = store.Init(ctx); err != nil {
+			log.Error("initialize owned connector receipts failed")
+			os.Exit(1)
+		}
+		ownedAuthority, err = owned.NewAuthority(store, os.Getenv("LUMO_GOVERNANCE_URL"), os.Getenv("LUMO_CONTROL_PLANE_TOKEN"), grants)
+		if err != nil {
+			log.Error("invalid owned connector governance configuration")
+			os.Exit(2)
+		}
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := store.Expire(ctx); err != nil {
+						log.Warn("owned connector receipt cleanup failed")
+					}
+				}
+			}
+		}()
+	}
 
 	var credStore credentials.Store = credentials.NewEnvStore(*credPrefix)
 	var vaultStore *credentials.VaultStore
@@ -202,6 +239,7 @@ func main() {
 			Gateway:    gw,
 			Registry:   reg,
 			Approvals:  approvals,
+			Owned:      ownedAuthority,
 			Audit:      auditReader,
 			OAuth:      oauthManager,
 			Breakers:   brk,

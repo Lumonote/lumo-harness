@@ -236,6 +236,15 @@ spec:
             {{- end }}
             {{- end }}
             {{- if eq $name "connector-gateway" }}
+            {{- with $.Values.ownedSessionConnectors }}
+            {{- if not $.Values.services.governance.enabled }}
+            {{- fail "ownedSessionConnectors requires services.governance.enabled" }}
+            {{- end }}
+            - name: LUMO_OWNED_SESSION_CONNECTORS
+              value: {{ . | toJson | quote }}
+            - name: LUMO_GOVERNANCE_URL
+              value: {{ printf "http://%s-governance:%v" (include "lumo-platform.name" $) $.Values.services.governance.port | quote }}
+            {{- end }}
             - name: LUMO_ADMIN_ROLES
               value: {{ $.Values.connectorOAuth.adminRoles | quote }}
             {{- if $.Values.connectorOAuth.enabled }}

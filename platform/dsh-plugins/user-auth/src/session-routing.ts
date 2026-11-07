@@ -1,3 +1,5 @@
+import { attachmentBytes, attachmentMediaType, attachmentName, parsePublicAttachmentReceipt } from './session-attachments.ts'
+import { SESSION_ATTACHMENT_MAX_BYTES, SESSION_ATTACHMENT_RUNTIME_PATH, type SessionAttachmentDownload, type SessionAttachmentReceipt, type SessionAttachmentUpload } from '../../../shared/seam-contracts/session-attachments.ts'
 import { SessionOwnerClient } from '../../../shared/session-owners.ts'
 import { boundedJSON, SessionExecutionClient, SessionExecutionFencedError, type ExecutionNode } from '../../../shared/session-execution.ts'
 import type { Principal } from './client.ts'
@@ -5,7 +7,7 @@ import type { AuthenticatedSessionTransport, SessionAuthority, SessionTransportC
 import { SessionModelPolicyError } from './session-model-policy.ts'
 
 const streams = new Set(['follow','observeState','observeEvent','observeProjections'])
-const unary = new Set(['fork','state','wait','events','page','projections','rename','prompt','cancel','updateQueue','models','selectModel'])
+const unary = new Set(['fork','state','wait','events','page','projections','rename','prompt','cancel','updateQueue','models','selectModel','interactionList','interactionAnswer'])
 export const SESSION_RUNTIME_PATH = '/lumo/runtime/session'
 /** Origins are deployment configuration, never browser input or registration
  * data. A current authority fact must agree with the pinned origin as well. */
@@ -71,8 +73,56 @@ export function routeSessionTransport(local: AuthenticatedSessionTransport,confi
     const timer=setInterval(()=>{if(!checking){checking=true;void authority?.().catch(()=>cancel.abort()).finally(()=>{checking=false})}},1000);timer.unref()
     try{return await run(combined)}finally{clearInterval(timer);cancel.abort()}
   }
+  let attachmentTransfers=0
+  const attachmentTarget=async(principal:Principal,ref:string,authority?:SessionAuthority)=>{
+    if(principal.realm!==realm||!authority?.credential)throw new SessionExecutionFencedError()
+    refOf({sessionId:ref});await runtime.check();await authority();await authorizeProject(principal)
+    const owner=await owners.get(realm,ref)
+    if(owner.state!=='active'||owner.realm!==realm||owner.owner_user_id!==principal.user_id||owner.project_id!==config.projectId)throw new SessionExecutionFencedError()
+    if(owner.node_id===config.nodeId)return undefined
+    const origin=routes.get(owner.node_id);if(!origin)throw new SessionExecutionFencedError()
+    const node=await executions.node(realm,owner.node_id,config.projectId)
+    if(node.endpoint!==origin)throw new SessionExecutionFencedError()
+    return {origin,node}
+  }
+  const attachmentEnvelope=(credential:string,destination:ExecutionNode,metadata?:SessionAttachmentUpload)=>{
+    const value=Buffer.from(JSON.stringify({credential,destination,...(metadata?{metadata}:{})})).toString('base64url')
+    if(value.length>8192)throw new SessionExecutionFencedError()
+    return value
+  }
   return {
     runtime,internal:{transport:local,destination},
+    ...(local.uploadAttachment&&local.readAttachment?{
+      async uploadAttachment(principal:Principal,ref:string,metadata:SessionAttachmentUpload,source:AsyncIterable<Uint8Array>,signal:AbortSignal,authority?:SessionAuthority):Promise<SessionAttachmentReceipt>{
+        if(attachmentTransfers>=2)throw new Error('Attachment transfer capacity reached');attachmentTransfers++
+        try{return await withAuthority(authority,signal,async active=>{
+          const target=await attachmentTarget(principal,ref,authority)
+          if(!target)return local.uploadAttachment!(principal,ref,metadata,source,active,authority)
+          const name=attachmentName(metadata.name),mediaType=attachmentMediaType(metadata.mediaType)
+          const data=await attachmentBytes(source,config.attachments?.maxUploadBytes??SESSION_ATTACHMENT_MAX_BYTES,active)
+          await authority!()
+          const response=await fetcher(target.origin+SESSION_ATTACHMENT_RUNTIME_PATH+'/'+ref,{method:'POST',redirect:'error',signal:active,headers:{authorization:'Bearer '+token,'content-type':mediaType,'x-lumo-attachment-envelope':attachmentEnvelope(authority!.credential!,target.node,{name,mediaType})},body:Buffer.from(data)})
+          if(!response.ok){await response.body?.cancel();throw new SessionExecutionFencedError()}
+          const value=await boundedJSON(response,8192)
+          await authority!();await authorizeProject(principal);active.throwIfAborted()
+          return parsePublicAttachmentReceipt(value)
+        })}finally{attachmentTransfers--}
+      },
+      async readAttachment(principal:Principal,ref:string,id:string,signal:AbortSignal,authority?:SessionAuthority):Promise<SessionAttachmentDownload>{
+        if(attachmentTransfers>=2)throw new Error('Attachment transfer capacity reached');attachmentTransfers++
+        try{return await withAuthority(authority,signal,async active=>{
+          const target=await attachmentTarget(principal,ref,authority)
+          if(!target)return local.readAttachment!(principal,ref,id,active,authority)
+          if(!/^att_[a-f0-9]{48}$/u.test(id))throw new SessionExecutionFencedError()
+          const response=await fetcher(target.origin+SESSION_ATTACHMENT_RUNTIME_PATH+'/'+ref+'/'+id,{method:'GET',redirect:'error',signal:active,headers:{authorization:'Bearer '+token,'x-lumo-attachment-envelope':attachmentEnvelope(authority!.credential!,target.node)}})
+          if(!response.ok||!response.body){await response.body?.cancel();throw new SessionExecutionFencedError()}
+          const mediaType=attachmentMediaType(response.headers.get('content-type')),name=attachmentName(decodeURIComponent(response.headers.get('x-lumo-attachment-name')??''))
+          const reader=response.body.getReader()
+          const data=await attachmentBytes((async function*(){try{for(;;){const chunk=await reader.read();if(chunk.done)break;yield chunk.value}}finally{await reader.cancel().catch(()=>{});reader.releaseLock()}})(),config.attachments?.maxUploadBytes??SESSION_ATTACHMENT_MAX_BYTES,active)
+          await authority!();await authorizeProject(principal);active.throwIfAborted();return {data,name,mediaType}
+        })}finally{attachmentTransfers--}
+      },
+    }:{}),
     async execute(principal,action,request,signal,authority){
       if(action==='create') return local.execute(principal,action,request,signal,authority)
       if(action==='list'){

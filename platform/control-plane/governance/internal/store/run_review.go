@@ -114,7 +114,7 @@ func (s *Store) PrepareRunExecution(ctx context.Context, realm, runID string, re
 		if already {
 			return out, fmt.Errorf("%w: cannot attest execution after outputs already exist", ErrConflict)
 		}
-		out.Snapshot = domain.RunExecutionSnapshot{Realm: realm, TaskID: taskID, RunID: runID, WorkerID: run.WorkerID, NodeID: req.NodeID, SessionRef: req.SessionRef, PresetID: p.ID, PresetRevision: p.Revision, Provider: p.Provider, Model: p.ModelRef, OutputProfile: domain.ClosedTextOutputProfile, Intent: task.Intent, IntentContract: task.IntentContract}
+		out.Snapshot = domain.RunExecutionSnapshot{Realm: realm, TaskID: taskID, RunID: runID, WorkerID: run.WorkerID, NodeID: req.NodeID, SessionRef: req.SessionRef, PresetID: p.ID, PresetRevision: p.Revision, Provider: p.Provider, Model: p.ModelRef, OutputProfile: p.OutputProfile, Intent: task.Intent, IntentContract: task.IntentContract}
 		if len(p.ConnectorIDs) > 0 || len(p.KnowledgeSpaceIDs) > 0 || p.SystemPromptRef != "" {
 			out.Snapshot.OutputProfile = "unknown"
 		}
@@ -132,7 +132,7 @@ func (s *Store) PrepareRunExecution(ctx context.Context, realm, runID string, re
 		if err != nil {
 			return out, err
 		}
-		if err = independentRunReviewer(producer, out.Snapshot, len(out.Review.Manifest.Entries)); err != nil {
+		if err = independentRunReviewer(producer, out.Snapshot, len(out.Review.Manifest.Entries)+len(out.Review.Manifest.Files)); err != nil {
 			return out, err
 		}
 	}
@@ -140,7 +140,7 @@ func (s *Store) PrepareRunExecution(ctx context.Context, realm, runID string, re
 }
 
 func independentRunReviewer(producer, review domain.RunExecutionSnapshot, artifacts int) error {
-	if producer.OutputProfile != domain.ClosedTextOutputProfile || review.OutputProfile != domain.ClosedTextOutputProfile {
+	if !domain.ProvenOutputProfile(producer.OutputProfile) || review.OutputProfile != domain.ClosedTextOutputProfile {
 		return fmt.Errorf("%w: review requires a closed tool-free execution profile", ErrConflict)
 	}
 	v := domain.ReviewerEligibility(domain.ReviewerFacts{Dispatcher: producer.WorkerID, Reviewer: review.WorkerID, DispatcherPreset: producer.PresetID, ReviewerPreset: review.PresetID, DispatcherModel: producer.Provider + ":" + producer.Model, ReviewerModel: review.Provider + ":" + review.Model, DispatcherNode: producer.NodeID, ReviewerNode: review.NodeID, AffectedArtifacts: artifacts})
@@ -155,7 +155,7 @@ func reviewContextTx(ctx context.Context, tx pgx.Tx, realm, reviewRunID string) 
 	var raw []byte
 	var current bool
 	err := tx.QueryRow(ctx, `SELECT b.producer_task_id,b.producer_run_id,b.manifest_digest,m.manifest,b.expires_at,
-	 b.expires_at>now() AND m.digest=b.manifest_digest AND p.attempt=(SELECT max(attempt) FROM governance_task_runs WHERE realm=$1 AND task_id=b.producer_task_id)
+	 b.expires_at>clock_timestamp() AND m.digest=b.manifest_digest AND p.attempt=(SELECT max(attempt) FROM governance_task_runs WHERE realm=$1 AND task_id=b.producer_task_id)
 	 FROM governance_run_reviews b JOIN governance_run_output_manifests m ON m.realm=b.realm AND m.run_id=b.producer_run_id JOIN governance_task_runs p ON p.realm=b.realm AND p.id=b.producer_run_id WHERE b.realm=$1 AND b.review_run_id=$2`, realm, reviewRunID).Scan(&out.ProducerTaskID, &out.ProducerRunID, &out.ManifestDigest, &raw, &out.ExpiresAt, &current)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -167,6 +167,9 @@ func reviewContextTx(ctx context.Context, tx pgx.Tx, realm, reviewRunID string) 
 		return nil, fmt.Errorf("%w: review binding expired or producer superseded", ErrConflict)
 	}
 	if err = json.Unmarshal(raw, &out.Manifest); err != nil {
+		return nil, err
+	}
+	if err = verifyManifestDigest(out.Manifest, out.ManifestDigest); err != nil {
 		return nil, err
 	}
 	producer, err := executionSnapshotTx(ctx, tx, realm, out.ProducerRunID)
@@ -294,12 +297,12 @@ func (s *Store) CreateRunReview(ctx context.Context, producerTaskID, producerRun
 		if preset.Status != "active" || ownerStatus != "active" || task.AssigneeUserID != preset.OwnerUserID || (preset.ProjectID != "" && preset.ProjectID != task.ProjectID) {
 			return ErrForbidden
 		}
-		profile := domain.ClosedTextOutputProfile
+		profile := preset.OutputProfile
 		if len(preset.ConnectorIDs) > 0 || len(preset.KnowledgeSpaceIDs) > 0 || preset.SystemPromptRef != "" {
 			profile = "unknown"
 		}
 		planned := domain.RunExecutionSnapshot{WorkerID: run.WorkerID, PresetID: preset.ID, Provider: preset.Provider, Model: preset.ModelRef, OutputProfile: profile}
-		if err = independentRunReviewer(producer, planned, len(bound.Manifest.Entries)); err != nil {
+		if err = independentRunReviewer(producer, planned, len(bound.Manifest.Entries)+len(bound.Manifest.Files)); err != nil {
 			return err
 		}
 		return nil
@@ -314,6 +317,9 @@ func (s *Store) CreateRunReview(ctx context.Context, producerTaskID, producerRun
 func sealRunOutputTx(ctx context.Context, tx pgx.Tx, realm string, result domain.TaskResult, trusted bool) error {
 	snapshot, err := executionSnapshotTx(ctx, tx, realm, result.RunID)
 	if errors.Is(err, pgx.ErrNoRows) {
+		if len(result.Files) > 0 || len(result.ReviewFileReceipts) > 0 {
+			return fmt.Errorf("%w: file evidence requires a pre-execution profile", ErrConflict)
+		}
 		return nil
 	}
 	if err != nil {
@@ -325,12 +331,30 @@ func sealRunOutputTx(ctx context.Context, tx pgx.Tx, realm string, result domain
 	if result.State != "COMPLETED" {
 		return nil
 	}
-	if snapshot.OutputProfile != domain.ClosedTextOutputProfile {
+	if !domain.ProvenOutputProfile(snapshot.OutputProfile) {
+		if len(result.Files) > 0 || len(result.ReviewFileReceipts) > 0 {
+			return fmt.Errorf("%w: unknown execution cannot register controlled file evidence", ErrConflict)
+		}
 		return nil
 	}
-	manifest, digest, err := domain.BuildRunOutputManifest(result)
+	if err = verifyReviewFileReceiptsTx(ctx, tx, realm, result); err != nil {
+		return err
+	}
+	var manifest domain.RunOutputManifest
+	var digest string
+	if snapshot.OutputProfile == domain.ClosedTextFilesOutputProfile {
+		manifest, digest, err = domain.BuildRunTextFilesManifest(result)
+	} else {
+		if len(result.Files) > 0 {
+			return fmt.Errorf("%w: text-only execution cannot register files", ErrConflict)
+		}
+		manifest, digest, err = domain.BuildRunOutputManifest(result)
+	}
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrConflict, err)
+	}
+	if err = persistRunFileBlobsTx(ctx, tx, realm, result, manifest); err != nil {
+		return err
 	}
 	raw, _ := json.Marshal(manifest)
 	_, err = tx.Exec(ctx, `INSERT INTO governance_run_output_manifests(run_id,realm,task_id,digest,manifest) VALUES($1,$2,$3,$4,$5)`, result.RunID, realm, result.TaskID, digest, raw)
@@ -347,16 +371,17 @@ func requireProvenTaskHistoryTx(ctx context.Context, tx pgx.Tx, realm, taskID st
 	 LEFT JOIN governance_run_execution_snapshots s ON s.realm=r.realm AND s.run_id=r.id AND s.task_id=r.task_id
 	 LEFT JOIN governance_run_output_manifests m ON m.realm=r.realm AND m.run_id=r.id AND m.task_id=r.task_id
 	 WHERE r.realm=$1 AND r.task_id=$2 AND (
-	   (s.run_id IS NOT NULL AND COALESCE(s.snapshot->>'output_profile','')<>$3)
+	   (s.run_id IS NOT NULL AND NOT COALESCE(s.snapshot->>'output_profile'=ANY($3::text[]),false))
 	   OR EXISTS(SELECT 1 FROM governance_task_artifacts a WHERE a.realm=r.realm AND a.run_id=r.id)
 	   OR ((r.started_at IS NOT NULL OR r.state='COMPLETED'
 	       OR EXISTS(SELECT 1 FROM governance_task_results e WHERE e.realm=r.realm AND e.run_id=r.id))
-	     AND NOT COALESCE(s.snapshot->>'output_profile'=$3 AND s.snapshot->>'realm'=r.realm
+	     AND NOT COALESCE(s.snapshot->>'output_profile'=ANY($3::text[]) AND s.snapshot->>'realm'=r.realm
 	       AND s.snapshot->>'task_id'=r.task_id AND s.snapshot->>'run_id'=r.id
-	       AND m.manifest->>'scope'=$3 AND m.manifest->>'task_id'=r.task_id AND m.manifest->>'run_id'=r.id,false))
-	 ) ORDER BY r.attempt LIMIT 1`, realm, taskID, domain.ClosedTextOutputProfile).Scan(&unprovenRunID)
+	       AND m.manifest->>'scope'=s.snapshot->>'output_profile' AND m.manifest->>'task_id'=r.task_id AND m.manifest->>'run_id'=r.id,false))
+	   OR (EXISTS(SELECT 1 FROM governance_run_file_blobs f WHERE f.realm=r.realm AND f.run_id=r.id) AND NOT COALESCE(s.snapshot->>'output_profile'=$4,false))
+	 ) ORDER BY r.attempt LIMIT 1`, realm, taskID, []string{domain.ClosedTextOutputProfile, domain.ClosedTextFilesOutputProfile}, domain.ClosedTextFilesOutputProfile).Scan(&unprovenRunID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
+		return verifyHistoricalRunBlobsTx(ctx, tx, realm, taskID)
 	}
 	if err != nil {
 		return err
@@ -390,6 +415,12 @@ func requireRunReviewTx(ctx context.Context, tx pgx.Tx, realm, taskID string) (m
 	}
 	var manifest domain.RunOutputManifest
 	if err = json.Unmarshal(raw, &manifest); err != nil {
+		return nil, err
+	}
+	if manifest.Scope != producer.OutputProfile || verifyManifestDigest(manifest, digest) != nil {
+		return nil, fmt.Errorf("%w: output manifest does not match execution", ErrConflict)
+	}
+	if err = verifyRunBlobSetTx(ctx, tx, realm, producerRunID, manifest); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `SELECT b.review_run_id,r.task_id,e.payload FROM governance_run_reviews b JOIN governance_task_runs r ON r.realm=b.realm AND r.id=b.review_run_id JOIN governance_task_results e ON e.realm=r.realm AND e.run_id=r.id
@@ -444,7 +475,7 @@ func requireRunReviewTx(ctx context.Context, tx pgx.Tx, realm, taskID string) (m
 		if err != nil {
 			return nil, err
 		}
-		if independentRunReviewer(producer, review, len(manifest.Entries)) != nil {
+		if independentRunReviewer(producer, review, len(manifest.Entries)+len(manifest.Files)) != nil {
 			continue
 		}
 		var result domain.TaskResult
@@ -455,7 +486,10 @@ func requireRunReviewTx(ctx context.Context, tx pgx.Tx, realm, taskID string) (m
 		if err != nil || !approved {
 			continue
 		}
-		return map[string]any{"review_run_id": c.id, "producer_run_id": producerRunID, "manifest_digest": digest, "scope": domain.ClosedTextOutputProfile, "artifacts": len(manifest.Entries), "verified": true}, nil
+		if err = verifyReviewFileReceiptsTx(ctx, tx, realm, result); err != nil {
+			continue
+		}
+		return map[string]any{"review_run_id": c.id, "producer_run_id": producerRunID, "manifest_digest": digest, "scope": manifest.Scope, "artifacts": len(manifest.Entries) + len(manifest.Files), "files": len(manifest.Files), "verified": true}, nil
 	}
 	return nil, fmt.Errorf("%w: a current completed independent review approving the exact closed output manifest is required", ErrConflict)
 }

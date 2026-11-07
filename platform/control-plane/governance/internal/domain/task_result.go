@@ -11,14 +11,16 @@ import (
 // TaskResult is an execution receipt. Acceptance remains a separate decision
 // by the requester, and a later attempt cannot overwrite an earlier receipt.
 type TaskResult struct {
-	TaskID     string          `json:"task_id"`
-	RunID      string          `json:"run_id"`
-	State      string          `json:"state"`
-	SessionRef string          `json:"session_ref"`
-	NodeID     string          `json:"node_id,omitempty"`
-	Summary    string          `json:"summary"`
-	Output     json.RawMessage `json:"output,omitempty"`
-	CreatedAt  time.Time       `json:"created_at"`
+	TaskID             string               `json:"task_id"`
+	RunID              string               `json:"run_id"`
+	State              string               `json:"state"`
+	SessionRef         string               `json:"session_ref"`
+	NodeID             string               `json:"node_id,omitempty"`
+	Summary            string               `json:"summary"`
+	Output             json.RawMessage      `json:"output,omitempty"`
+	Files              []RunTextFile        `json:"files,omitempty"`
+	ReviewFileReceipts []RunFileReadReceipt `json:"review_file_receipts,omitempty"`
+	CreatedAt          time.Time            `json:"created_at"`
 }
 
 func (r TaskResult) Validate() error {
@@ -31,6 +33,19 @@ func (r TaskResult) Validate() error {
 	}
 	if len(r.Output) > 1<<20 || (len(r.Output) > 0 && !json.Valid(r.Output)) {
 		return fmt.Errorf("result output must be valid JSON of at most 1 MiB")
+	}
+	if len(r.Files) > 0 {
+		if err := ValidateRunTextFiles(r.Files); err != nil {
+			return err
+		}
+	}
+	if len(r.ReviewFileReceipts) > MaxRunTextFiles {
+		return fmt.Errorf("too many file review receipts")
+	}
+	for _, read := range r.ReviewFileReceipts {
+		if len(read.ID) > 32 || len(read.Receipt) != 64 {
+			return fmt.Errorf("invalid file review receipt")
+		}
 	}
 	if r.State == DelegationCompleted && (strings.TrimSpace(r.SessionRef) == "" ||
 		(strings.TrimSpace(r.Summary) == "" && (len(r.Output) == 0 || bytes.Equal(bytes.TrimSpace(r.Output), []byte("null"))))) {

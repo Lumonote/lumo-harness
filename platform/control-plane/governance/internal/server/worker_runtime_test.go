@@ -12,9 +12,9 @@ import (
 func TestWorkerRuntimeRequiresServiceCredential(t *testing.T) {
 	mux := http.NewServeMux()
 	newTestServer(t, Config{DeploymentMode: domain.ModeCluster, ClusterStatus: "ready", ControlPlaneToken: "runtime-service-token"}).Register(mux)
-	for _, path := range []string{"/v1/workers/agent:one/runtime", "/v1/runtime/agent-presets/one"} {
+	for _, path := range []string{"/v1/workers/agent:one/runtime", "/v1/runtime/agent-presets/one", "/v1/runtime/task-runs/reviewer/review-files/file-0001"} {
 		method := http.MethodPut
-		if strings.Contains(path, "agent-presets") {
+		if strings.Contains(path, "agent-presets") || strings.Contains(path, "review-files") {
 			method = http.MethodGet
 		}
 		req := httptest.NewRequest(method, path, nil)

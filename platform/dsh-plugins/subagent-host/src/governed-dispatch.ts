@@ -31,6 +31,8 @@ export interface GovernedResult {
   state: 'COMPLETED' | 'FAILED' | 'CANCELLED'
   summary: string
   output?: unknown
+  files?: import('./controlled-files.ts').ControlledTextFile[]
+  review_file_receipts?: {id:string;receipt:string}[]
 }
 
 // This consumer deliberately shares the cluster PostgreSQL database with

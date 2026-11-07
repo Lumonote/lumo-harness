@@ -286,6 +286,26 @@ function tablesIn(ddl: string): string[] {
  */
 const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequisites?: DdlSource | DdlSource[] }> = [
   {
+    label:'受控文本文件审核（Go governance ↔ 迁移 029）',
+    a:{files:[`${MIGRATION_DIR}/029_governance_controlled_files.sql`]},
+    b:{files:['control-plane/governance/internal/store/run_files.go'],constName:'runFilesDDL'},
+    prerequisites:[
+      {files:['control-plane/governance/internal/store/store.go'],constName:'DDL'},
+      {files:['control-plane/governance/internal/store/run_review.go'],constName:'runReviewDDL'},
+    ],
+  },
+  {
+    label: '动态 Session one-use connector receipts（Go connector-gateway ↔ 迁移 030）',
+    a: { files: [`${MIGRATION_DIR}/030_owned_connector_receipts.sql`] },
+    b: { files: ['control-plane/connector-gateway/internal/owned/store.go'], constName: 'DDL' },
+  },
+  {
+    label: '动态 Session attachment receipts（Go session-control ↔ 迁移 028）',
+    a: { files: [`${MIGRATION_DIR}/028_session_attachment_receipts.sql`] },
+    b: { files: ['control-plane/session-control/internal/store/session_attachments.go'], constName: 'sessionAttachmentDDL' },
+    prerequisites: { files: ['control-plane/session-control/internal/store/session_owners.go'], constName: 'sessionOwnerDDL' },
+  },
+  {
     label: '动态 Session execution fencing（Go session-control ↔ 迁移 027）',
     a: { files: [`${MIGRATION_DIR}/027_session_execution_leases.sql`] },
     b: { files: ['control-plane/session-control/internal/store/session_execution.go'], constName: 'sessionExecutionDDL' },

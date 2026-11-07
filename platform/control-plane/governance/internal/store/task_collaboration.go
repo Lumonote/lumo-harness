@@ -210,7 +210,7 @@ func (s *Store) ReserveTaskArtifact(ctx context.Context, artifact domain.TaskArt
 		return artifact, ErrNotFound
 	}
 	var closed bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM governance_run_execution_snapshots WHERE realm=$1 AND run_id=$2 AND snapshot->>'output_profile'=$3)`, artifact.Realm, artifact.RunID, domain.ClosedTextOutputProfile).Scan(&closed); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM governance_run_execution_snapshots WHERE realm=$1 AND run_id=$2 AND snapshot->>'output_profile'=ANY($3::text[]))`, artifact.Realm, artifact.RunID, []string{domain.ClosedTextOutputProfile, domain.ClosedTextFilesOutputProfile}).Scan(&closed); err != nil {
 		return artifact, err
 	}
 	if closed {

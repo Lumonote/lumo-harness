@@ -30,6 +30,7 @@ import { layoutTaskBoard, type BoardTaskInput, type BoardTaskState, type TeamPro
 // 侧边栏登录态的映射规则（纯函数，见该文件头）：三条分支的区别就是它的全部内容。
 import { resolveSidebarIdentity, type SidebarIdentity } from './sidebar-identity.ts'
 import { ClusterNodesPanel, SchedulerClustersPanel, SkillAccessPanel, ProjectMembersPanel, ConnectorManifestPanel, ConnectorAccountPanel, AgentPresetEditor, FlowManagementPanel, TaskIntentContractPanel, TaskCollaboratorsPanel, TaskCollaborationPanel, TaskEvidencePanel, SessionControlPanel, ThreadBoardPanel, type AgentPreset, type ProjectMember, type TaskIntentFacts, type TaskIntentContract, type TaskScoreBreakdown, type TaskResultFacts, type TaskCollaborationFacts } from './cluster-panels.tsx'
+import { AgentOutputProfileField, TEXT_OUTPUT_PROFILE, agentOutputProfileError, agentOutputProfileLabel, useClusterCapabilities } from './cluster-panels.tsx'
 import { TokenUsagePanel } from './token-usage-panel.tsx'
 import { ProjectSettingsPanel } from './project-settings-panel.tsx'
 import { ProjectBudgetPanel } from './project-budget-panel.tsx'
@@ -1837,6 +1838,7 @@ function resolveHostModel(): HostModelSelection | undefined {
 }
 
 function SkillHubSurface({ onClose }: { onClose: () => void }) {
+  const capability = useClusterCapabilities(api)
   const [tab, setTab] = useState<SkillHubTab>('专家')
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('全部')
@@ -1941,6 +1943,8 @@ function SkillHubSurface({ onClose }: { onClose: () => void }) {
     const active = resolveHostModel() ?? hostModel
     const provider = active?.provider ?? String(fields.get('provider') ?? '').trim()
     const modelRef = active?.model ?? String(fields.get('model_ref') ?? '').trim()
+    const outputProfile = String(fields.get('output_profile') ?? TEXT_OUTPUT_PROFILE)
+    const systemPromptRef = String(fields.get('system_prompt_ref') ?? '').trim()
     if (!name || !description) {
       setNotice('请填写专家名称与职责说明。')
       return
@@ -1949,6 +1953,8 @@ function SkillHubSurface({ onClose }: { onClose: () => void }) {
       setNotice('没有解析到当前选中的模型，请先选择模型，或填写 Provider 与模型。')
       return
     }
+    const profileError = agentOutputProfileError(outputProfile, { system_prompt_ref: systemPromptRef, connector_ids: [], knowledge_space_ids: [] }, capability?.clusterReady === true && !expertDirectoryLocal)
+    if (profileError) { setNotice(profileError); return }
     setCreatingExpert(true); setNotice('')
     try {
       const expert = await api<AgentPreset>('/lumo/api/agent-presets', {
@@ -1956,7 +1962,7 @@ function SkillHubSurface({ onClose }: { onClose: () => void }) {
         body: JSON.stringify({
           name, description, provider, model_ref: modelRef,
           project_id: String(fields.get('project_id') ?? '').trim(),
-          system_prompt_ref: String(fields.get('system_prompt_ref') ?? '').trim(),
+          system_prompt_ref: systemPromptRef, output_profile: outputProfile,
           connector_ids: [], knowledge_space_ids: [], max_concurrency: 1,
           max_budget_cents: 0, timeout_seconds: 3600, max_delegation_depth: 0,
         }),
@@ -1976,6 +1982,10 @@ function SkillHubSurface({ onClose }: { onClose: () => void }) {
     const fields = new FormData(event.currentTarget)
     // 与创建一致：沿用宿主当前选中的模型，解析不到才回落到手填字段。
     const active = resolveHostModel() ?? hostModel
+    const outputProfile = String(fields.get('output_profile') ?? TEXT_OUTPUT_PROFILE)
+    const systemPromptRef = String(fields.get('system_prompt_ref') ?? '').trim()
+    const profileError = agentOutputProfileError(outputProfile, { system_prompt_ref: systemPromptRef, connector_ids: editingExpert.connector_ids, knowledge_space_ids: editingExpert.knowledge_space_ids }, capability?.clusterReady === true && !expertDirectoryLocal)
+    if (profileError) { setNotice(profileError); return }
     setSavingExpert(true); setNotice('')
     try {
       const updated = await api<AgentPreset>(`/lumo/api/agent-presets/${encodeURIComponent(editingExpert.id)}`, {
@@ -1984,7 +1994,7 @@ function SkillHubSurface({ onClose }: { onClose: () => void }) {
           revision: editingExpert.revision,
           name: String(fields.get('name') ?? '').trim(), description: String(fields.get('description') ?? '').trim(),
           provider: active?.provider ?? String(fields.get('provider') ?? '').trim(), model_ref: active?.model ?? String(fields.get('model_ref') ?? '').trim(),
-          project_id: String(fields.get('project_id') ?? '').trim(), system_prompt_ref: String(fields.get('system_prompt_ref') ?? '').trim(),
+          project_id: String(fields.get('project_id') ?? '').trim(), system_prompt_ref: systemPromptRef, output_profile: outputProfile,
           max_concurrency: Number(fields.get('max_concurrency') ?? 1),
         }),
       })
@@ -2108,6 +2118,7 @@ function SkillHubSurface({ onClose }: { onClose: () => void }) {
           </>
           : <div className="wide lumo-expert-model"><span>模型</span><p>沿用当前选中的模型 <b>{hostModel.provider}</b> · <b>{hostModel.model}</b></p></div>}
         <label><span>项目范围</span><input name="project_id" placeholder="留空则对整个 Realm 生效" /></label>
+        <AgentOutputProfileField allowFiles={capability?.clusterReady === true && !expertDirectoryLocal} />
         <label className="wide"><span>职责说明</span><textarea name="description" required maxLength={500} rows={3} placeholder="说明它负责什么、如何判断结果，以及哪些事项需要交回给人。" /></label>
         <label className="wide"><span>系统提示引用 <i>可选</i></span><input name="system_prompt_ref" maxLength={256} placeholder="受保护配置中的引用名称" /></label>
       </div>
@@ -2126,6 +2137,7 @@ function SkillHubSurface({ onClose }: { onClose: () => void }) {
           : <div className="wide lumo-expert-model"><span>模型</span><p>保存后沿用当前选中的模型 <b>{hostModel.provider}</b> · <b>{hostModel.model}</b>；原为 {editingExpert.provider} · {editingExpert.model_ref}</p></div>}
         <label><span>最大并发</span><input name="max_concurrency" required type="number" min={1} max={1000} defaultValue={editingExpert.max_concurrency} /></label>
         <label><span>项目范围</span><input name="project_id" maxLength={128} defaultValue={editingExpert.project_id ?? ''} placeholder="留空则对整个 Realm 生效" /></label>
+        <AgentOutputProfileField profile={editingExpert.output_profile} allowFiles={capability?.clusterReady === true && !expertDirectoryLocal} />
         <label><span>系统提示引用</span><input name="system_prompt_ref" maxLength={256} defaultValue={editingExpert.system_prompt_ref ?? ''} /></label>
         <label className="wide"><span>职责说明</span><textarea name="description" required maxLength={500} rows={3} defaultValue={editingExpert.description ?? ''} /></label>
       </div>
@@ -2155,7 +2167,7 @@ function SkillHubSurface({ onClose }: { onClose: () => void }) {
         {visibleExperts.length ? <section className="lumo-expert-block"><header><div><b>我的专家</b><span>已创建、可继续治理的 Agent 资产</span></div><em>{visibleExperts.length}</em></header><div className="lumo-skillhub-grid">{visibleExperts.map((expert, index) => <SkillHubCard key={expert.id} index={index} tone="mint">
           <header><span className="lumo-skillhub-mark lumo-expert-mark" data-tone="mint">{expert.name.slice(0, 1)}</span><div className="lumo-skillhub-title"><b title={expert.name}>{expert.name}</b><small>{expert.provider} · {expert.model_ref}</small></div><span className={`lumo-expert-status ${expert.status}`}>{expert.status === 'active' ? '已启用' : '已停用'}</span></header>
           <p>{expert.description || '尚未填写职责说明。'}</p>
-          <div className="lumo-skillhub-chips"><span className="lumo-skillhub-tag" data-tone="mint">专属专家</span>{expert.project_id ? <span className="lumo-skillhub-tag">项目 · {expert.project_id}</span> : <span className="lumo-skillhub-tag">全 Realm</span>}</div>
+          <div className="lumo-skillhub-chips"><span className="lumo-skillhub-tag" data-tone="mint">专属专家</span><span className="lumo-skillhub-tag">{agentOutputProfileLabel(expert.output_profile)}</span>{expert.project_id ? <span className="lumo-skillhub-tag">项目 · {expert.project_id}</span> : <span className="lumo-skillhub-tag">全 Realm</span>}</div>
           <footer><span className="lumo-skillhub-stats"><span>并发 {expert.max_concurrency}</span><span>版本 {expert.version}</span></span><span className="lumo-skillhub-actions"><button type="button" className="lumo-button lumo-secondary" onClick={() => { setCreateExpertOpen(false); setEditingExpert(expert) }}>编辑</button>{expertDirectoryLocal ? <ConfirmButton busy={deletingExpert === expert.id} confirmLabel="确认删除" onConfirm={() => deleteExpert(expert)}>删除</ConfirmButton> : null}</span></footer>
         </SkillHubCard>)}</div></section> : expertDirectoryState !== 'ok' ? <div className="lumo-expert-directory-note"><b>专属专家目录未连接</b><p>{expertDirectoryMessage}</p></div> : null}
         <section className="lumo-expert-block"><header><div><b>专家模板</b><span>按场景预装的一组技能，可直接加入工作区</span></div><em>{metricValue(total)}</em></header>{packs.length ? <div className="lumo-skillhub-grid">{packs.map((pack, index) => <SkillHubCard key={pack.id} index={index} tone={toneFor(pack.category)}>
@@ -3396,7 +3408,7 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
     {data.deployment.clusterReady ? <AgentPresetEditor request={api} presets={agentPresets} refresh={load} /> : null}
     <Section title="上下游任务协同" meta={governance?.features.ok ? '集群已就绪 · 意图、标签、有效技能交集' : '仅集群已就绪时开放跨用户委派'}><div className="lumo-delegation-layout"><form ref={delegationFormRef} className="lumo-delegation-form" onSubmit={previewDelegation}><label><span>任务标题</span><input name="title" placeholder="例如：华东客户合同复核" /></label><label className="wide"><span>工作意图</span><textarea name="intent" rows={3} required placeholder="描述交付结果、业务范围和约束，例如：跟进华东客户的合同复核并标出高风险条款。" /></label><label><span>项目边界</span><select name="project_id" defaultValue=""><option value="">不绑定项目</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name ?? project.id}</option>)}</select></label><label><span>必须标签</span><input name="required_tags" placeholder="华东, 客户" /></label><label><span>必须技能</span><input name="required_skills" placeholder="合同复核" /></label><label><span>调度集群</span><input name="cluster_id" placeholder="cluster-a" /></label><label className="wide"><span>节点能力</span><input name="requires" placeholder="cpu, region=cn-east" /></label><label><span>优先级</span><input name="priority" type="number" defaultValue="0" /></label><label><span>数据驻留</span><input name="residency" placeholder="cn-east" /></label><BusyButton type="submit" busy={busy === 'delegation-preview'} className="lumo-primary">识别候选人</BusyButton></form><div className="lumo-delegation-preview">{delegationPreview ? <><div className="lumo-preview-head"><div><span className="lumo-inspector-label">匹配预览</span><b>{delegationPreview.candidates.filter(candidate => candidate.eligible).length} 个可分发对象</b></div><small>{delegationPreview.intent_terms.join(' · ') || '未提取词项'}</small></div><div className="lumo-inference"><span>识别标签：{delegationPreview.inferred_tags.join('、') || '无'}</span><span>识别技能：{delegationPreview.inferred_skills.join('、') || '无'}</span></div><div className="lumo-assignment-mode"><label><input type="checkbox" checked={assignmentMode === 'auto'} onChange={event => setAssignmentMode(event.target.checked ? 'auto' : 'manual')} /> <b>自动分发</b><span>按意图 · 标签 · 技能 · 当前负载选择</span></label><small>{assignmentMode === 'auto' ? '系统将在服务端再次计算候选集并写入审计理由。' : '手动指定仅可选择满足硬约束的候选人。'}</small></div><div className="lumo-candidate-list">{delegationPreview.candidates.slice(0, 8).map(candidate => <button type="button" disabled={!candidate.eligible} className={assignmentMode === 'manual' && selectedAssignee === candidate.user_id ? 'selected' : ''} key={candidate.user_id} onClick={() => { setSelectedAssignee(candidate.user_id); setAssignmentMode('manual') }}><span><b>{candidate.display_name}</b><small>{candidate.user_id} · {candidate.active_tasks} 个进行中任务</small></span><em>{candidate.eligible ? `${candidate.score} · ${candidate.matched_tags.concat(candidate.matched_skills).join(' / ') || '可接收'}` : candidate.rationale[0] ?? '不满足条件'}</em></button>)}</div><BusyButton busy={busy === 'delegation'} disabled={assignmentMode === 'manual' && !selectedAssignee} className="lumo-primary" onClick={() => void dispatchDelegation()}>{assignmentMode === 'auto' ? `自动分发${delegationPreview.candidates.find(candidate => candidate.eligible)?.display_name ? ` · 推荐 ${delegationPreview.candidates.find(candidate => candidate.eligible)?.display_name}` : ''}` : `确认分发给 ${delegationPreview.candidates.find(candidate => candidate.user_id === selectedAssignee)?.display_name ?? '候选人'}`}</BusyButton></> : <div className="lumo-delegation-empty"><Glyph surface="operations" /><b>先描述任务，再生成可解释分发建议</b><p>系统只使用当前 realm 的启用用户、用户标签和已生效技能；没有满足交集时不会强行分发。</p></div>}</div></div><div className="lumo-task-tracker"><header><b>任务跟踪</b><span>{delegationError ? '请求未完成' : `${delegations.length} 条记录 · 30 秒同步`}</span></header>{delegations.length ? delegations.map(task => <div className="lumo-task-row" key={task.id}><span className="lumo-task-state"><i className={task.state === 'COMPLETED' ? 'done' : task.state === 'FAILED' || task.state === 'BLOCKED' ? 'bad' : 'live'} />{localizedTaskDisplayState(task)}</span><span className="lumo-task-main"><b>{task.title}</b><small>{task.assignee_name ?? task.assignee_user_id} · {task.selected_skills.join(' / ') || '意图匹配'} · {task.assigned_node_id ?? '等待节点'}</small></span><em>{task.updated_at ? formatSync(task.updated_at) : '刚刚'}</em>{['ASSIGNED', 'QUEUED', 'RUNNING'].includes(task.state) ? <BusyButton busy={busy === `task-${task.id}`} className="lumo-small lumo-danger" onClick={() => void cancelTask(task)}>取消任务</BusyButton> : task.state === 'CANCELLING' ? <em>取消中，等待执行节点确认</em> : null}</div>) : <Empty>{delegationError || '还没有委派任务。识别候选人后，系统会保留委派、技能快照和节点调度状态。'}</Empty>}</div></Section>
     <Section title="人员画像" meta="标签直接参与意图分发与负载排序"><div className="lumo-profile-layout">{directory.length ? <form className="lumo-profile-form" onSubmit={saveProfileTags}><label><span>人员</span><select value={profileUserID} onChange={event => setProfileUserID(event.target.value)}>{directory.map(user => <option value={user.id} key={user.id}>{user.display_name} · {user.id}</option>)}</select></label><label className="wide"><span>标签</span><input value={profileTags} onChange={event => setProfileTags(event.target.value)} placeholder="华东, 合同, 客户成功" /></label><BusyButton type="submit" busy={profileBusy} className="lumo-primary">保存标签</BusyButton>{profileNotice ? <small className="lumo-form-note">{profileNotice}</small> : null}</form> : <div className="lumo-profile-empty"><b>{directoryError ? '人员目录请求失败' : '人员目录不可用'}</b><span>{directoryError || '只有集群已就绪且当前身份具备 task:delegate 权限时，才能编辑人员画像。'}</span></div>}<div className="lumo-profile-hint"><span>分发判定</span><b>标签硬约束 + 技能交集 + 当前负载</b><small>保存后立即影响下一次预览；已经分发的任务保留当时的技能快照与匹配理由，便于审计。</small></div></div></Section>
-    <Section title="专家运行管理" meta={agentPresetError ? '专家目录不可用' : `${agentPresets.length} 个专家 · 配置与运行态分离`} actions={<button type="button" className="lumo-button lumo-secondary" onClick={() => openSurface('skillhub')}>前往技能中心新建专家</button>}><div className="lumo-agent-preset-layout directory"><div className="lumo-table-list">{agentPresets.length ? agentPresets.map(preset => <div key={preset.id}><span><b>{preset.name}</b><small>{preset.provider} · {preset.model_ref} · v{preset.version} · 所有者 {preset.owner_user_id}{preset.project_id ? ` · 项目 ${preset.project_id}` : ' · 全 Realm'}</small></span><em>{preset.status === 'active' ? `启用 · ${preset.max_concurrency} 并发 · ${agentRuntimeLabel(preset)}` : `已停用 · ${agentRuntimeLabel(preset)}`}</em><BusyButton className={preset.status === 'active' ? 'lumo-danger lumo-small' : 'lumo-secondary lumo-small'} busy={busy === `agent-preset-${preset.id}`} onClick={() => void toggleAgentPreset(preset)}>{preset.status === 'active' ? '停用' : '启用'}</BusyButton></div>) : <Empty>{agentPresetError || '尚未创建专家。普通成员只能看到自己拥有的专家。'}</Empty>}</div></div></Section>
+    <Section title="专家运行管理" meta={agentPresetError ? '专家目录不可用' : `${agentPresets.length} 个专家 · 配置与运行态分离`} actions={<button type="button" className="lumo-button lumo-secondary" onClick={() => openSurface('skillhub')}>前往技能中心新建专家</button>}><div className="lumo-agent-preset-layout directory"><div className="lumo-table-list">{agentPresets.length ? agentPresets.map(preset => <div key={preset.id}><span><b>{preset.name}</b><small>{preset.provider} · {preset.model_ref} · {agentOutputProfileLabel(preset.output_profile)} · v{preset.version} · 所有者 {preset.owner_user_id}{preset.project_id ? ` · 项目 ${preset.project_id}` : ' · 全 Realm'}</small></span><em>{preset.status === 'active' ? `启用 · ${preset.max_concurrency} 并发 · ${agentRuntimeLabel(preset)}` : `已停用 · ${agentRuntimeLabel(preset)}`}</em><BusyButton className={preset.status === 'active' ? 'lumo-danger lumo-small' : 'lumo-secondary lumo-small'} busy={busy === `agent-preset-${preset.id}`} onClick={() => void toggleAgentPreset(preset)}>{preset.status === 'active' ? '停用' : '启用'}</BusyButton></div>) : <Empty>{agentPresetError || '尚未创建专家。普通成员只能看到自己拥有的专家。'}</Empty>}</div></div></Section>
     </> : null}
     {area === 'permissions' ? <Section title="权限诊断" meta="Realm ∩ Project ∩ Space · 未知边界默认拒绝"><p className="lumo-form-hint">这里展示当前登录身份的有效权限和判定依据；用户角色分配在“用户管理”中维护。</p><div className="lumo-compact-list">{governance?.permissions?.ok ? permissionDecisions.map(decision => <div key={decision.action}><span><b>{decision.action}</b><small>{decision.reason}</small></span><em>{decision.allowed ? `允许 · ${decision.matched_policies.join(' + ')}` : '拒绝'}</em></div>) : <Empty>{governance?.permissions?.error || '权限策略版本尚未部署；当前不会将其伪装为空权限。'}</Empty>}</div></Section> : null}
     {area === 'token-usage' && platformAdmin ? <TokenUsagePanel platformAdmin={platformAdmin} /> : null}

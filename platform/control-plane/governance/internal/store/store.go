@@ -451,6 +451,13 @@ CREATE TABLE IF NOT EXISTS governance_agent_presets (
 CREATE INDEX IF NOT EXISTS governance_agent_presets_project_idx
   ON governance_agent_presets (realm, project_id, status, name);
 
+ALTER TABLE governance_agent_presets ADD COLUMN IF NOT EXISTS output_profile TEXT NOT NULL DEFAULT 'platform-closed-text-v1';
+DO $$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='governance_agent_presets_output_profile_check' AND conrelid='governance_agent_presets'::regclass) THEN
+ ALTER TABLE governance_agent_presets ADD CONSTRAINT governance_agent_presets_output_profile_check CHECK(output_profile IN ('platform-closed-text-v1','platform-closed-text-files-v1'));
+ END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS governance_dispatch_outcomes (
   id          TEXT PRIMARY KEY,
   realm       TEXT NOT NULL,
@@ -547,6 +554,9 @@ func (s *Store) Init(ctx context.Context) error {
 	}
 	if _, err := tx.Exec(ctx, runReviewDDL); err != nil {
 		return fmt.Errorf("initialize run review: %w", err)
+	}
+	if _, err := tx.Exec(ctx, runFilesDDL); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, taskResultsDDL); err != nil {
 		return fmt.Errorf("initialize task results: %w", err)
@@ -737,7 +747,7 @@ func scanAgentPreset(row rowScanner, preset *domain.AgentPreset) error {
 		&preset.ID, &preset.Realm, &preset.ProjectID, &preset.Name, &preset.Description, &preset.OwnerUserID,
 		&preset.Status, &preset.Version, &preset.Revision, &preset.Provider, &preset.ModelRef, &preset.SystemPromptRef,
 		&connectorIDs, &knowledgeSpaceIDs, &preset.MaxConcurrency, &preset.TrustLevel, &preset.Residency,
-		&preset.MaxBudgetCents, &preset.TimeoutSeconds, &preset.MaxDelegationDepth, &preset.CreatedAt, &preset.UpdatedAt,
+		&preset.MaxBudgetCents, &preset.TimeoutSeconds, &preset.MaxDelegationDepth, &preset.CreatedAt, &preset.UpdatedAt, &preset.OutputProfile,
 	); err != nil {
 		return err
 	}
@@ -754,7 +764,7 @@ const agentPresetSelect = `
 	SELECT id,realm,project_id,name,description,owner_user_id,status,version,revision,
 	       provider,model_ref,system_prompt_ref,connector_ids,knowledge_space_ids,
 	       max_concurrency,trust_level,residency,max_budget_cents,timeout_seconds,
-	       max_delegation_depth,created_at,updated_at
+	       max_delegation_depth,created_at,updated_at,output_profile
 	FROM governance_agent_presets`
 
 func (s *Store) CreateAgentPreset(ctx context.Context, preset domain.AgentPreset) (domain.AgentPreset, error) {
@@ -777,13 +787,13 @@ func (s *Store) CreateAgentPreset(ctx context.Context, preset domain.AgentPreset
 		INSERT INTO governance_agent_presets (
 			realm,id,project_id,name,description,owner_user_id,status,version,provider,model_ref,
 			system_prompt_ref,connector_ids,knowledge_space_ids,max_concurrency,trust_level,residency,
-			max_budget_cents,timeout_seconds,max_delegation_depth)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+			max_budget_cents,timeout_seconds,max_delegation_depth,output_profile)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 		RETURNING revision,created_at,updated_at`,
 		preset.Realm, preset.ID, preset.ProjectID, preset.Name, preset.Description, preset.OwnerUserID,
 		preset.Status, preset.Version, preset.Provider, preset.ModelRef, preset.SystemPromptRef,
 		connectorIDs, knowledgeSpaceIDs, preset.MaxConcurrency, preset.TrustLevel, preset.Residency,
-		preset.MaxBudgetCents, preset.TimeoutSeconds, preset.MaxDelegationDepth,
+		preset.MaxBudgetCents, preset.TimeoutSeconds, preset.MaxDelegationDepth, preset.OutputProfile,
 	).Scan(&preset.Revision, &preset.CreatedAt, &preset.UpdatedAt)
 	if isUniqueViolation(err) {
 		return domain.AgentPreset{}, ErrConflict
@@ -840,13 +850,13 @@ func (s *Store) UpdateAgentPreset(ctx context.Context, preset domain.AgentPreset
 			project_id=$3,name=$4,description=$5,owner_user_id=$6,status=$7,version=$8,
 			provider=$9,model_ref=$10,system_prompt_ref=$11,connector_ids=$12,knowledge_space_ids=$13,
 			max_concurrency=$14,trust_level=$15,residency=$16,max_budget_cents=$17,
-			timeout_seconds=$18,max_delegation_depth=$19,revision=revision+1,updated_at=now()
+			timeout_seconds=$18,max_delegation_depth=$19,output_profile=$21,revision=revision+1,updated_at=now()
 		WHERE realm=$1 AND id=$2 AND revision=$20
 		RETURNING revision,created_at,updated_at`,
 		preset.Realm, preset.ID, preset.ProjectID, preset.Name, preset.Description, preset.OwnerUserID,
 		preset.Status, preset.Version, preset.Provider, preset.ModelRef, preset.SystemPromptRef,
 		connectorIDs, knowledgeSpaceIDs, preset.MaxConcurrency, preset.TrustLevel, preset.Residency,
-		preset.MaxBudgetCents, preset.TimeoutSeconds, preset.MaxDelegationDepth, expectedRevision,
+		preset.MaxBudgetCents, preset.TimeoutSeconds, preset.MaxDelegationDepth, expectedRevision, preset.OutputProfile,
 	).Scan(&preset.Revision, &preset.CreatedAt, &preset.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.AgentPreset{}, ErrConflict

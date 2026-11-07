@@ -418,6 +418,39 @@ spec:
 {{- fail "dshWeb.userSessionExecution.knowledge.realm must match dshWeb.realm" }}
 {{- end }}
 {{- end }}
+{{- with .Values.dshWeb.userSessionExecution.attachments }}
+{{- if ne .realm $.Values.dshWeb.realm }}
+{{- fail "dshWeb.userSessionExecution.attachments.realm must match dshWeb.realm" }}
+{{- end }}
+{{- end }}
+{{- with .Values.dshWeb.userSessionExecution.connectors }}
+{{- if ne .realm $.Values.dshWeb.realm }}
+{{- fail "dshWeb.userSessionExecution.connectors.realm must match dshWeb.realm" }}
+{{- end }}
+{{- if not $.Values.ownedSessionConnectors }}
+{{- fail "dshWeb.userSessionExecution.connectors requires ownedSessionConnectors" }}
+{{- end }}
+{{- if not (index $.Values.services "connector-gateway").enabled }}
+{{- fail "dshWeb.userSessionExecution.connectors requires services.connector-gateway.enabled" }}
+{{- end }}
+{{- $realm := .realm }}
+{{- $project := $.Values.dshWeb.userSessionExecution.projectId }}
+{{- range .actions }}
+{{- $connector := .connectorId }}
+{{- range .operations }}
+{{- $operation := . }}
+{{- $granted := false }}
+{{- range $.Values.ownedSessionConnectors }}
+{{- if and (eq .realm $realm) (eq .project_id $project) (eq .connector_id $connector) (eq .operation $operation) }}
+{{- $granted = true }}
+{{- end }}
+{{- end }}
+{{- if not $granted }}
+{{- fail "every dshWeb connector action requires an exact realm/project/connector/operation ownedSessionConnectors grant" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if and (not .Values.dshWeb.identityAssertion.secretName) (not .Values.dshWeb.identityAssertion.allowStaticIdentity) }}
 {{- fail "dshWeb.identityAssertion.secretName is required when dshWeb is enabled; set allowStaticIdentity=true only for development" }}
 {{- end }}

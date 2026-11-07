@@ -89,7 +89,18 @@ export class SessionExecutionRuntime {
     }
     await current
   }
+  /** Internal service proof; never serialize this capability to a browser. */
+  async proof(ref: string) {
+    await this.ensure(ref)
+    const lease = this.leases.get(ref)!
+    return { ...this.body(), writer_holder: lease.writer_holder, fencing_token: lease.fencing_token }
+  }
   async check(): Promise<void> { await this.start(); try { await this.renewNode() } catch { this.fail() } }
+  /** Public non-secret generation facts for independent service-side fencing. */
+  async identity(ref:string): Promise<{node_id:string;process_id:string;node_fence:number;writer_holder:string;fencing_token:number}> {
+    await this.check(); await this.ensure(ref)
+    return {node_id:this.nodeId,process_id:this.processId,node_fence:this.node!.fence,writer_holder:this.writerHolder,fencing_token:this.leases.get(ref)!.fencing_token}
+  }
   private async heartbeat(): Promise<void> { try { await this.renewNode(); await Promise.all([...this.leases.keys()].map(ref => this.ensure(ref))) } catch { this.fail() } }
   async dispose(): Promise<void> {
     if (this.timer) clearInterval(this.timer)

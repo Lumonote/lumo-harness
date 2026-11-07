@@ -44,6 +44,7 @@ type RunOutputManifest struct {
 	RunID   string           `json:"run_id"`
 	Summary string           `json:"summary"`
 	Entries []RunOutputEntry `json:"entries"`
+	Files   []RunFileEntry   `json:"files,omitempty"`
 }
 
 // BuildRunOutputManifest enumerates the entire accepted output array; a model

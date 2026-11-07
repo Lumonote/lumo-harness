@@ -678,6 +678,69 @@ render_rejected "dynamic Session mesh mTLS without a configured mesh" \
   -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" \
   --set dshWeb.userSessionExecution.routing.transportSecurity=mesh-mtls --set serviceMesh.istio.enabled=false
 
+# Attachment application policy stays opt-in and cannot widen its bounded realm.
+cat >"$report_dir/dynamic-attachments.yaml" <<'YAML'
+dshWeb:
+  userSessionExecution:
+    attachments: {realm: dev, maxUploadBytes: 8388608, maxTextBytes: 1048576, maxPerMessage: 4}
+YAML
+render_ok "owned Session attachments with bounded immutable receipt policy" \
+  "$report_dir/dynamic-attachments-render.yaml" -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-attachments.yaml"
+if grep -q 'maxUploadBytes.*8388608' "$report_dir/dynamic-attachments-render.yaml"; then
+  pass "explicit owned attachment application policy reaches the node environment"
+else
+  fail "owned attachment application policy is missing from the node environment"
+fi
+render_rejected "owned Session attachments with a foreign realm" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-attachments.yaml" --set dshWeb.userSessionExecution.attachments.realm=foreign
+render_rejected "owned Session attachments with an arbitrary storage URL" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-attachments.yaml" --set dshWeb.userSessionExecution.attachments.url=https://private.example
+render_rejected "owned Session attachments exceeding the binary bound" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-attachments.yaml" --set dshWeb.userSessionExecution.attachments.maxUploadBytes=8388609
+render_rejected "owned Session attachments exceeding the text bound" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-attachments.yaml" --set dshWeb.userSessionExecution.attachments.maxTextBytes=1048577
+render_rejected "owned Session attachments exceeding the message count" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-attachments.yaml" --set dshWeb.userSessionExecution.attachments.maxPerMessage=5
+render_rejected "owned Session attachments without a fixed realm" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" --set-json dshWeb.userSessionExecution.attachments='{"maxPerMessage":4}'
+
+# Native owner connector approval stays opt-in on both the execution node and
+# gateway. Render failures prove that one list cannot widen the other one.
+cat >"$report_dir/dynamic-connectors.yaml" <<'YAML'
+ownedSessionConnectors:
+  - {realm: dev, project_id: dev-project, connector_id: issues, operation: create}
+dshWeb:
+  userSessionExecution:
+    connectors:
+      realm: dev
+      gatewayUrl: http://lumo-platform-connector-gateway:8082
+      actions: [{connectorId: issues, operations: [create]}]
+YAML
+render_ok "owned Session connectors with exact matching deployment grants" \
+  "$report_dir/dynamic-connectors-render.yaml" -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-connectors.yaml"
+if grep -q 'LUMO_OWNED_SESSION_CONNECTORS' "$default_render"; then
+  fail "owned Session connectors must remain disabled in the base profile"
+else
+  pass "owned Session connectors remain disabled in the base profile"
+fi
+if grep -q 'LUMO_OWNED_SESSION_CONNECTORS' "$report_dir/dynamic-connectors-render.yaml"; then
+  pass "explicit owned Session connector grants reach the gateway environment"
+else
+  fail "owned Session connector grants are missing from the gateway environment"
+fi
+render_rejected "owned Session connectors without the gateway grant list" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-connectors.yaml" --set-json ownedSessionConnectors='[]'
+render_rejected "owned Session connectors with a foreign realm" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-connectors.yaml" --set dshWeb.userSessionExecution.connectors.realm=foreign
+render_rejected "owned Session connector grants for another project" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-connectors.yaml" --set 'ownedSessionConnectors[0].project_id=foreign'
+render_rejected "owned Session connectors with embedded gateway credentials" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-connectors.yaml" --set dshWeb.userSessionExecution.connectors.gatewayUrl=https://user:secret@gateway.example
+render_rejected "owned Session connectors without Governance" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-connectors.yaml" --set services.governance.enabled=false
+render_rejected "owned Session connectors without connector-gateway" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-connectors.yaml" --set services.connector-gateway.enabled=false
+
 lint_ok "base profile"
 lint_ok "cluster profile" -f "$cluster_profile"
 

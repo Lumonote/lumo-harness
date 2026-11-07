@@ -1183,6 +1183,7 @@ func (s *Server) workerProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 type agentPresetCreateRequest struct {
+	OutputProfile      string   `json:"output_profile,omitempty"`
 	ProjectID          string   `json:"project_id,omitempty"`
 	Name               string   `json:"name"`
 	Description        string   `json:"description,omitempty"`
@@ -1207,7 +1208,8 @@ func (r agentPresetCreateRequest) preset(realm, presetID, ownerUserID string) do
 		ownerUserID = r.OwnerUserID
 	}
 	preset := domain.AgentPreset{
-		ID: presetID, Realm: realm, ProjectID: r.ProjectID, Name: r.Name, Description: r.Description,
+		OutputProfile: r.OutputProfile,
+		ID:            presetID, Realm: realm, ProjectID: r.ProjectID, Name: r.Name, Description: r.Description,
 		OwnerUserID: ownerUserID, Status: r.Status, Version: r.Version, Provider: r.Provider, ModelRef: r.ModelRef,
 		SystemPromptRef: r.SystemPromptRef, ConnectorIDs: r.ConnectorIDs, KnowledgeSpaceIDs: r.KnowledgeSpaceIDs,
 		MaxConcurrency: r.MaxConcurrency, TrustLevel: r.TrustLevel, Residency: r.Residency,
@@ -1220,6 +1222,7 @@ func (r agentPresetCreateRequest) preset(realm, presetID, ownerUserID string) do
 // Agent preset PATCH is explicitly sparse; Revision is mandatory so one
 // operator cannot silently clobber another operator's configuration update.
 type agentPresetPatchRequest struct {
+	OutputProfile      *string   `json:"output_profile,omitempty"`
 	Revision           int       `json:"revision"`
 	ProjectID          *string   `json:"project_id,omitempty"`
 	Name               *string   `json:"name,omitempty"`
@@ -1241,6 +1244,9 @@ type agentPresetPatchRequest struct {
 }
 
 func (r agentPresetPatchRequest) apply(preset *domain.AgentPreset) {
+	if r.OutputProfile != nil {
+		preset.OutputProfile = *r.OutputProfile
+	}
 	if r.ProjectID != nil {
 		preset.ProjectID = *r.ProjectID
 	}

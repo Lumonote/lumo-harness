@@ -48,6 +48,7 @@ export interface LocalAgentPreset {
   revision: number
   provider: string
   model_ref: string
+  output_profile?: 'platform-closed-text-v1'
   system_prompt_ref?: string
   connector_ids: string[]
   knowledge_space_ids: string[]
@@ -249,6 +250,7 @@ export class LocalAssetStore {
    * @returns the created preset.
    */
   createAgentPreset(identity: RequestIdentity, body: Record<string, unknown>): LocalAgentPreset {
+    localOutputProfile(body)
     const name = requiredString(body, 'name', MAX_NAME_BYTES)
     const provider = requiredString(body, 'provider', MAX_NAME_BYTES)
     const modelRef = requiredString(body, 'model_ref', MAX_VERSION_BYTES)
@@ -269,6 +271,7 @@ export class LocalAssetStore {
       revision: 1,
       provider,
       model_ref: modelRef,
+      output_profile: 'platform-closed-text-v1',
       connector_ids: stringArray(body, 'connector_ids'),
       knowledge_space_ids: stringArray(body, 'knowledge_space_ids'),
       max_concurrency: numberField(body, 'max_concurrency', 1, 1, 1_000_000),
@@ -296,6 +299,7 @@ export class LocalAssetStore {
    * @returns the updated preset.
    */
   updateAgentPreset(identity: RequestIdentity, presetID: string, body: Record<string, unknown>): LocalAgentPreset {
+    localOutputProfile(body)
     const state = this.readState()
     const entry = state.presets.find(item => item.realm === identity.realm && item.preset.id === presetID)
     if (entry === undefined) throw new LocalAssetError(404, '找不到该专家。')
@@ -305,6 +309,7 @@ export class LocalAssetStore {
       throw new LocalAssetError(409, '配置已被其他操作更新，请重新读取。')
     }
     const preset = entry.preset
+    preset.output_profile = 'platform-closed-text-v1'
     if (body['name'] !== undefined) preset.name = requiredString(body, 'name', MAX_NAME_BYTES)
     if (body['provider'] !== undefined) preset.provider = requiredString(body, 'provider', MAX_NAME_BYTES)
     if (body['model_ref'] !== undefined) preset.model_ref = requiredString(body, 'model_ref', MAX_VERSION_BYTES)
@@ -575,7 +580,7 @@ function normalizePreset(value: unknown): StoredPreset | undefined {
       id, name, owner_user_id: owner, status: presetStatus(presetRecord['status']),
       version: asString(presetRecord['version']) ?? '1',
       revision: numberOr(presetRecord['revision'], 1),
-      provider, model_ref: modelRef,
+      provider, model_ref: modelRef, output_profile: 'platform-closed-text-v1',
       connector_ids: arrayOf(presetRecord['connector_ids']).filter((item): item is string => typeof item === 'string'),
       knowledge_space_ids: arrayOf(presetRecord['knowledge_space_ids']).filter((item): item is string => typeof item === 'string'),
       max_concurrency: numberOr(presetRecord['max_concurrency'], 1),
@@ -589,6 +594,14 @@ function normalizePreset(value: unknown): StoredPreset | undefined {
       ...(residency === undefined ? {} : { residency }),
     },
   }
+}
+
+function localOutputProfile(body: Record<string, unknown>): void {
+  const profile = body['output_profile']
+  if (profile === undefined || profile === 'platform-closed-text-v1') return
+  throw new LocalAssetError(422, profile === 'platform-closed-text-files-v1'
+    ? '文本与受控文件需要集群审核服务，本地专家目录不支持此类型。'
+    : '不支持此产出类型。')
 }
 
 function numberOr(value: unknown, fallback: number): number {

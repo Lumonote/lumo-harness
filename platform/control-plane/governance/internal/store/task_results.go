@@ -62,6 +62,7 @@ func scanTaskResult(row rowScanner) (domain.TaskResult, error) {
 		return result, err
 	}
 	err := json.Unmarshal(raw, &result)
+	result.ReviewFileReceipts = nil // execution receipts are not user-facing evidence
 	return result, err
 }
 
@@ -69,6 +70,9 @@ func (s *Store) GetTaskResult(ctx context.Context, realm, taskID, runID string) 
 	result, err := scanTaskResult(s.pool.QueryRow(ctx, `SELECT payload,created_at FROM governance_task_results WHERE realm=$1 AND task_id=$2 AND run_id=$3`, realm, taskID, runID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return result, ErrNotFound
+	}
+	if err == nil && result.State == domain.DelegationCompleted && len(result.Files) > 0 {
+		result.Files, err = s.controlledResultFiles(ctx, realm, taskID, runID)
 	}
 	return result, err
 }
@@ -104,12 +108,22 @@ func recordTaskResultTx(ctx context.Context, tx pgx.Tx, realm string, result *do
 	if err := result.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrBadRequest, err)
 	}
+	if (len(result.Files) > 0 || len(result.ReviewFileReceipts) > 0) && (len(trusted) == 0 || !trusted[0]) {
+		return fmt.Errorf("%w: controlled file evidence requires the authenticated executor", ErrForbidden)
+	}
 	// Timestamp belongs to the database; exclude it from replay equality.
-	raw, err := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"task_id": result.TaskID, "run_id": result.RunID, "state": result.State,
 		"session_ref": result.SessionRef, "node_id": result.NodeID,
 		"summary": result.Summary, "output": result.Output,
-	})
+	}
+	if len(result.Files) > 0 {
+		payload["files"] = result.Files
+	}
+	if len(result.ReviewFileReceipts) > 0 {
+		payload["review_file_receipts"] = result.ReviewFileReceipts
+	}
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}

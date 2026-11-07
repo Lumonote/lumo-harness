@@ -379,6 +379,7 @@ type AgentPreset struct {
 	Provider           string    `json:"provider"`
 	ModelRef           string    `json:"model_ref"`
 	SystemPromptRef    string    `json:"system_prompt_ref,omitempty"`
+	OutputProfile      string    `json:"output_profile"`
 	ConnectorIDs       []string  `json:"connector_ids"`
 	KnowledgeSpaceIDs  []string  `json:"knowledge_space_ids"`
 	MaxConcurrency     int       `json:"max_concurrency"`
@@ -406,6 +407,10 @@ func (p *AgentPreset) Normalize() {
 	p.Provider = strings.TrimSpace(p.Provider)
 	p.ModelRef = strings.TrimSpace(p.ModelRef)
 	p.SystemPromptRef = strings.TrimSpace(p.SystemPromptRef)
+	p.OutputProfile = strings.TrimSpace(p.OutputProfile)
+	if p.OutputProfile == "" {
+		p.OutputProfile = ClosedTextOutputProfile
+	}
 	p.TrustLevel = strings.TrimSpace(p.TrustLevel)
 	p.Residency = strings.TrimSpace(p.Residency)
 	if p.Status == "" {
@@ -431,6 +436,12 @@ func (p AgentPreset) Valid() bool {
 		return false
 	}
 	if p.Status != "active" && p.Status != "disabled" {
+		return false
+	}
+	if !ProvenOutputProfile(p.OutputProfile) {
+		return false
+	}
+	if p.OutputProfile == ClosedTextFilesOutputProfile && (len(p.ConnectorIDs) > 0 || len(p.KnowledgeSpaceIDs) > 0 || p.SystemPromptRef != "") {
 		return false
 	}
 	if len([]rune(p.ID)) > 128 || len([]rune(p.Name)) > 160 || len([]rune(p.Version)) > 64 || len([]rune(p.Provider)) > 128 || len([]rune(p.ModelRef)) > 256 {
