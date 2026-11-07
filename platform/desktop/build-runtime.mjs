@@ -25,7 +25,7 @@ import { dshClientTypeConfigs, hasUsableDshClientTypes } from './dsh-client-type
 import { prepareSkillHubArchive, stageSkillHub } from './skillhub-tooling.mjs'
 import { acquireBuildLock } from './build-lock.mjs'
 import { prepareSourcePlugins } from '../tools/prepare-source-plugins.mjs'
-import { copyRuntimePackage, planRuntimePackages, resolveInstalledPackage } from './runtime-dependencies.mjs'
+import { assertWindowsRuntimePaths, copyRuntimePackage, planRuntimePackages, resolveInstalledPackage } from './runtime-dependencies.mjs'
 import { compilePackagedTypeScriptPlugin } from './packaged-typescript.mjs'
 import { stageDshNode } from './stage-dsh-node.mjs'
 
@@ -561,6 +561,7 @@ const launcherSource = resolve(desktopRoot, launcherName)
 const launcherDestination = resolve(stagingRoot, launcherName)
 cpSync(launcherSource, launcherDestination)
 if (targetPlatform !== 'win32') chmodSync(launcherDestination, 0o755)
+if (targetPlatform === 'win32') assertWindowsRuntimePaths(stagingRoot)
 
 writeFileSync(resolve(stagingRoot, 'runtime-manifest.json'), `${JSON.stringify({
   target: buildTarget,

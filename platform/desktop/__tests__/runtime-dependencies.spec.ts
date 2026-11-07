@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { copyRuntimePackage, planRuntimePackages, resolveInstalledPackage } from '../runtime-dependencies.mjs'
+import { assertWindowsRuntimePaths, copyRuntimePackage, planRuntimePackages, resolveInstalledPackage } from '../runtime-dependencies.mjs'
 
 type Package = {
   root: string
@@ -87,7 +87,47 @@ describe('desktop runtime dependency layout', () => {
     const { value, layout } = run('console.log(JSON.stringify(require("app")))')
     expect(value).toEqual({ name: 'a2', b: 'b2' })
     expect(layout.length).toBeLessThan(10)
-    expect(resolveInstalledPackage('legacy-a', join(modulesRoot, 'app'))).toBe(join(modulesRoot, 'app', 'node_modules', 'legacy-a'))
+    const resolved = resolveInstalledPackage('legacy-a', join(modulesRoot, 'app'))
+    expect(resolved).toBeDefined()
+    expect(JSON.parse(readFileSync(join(resolved!, 'package.json'), 'utf8'))).toMatchObject({ name: '@scope/a', version: '2.0.0' })
+  })
+
+  it('hoists a conflicting dependency chain within the Windows installer path budget', () => {
+    const { add, run, modulesRoot } = fixture()
+    const names = ['express', 'qs', 'side-channel', 'side-channel-map', 'call-bound', 'call-bind-apply-helpers']
+    // Every name already has another top-level version. Nesting each conflict
+    // directly under its importer recreates the real NSIS MAX_PATH failure,
+    // including executable JavaScript rather than only optional dotfiles.
+    for (const name of names) add(name, '1.0.0', 'module.exports = ["top-level-1"]')
+    const chain = names.map((name, index) => add(name, '2.0.0', index === names.length - 1
+      ? `module.exports = [${JSON.stringify(name + '@2')}]`
+      : `module.exports = [${JSON.stringify(name + '@2')}, ...require(${JSON.stringify(names[index + 1])})]`))
+    for (let index = 0; index < chain.length - 1; index++) chain[index]!.dependencies.set(names[index + 1]!, chain[index + 1]!)
+    const sdk = add('@modelcontextprotocol/sdk', '1.0.0', 'module.exports = require("express")')
+    sdk.dependencies.set('express', chain[0]!)
+
+    const { value, layout } = run('console.log(JSON.stringify(require("@modelcontextprotocol/sdk")))')
+    expect(value).toEqual(names.map(name => name + '@2'))
+    const windowsModules = 'D:\\a\\lumo-harness\\lumo-harness\\platform\\desktop\\lumo-runtime\\node_modules\\'
+    const executablePaths = layout.map(entry => windowsModules + relative(modulesRoot, join(entry.destination, 'index.js')).replaceAll('\\', '/').replaceAll('/', '\\'))
+    expect(Math.max(...executablePaths.map(path => path.length)), 'NSIS must open every JavaScript payload below Windows MAX_PATH').toBeLessThan(260)
+  })
+
+  it('does not let a hoisted sibling replace an already-correct ancestor dependency', () => {
+    const { add, run } = fixture()
+    const original = add('shared-value', '1.0.0', 'module.exports = "shared-1"')
+    const replacement = add('shared-value', '2.0.0', 'module.exports = "shared-2"')
+    add('consumer-a', '1.0.0', 'module.exports = "unused-a"')
+    add('consumer-b', '1.0.0', 'module.exports = "unused-b"')
+    const first = add('consumer-a', '2.0.0', 'module.exports = require("shared-value")')
+    const second = add('consumer-b', '2.0.0', 'module.exports = require("shared-value")')
+    const app = add('sibling-parent', '1.0.0', 'module.exports = [require("consumer-a"), require("consumer-b")]')
+    first.dependencies.set('shared-value', original)
+    second.dependencies.set('shared-value', replacement)
+    app.dependencies.set('consumer-a', first)
+    app.dependencies.set('consumer-b', second)
+
+    expect(run('console.log(JSON.stringify(require("sibling-parent")))').value).toEqual(['shared-1', 'shared-2'])
   })
 
   it('resolves each importer through its own pnpm links instead of reusing a previously seen name', () => {
@@ -103,5 +143,25 @@ describe('desktop runtime dependency layout', () => {
     expect(resolveInstalledPackage('signal-exit', root)).toBe(modern.root)
     expect(resolveInstalledPackage('signal-exit', lockfile.root)).toBe(legacy.root)
     expect(resolveInstalledPackage('missing-package', lockfile.root)).toBeUndefined()
+  })
+
+  it('accepts a real runtime tree whose installer resource paths stay below MAX_PATH', () => {
+    const { root, add, run } = fixture()
+    add('short-package', '1.0.0', 'module.exports = "ready"')
+    expect(run('console.log(JSON.stringify(require("short-package")))').value).toBe('ready')
+    expect(() => assertWindowsRuntimePaths(join(root, 'runtime'))).not.toThrow()
+  })
+
+  it('rejects an existing oversized executable payload before NSIS starts', () => {
+    const { root } = fixture()
+    const runtime = join(root, 'runtime')
+    let directory = runtime
+    while (join(directory, 'index.js').length < 260) directory = join(directory, 'nested-dependency')
+    mkdirSync(directory, { recursive: true })
+    const file = join(directory, 'index.js')
+    writeFileSync(file, 'module.exports = "real executable payload"')
+    expect(() => assertWindowsRuntimePaths(runtime)).toThrow(/NSIS.*MAX_PATH/)
+    // The diagnostic names the actual overlong directory or file and its size.
+    expect(() => assertWindowsRuntimePaths(runtime)).toThrow(/>= 260/)
   })
 })
