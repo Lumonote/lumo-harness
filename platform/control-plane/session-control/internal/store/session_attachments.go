@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/lumo-harness/platform/storageledger"
 )
 
 const sessionAttachmentDDL = `
@@ -179,6 +180,9 @@ func (s *Store) SessionAttachments(ctx context.Context, ref string, in Attachmen
 		if e != nil {
 			return nil, e
 		}
+		if err = storageledger.Register(ctx, tx, storageledger.Charge{Realm: in.Realm, ProjectID: in.ProjectID, Kind: "session-attachment", ReferenceID: ref + "/" + r.ReceiptID, Bytes: r.Bytes, ObjectKey: r.NativeRef.AttachmentID}); err != nil {
+			return nil, err
+		}
 		r, err = scanAttachment(tx.QueryRow(ctx, `INSERT INTO session_attachment_receipts(realm,session_ref,receipt_id,owner_user_id,project_id,kind,name,media_type,bytes,sha256,native_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING `+attachmentColumns, in.Realm, ref, r.ReceiptID, in.OwnerUserID, in.ProjectID, r.Kind, r.Name, r.MediaType, r.Bytes, r.SHA256, raw))
 		if err == nil {
 			out = append(out, r)
@@ -226,6 +230,9 @@ func (s *Store) SessionAttachments(ctx context.Context, ref string, in Attachmen
 			raw, e := json.Marshal(r.NativeRef)
 			if e != nil {
 				return nil, e
+			}
+			if err = storageledger.Register(ctx, tx, storageledger.Charge{Realm: in.Realm, ProjectID: in.ProjectID, Kind: "session-attachment", ReferenceID: ref + "/" + r.ReceiptID, Bytes: r.Bytes, ObjectKey: r.NativeRef.AttachmentID}); err != nil {
+				return nil, err
 			}
 			_, err = tx.Exec(ctx, `INSERT INTO session_attachment_receipts(realm,session_ref,receipt_id,owner_user_id,project_id,kind,name,media_type,bytes,sha256,native_ref,inherited_from_session) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, in.Realm, ref, r.ReceiptID, in.OwnerUserID, in.ProjectID, r.Kind, r.Name, r.MediaType, r.Bytes, r.SHA256, raw, in.SourceSession)
 			if err != nil {

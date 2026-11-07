@@ -148,7 +148,7 @@ CREATE TABLE IF NOT EXISTS governance_auth_security_events (
 );
 ALTER TABLE governance_auth_security_events DROP CONSTRAINT IF EXISTS governance_auth_security_events_event_check;
 ALTER TABLE governance_auth_security_events ADD CONSTRAINT governance_auth_security_events_event_check
-  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected','user_created','user_updated','credentials_reset','role_assigned','role_revoked','role_updated','department_updated','node_updated','skill_access_updated','oidc_login','oidc_linked','oidc_unlinked','role_permissions_updated','role_parent_updated'));
+  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected','user_created','user_updated','credentials_reset','role_assigned','role_revoked','role_updated','department_updated','node_updated','skill_access_updated','oidc_login','oidc_linked','oidc_unlinked','role_permissions_updated','role_parent_updated','storage_quota_updated'));
 CREATE INDEX IF NOT EXISTS governance_auth_security_events_user_idx
   ON governance_auth_security_events (realm, user_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS governance_auth_totp (
@@ -531,7 +531,7 @@ CREATE TABLE IF NOT EXISTS governance_role_permissions (
 );
 ALTER TABLE governance_auth_security_events DROP CONSTRAINT IF EXISTS governance_auth_security_events_event_check;
 ALTER TABLE governance_auth_security_events ADD CONSTRAINT governance_auth_security_events_event_check
-  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected','user_created','user_updated','credentials_reset','role_assigned','role_revoked','role_updated','department_updated','node_updated','skill_access_updated','oidc_login','oidc_linked','oidc_unlinked','role_permissions_updated','role_parent_updated'));
+  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected','user_created','user_updated','credentials_reset','role_assigned','role_revoked','role_updated','department_updated','node_updated','skill_access_updated','oidc_login','oidc_linked','oidc_unlinked','role_permissions_updated','role_parent_updated','storage_quota_updated'));
 
 `
 
@@ -579,10 +579,13 @@ func (s *Store) Init(ctx context.Context) error {
 	if _, err := tx.Exec(ctx, recoveryDDL); err != nil {
 		return fmt.Errorf("initialize recovery workflow: %w", err)
 	}
+	if _, err := tx.Exec(ctx, storageQuotaAuditDDL); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit governance schema initialization: %w", err)
 	}
-	return nil
+	return s.initStorageLedger(ctx)
 }
 
 func (s *Store) UpsertUser(ctx context.Context, user domain.User, actor string) (domain.User, error) {

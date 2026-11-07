@@ -86,6 +86,7 @@ func New(o Options) *Server {
 }
 
 func (s *Server) Routes() *http.ServeMux {
+	observability.RegisterBusinessOperations(observability.BusinessConnectorRequest, observability.BusinessConnectorInvoke)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)

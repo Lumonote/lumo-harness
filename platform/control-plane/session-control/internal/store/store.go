@@ -348,7 +348,7 @@ func (s *Store) Init(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, actionReviewDDL); err != nil {
 		return fmt.Errorf("建 action_reviews 表失败: %w", err)
 	}
-	return nil
+	return s.initStorageLedger(ctx)
 }
 
 // Load 读当前状态。未登记返回 ErrNotFound（**不返回编造的 running**）。

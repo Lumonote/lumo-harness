@@ -159,6 +159,23 @@ def _(t):
     return t
 
 
+@case("business-outcome-typo", '业务指标标签 outcome 的值 "unkown" 不在闭集枚举内')
+def _(t):
+    return sub(t, 'operation="connector_invoke",outcome="unknown"',
+               'operation="connector_invoke",outcome="unkown"')
+
+
+@case("business-private-label", '没有标签 "session_ref"')
+def _(t):
+    return sub(t, 'operation="connector_invoke",outcome="unknown"',
+               'operation="connector_invoke",outcome="unknown",session_ref="private"')
+
+
+@case("business-alert-missing", "缺少 connector_outcome_unknown")
+def _(t):
+    return sub(t, "class: connector_outcome_unknown\n", "class: connector_outcome_unknown_removed\n")
+
+
 def main():
     name, src, dst = sys.argv[1], sys.argv[2], sys.argv[3]
     if name not in CASES:
@@ -178,7 +195,7 @@ main()
 PY
 
 # 反例清单：与 mutate.py 里的 @case 一一对应。
-CASES="unknown-metric unknown-label misplaced-grouping missing-class missing-severity tier-severity-mismatch unknown-rule-key spec-class-missing vacuous-parse gateway-list-drift service-not-scraped"
+CASES="unknown-metric unknown-label misplaced-grouping missing-class missing-severity tier-severity-mismatch unknown-rule-key spec-class-missing vacuous-parse gateway-list-drift service-not-scraped business-outcome-typo business-private-label business-alert-missing"
 
 echo
 echo "── ② 反例自证（每种缺陷都必须被抓住）───────────────────────"

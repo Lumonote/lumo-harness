@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/jackc/pgx/v5"
 	"github.com/lumo-harness/platform/governance/internal/domain"
+	"github.com/lumo-harness/platform/storageledger"
 	"unicode/utf8"
 )
 
@@ -79,8 +80,17 @@ func persistRunFileBlobsTx(ctx context.Context, tx pgx.Tx, realm string, result 
 	if len(result.Files) != len(manifest.Files) {
 		return ErrConflict
 	}
+	var project string
+	if len(manifest.Files) > 0 {
+		if err := tx.QueryRow(ctx, `SELECT project_id FROM governance_delegation_tasks WHERE realm=$1 AND id=$2`, realm, result.TaskID).Scan(&project); err != nil {
+			return err
+		}
+	}
 	for i, entry := range manifest.Files {
 		file := result.Files[i]
+		if err := storageledger.Register(ctx, tx, storageledger.Charge{Realm: realm, ProjectID: project, Kind: "run-file", ReferenceID: result.RunID + "/" + entry.ID, Bytes: int64(entry.Bytes), ObjectKey: "pg-run-file/" + result.RunID + "/" + entry.ID}); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO governance_run_file_blobs(realm,run_id,entry_id,name,media_type,bytes,sha256,body) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, realm, result.RunID, entry.ID, entry.Name, entry.MediaType, entry.Bytes, entry.SHA256, []byte(file.Text)); err != nil {
 			return err
 		}

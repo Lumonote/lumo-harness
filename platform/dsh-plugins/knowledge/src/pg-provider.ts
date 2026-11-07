@@ -27,6 +27,7 @@ import { forbidden } from '../../../shared/seam-contracts/errors.ts'
 import type { EmbeddingClient } from './embedding.ts'
 import { OUTBOX_DDL, collectProjection } from './graph-projector.ts'
 import { pinManagedContent, releaseManagedContent } from '../../../shared/managed-content.ts'
+import { STORAGE_LEDGER_DDL, registerKnowledgeStorage, releaseKnowledgeStorage, backfillKnowledgeStorage } from '../../../shared/storage-ledger.ts'
 
 /** 幂等初始化：建表 + 建索引（含动态维度 vector(n)） */
 export function ddl(dimension: number): string {
@@ -259,6 +260,21 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
       await client.query('BEGIN')
       await client.query('SELECT pg_advisory_xact_lock(823054)')
       await client.query(ddl(this.embedding.dimension))
+      await client.query('COMMIT')
+      // Ledger index DDL can itself wait for a live charge INSERT. Keep it
+      // outside the metadata ALTER transaction so that writer can finish.
+      await client.query('BEGIN')
+      await client.query('SELECT pg_advisory_xact_lock(823054)')
+      await client.query('SELECT pg_advisory_xact_lock(823055)')
+      await client.query(STORAGE_LEDGER_DDL)
+      await client.query('COMMIT')
+      // Release metadata ALTER locks before waiting for an online writer's
+      // realm charge lock. The backfill only reads metadata and must not block
+      // that writer from committing its authoritative file row.
+      await client.query('BEGIN')
+      await client.query('SELECT pg_advisory_xact_lock(823054)')
+      await client.query('SELECT pg_advisory_xact_lock(823055)')
+      await backfillKnowledgeStorage(client)
       await client.query('COMMIT')
     } catch (error) {
       await client.query('ROLLBACK')
@@ -743,6 +759,7 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
       await client.query('BEGIN')
       await this.lockLibraryAcl(client, file.realm)
       if (actorContext !== undefined) await this.assertLibraryDestination(client, file.realm, file.folderId, file.ownerUserId, actorContext.roles, actorContext.isAdmin)
+      await registerKnowledgeStorage(client,file.realm,file.docId,file.byteSize,file.objectKey)
       await pinManagedContent(client,{ realm:file.realm,kind:'knowledge-file',referenceId:file.docId,objectKey:file.objectKey,sha256:file.sha256,byteSize:file.byteSize })
       await client.query(
         `INSERT INTO knowledge_library_files
@@ -895,6 +912,7 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
   /** Caller holds the source lock; authoritative state and replayable cleanup intents commit together. */
   private async removeSourceState(client: pg.PoolClient, docId: string, realm: string): Promise<void> {
     const file=(await client.query<{object_key:string}>('SELECT object_key FROM knowledge_library_files WHERE doc_id=$1 AND realm=$2 FOR UPDATE',[docId,realm])).rows[0]
+    if(file)await releaseKnowledgeStorage(client,realm,docId)
     if(file)await releaseManagedContent(client,{realm,kind:'knowledge-file',referenceId:docId,objectKey:file.object_key})
     // Persist the former resource kind: an old upload cannot bypass deletion by dropping
     // metadata.libraryFile and retrying as a manually managed source with the same ID.

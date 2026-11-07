@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/session-control/internal/store"
 )
 
@@ -29,9 +31,19 @@ func (f *executionFake) SessionExecutionLease(context.Context, string, store.Exe
 	return store.ExecutionLease{}, store.ErrExecutionFenced
 }
 func TestExecutionRoutesBoundIdentityAndDoNotExposeProcessSecrets(t *testing.T) {
+	previous := observability.Default
+	observability.Default = &observability.Metrics{}
+	t.Cleanup(func() { observability.Default = previous })
 	f := &executionFake{}
 	mux := http.NewServeMux()
 	New(Options{Owners: f}).Routes(mux)
+	initial := httptest.NewRecorder()
+	observability.Default.Write(initial)
+	for _, operation := range []string{"session_execution_node", "session_execution_lease", "session_attachment"} {
+		if !strings.Contains(initial.Body.String(), `lumo_business_requests_total{operation="`+operation+`",outcome="fenced"} 0`) {
+			t.Fatalf("startup did not publish the initial business baseline: %s", initial.Body)
+		}
+	}
 	call := func(method, path, body string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, httptest.NewRequest(method, path, strings.NewReader(body)))
@@ -55,5 +67,35 @@ func TestExecutionRoutesBoundIdentityAndDoNotExposeProcessSecrets(t *testing.T) 
 	}
 	if w = call("PUT", "/v1/session-execution/nodes/n/acquire", valid); w.Code != 405 {
 		t.Fatalf("unsupported write %d", w.Code)
+	}
+	metrics := httptest.NewRecorder()
+	observability.Default.Write(metrics)
+	for _, want := range []string{
+		`lumo_business_requests_total{operation="session_execution_node",outcome="success"} 1`,
+		`lumo_business_requests_total{operation="session_execution_node",outcome="invalid"} 3`,
+		`lumo_business_requests_total{operation="session_execution_node",outcome="fenced"} 1`,
+		`lumo_business_requests_total{operation="session_execution_lease",outcome="fenced"} 1`,
+	} {
+		if !strings.Contains(metrics.Body.String(), want) {
+			t.Fatalf("missing actual handler metric %q: %s", want, metrics.Body)
+		}
+	}
+}
+
+func TestSessionBusinessErrorsStayInClosedOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want observability.BusinessOutcome
+	}{
+		{nil, observability.BusinessSuccess},
+		{errors.Join(errors.New("private-session"), store.ErrExecutionFenced), observability.BusinessFenced},
+		{store.ErrOwnerInvalid, observability.BusinessInvalid},
+		{store.ErrOwnerConflict, observability.BusinessConflict},
+		{store.ErrNotFound, observability.BusinessNotFound},
+		{errors.New("db-private-realm"), observability.BusinessUnavailable},
+	} {
+		if got := sessionBusinessOutcome(tc.err); got != tc.want {
+			t.Fatalf("%v: got %s want %s", tc.err, got, tc.want)
+		}
 	}
 }

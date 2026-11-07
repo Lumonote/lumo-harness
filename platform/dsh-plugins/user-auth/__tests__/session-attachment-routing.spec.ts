@@ -42,4 +42,10 @@ describe('bounded binary attachment routing',()=>{
   const f=fixture();expect(parsePublicAttachmentReceipt({...f.receipt,native_ref:{attachmentId:'/private'}})).toEqual(f.receipt)
   for(const value of [{...f.receipt,receipt_id:'https://private'},{...f.receipt,name:'../private'},{...f.receipt,media_type:'text/html'},{...f.receipt,bytes:9*1024*1024}])expect(()=>parsePublicAttachmentReceipt(value)).toThrow()
  })
+ it.each([[413,'session_attachment_too_large'],[415,'session_attachment_unsupported'],[429,'session_attachment_busy'],[503,'session_attachment_unavailable'],[507,'storage_quota_exceeded']] as const)('preserves remote %s safely across node hops',async(status,code)=>{
+  const f=fixture();f.readResponse(()=>new Response(JSON.stringify({error:code,message:'service-secret private store'}),{status,headers:{'retry-after':'7'}}))
+  const failure=await f.transport.readAttachment!(principal,ref,id,new AbortController().signal,f.authority).catch(error=>error)
+  expect(failure).toMatchObject({status,code});expect(failure.message).not.toMatch(/service-secret|private/u)
+  if(status===429)expect(failure.retryAfter).toBe(7)
+ })
 })

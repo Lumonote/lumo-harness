@@ -5,6 +5,7 @@ import { boundedJSON, SessionExecutionClient, SessionExecutionFencedError, type 
 import type { Principal } from './client.ts'
 import type { AuthenticatedSessionTransport, SessionAuthority, SessionTransportConfig } from './session-transport.ts'
 import { SessionModelPolicyError } from './session-model-policy.ts'
+import { SessionRequestError, sessionUpstreamError, publicSessionRequestError } from './session-request-errors.ts'
 
 const streams = new Set(['follow','observeState','observeEvent','observeProjections'])
 const unary = new Set(['fork','state','wait','events','page','projections','rename','prompt','cancel','updateQueue','models','selectModel','interactionList','interactionAnswer'])
@@ -59,11 +60,12 @@ export function routeSessionTransport(local: AuthenticatedSessionTransport,confi
     // forwarded. Only this exact configured origin receives the credential.
     const response=await fetcher(origin+SESSION_RUNTIME_PATH,{method:'POST',redirect:'error',signal,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify({action,request,credential:authority.credential,destination:node})})
     if(!response.ok) {
-      if (action === 'selectModel' && response.status === 409) {
-        const value = await boundedJSON(response, 4096) as { error?: unknown }
-        if (value.error === 'session_model_changed' || value.error === 'session_model_busy') throw new SessionModelPolicyError(value.error, 'Refresh the current model selection')
-      }
-      await response.body?.cancel();throw new SessionExecutionFencedError()
+      let code:unknown
+      try{code=(await boundedJSON(response,4096)).error}catch{throw new SessionExecutionFencedError()}
+      if(action==='selectModel'&&response.status===409&&(code==='session_model_changed'||code==='session_model_busy'))throw new SessionModelPolicyError(code,'Refresh the current model selection')
+      const failure=publicSessionRequestError(code,response.status,response.headers.get('retry-after'))
+      if(failure)throw failure
+      throw new SessionExecutionFencedError()
     }
     return response
   }
@@ -94,28 +96,31 @@ export function routeSessionTransport(local: AuthenticatedSessionTransport,confi
     runtime,internal:{transport:local,destination},
     ...(local.uploadAttachment&&local.readAttachment?{
       async uploadAttachment(principal:Principal,ref:string,metadata:SessionAttachmentUpload,source:AsyncIterable<Uint8Array>,signal:AbortSignal,authority?:SessionAuthority):Promise<SessionAttachmentReceipt>{
-        if(attachmentTransfers>=2)throw new Error('Attachment transfer capacity reached');attachmentTransfers++
+        if(attachmentTransfers>=2)throw new SessionRequestError('session_attachment_busy');attachmentTransfers++
         try{return await withAuthority(authority,signal,async active=>{
           const target=await attachmentTarget(principal,ref,authority)
           if(!target)return local.uploadAttachment!(principal,ref,metadata,source,active,authority)
           const name=attachmentName(metadata.name),mediaType=attachmentMediaType(metadata.mediaType)
           const data=await attachmentBytes(source,config.attachments?.maxUploadBytes??SESSION_ATTACHMENT_MAX_BYTES,active)
           await authority!()
-          const response=await fetcher(target.origin+SESSION_ATTACHMENT_RUNTIME_PATH+'/'+ref,{method:'POST',redirect:'error',signal:active,headers:{authorization:'Bearer '+token,'content-type':mediaType,'x-lumo-attachment-envelope':attachmentEnvelope(authority!.credential!,target.node,{name,mediaType})},body:Buffer.from(data)})
-          if(!response.ok){await response.body?.cancel();throw new SessionExecutionFencedError()}
+          let response:Response
+          try{response=await fetcher(target.origin+SESSION_ATTACHMENT_RUNTIME_PATH+'/'+ref,{method:'POST',redirect:'error',signal:active,headers:{authorization:'Bearer '+token,'content-type':mediaType,'x-lumo-attachment-envelope':attachmentEnvelope(authority!.credential!,target.node,{name,mediaType})},body:Buffer.from(data)})}catch{throw new SessionRequestError('session_attachment_unavailable')}
+          if(!response.ok)throw await sessionUpstreamError(response,'attachment')
           const value=await boundedJSON(response,8192)
           await authority!();await authorizeProject(principal);active.throwIfAborted()
           return parsePublicAttachmentReceipt(value)
         })}finally{attachmentTransfers--}
       },
       async readAttachment(principal:Principal,ref:string,id:string,signal:AbortSignal,authority?:SessionAuthority):Promise<SessionAttachmentDownload>{
-        if(attachmentTransfers>=2)throw new Error('Attachment transfer capacity reached');attachmentTransfers++
+        if(attachmentTransfers>=2)throw new SessionRequestError('session_attachment_busy');attachmentTransfers++
         try{return await withAuthority(authority,signal,async active=>{
           const target=await attachmentTarget(principal,ref,authority)
           if(!target)return local.readAttachment!(principal,ref,id,active,authority)
           if(!/^att_[a-f0-9]{48}$/u.test(id))throw new SessionExecutionFencedError()
-          const response=await fetcher(target.origin+SESSION_ATTACHMENT_RUNTIME_PATH+'/'+ref+'/'+id,{method:'GET',redirect:'error',signal:active,headers:{authorization:'Bearer '+token,'x-lumo-attachment-envelope':attachmentEnvelope(authority!.credential!,target.node)}})
-          if(!response.ok||!response.body){await response.body?.cancel();throw new SessionExecutionFencedError()}
+          let response:Response
+          try{response=await fetcher(target.origin+SESSION_ATTACHMENT_RUNTIME_PATH+'/'+ref+'/'+id,{method:'GET',redirect:'error',signal:active,headers:{authorization:'Bearer '+token,'x-lumo-attachment-envelope':attachmentEnvelope(authority!.credential!,target.node)}})}catch{throw new SessionRequestError('session_attachment_unavailable')}
+          if(!response.ok)throw await sessionUpstreamError(response,'attachment')
+          if(!response.body)throw new SessionRequestError('session_attachment_unavailable')
           const mediaType=attachmentMediaType(response.headers.get('content-type')),name=attachmentName(decodeURIComponent(response.headers.get('x-lumo-attachment-name')??''))
           const reader=response.body.getReader()
           const data=await attachmentBytes((async function*(){try{for(;;){const chunk=await reader.read();if(chunk.done)break;yield chunk.value}}finally{await reader.cancel().catch(()=>{});reader.releaseLock()}})(),config.attachments?.maxUploadBytes??SESSION_ATTACHMENT_MAX_BYTES,active)

@@ -118,6 +118,7 @@ func New(opts Options) *Server {
 
 // Routes 注册路由。
 func (s *Server) Routes(mux *http.ServeMux) {
+	observability.RegisterBusinessOperations(observability.BusinessSessionExecutionNode, observability.BusinessSessionExecutionLease, observability.BusinessSessionAttachment)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))

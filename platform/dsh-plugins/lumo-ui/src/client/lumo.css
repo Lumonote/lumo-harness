@@ -3023,3 +3023,19 @@ body *::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-brand-primar
 .lumo-recovery-confirm { padding: 16px; margin-block: 16px; border: 1px solid var(--lumo-line); border-radius: 8px; background: var(--lumo-bg); overflow-wrap: anywhere; }
 @media (max-width: 900px) { .lumo-recovery-grid { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 500px) { .lumo-recovery-facts { grid-template-columns: minmax(0, 1fr); gap: 6px; } .lumo-recovery-facts dd { margin-bottom: 10px; } }
+
+/* Keep management forms and long grant lists usable at narrow panel widths. */
+.lumo-workbench :is(.lumo-cluster-panel, .lumo-governance-form, .lumo-form-actions, .lumo-role-parent) { min-width: 0; }
+.lumo-workbench :is(.lumo-cluster-form, .lumo-role-parent) :is(input, select, textarea) { min-width: 0; max-width: 100%; }
+.lumo-workbench .lumo-cluster-list { max-height: min(65vh, 620px); overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.lumo-workbench .lumo-role-action-list { max-height: min(65vh, 620px); overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.lumo-settings-comparison { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0; color: var(--lumo-muted); font-size: var(--lumo-fs-xs-13); }
+.lumo-settings-comparison strong { min-width: 0; overflow-wrap: anywhere; color: var(--lumo-ink); }
+@media (max-width: 620px) {
+  .lumo-workbench .lumo-cluster-panel > .lumo-section-title { align-items: flex-start; flex-wrap: wrap; }
+  .lumo-workbench .lumo-cluster-list > div { align-items: flex-start; flex-wrap: wrap; gap: 10px; }
+  .lumo-workbench .lumo-cluster-list > div > span:first-child { flex: 1 1 100%; }
+  .lumo-workbench .lumo-cluster-list > div > select { flex: 1 1 140px; max-width: 100%; }
+  .lumo-workbench .lumo-role-action-list > div { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .lumo-workbench .lumo-role-action-list { max-height: 65vh; }
+}

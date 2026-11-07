@@ -26,6 +26,7 @@ import (
 	"github.com/lumo-harness/platform/governance/internal/domain"
 	"github.com/lumo-harness/platform/governance/internal/store"
 	"github.com/lumo-harness/platform/observability"
+	"github.com/lumo-harness/platform/storageledger"
 )
 
 type Config struct {
@@ -115,6 +116,8 @@ func New(st *store.Store, cfg Config, log *slog.Logger) (*Server, error) {
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
+	mux.HandleFunc("GET /v1/storage/quota", s.storageQuota)
+	mux.HandleFunc("PUT /v1/storage/quota", s.storageQuota)
 	s.registerRecoveryRoutes(mux)
 	s.registerRolePolicyRoutes(mux)
 	s.registerRunReviewRoutes(mux)
@@ -2453,6 +2456,10 @@ func (s *Server) listDesktopNodes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) respondStoreError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, storageledger.ErrCoverage):
+		writeError(w, http.StatusServiceUnavailable, "storage_accounting_pending", "存储台账正在回填，暂未接收新增文件")
+	case errors.Is(err, storageledger.ErrQuota):
+		writeError(w, http.StatusInsufficientStorage, "storage_quota_exceeded", "存储配额不足，请联系管理员调整容量")
 	case errors.Is(err, errPermissionPolicyUnavailable), errors.Is(err, store.ErrRolePolicyUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "permission_policy_unavailable", "权限策略暂时不可用，未放行动作")
 	case errors.Is(err, store.ErrRolePolicyChanged):

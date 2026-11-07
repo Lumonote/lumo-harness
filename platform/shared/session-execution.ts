@@ -11,14 +11,23 @@ export class SessionExecutionFencedError extends Error {
   readonly code = 'session_execution_unavailable'
   constructor() { super('Session execution authority is unavailable; retry on its registered node after recovery') }
 }
-export async function boundedJSON(response: Response, maxBytes = 128 * 1024): Promise<Record<string, unknown>> {
+export async function boundedJSON(response: Response, maxBytes = 128 * 1024, signal?: AbortSignal): Promise<Record<string, unknown>> {
   if (!response.body) throw new SessionExecutionFencedError()
   const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let bytes = 0
-  try { for (;;) { const value = await reader.read(); if (value.done) break; bytes += value.value.length; if (bytes > maxBytes) throw new SessionExecutionFencedError(); chunks.push(value.value) } }
-  finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
+  try { for (;;) { const value = signal ? await abortable(reader.read(), signal) : await reader.read(); if (value.done) break; bytes += value.value.length; if (bytes > maxBytes) throw new SessionExecutionFencedError(); chunks.push(value.value) } }
+  finally { void reader.cancel().catch(() => {}); reader.releaseLock() }
+  signal?.throwIfAborted()
   const result: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
   if (!result || typeof result !== 'object' || Array.isArray(result)) throw new SessionExecutionFencedError()
   return result as Record<string, unknown>
+}
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) { void promise.catch(() => {}); return Promise.reject(signal.reason) }
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason)
+    signal.addEventListener('abort', abort, { once: true })
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+  })
 }
 export class SessionExecutionClient {
   private readonly base: string
@@ -27,12 +36,15 @@ export class SessionExecutionClient {
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || !token.trim()) throw new Error('Invalid execution authority')
     this.base = base.replace(/\/+$/u, '')
   }
-  async call(path: string, body?: unknown): Promise<Record<string, unknown>> {
+  async call(path: string, body?: unknown, signal?: AbortSignal): Promise<Record<string, unknown>> {
     try {
-    const res = await this.fetcher(`${this.base}/v1/session-execution${path}`, { method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: AbortSignal.timeout(3000),
-      headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
-    if (!res.ok) { await res.body?.cancel(); throw new SessionExecutionFencedError() }
-    return await boundedJSON(res)
+    const active = AbortSignal.any([AbortSignal.timeout(3000), ...(signal ? [signal] : [])])
+    active.throwIfAborted()
+    const request = this.fetcher(`${this.base}/v1/session-execution${path}`, { method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: active,
+      headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }).then(response => { if (active.aborted) void response.body?.cancel().catch(() => {}); return response })
+    const res = await abortable(request, active)
+    if (!res.ok) { void res.body?.cancel().catch(() => {}); throw new SessionExecutionFencedError() }
+    return await boundedJSON(res, 128 * 1024, active)
     } catch { throw new SessionExecutionFencedError() }
   }
   async node(realm: string, node: string, project: string): Promise<ExecutionNode> {
@@ -50,39 +62,53 @@ export class SessionExecutionRuntime {
   private node?: ExecutionNode
   private leases = new Map<string, ExecutionLease>()
   private pending = new Map<string, Promise<void>>()
-  private timer?: ReturnType<typeof setInterval>
+  private timer?: ReturnType<typeof setTimeout>
   private failed = false
-  private renewing = false
+  private renewingNode?: Promise<void>
   readonly signal: AbortSignal
   private abort = new AbortController()
   constructor(readonly client: SessionExecutionClient, readonly realm: string, readonly nodeId: string, readonly projectId: string, readonly endpoint: string, readonly writerHolder: string, private stop: () => void) { this.signal = this.abort.signal }
   private body() { return { realm: this.realm, node_id: this.nodeId, project_id: this.projectId, process_id: this.processId, endpoint: this.endpoint, token: this.secret } }
-  private fail(): never { if (!this.failed) { this.failed = true; if (this.timer) clearInterval(this.timer); this.abort.abort(new SessionExecutionFencedError()); this.stop() }; throw new SessionExecutionFencedError() }
+  private fail(): never { if (!this.failed) { this.failed = true; if (this.timer) clearTimeout(this.timer); this.abort.abort(new SessionExecutionFencedError()); this.stop() }; throw new SessionExecutionFencedError() }
   async start(): Promise<void> {
     if (this.failed) throw new SessionExecutionFencedError()
     this.ready ??= (async () => {
-      const n = (await this.client.call(`/nodes/${encodeURIComponent(this.nodeId)}/acquire`, this.body())).node as ExecutionNode
-      if (!n || n.process_id !== this.processId || n.realm !== this.realm || n.node_id !== this.nodeId || n.project_id !== this.projectId || n.endpoint !== this.endpoint || !Number.isSafeInteger(n.fence) || n.fence < 1) this.fail()
+      const n = (await this.client.call(`/nodes/${encodeURIComponent(this.nodeId)}/acquire`, this.body(), this.signal)).node as ExecutionNode
+      if (this.failed || !n || n.process_id !== this.processId || n.realm !== this.realm || n.node_id !== this.nodeId || n.project_id !== this.projectId || n.endpoint !== this.endpoint || !Number.isSafeInteger(n.fence) || n.fence < 1) this.fail()
       this.node = n
-      this.timer = setInterval(() => { if (!this.renewing) { this.renewing = true; void this.heartbeat().catch(() => {}).finally(() => { this.renewing = false }) } }, 2000)
-      this.timer.unref()
+      this.scheduleHeartbeat()
     })().catch(() => this.fail())
     return this.ready
   }
+  private scheduleHeartbeat(): void {
+    if (this.failed) return
+    // Spread replicas over time; schedule after completion so cycles cannot overlap.
+    this.timer = setTimeout(() => {
+      this.timer = undefined
+      void this.heartbeat().catch(() => {}).finally(() => this.scheduleHeartbeat())
+    }, 1750 + Math.floor(Math.random() * 501))
+    this.timer.unref()
+  }
   private async renewNode(): Promise<void> {
-    const n = (await this.client.call(`/nodes/${encodeURIComponent(this.nodeId)}/renew`, this.body())).node as ExecutionNode
-    if (!this.node || n?.process_id !== this.processId || n.fence !== this.node.fence) this.fail()
+    // Join only an in-flight authority request. Every later check still renews;
+    // no completed result, authorization or lease lifetime is cached here.
+    this.renewingNode ??= (async () => {
+      const n = (await this.client.call(`/nodes/${encodeURIComponent(this.nodeId)}/renew`, this.body(), this.signal)).node as ExecutionNode
+      if (this.failed || !this.node || n?.process_id !== this.processId || n.realm !== this.realm || n.node_id !== this.nodeId || n.project_id !== this.projectId || n.endpoint !== this.endpoint || n.fence !== this.node.fence) this.fail()
+      this.node = n
+    })().finally(() => { this.renewingNode = undefined })
+    await this.renewingNode
   }
   async ensure(ref: string): Promise<void> {
     await this.start()
     if (this.failed) throw new SessionExecutionFencedError()
-    if (!this.leases.has(ref) && this.leases.size >= 512) throw new Error('Session execution identity capacity reached')
+    if (!this.leases.has(ref) && !this.pending.has(ref) && new Set([...this.leases.keys(), ...this.pending.keys()]).size >= 512) throw new Error('Session execution identity capacity reached')
     let current = this.pending.get(ref)
     if (!current) {
       current = (async () => {
         const prior = this.leases.get(ref)
-        const l = (await this.client.call(`/sessions/${encodeURIComponent(ref)}/${prior ? 'renew' : 'acquire'}`, { ...this.body(), writer_holder: this.writerHolder, fencing_token: prior?.fencing_token ?? 0 })).lease as ExecutionLease
-        if (!l || l.session_ref !== ref || l.realm !== this.realm || l.node_id !== this.nodeId || l.project_id !== this.projectId || l.process_id !== this.processId || l.node_fence !== this.node?.fence || l.writer_holder !== this.writerHolder || !Number.isSafeInteger(l.fencing_token) || l.fencing_token < 1 || prior && prior.fencing_token !== l.fencing_token) this.fail()
+        const l = (await this.client.call(`/sessions/${encodeURIComponent(ref)}/${prior ? 'renew' : 'acquire'}`, { ...this.body(), writer_holder: this.writerHolder, fencing_token: prior?.fencing_token ?? 0 }, this.signal)).lease as ExecutionLease
+        if (this.failed || !l || l.session_ref !== ref || l.realm !== this.realm || l.node_id !== this.nodeId || l.project_id !== this.projectId || l.process_id !== this.processId || l.node_fence !== this.node?.fence || l.writer_holder !== this.writerHolder || !Number.isSafeInteger(l.fencing_token) || l.fencing_token < 1 || prior && prior.fencing_token !== l.fencing_token) this.fail()
         this.leases.set(ref, l)
       })().catch(() => this.fail()).finally(() => { this.pending.delete(ref) })
       this.pending.set(ref, current)
@@ -101,9 +127,28 @@ export class SessionExecutionRuntime {
     await this.check(); await this.ensure(ref)
     return {node_id:this.nodeId,process_id:this.processId,node_fence:this.node!.fence,writer_holder:this.writerHolder,fencing_token:this.leases.get(ref)!.fencing_token}
   }
-  private async heartbeat(): Promise<void> { try { await this.renewNode(); await Promise.all([...this.leases.keys()].map(ref => this.ensure(ref))) } catch { this.fail() } }
+  private async heartbeat(): Promise<void> {
+    const active = AbortSignal.any([this.signal, AbortSignal.timeout(5000)])
+    // Snapshot references, not credentials. A foreground renewal that finishes
+    // while queued already fulfilled this background refresh, so skip only it.
+    const leases = [...this.leases.entries()]
+    let cursor = 0
+    try {
+      await abortable(this.renewNode(), active)
+      await Promise.all(Array.from({ length: Math.min(8, leases.length) }, async () => {
+        for (;;) {
+          active.throwIfAborted()
+          const entry = leases[cursor++]
+          if (!entry) return
+          const [ref, observed] = entry
+          if (this.leases.get(ref) !== observed) continue
+          await abortable(this.ensure(ref), active)
+        }
+      }))
+    } catch { this.fail() }
+  }
   async dispose(): Promise<void> {
-    if (this.timer) clearInterval(this.timer)
+    if (this.timer) clearTimeout(this.timer)
     const acquired = this.node !== undefined
     this.failed = true; this.abort.abort(new SessionExecutionFencedError())
     if (acquired) await this.client.call(`/nodes/${encodeURIComponent(this.nodeId)}/release`, this.body()).catch(() => {})

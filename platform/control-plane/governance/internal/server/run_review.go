@@ -13,6 +13,7 @@ import (
 )
 
 func (s *Server) registerRunReviewRoutes(mux *http.ServeMux) {
+	observability.RegisterBusinessOperations(observability.BusinessReviewFileRead)
 	mux.Handle("PUT /v1/runtime/task-runs/{runID}/prepare", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.prepareRunExecution)))
 	mux.Handle("GET /v1/runtime/task-runs/{runID}/review-files/{entryID}", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.readRunReviewFile)))
 	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/reviews", s.bindRunReview)
@@ -20,21 +21,46 @@ func (s *Server) registerRunReviewRoutes(mux *http.ServeMux) {
 }
 
 func (s *Server) readRunReviewFile(w http.ResponseWriter, r *http.Request) {
+	outcome := observability.BusinessUnavailable
+	defer func() { observability.RecordBusinessResult(observability.BusinessReviewFileRead, outcome) }()
 	if !s.requireCluster(w) {
+		if !domain.IntentIsCluster(s.cfg.DeploymentMode, s.cfg.ClusterStatus) {
+			outcome = observability.BusinessDenied
+		}
 		return
 	}
 	realm := r.Header.Get("X-Lumo-Realm")
 	if realm == "" {
+		outcome = observability.BusinessDenied
 		writeError(w, http.StatusUnauthorized, "missing_realm", "X-Lumo-Realm required")
 		return
 	}
 	file, err := s.store.ReadRunReviewFile(r.Context(), realm, r.PathValue("runID"), r.Header.Get("X-Lumo-Node-ID"), r.Header.Get("X-Lumo-Session-Ref"), r.PathValue("entryID"))
 	if err != nil {
+		outcome = reviewFileBusinessOutcome(err)
 		s.respondStoreError(w, err)
 		return
 	}
+	outcome = observability.BusinessSuccess
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, file)
+}
+
+func reviewFileBusinessOutcome(err error) observability.BusinessOutcome {
+	switch {
+	case err == nil:
+		return observability.BusinessSuccess
+	case errors.Is(err, store.ErrForbidden):
+		return observability.BusinessDenied
+	case errors.Is(err, store.ErrBadRequest):
+		return observability.BusinessInvalid
+	case errors.Is(err, store.ErrNotFound):
+		return observability.BusinessNotFound
+	case errors.Is(err, store.ErrConflict):
+		return observability.BusinessConflict
+	default:
+		return observability.BusinessUnavailable
+	}
 }
 
 // Only the trusted runtime result transport needs this bounded expansion for

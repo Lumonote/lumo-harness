@@ -606,6 +606,8 @@ function sourceWrite(body: Record<string, unknown>, realm: string, docId?: strin
 }
 
 function knowledgeManagementStatus(error: unknown): number {
+  if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'storage_quota_exceeded') return 507
+  if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'storage_accounting_pending') return 503
   if (error instanceof RangeError) return 413
   if (error instanceof SyntaxError || error instanceof TypeError) return 400
   if (error instanceof Error && error.name === 'KnowledgeSourceConflictError') return 409
@@ -1166,7 +1168,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       writeJson(res, 201, { file: publicLibraryFile({ ...storedFile, canEdit: true }), indexed: extracted.text !== '' })
     } catch (error) {
       if(reservation && objectStore.managedContent) await objectStore.managedContent.abandon(reservation).catch(()=>{})
-      writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '资料文件未上传' })
+      writeJson(res, knowledgeManagementStatus(error), { error: knowledgeManagementStatus(error) === 507 ? '存储配额不足，请联系管理员调整容量' : error instanceof Error ? error.message : '资料文件未上传' })
     }
     return
   }
@@ -1730,6 +1732,14 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       return
     }
     writeJson(res, 405, { error: 'method not allowed' }); return
+  }
+
+  if (pathname === '/lumo/api/storage/quota' && (req.method === 'GET' || req.method === 'PUT')) {
+    if (!requireClusterReady(config, res)) return
+    const suffix = new URL(req.url ?? '/', 'http://lumo.local').search
+    if (req.method === 'GET') { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/storage/quota${suffix}`, req)); return }
+    try { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/storage/quota${suffix}`, req, 'PUT', await readBody(req))) } catch { writeJson(res, 400, { error: '存储配额请求无效' }) }
+    return
   }
 
   if (pathname === '/lumo/api/permission-actions') {

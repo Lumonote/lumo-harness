@@ -17,7 +17,7 @@ import { CLOSED_FILES_PROFILE,CONTROLLED_FILE_TOOL,ControlledFiles } from './con
  * are inherited from the dispatch payload. The existing process plugins retain
  * the exact owner/project/Agent identity checked at admission. */
 export async function runGovernedTask(ctx: Context, execution: GovernedExecution, binding: WorkerBinding,
-  nodeId: string, stop: AbortSignal, promptSource?: PromptSource, prepare?: () => Promise<PreparedRun>): Promise<GovernedResult> {
+  nodeId: string, stop: AbortSignal, promptSource?: PromptSource, prepare?: (signal: AbortSignal) => Promise<PreparedRun>): Promise<GovernedResult> {
   const result: GovernedResult = { run_id: execution.runId, task_id: execution.task.id,
     session_ref: execution.sessionRef, node_id: nodeId, state: 'FAILED', summary: '' }
   let dispose: (() => Promise<void>) | undefined
@@ -110,7 +110,7 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
         componentId: 'subagent-host', feature: `governed:${execution.task.id}` },
       traceId: `run:${execution.runId}`,
     })
-    const prepared = await prepare?.()
+    const prepared = await prepare?.(signal)
     signal.throwIfAborted()
     const closedText = prepared?.snapshot.output_profile === 'platform-closed-text-v1'
     const closedFiles=prepared?.snapshot.output_profile===CLOSED_FILES_PROFILE
@@ -230,7 +230,7 @@ export function startGovernedDispatch(ctx: Context, store: GovernedStore, onErro
         const stop = new AbortController()
         if (closed) stop.abort()
         const done = runGovernedTask(ctx, execution, store.config.binding, store.config.nodeId,
-          stop.signal, store.config.promptSource, () => prepareGovernedRun(store.config, execution))
+          stop.signal, store.config.promptSource, signal => prepareGovernedRun(store.config, execution, undefined, signal))
           .then(result => persist(execution, result)).catch(onError).finally(() => active.delete(execution.runId))
         active.set(execution.runId, { execution, stop, done })
       }

@@ -21,9 +21,13 @@ import (
 	"github.com/lumo-harness/platform/connector-gateway/internal/policy"
 	"github.com/lumo-harness/platform/connector-gateway/internal/ratelimit"
 	"github.com/lumo-harness/platform/connector-gateway/internal/server"
+	"github.com/lumo-harness/platform/observability"
 )
 
 func TestOwnedConnectorExactConsentAndUnknownOutcome(t *testing.T) {
+	previousMetrics := observability.Default
+	observability.Default = &observability.Metrics{}
+	t.Cleanup(func() { observability.Default = previousMetrics })
 	var calls atomic.Int32
 	var fail, revoked atomic.Bool
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -161,5 +165,11 @@ func TestOwnedConnectorExactConsentAndUnknownOutcome(t *testing.T) {
 	}
 	if status, _ = call("list", map[string]any{}); status != 403 {
 		t.Fatal("expired owner process", status)
+	}
+	metrics := httptest.NewRecorder()
+	observability.Default.Write(metrics)
+	if !strings.Contains(metrics.Body.String(), `lumo_business_requests_total{operation="connector_invoke",outcome="unknown"} 1`) ||
+		!strings.Contains(metrics.Body.String(), `lumo_business_requests_total{operation="connector_request",outcome="unknown"} 1`) {
+		t.Fatalf("actual unknown invocation was not counted: %s", metrics.Body)
 	}
 }

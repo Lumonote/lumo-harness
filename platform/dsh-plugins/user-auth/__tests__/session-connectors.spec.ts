@@ -84,4 +84,25 @@ describe('owned connector consent and native interaction bridge',()=>{
   expect(()=>validateSessionConnectors(config,'r')).not.toThrow()
   for(const value of [{...config,realm:'foreign'},{...config,gatewayUrl:'https://user:secret@gateway.example'},{...config,actions:[]},{...config,actions:[{connectorId:'issues',operations:['read','read']}]}])expect(()=>validateSessionConnectors(value,'r')).toThrow()
  })
+ it.each([[403,'owned_connector_denied','session_connector_denied'],[409,'owned_connector_changed','session_connector_changed'],[429,'rate_limited','session_connector_busy'],[503,'owned_connector_unavailable','session_connector_unavailable']] as const)('classifies prepare %s and suppresses private gateway messages',async(status,remote,code)=>{
+  const f=fixture();f.fetcher.mockResolvedValueOnce(new Response(JSON.stringify({error:remote,message:'login-secret private endpoint'}),{status,headers:{'retry-after':'9'}}))
+  const failure=await Promise.resolve(f.run({connectorId:'issues',operation:'read'})).catch(error=>error)
+  expect(failure).toMatchObject({status,code});expect(failure.message).not.toMatch(/login-secret|private/u)
+  expect(f.fetcher).toHaveBeenCalledOnce();if(status===429)expect(failure.retryAfter).toBe(9)
+ })
+ it.each(['network','malformed','unknown','dependency'] as const)('does not invite replay after execute %s failure',async kind=>{
+  const f=fixture(),original=f.fetcher.getMockImplementation()!
+  f.fetcher.mockImplementation(async(url,init)=>{
+   if(!String(url).endsWith('/execute'))return original(url,init)
+   if(kind==='network')throw Error('login-secret remote network detail')
+   if(kind==='malformed')return new Response('unreadable')
+   return new Response(JSON.stringify({error:kind==='unknown'?'connector_outcome_unknown':'owned_connector_unavailable',message:'login-secret'}),{status:kind==='unknown'?502:503})
+  })
+  const pending=Promise.resolve(f.run({connectorId:'issues',operation:'create'})).catch(error=>error)
+  await f.wait();const q=(await f.manager.list(f.agent)).questions[0]!
+  await f.manager.answer(f.agent,{questionId:q.questionId,receiptId:q.receiptId,digest:q.digest,revision:q.revision,decision:'approve'})
+  const failure=await pending;expect(failure).toMatchObject({code:'connector_outcome_unknown',status:502,retryable:false,retryAfter:0});expect(failure.message).not.toContain('login-secret')
+  expect(f.fetcher.mock.calls.filter(([url])=>String(url).endsWith('/execute'))).toHaveLength(1)
+  expect((await f.manager.list(f.agent)).questions).toEqual([])
+ })
 })

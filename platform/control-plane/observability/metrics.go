@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -148,6 +149,35 @@ func SetGaugeWithLabels(name string, value float64, labels map[string]string) {
 	// 先前写入的序列跟着被改掉。
 	Default.gauges[key] = gaugeSeries{labels: rendered, attrs: copyLabels(labels), value: value}
 	Default.gaugeMu.Unlock()
+}
+
+// AddGaugeWithLabels atomically adds delta to one series. It uses the same
+// cardinality budget as SetGaugeWithLabels; rejected/non-finite updates leave
+// the previous value intact. Callers must not implement increments as get/set:
+// concurrent HTTP handlers would silently lose events.
+func AddGaugeWithLabels(name string, delta float64, labels map[string]string) {
+	rendered, ok := renderLabels(labels)
+	if !metricName.MatchString(name) || !ok || math.IsNaN(delta) || math.IsInf(delta, 0) {
+		Default.droppedGauges.Add(1)
+		return
+	}
+	key := name + "\x00" + rendered
+	Default.gaugeMu.Lock()
+	defer Default.gaugeMu.Unlock()
+	if Default.gauges == nil {
+		Default.gauges = make(map[string]gaugeSeries)
+	}
+	previous, exists := Default.gauges[key]
+	if !exists && len(Default.gauges) >= int(defaultMetricCardinalityLimit.Load()) {
+		Default.droppedGauges.Add(1)
+		return
+	}
+	next := previous.value + delta
+	if math.IsNaN(next) || math.IsInf(next, 0) {
+		Default.droppedGauges.Add(1)
+		return
+	}
+	Default.gauges[key] = gaugeSeries{labels: rendered, attrs: copyLabels(labels), value: next}
 }
 
 // copyLabels 复制标签，避免调用方复用同一个 map 时污染已写入的序列。

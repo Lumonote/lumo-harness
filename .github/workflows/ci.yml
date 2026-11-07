@@ -78,6 +78,22 @@ jobs:
       - name: Unit tests
         run: pnpm run test
 
+      - name: Storage quota, startup concurrency and shared DDL
+        env:
+          LUMO_TEST_PG_DSN: postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable
+        run: >-
+          pnpm exec vitest run
+          dsh-plugins/knowledge/__tests__/pg-storage-quota.spec.ts
+          shared/__tests__/ddl-ownership.spec.ts
+
+      - name: Readonly archive and recovery drill contracts
+        env:
+          LUMO_TEST_PG_DSN: postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable
+        run: |
+          set -euo pipefail
+          node --test tools/archive-governance-results.test.mjs tools/archive-governance-results.pg.test.mjs
+          python3 -m unittest discover -s deploy/tests -p test_recovery_drill.py
+
       - name: Governed dispatch, team migration, metering and recovery
         env:
           LUMO_TEST_PG_DSN: postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable
@@ -131,6 +147,7 @@ jobs:
           - registry
           - scheduler
           - session-control
+          - storageledger
           - terminal-gateway
           - usage-ledger
     defaults:

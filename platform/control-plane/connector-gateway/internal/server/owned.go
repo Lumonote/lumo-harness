@@ -10,6 +10,7 @@ import (
 
 	"github.com/lumo-harness/platform/connector-gateway/internal/domain"
 	"github.com/lumo-harness/platform/connector-gateway/internal/owned"
+	"github.com/lumo-harness/platform/observability"
 )
 
 type ownedRequest struct {
@@ -25,12 +26,16 @@ type ownedRequest struct {
 
 func ownedError(w http.ResponseWriter, err error) {
 	status, code := http.StatusServiceUnavailable, "owned_connector_unavailable"
+	outcome := observability.BusinessUnavailable
 	if errors.Is(err, owned.ErrDenied) {
+		outcome = observability.BusinessDenied
 		status, code = http.StatusForbidden, "owned_connector_denied"
 	}
 	if errors.Is(err, owned.ErrChanged) {
+		outcome = observability.BusinessConflict
 		status, code = http.StatusConflict, "owned_connector_changed"
 	}
+	observability.RecordBusinessResult(observability.BusinessConnectorRequest, outcome)
 	writeJSON(w, status, map[string]string{"error": code, "code": code})
 }
 func (s *Server) handleOwnedConnector(w http.ResponseWriter, r *http.Request) {
@@ -96,6 +101,7 @@ func (s *Server) handleOwnedConnector(w http.ResponseWriter, r *http.Request) {
 				summaries = append(summaries, map[string]any{"id": conn.ID, "name": conn.Name, "version": conn.Version, "operations": ops})
 			}
 		}
+		observability.RecordBusinessResult(observability.BusinessConnectorRequest, observability.BusinessSuccess)
 		writeJSON(w, 200, map[string]any{"connectors": summaries})
 		return
 	case "prepare":
@@ -116,6 +122,7 @@ func (s *Server) handleOwnedConnector(w http.ResponseWriter, r *http.Request) {
 				ownedError(w, err)
 				return
 			}
+			observability.RecordBusinessResult(observability.BusinessConnectorRequest, observability.BusinessSuccess)
 			writeJSON(w, 200, map[string]any{"receipt": receipt})
 			return
 		}
@@ -140,6 +147,7 @@ func (s *Server) handleOwnedConnector(w http.ResponseWriter, r *http.Request) {
 			ownedError(w, err)
 			return
 		}
+		observability.RecordBusinessResult(observability.BusinessConnectorRequest, observability.BusinessSuccess)
 		writeJSON(w, 200, map[string]any{"receipt": result})
 		return
 	case "execute":
@@ -218,6 +226,15 @@ func (s *Server) invokeOwned(w http.ResponseWriter, r *http.Request, scope owned
 	} else if result.Status >= 400 {
 		outcome = "failed"
 	}
+	metricOutcome := observability.BusinessSuccess
+	if outcome == "unknown" {
+		metricOutcome = observability.BusinessUnknown
+	} else if outcome == "failed" {
+		metricOutcome = observability.BusinessFailed
+	}
+	// Record uncertainty before receipt persistence: a database failure must not
+	// hide an external side effect whose result is unknown and cannot be replayed.
+	observability.RecordBusinessResult(observability.BusinessConnectorInvoke, metricOutcome)
 	if receiptID != "" {
 		// Use a short independent context to persist an unknown outcome even when
 		// the user connection or execution lease was revoked during the request.
@@ -230,9 +247,11 @@ func (s *Server) invokeOwned(w http.ResponseWriter, r *http.Request, scope owned
 		}
 	}
 	if outcome == "unknown" {
+		observability.RecordBusinessResult(observability.BusinessConnectorRequest, observability.BusinessUnknown)
 		writeJSON(w, 502, map[string]string{"error": "connector_outcome_unknown", "code": "connector_outcome_unknown"})
 		return
 	}
+	observability.RecordBusinessResult(observability.BusinessConnectorRequest, metricOutcome)
 	// Connector credentials remain inside Gateway's resolver. Its result is
 	// already bounded and redacted; never return raw gateway failure text here.
 	writeJSON(w, 200, map[string]any{"result": result, "outcome": outcome})

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/lumo-harness/platform/session-control/internal/store"
+	"github.com/lumo-harness/platform/storageledger"
 	"io"
 	"net/http"
 	"strconv"
@@ -39,6 +40,12 @@ func ownerError(w http.ResponseWriter, err error) {
 	status := 500
 	code := "owner_store_unavailable"
 	switch {
+	case errors.Is(err, storageledger.ErrCoverage):
+		status = 503
+		code = "storage_accounting_pending"
+	case errors.Is(err, storageledger.ErrQuota):
+		status = 507
+		code = "storage_quota_exceeded"
 	case errors.Is(err, store.ErrExecutionFenced):
 		status = 409
 		code = "session_execution_fenced"

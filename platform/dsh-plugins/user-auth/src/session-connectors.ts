@@ -5,6 +5,7 @@ import type { AskUserQuestionAnswer, AskUserQuestionRequest, UserQuestionService
 import type {} from '@deepseek-ai/dsh-tools'
 import { boundedJSON } from '../../../shared/session-execution.ts'
 import type { Principal } from './client.ts'
+import { SessionRequestError, sessionUpstreamError, type SessionRequestErrorCode } from './session-request-errors.ts'
 
 export const USER_CONNECTOR_TOOLS = ['user_connector_list', 'user_connector_invoke'] as const
 export interface SessionConnectorConfig {
@@ -17,9 +18,8 @@ interface Receipt {id:string;connector_id:string;operation:string;connector_vers
 interface Invocation {connectorId:string;operation:string;pathParams?:Record<string,string>;query?:Record<string,string>;body?:unknown}
 interface Decision {questionId:string;receiptId:string;digest:string;revision:number;decision:'approve'|'reject'}
 interface Pending {receipt:Receipt;questions:AskUserQuestionRequest['questions'];resolve?:(answer:AskUserQuestionAnswer)=>void;reject?:(reason:unknown)=>void}
-export class SessionConnectorError extends Error {
-  readonly code='session_connector_unavailable'
-  constructor(){super('Connector request was refused or its external outcome is unknown; review its audit before trying again')}
+export class SessionConnectorError extends SessionRequestError {
+  constructor(code:SessionRequestErrorCode='session_connector_denied'){super(code)}
 }
 export function validateSessionConnectors(value:unknown,realm?:string):asserts value is SessionConnectorConfig|undefined{
  if(value===undefined)return
@@ -69,10 +69,12 @@ export class SessionConnectorTools {
   if(principal.realm!==this.config.realm||!credential)throw new SessionConnectorError()
   const execution=await access.execution()
   const active=AbortSignal.any([signal,access.signal,AbortSignal.timeout(35_000)])
-  const response=await this.fetcher(`${this.base}/owned/sessions/${encodeURIComponent(String(agent.session.id))}/${action}`,{method:'POST',redirect:'error',signal:active,headers:{authorization:`Bearer ${this.token}`,'content-type':'application/json','X-Lumo-Login-Session':credential},body:JSON.stringify({...body,project_id:this.projectId,execution})})
-  if(!response.ok){await response.body?.cancel();throw new SessionConnectorError()}
-  const result=await boundedJSON(response,512*1024)
-  await access.principal();await access.execution();active.throwIfAborted()
+  let response:Response
+  try{response=await this.fetcher(`${this.base}/owned/sessions/${encodeURIComponent(String(agent.session.id))}/${action}`,{method:'POST',redirect:'error',signal:active,headers:{authorization:`Bearer ${this.token}`,'content-type':'application/json','X-Lumo-Login-Session':credential},body:JSON.stringify({...body,project_id:this.projectId,execution})})}catch{throw new SessionConnectorError(action==='execute'?'connector_outcome_unknown':'session_connector_unavailable')}
+  if(!response.ok)throw await sessionUpstreamError(response,'connector',action==='execute')
+  let result:Record<string,unknown>
+  try{result=await boundedJSON(response,512*1024)}catch{throw new SessionConnectorError(action==='execute'?'connector_outcome_unknown':'session_connector_unavailable')}
+  try{await access.principal();await access.execution();active.throwIfAborted()}catch(error){if(action==='execute')throw new SessionConnectorError('connector_outcome_unknown');throw error}
   return result
  }
  async list(agent:Agent):Promise<{questions:Array<{questionId:string;receiptId:string;digest:string;revision:number;expiresAt:string;questions:AskUserQuestionRequest['questions']}>}>{
@@ -85,7 +87,7 @@ export class SessionConnectorTools {
   const d=value as Decision
   if(Object.keys(d).some(key=>!['questionId','receiptId','digest','revision','decision'].includes(key))||!['approve','reject'].includes(d.decision))throw new SessionConnectorError()
   const pending=this.pending.get(agent)?.get(d.questionId)
-  if(!pending?.resolve||pending.receipt.id!==d.receiptId||pending.receipt.digest!==d.digest||pending.receipt.revision!==d.revision||Date.parse(pending.receipt.expires_at)<=Date.now())throw new SessionConnectorError()
+  if(!pending?.resolve||pending.receipt.id!==d.receiptId||pending.receipt.digest!==d.digest||pending.receipt.revision!==d.revision||Date.parse(pending.receipt.expires_at)<=Date.now())throw new SessionConnectorError('session_connector_changed')
   // Remove synchronously before waking ask(), so a concurrent second answer
   // cannot claim a question while its one-use decision is being committed.
   this.pending.get(agent)!.delete(d.questionId)

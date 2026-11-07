@@ -286,6 +286,16 @@ function tablesIn(ddl: string): string[] {
  */
 const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequisites?: DdlSource | DdlSource[] }> = [
   {
+    label: '存储配额台账（Go ↔ 迁移 031）',
+    a: {files:[`${MIGRATION_DIR}/031_storage_ledger.sql`]},
+    b: {files:['control-plane/storageledger/ledger.go'],constName:'DDL'},
+  },
+  {
+    label: '存储配额台账（TS ↔ 迁移 031）',
+    a: {files:[`${MIGRATION_DIR}/031_storage_ledger.sql`]},
+    b: {files:['shared/storage-ledger.ts'],constName:'STORAGE_LEDGER_DDL'},
+  },
+  {
     label:'受控文本文件审核（Go governance ↔ 迁移 029）',
     a:{files:[`${MIGRATION_DIR}/029_governance_controlled_files.sql`]},
     b:{files:['control-plane/governance/internal/store/run_files.go'],constName:'runFilesDDL'},
@@ -559,6 +569,25 @@ function targetTables(stmt: string): string[] {
   return on ? [on[1]!] : []
 }
 
+/** A later DROP + ADD of the same named CHECK replaces its historical vocabulary.
+ * Requiring a startup to reapply the old CHECK rejects rows added by the newer
+ * version. Keep migration history intact and require the final replacement.
+ */
+function currentMigrationStatements(entries: Array<{ file: string; stmt: string }>) {
+  const checkKey = (stmt: string) => /^ALTER TABLE ([A-Za-z_][A-Za-z0-9_]*) ADD CONSTRAINT ([A-Za-z_][A-Za-z0-9_]*) CHECK\s*\(/iu.exec(stmt)?.slice(1).map(s => s.toLowerCase()).join('.')
+  const replacements = new Map<string, number>()
+  entries.forEach(({ stmt }, index) => {
+    const key = checkKey(stmt)
+    if (!key || index === 0) return
+    const drop = /^ALTER TABLE ([A-Za-z_][A-Za-z0-9_]*) DROP CONSTRAINT IF EXISTS ([A-Za-z_][A-Za-z0-9_]*)$/iu.exec(entries[index - 1]!.stmt)
+    if (drop?.slice(1).map(s => s.toLowerCase()).join('.') === key) replacements.set(key, index)
+  })
+  return entries.filter(({ stmt }, index) => {
+    const key = checkKey(stmt)
+    return !key || (replacements.get(key) ?? index) <= index
+  })
+}
+
 const flatCache = new Map<string, Promise<string>>()
 
 function flattenedSource(rel: string): Promise<string> {
@@ -571,6 +600,18 @@ function flattenedSource(rel: string): Promise<string> {
 }
 
 describe('迁移 ↔ 服务 DDL 收敛（常跑，不依赖 DSN）', () => {
+  it('仅由同表同名的后续 DROP + ADD CHECK 替换历史约束，不改写已发布迁移', () => {
+    const entry = (stmt: string) => ({ file: 'fixture.sql', stmt })
+    const old = entry("ALTER TABLE audit ADD CONSTRAINT events CHECK (event IN ('old'))")
+    const drop = entry('ALTER TABLE audit DROP CONSTRAINT IF EXISTS events')
+    const next = entry("ALTER TABLE audit ADD CONSTRAINT events CHECK (event IN ('old','new'))")
+    expect(currentMigrationStatements([old, drop, next])).toEqual([drop, next])
+    expect(currentMigrationStatements([old, next])).toEqual([old, next])
+    expect(currentMigrationStatements([old, entry('ALTER TABLE other DROP CONSTRAINT IF EXISTS events'), next])).toHaveLength(3)
+    expect(currentMigrationStatements([old, entry('ALTER TABLE audit DROP CONSTRAINT IF EXISTS unrelated'), next])).toHaveLength(3)
+    const unique = entry('ALTER TABLE audit ADD CONSTRAINT events UNIQUE (event)')
+    expect(currentMigrationStatements([unique, drop, next])).toEqual([unique, drop, next])
+  })
   it('保留带内部语句和引号分号的 DO 块，并检查每一张写入表', () => {
     const block = "DO $upgrade$ BEGIN UPDATE state SET reason = 'operator''s; reason'; UPDATE audit SET outcome = 'applied'; END $upgrade$"
     expect(statementsOf(`${block}; ALTER TABLE audit DROP COLUMN IF EXISTS legacy;`)).toEqual([
@@ -593,26 +634,27 @@ describe('迁移 ↔ 服务 DDL 收敛（常跑，不依赖 DSN）', () => {
     const checked: string[] = []
     const missing: string[] = []
 
-    for (const file of migrationFiles()) {
-      for (const stmt of statementsOf(await readText(file))) {
-        if (/^CREATE\s+TABLE/iu.test(stmt)) continue
+    const entries = (await Promise.all(migrationFiles().map(async file =>
+      statementsOf(await readText(file)).map(stmt => ({ file, stmt })),
+    ))).flat()
+    for (const { file, stmt } of currentMigrationStatements(entries)) {
+      if (/^CREATE\s+TABLE/iu.test(stmt)) continue
 
-        const tables = targetTables(stmt)
-        if (tables.length === 0) {
-          missing.push(`${file}: 认不出目标表 → ${stmt}`)
+      const tables = targetTables(stmt)
+      if (tables.length === 0) {
+        missing.push(`${file}: 认不出目标表 → ${stmt}`)
+        continue
+      }
+      for (const table of tables) {
+        const declarers = [...(decls.get(table) ?? [])].filter((f) => !f.startsWith(`${MIGRATION_DIR}/`))
+        if (declarers.length === 0) {
+          missing.push(`${file}: ${table} 没有任何非迁移建表方 → ${stmt}`)
           continue
         }
-        for (const table of tables) {
-          const declarers = [...(decls.get(table) ?? [])].filter((f) => !f.startsWith(`${MIGRATION_DIR}/`))
-          if (declarers.length === 0) {
-            missing.push(`${file}: ${table} 没有任何非迁移建表方 → ${stmt}`)
-            continue
-          }
-          checked.push(`${file} → ${table}`)
-          for (const declarer of declarers) {
-            if (!(await flattenedSource(declarer)).includes(stmt)) {
-              missing.push(`${file}: ${declarer} 里找不到 → ${stmt}`)
-            }
+        checked.push(`${file} → ${table}`)
+        for (const declarer of declarers) {
+          if (!(await flattenedSource(declarer)).includes(stmt)) {
+            missing.push(`${file}: ${declarer} 里找不到 → ${stmt}`)
           }
         }
       }

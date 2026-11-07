@@ -2,6 +2,7 @@ import { afterEach,describe,it,expect,vi } from 'vitest'
 import { createAuthProxy,listenAuthProxy,closeAuthProxy } from '../src/proxy.ts'
 import type { AuthenticatedSessionTransport } from '../src/session-transport.ts'
 import { GovernanceApiError, type GovernanceAuthClient } from '../src/client.ts'
+import { SessionRequestError } from '../src/session-request-errors.ts'
 const principal={realm:'r',user_id:'alice',username:'alice',display_name:'Alice',roles:['viewer'],session_expires_at:'2099-01-01'}
 const ref='session-'+'a'.repeat(32),id='att_'+'b'.repeat(48)
 const closers:Array<()=>Promise<unknown>>=[]
@@ -29,7 +30,7 @@ group('independent owned attachment binary HTTP ingress',()=>{
  })
  it('requires CSRF header and current cookie and rejects query/path/encoding metadata',async()=>{
   const f=await fixture()
-  for(const headers of [{...publicHeaders,'x-lumo-auth-request':''},{...publicHeaders,'content-encoding':'gzip'},{...publicHeaders,'x-lumo-attachment-name':'..%2F%00'}]){const response=await fetch(f.base+'/lumo/session-attachments/'+ref,{method:'POST',headers,body:'text'});expect(response.status).toBe(403)}
+  for(const [headers,status] of [[{...publicHeaders,'x-lumo-auth-request':''},403],[{...publicHeaders,'content-encoding':'gzip'},415],[{...publicHeaders,'x-lumo-attachment-name':'..%2F%00'},400]] as const){const response=await fetch(f.base+'/lumo/session-attachments/'+ref,{method:'POST',headers,body:'text'});expect(response.status).toBe(status)}
   const query=await fetch(f.base+'/lumo/session-attachments/'+ref+'?url=https://private',{method:'POST',headers:publicHeaders,body:'text'});expect(query.status).toBe(400);expect(f.upload).not.toHaveBeenCalled()
   f.revoke();const revoked=await fetch(f.base+'/lumo/session-attachments/'+ref+'/'+id,{headers:{cookie:publicHeaders.cookie},redirect:'manual'});expect([401,303]).toContain(revoked.status);expect(f.read).not.toHaveBeenCalled()
  })
@@ -38,5 +39,12 @@ group('independent owned attachment binary HTTP ingress',()=>{
   for(const headers of [ {'content-type':'text/plain','x-lumo-attachment-envelope':envelope()}, {'content-type':'text/plain','authorization':'Bearer service-secret','x-lumo-attachment-envelope':envelope('forged'),'cookie':publicHeaders.cookie,'x-lumo-user':'alice'}, {'content-type':'text/plain','authorization':'Bearer service-secret','x-lumo-attachment-envelope':envelope('login-secret','stale-process')} ]){const response=await fetch(path,{method:'POST',headers,body:'text'});expect([401,403]).toContain(response.status)}
   expect(f.upload).not.toHaveBeenCalled()
   const accepted=await fetch(path,{method:'POST',headers:{'content-type':'text/plain','authorization':'Bearer service-secret','x-lumo-attachment-envelope':envelope()},body:'text'});expect(accepted.status).toBe(201);expect(f.upload).toHaveBeenCalledOnce();expect(f.destination.mock.calls.length).toBeGreaterThan(1)
+ })
+ it.each(['session_attachment_too_large','session_attachment_busy','session_attachment_unavailable','session_attachment_denied','storage_quota_exceeded'] as const)('preserves safe %s status without reflecting dependency detail',async code=>{
+  const f=await fixture(),failure=new SessionRequestError(code,7);f.upload.mockRejectedValueOnce(failure)
+  const response=await fetch(f.base+'/lumo/session-attachments/'+ref,{method:'POST',headers:publicHeaders,body:'text'})
+  expect(response.status).toBe(failure.status);expect(await response.json()).toEqual({error:code,retryable:failure.retryable});expect(response.headers.get('retry-after')).toBe(code==='session_attachment_busy'?'7':null)
+  f.upload.mockRejectedValueOnce(Object.assign(Error('service-secret private-bucket'),{code:'storage_quota_exceeded',status:507}))
+  const hostile=await fetch(f.base+'/lumo/session-attachments/'+ref,{method:'POST',headers:publicHeaders,body:'text'});expect(hostile.status).toBe(403);expect(await hostile.text()).not.toMatch(/service-secret|private-bucket|storage_quota/u)
  })
 })

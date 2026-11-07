@@ -1,5 +1,6 @@
 import { SESSION_ATTACHMENT_PATH, SESSION_ATTACHMENT_RUNTIME_PATH, SESSION_ATTACHMENT_MAX_BYTES } from '../../../shared/seam-contracts/session-attachments.ts'
 import { attachmentName, attachmentMediaType } from './session-attachments.ts'
+import { SessionRequestError } from './session-request-errors.ts'
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -386,6 +387,10 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
       // The internal request contains a credential: never log the request,
       // downstream error text, or reflect remote response bodies.
       options.logger.warn('lumo-user-auth: owned Session request denied')
+      if(error instanceof SessionRequestError){
+        if(!res.headersSent){if(error.retryAfter)res.setHeader('Retry-After',String(error.retryAfter));writeJson(res,error.status,{error:error.code,retryable:error.retryable})}else res.destroy()
+        return
+      }
       const code=error instanceof Error&&'code' in error?String(error.code):''
       if(!res.headersSent)writeJson(res,code==='session_execution_unavailable'?503:['session_model_changed','session_model_busy'].includes(code)?409:403,{error:['session_pending_input','session_fork_unavailable','session_execution_unavailable','session_model_changed','session_model_busy','session_model_unavailable','session_connector_unavailable'].includes(code)?code:'session_request_denied'})
       else res.destroy()
@@ -406,23 +411,29 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
     const timer=setInterval(()=>{if(!checking){checking=true;void authority().catch(()=>abort.abort()).finally(()=>{checking=false})}},1000);timer.unref()
     try{
       await authority()
-      if(req.headers['content-encoding']!==undefined)throw new Error('Encoded attachment body is unsupported')
+      if(req.headers['content-encoding']!==undefined)throw new SessionRequestError('session_attachment_unsupported')
       if(id){
-        if(req.method!=='GET'||!transport.readAttachment)throw new Error('Attachment read unavailable')
+        if(req.method!=='GET'||!transport.readAttachment)throw new SessionRequestError('session_attachment_unavailable')
         const binary=await transport.readAttachment(principal,ref,id,active,authority)
         await authority();active.throwIfAborted()
         res.writeHead(200,{'Content-Type':binary.mediaType,'Content-Length':String(binary.data.length),'Content-Disposition':"attachment; filename*=UTF-8''"+encodeURIComponent(binary.name),'X-Lumo-Attachment-Name':encodeURIComponent(binary.name),'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; sandbox"})
         res.end(binary.data)
       }else{
-        if(req.method!=='POST'||!transport.uploadAttachment)throw new Error('Attachment upload unavailable')
-        const rawLength=req.headers['content-length'];if(rawLength!==undefined&&(!/^\d+$/u.test(rawLength)||Number(rawLength)<1||Number(rawLength)>SESSION_ATTACHMENT_MAX_BYTES))throw new Error('Invalid attachment length')
-        const name=attachmentName(metadata?.name??decodeURIComponent(String(req.headers['x-lumo-attachment-name']??'')))
+        if(req.method!=='POST'||!transport.uploadAttachment)throw new SessionRequestError('session_attachment_unavailable')
+        const rawLength=req.headers['content-length'];if(rawLength!==undefined){if(!/^\d+$/u.test(rawLength)||Number(rawLength)<1)throw new SessionRequestError('session_attachment_invalid');if(Number(rawLength)>SESSION_ATTACHMENT_MAX_BYTES)throw new SessionRequestError('session_attachment_too_large')}
+        let name:string
+        try{name=attachmentName(metadata?.name??decodeURIComponent(String(req.headers['x-lumo-attachment-name']??'')))}catch{throw new SessionRequestError('session_attachment_invalid')}
         const mediaType=attachmentMediaType(metadata?.mediaType??req.headers['content-type'])
-        if(metadata&&metadata.mediaType!==req.headers['content-type'])throw new Error('Attachment type mismatch')
+        if(metadata&&metadata.mediaType!==req.headers['content-type'])throw new SessionRequestError('session_attachment_unsupported')
         const value=await transport.uploadAttachment(principal,ref,{name,mediaType},req,active,authority)
         await authority();active.throwIfAborted();writeJson(res,201,value)
       }
-    }catch{options.logger.warn('lumo-user-auth: attachment request denied');if(!res.headersSent)writeJson(res,403,{error:'session_attachment_denied'});else res.destroy()}
+    }catch(error){
+      options.logger.warn('lumo-user-auth: attachment request denied')
+      const unavailable=error instanceof GovernanceApiError&&error.status>=500||error instanceof Error&&'code' in error&&error.code==='session_execution_unavailable'||active.aborted&&!abort.signal.aborted
+      const failure=error instanceof SessionRequestError?error:new SessionRequestError(unavailable?'session_attachment_unavailable':'session_attachment_denied')
+      if(!res.headersSent){if(failure.retryAfter)res.setHeader('Retry-After',String(failure.retryAfter));writeJson(res,failure.status,{error:failure.code,retryable:failure.retryable})}else res.destroy()
+    }
     finally{clearInterval(timer);abort.abort()}
   }
   const server = createServer((req, res) => {

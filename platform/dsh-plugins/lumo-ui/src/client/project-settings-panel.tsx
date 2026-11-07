@@ -12,6 +12,7 @@ export function ProjectSettingsPanel({ request, project, role, refresh }: {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [conflict, setConflict] = useState(false)
+  const [remoteName, setRemoteName] = useState<string | null>(null)
   const pending = useRef(false)
   const editable = project.status === 'active' && (role === 'owner' || role === 'editor')
   // Keep unsaved text when a remote update is received. The old baseline is
@@ -21,7 +22,11 @@ export function ProjectSettingsPanel({ request, project, role, refresh }: {
     if (name === baseline) setBaseline(project.name)
   }, [project.name])
   const reset = () => {
-    setName(project.name); setBaseline(project.name); setConflict(false); setError(''); setNotice('')
+    setName(project.name); setBaseline(project.name); setRemoteName(null); setConflict(false); setError(''); setNotice('')
+  }
+  const discardDraft = () => {
+    if (remoteName === null) reset()
+    else { setName(remoteName); setNotice('已取消草稿修改。') }
   }
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -31,13 +36,13 @@ export function ProjectSettingsPanel({ request, project, role, refresh }: {
       const saved = await request<ProjectSettingsProject>(`/lumo/api/projects/${encodeURIComponent(project.id)}`, {
         method: 'PATCH', body: JSON.stringify({ name: name.trim(), expectedName: baseline }),
       })
-      setName(saved.name); setBaseline(saved.name); setNotice('项目名称已保存。')
+      setName(saved.name); setBaseline(saved.name); setRemoteName(null); setNotice('项目名称已保存。')
       try { await refresh() } catch (reason) { setError(`已保存，刷新失败：${reason instanceof Error ? reason.message : String(reason)}`) }
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason)
       const stale = reason instanceof Error && 'status' in reason && reason.status === 409
       setConflict(stale)
-      setError(stale ? `保存冲突：${message}。请重新读取当前名称后再编辑。` : message)
+      setError(stale ? `保存冲突：${message}。草稿已保留，请读取最新名称并核对后再保存。` : message)
     } finally { pending.current = false; setBusy(false) }
   }
   const reload = async () => {
@@ -45,7 +50,7 @@ export function ProjectSettingsPanel({ request, project, role, refresh }: {
     pending.current = true; setBusy(true); setError('')
     try {
       const snapshot = await request<{ project: ProjectSettingsProject }>(`/lumo/api/projects/${encodeURIComponent(project.id)}`)
-      setName(snapshot.project.name); setBaseline(snapshot.project.name); setConflict(false); setNotice('已读取当前项目名称。')
+      setBaseline(snapshot.project.name); setRemoteName(snapshot.project.name); setConflict(false); setNotice('已读取最新名称，草稿仍保留。请核对后保存，或采用已保存的名称。')
       try { await refresh() } catch (reason) { setError(`名称已读取，刷新失败：${reason instanceof Error ? reason.message : String(reason)}`) }
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
     finally { pending.current = false; setBusy(false) }
@@ -54,7 +59,8 @@ export function ProjectSettingsPanel({ request, project, role, refresh }: {
     <div className="lumo-section-title"><div><h3>项目设置</h3><p className="lumo-muted">为团队设置清晰的项目名称。</p></div><span className="lumo-pill">{project.status === 'archived' ? '已归档' : '进行中'}</span></div>
     {editable ? <form className="lumo-governance-form lumo-cluster-form" onSubmit={submit}>
       <label>项目名称<input aria-label="项目名称" value={name} maxLength={120} disabled={busy} onChange={event => { setName(event.target.value); setNotice('') }} required /></label>
-      <div className="lumo-form-actions"><button className="lumo-button" type="submit" disabled={busy || conflict || !name.trim() || name.trim() === baseline}>{busy ? '处理中…' : '保存名称'}</button><button className="lumo-button lumo-secondary" type="button" disabled={busy || conflict || name === project.name} onClick={reset}>取消修改</button>{conflict ? <button className="lumo-button lumo-secondary" type="button" disabled={busy} onClick={() => void reload()}>重新读取名称</button> : null}</div>
+      {remoteName !== null ? <p className="lumo-settings-comparison">当前已保存：<strong>{remoteName}</strong><button className="lumo-button lumo-secondary lumo-small" type="button" disabled={busy} onClick={() => { setName(remoteName); setNotice('已采用当前保存的名称。') }}>采用已保存的名称</button></p> : null}
+      <div className="lumo-form-actions"><button className="lumo-button" type="submit" disabled={busy || conflict || !name.trim() || name.trim() === baseline}>{busy ? '处理中…' : '保存名称'}</button><button className="lumo-button lumo-secondary" type="button" disabled={busy || conflict || name === (remoteName ?? project.name)} onClick={discardDraft}>取消修改</button>{conflict ? <button className="lumo-button lumo-secondary" type="button" disabled={busy} onClick={() => void reload()}>读取最新名称（保留草稿）</button> : null}</div>
     </form> : <p className="lumo-muted">{project.status === 'archived' ? '项目已归档，恢复后可编辑项目内容。' : '当前角色可查看项目设置，编辑需 owner 或 editor 权限。'}</p>}
     {error ? <div className="lumo-cluster-feedback error" role="alert">{error}</div> : null}
     {notice ? <div className="lumo-cluster-feedback" role="status">{notice}</div> : null}

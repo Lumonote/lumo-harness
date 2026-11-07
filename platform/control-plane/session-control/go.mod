@@ -3,6 +3,7 @@ module github.com/lumo-harness/platform/session-control
 go 1.25.0
 
 require (
+	github.com/lumo-harness/platform/storageledger v0.0.0
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/lumo-harness/platform/heartbeat v0.0.0
 	github.com/lumo-harness/platform/observability v0.0.0
@@ -20,3 +21,5 @@ require (
 replace github.com/lumo-harness/platform/observability => ../observability
 
 replace github.com/lumo-harness/platform/heartbeat => ../heartbeat
+
+replace github.com/lumo-harness/platform/storageledger => ../storageledger

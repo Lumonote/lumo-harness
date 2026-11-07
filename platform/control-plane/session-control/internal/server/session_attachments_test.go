@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/session-control/internal/store"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,9 @@ func (f *attachmentFake) SessionAttachments(_ context.Context, ref string, in st
 	return []store.AttachmentReceipt{}, nil
 }
 func TestAttachmentAPIRejectsUnrecognizedFieldsAndMultipleBodies(t *testing.T) {
+	previous := observability.Default
+	observability.Default = &observability.Metrics{}
+	t.Cleanup(func() { observability.Default = previous })
 	f := &attachmentFake{}
 	mux := http.NewServeMux()
 	New(Options{Owners: f}).Routes(mux)
@@ -44,5 +48,15 @@ func TestAttachmentAPIRejectsUnrecognizedFieldsAndMultipleBodies(t *testing.T) {
 	mux.ServeHTTP(w, httptest.NewRequest("GET", "/v1/session-attachments/test", nil))
 	if w.Code != 405 {
 		t.Fatalf("%d", w.Code)
+	}
+	metrics := httptest.NewRecorder()
+	observability.Default.Write(metrics)
+	for _, want := range []string{
+		`lumo_business_requests_total{operation="session_attachment",outcome="invalid"} 4`,
+		`lumo_business_requests_total{operation="session_attachment",outcome="success"} 1`,
+	} {
+		if !strings.Contains(metrics.Body.String(), want) {
+			t.Fatalf("missing attachment metric %q: %s", want, metrics.Body)
+		}
 	}
 }

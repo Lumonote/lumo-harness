@@ -534,6 +534,51 @@ groups:
           summary: "服务 {{ $labels.service }} 的 5xx 比例超过 5%"
           description: "{{ $labels.service }} 近 5 分钟 5xx 占比超过 5%，持续 10 分钟。"
 
+      - alert: LumoSessionExecutionFenced
+        expr: |
+          sum by (service) (increase(lumo_business_requests_total{operation=~"session_execution_node|session_execution_lease",outcome="fenced"}[5m])) > 0
+        for: 0m
+        labels:
+          class: execution_fenced
+          tier: P2
+          severity: warning
+        annotations:
+          summary: "执行节点或会话租约已被 fencing 拒绝"
+          description: >-
+            近 5 分钟有节点身份或会话执行租约失效。检查 session-control 的数据库延迟、
+            节点心跳及进程重启记录；失租进程必须停止执行，由新进程重新取得权威租约。
+            指标不含会话或用户标识，具体对象通过受控日志和租约台账定位。
+
+      - alert: LumoReviewFileUnavailable
+        expr: |
+          sum by (service) (increase(lumo_business_requests_total{operation="review_file_read",outcome=~"unavailable|not_found|conflict"}[5m])) > 0
+        for: 0m
+        labels:
+          class: review_unavailable
+          tier: P2
+          severity: warning
+        annotations:
+          summary: "独立审核文件无法完整读取或校验"
+          description: >-
+            近 5 分钟有逐文件审核读取失败、文件缺失或摘要冲突。检查治理服务、数据库中的文件 blob 及
+            原始输出 manifest；保留审核阻断，不得将未读取或校验失败的文件标记为已审核。
+            正常的授权撤销拒绝单独计数，不触发此告警。
+
+      - alert: LumoOwnedConnectorOutcomeUnknown
+        expr: |
+          sum by (service) (increase(lumo_business_requests_total{operation="connector_invoke",outcome="unknown"}[5m])) > 0
+        for: 0m
+        labels:
+          class: connector_outcome_unknown
+          tier: P2
+          severity: warning
+        annotations:
+          summary: "连接器调用结果未知，禁止自动重放"
+          description: >-
+            外部系统可能已经提交了操作，网络中断、超时或授权撤销使结果无法确认。
+            此计数在持久化回执之前记录，回执写入失败也不会隐藏未知结果。
+            不可自动重试或重置为可执行；人工核对外部系统与 consent receipt 后再处理。
+
       - alert: LumoHttpP95LatencyHigh
         # 分位数而不是均值：均值会被大量快请求拉平，掩盖长尾。规范在 SLO 行提到 p99，
         # 但本仓库的直方图桶最粗只到 1s（observability/metrics.go 的七个桶），

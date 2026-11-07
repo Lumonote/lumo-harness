@@ -30,6 +30,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/lumo-harness/platform/observability"
 )
 
 // metricContract 导出面的契约：每个指标名携带哪些标签键。
@@ -44,6 +46,7 @@ var metricContract = map[string][]string{
 	"lumo_observability_metric_series_dropped_total": nil,
 	"lumo_http_inflight":                             nil,
 	"lumo_http_request_duration_seconds":             {"le"},
+	"lumo_business_requests_total":                   {"operation", "outcome"},
 	// scheduler（internal/server/metrics.go 的常量）。
 	"lumo_scheduler_pending_tasks":          nil,
 	"lumo_scheduler_tasks":                  {"state", "cluster_id"},
@@ -114,6 +117,7 @@ var syntheticLabels = map[string]bool{
 // 但这六类少一个就是覆盖缺口。
 var specClasses = []string{
 	"task_lost", "node_down", "queue_backlog", "budget_overrun", "gateway_5xx", "seam_circuit_open",
+	"execution_fenced", "review_unavailable", "connector_outcome_unknown",
 }
 
 // allowedRuleKeys Prometheus 规则文件里合法的规则级键。多一个键（例如把 class 写在
@@ -238,7 +242,7 @@ func resolveRoot(root string) (string, error) {
 
 // emitFuncs 会产生序列的写入 API。名字必须与 observability 包导出的函数一致。
 var emitFuncs = map[string]bool{
-	"SetGauge": true, "SetGaugeWithLabels": true, "ReplaceGauges": true,
+	"SetGauge": true, "SetGaugeWithLabels": true, "AddGaugeWithLabels": true, "ReplaceGauges": true,
 }
 
 // typeLine 匹配 metrics.go 里固定打印的 `# TYPE <name>`——那几条不走写入 API。
@@ -321,9 +325,9 @@ func loadEmitted(root string) (map[string]bool, []problem) {
 		}
 	}
 
-	// 第二遍：写入点。只看带包/接收者限定的调用（`observability.SetGauge(...)`）：
-	// 包内那些把参数原样转发的调用（SetGauge 转调 SetGaugeWithLabels）不是写入点，
-	// 把它们算进来会把「参数名」误判成指标名。
+	// Qualified calls must resolve statically. Inside observability also inspect
+	// literal/constant writes used by closed business helpers, while ignoring
+	// wrappers that only forward a parameter rather than declare a metric.
 	emitted := map[string]bool{}
 	for _, file := range parsed {
 		ast.Inspect(file, func(n ast.Node) bool {
@@ -331,15 +335,26 @@ func loadEmitted(root string) (map[string]bool, []problem) {
 			if !ok || len(call.Args) == 0 {
 				return true
 			}
-			selector, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || !emitFuncs[selector.Sel.Name] {
+			writer, qualified := "", false
+			switch fn := call.Fun.(type) {
+			case *ast.SelectorExpr:
+				writer, qualified = fn.Sel.Name, true
+			case *ast.Ident:
+				if file.Name.Name == "observability" {
+					writer = fn.Name
+				}
+			}
+			if !emitFuncs[writer] {
 				return true
 			}
 			name, ok := resolveMetricName(call.Args[0], consts)
 			if !ok {
+				if !qualified {
+					return true
+				}
 				problems = append(problems, problem{
 					where: fset.Position(call.Pos()).String(),
-					what:  fmt.Sprintf("%s 的第一个实参不是字符串字面量也不是可解析的常量，门禁无法核对；请用具名常量", selector.Sel.Name),
+					what:  fmt.Sprintf("%s 的第一个实参不是字符串字面量也不是可解析的常量，门禁无法核对；请用具名常量", writer),
 				})
 				return true
 			}
@@ -589,11 +604,12 @@ func checkSpecClasses(rules []rule) []problem {
 }
 
 var (
-	selector     = regexp.MustCompile(`([a-zA-Z_:][a-zA-Z0-9_:]*)\s*\{([^}]*)\}`)
-	labelMatcher = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)\s*(=~|!~|!=|=)`)
-	metricToken  = regexp.MustCompile(`\b(lumo_[a-zA-Z0-9_]+)\b`)
-	recordedName = regexp.MustCompile(`\b(lumo:[a-zA-Z0-9_]+)\b`)
-	grouping     = regexp.MustCompile(`\b(?:by|without|on|ignoring|group_left|group_right)\s*\(([^)]*)\)`)
+	selector          = regexp.MustCompile(`([a-zA-Z_:][a-zA-Z0-9_:]*)\s*\{([^}]*)\}`)
+	labelMatcher      = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)\s*(=~|!~|!=|=)`)
+	labelValueMatcher = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)\s*(=~|!~|!=|=)\s*("(?:\\.|[^"\\])*")`)
+	metricToken       = regexp.MustCompile(`\b(lumo_[a-zA-Z0-9_]+)\b`)
+	recordedName      = regexp.MustCompile(`\b(lumo:[a-zA-Z0-9_]+)\b`)
+	grouping          = regexp.MustCompile(`\b(?:by|without|on|ignoring|group_left|group_right)\s*\(([^)]*)\)`)
 )
 
 // checkReferences 校验表达式引用的指标名与标签键。
@@ -674,6 +690,18 @@ func checkReferences(exprs []expression, emitted, defined map[string]bool) []pro
 					})
 				}
 			}
+			if base == "lumo_business_requests_total" {
+				values := labelValueMatcher.FindAllStringSubmatch(m[2], -1)
+				if len(values) != len(labelMatcher.FindAllStringSubmatch(m[2], -1)) {
+					problems = append(problems, problem{where: e.where, what: "业务指标标签值无法解析，必须使用双引号闭集枚举"})
+				}
+				for _, lm := range values {
+					value, err := strconv.Unquote(lm[3])
+					if err != nil || !validBusinessMatcher(lm[1], lm[2], value) {
+						problems = append(problems, problem{where: e.where, what: fmt.Sprintf("业务指标标签 %s 的值 %s 不在闭集枚举内", lm[1], lm[3])})
+					}
+				}
+			}
 		}
 
 		// 分组/匹配标签：多选择器时按各指标标签之并核对（无法确定归属，宁可宽一点，
@@ -696,6 +724,32 @@ func checkReferences(exprs []expression, emitted, defined map[string]bool) []pro
 		}
 	}
 	return problems
+}
+
+func validBusinessMatcher(label, operator, value string) bool {
+	if syntheticLabels[label] {
+		return true
+	}
+	values := []string{value}
+	if operator == "=~" || operator == "!~" {
+		// Keep regex matchers finite and reviewable: only enum alternatives.
+		values = strings.Split(value, "|")
+	}
+	for _, v := range values {
+		switch label {
+		case "operation":
+			if !observability.ValidBusinessOperation(observability.BusinessOperation(v)) {
+				return false
+			}
+		case "outcome":
+			if !observability.ValidBusinessOutcome(observability.BusinessOutcome(v)) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // ── service 维度名单：互斥性与可抓取性 ─────────────────────────────────────────

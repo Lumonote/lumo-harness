@@ -5,6 +5,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { boundedJSON, type SessionExecutionRuntime } from '../../../shared/session-execution.ts'
 import { SESSION_ATTACHMENT_MAX_BYTES, sessionAttachmentID, type SessionAttachmentConfig, type SessionAttachmentReceipt, type SessionAttachmentUpload, type SessionAttachmentDownload } from '../../../shared/seam-contracts/session-attachments.ts'
 import type { Principal } from './client.ts'
+import { SessionRequestError, sessionUpstreamError } from './session-request-errors.ts'
 
 export const USER_SESSION_ATTACHMENT_TOOL = 'user_attachment_read'
 const textTypes = new Set(['text/plain','text/markdown','text/csv','application/json'])
@@ -19,34 +20,34 @@ export function validateSessionAttachments(value: unknown, realm?: string): asse
   if(Number(c.maxTextBytes??1024*1024)>Number(c.maxUploadBytes??SESSION_ATTACHMENT_MAX_BYTES))throw new Error('Text limit exceeds upload limit')
 }
 export function attachmentName(value: unknown): string {
-  if(typeof value!=='string'||!value.trim()||value.length>1000)throw new Error('Attachment filename is required')
+  if(typeof value!=='string'||!value.trim()||value.length>1000)throw new SessionRequestError('session_attachment_invalid')
   const leaf=value.split(/[\\/]/u).at(-1)!.replace(/[\p{Cc}\p{Cf}]/gu,'').trim()
   let name='',bytes=0,count=0
   // Match the receipt store's byte bound without cutting a Unicode scalar.
   for(const character of leaf){
     const scalar=character.codePointAt(0)!
-    if(scalar>=0xd800&&scalar<=0xdfff)throw new Error('Invalid attachment filename')
+    if(scalar>=0xd800&&scalar<=0xdfff)throw new SessionRequestError('session_attachment_invalid')
     const size=Buffer.byteLength(character,'utf8')
     if(count>=100||bytes+size>200)break
     name+=character;bytes+=size;count++
   }
-  if(!name||name==='.'||name==='..'||name.includes('[lumo-attachment:'))throw new Error('Invalid attachment filename')
+  if(!name||name==='.'||name==='..'||name.includes('[lumo-attachment:'))throw new SessionRequestError('session_attachment_invalid')
   return name
 }
 export function attachmentMediaType(value: unknown): string {
-  if(typeof value!=='string')throw new Error('An explicit supported attachment media type is required')
+  if(typeof value!=='string')throw new SessionRequestError('session_attachment_unsupported')
   const mime=value.toLowerCase()
-  if(!textTypes.has(mime)&&!imageTypes.has(mime))throw new Error('Only UTF-8 plain text, Markdown, CSV, JSON and PNG/JPEG/WebP/GIF are supported')
+  if(!textTypes.has(mime)&&!imageTypes.has(mime))throw new SessionRequestError('session_attachment_unsupported')
   return mime
 }
 export async function attachmentBytes(source: AsyncIterable<Uint8Array>, max: number, signal: AbortSignal): Promise<Uint8Array> {
   const chunks: Uint8Array[]=[];let size=0
   const iterator=source[Symbol.asyncIterator]()
-  try{for(;;){signal.throwIfAborted();const next=await abortable(Promise.resolve(iterator.next()),signal);if(next.done)break;if(!(next.value instanceof Uint8Array))throw new Error('Binary attachment required');size+=next.value.length;if(size>max)throw new Error('Attachment exceeds the upload byte limit');chunks.push(next.value)}signal.throwIfAborted();if(size===0)throw new Error('Empty attachment is not supported');return Buffer.concat(chunks)}
+  try{for(;;){signal.throwIfAborted();const next=await abortable(Promise.resolve(iterator.next()),signal);if(next.done)break;if(!(next.value instanceof Uint8Array))throw new SessionRequestError('session_attachment_invalid');size+=next.value.length;if(size>max)throw new SessionRequestError('session_attachment_too_large');chunks.push(next.value)}signal.throwIfAborted();if(size===0)throw new SessionRequestError('session_attachment_invalid');return Buffer.concat(chunks)}
   finally{void iterator.return?.().catch(()=>{})}
 }
 function abortable<T>(promise:Promise<T>,signal:AbortSignal):Promise<T>{if(signal.aborted){void promise.catch(()=>{});return Promise.reject(signal.reason)}return new Promise((resolve,reject)=>{const abort=()=>reject(signal.reason);signal.addEventListener('abort',abort,{once:true});promise.then(resolve,reject).finally(()=>signal.removeEventListener('abort',abort))})}
-export function attachmentText(bytes:Uint8Array):string{const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);if(!text.length||/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/u.test(text))throw new Error('Attachment must contain safe UTF-8 text');return text}
+export function attachmentText(bytes:Uint8Array):string{try{const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);if(!text.length||/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/u.test(text))throw new SessionRequestError('session_attachment_unsupported');return text}catch{throw new SessionRequestError('session_attachment_unsupported')}}
 function publicReceipt(r:StoredReceipt):SessionAttachmentReceipt{return {receipt_id:r.receipt_id,kind:r.kind,name:r.name,media_type:r.media_type,bytes:r.bytes,sha256:r.sha256,created_at:r.created_at}}
 export function parsePublicAttachmentReceipt(value:unknown):SessionAttachmentReceipt {
  const r=value as SessionAttachmentReceipt
@@ -70,33 +71,35 @@ export class OwnedSessionAttachments {
  constructor(private store:AttachmentStore,private config:SessionAttachmentConfig,private runtime:SessionExecutionRuntime,private authorityURL:string,private token:string,private fetcher:typeof fetch=globalThis.fetch){validateSessionAttachments(config,runtime.realm)}
  private async call(principal:Principal,ref:string,operation:string,fields:Record<string,unknown>={}):Promise<StoredReceipt[]>{
   const proof=await this.runtime.proof(ref)
-  const response=await this.fetcher(this.authorityURL.replace(/\/+$/u,'')+'/v1/session-attachments/'+encodeURIComponent(ref),{method:'POST',redirect:'error',signal:AbortSignal.any([this.runtime.signal,AbortSignal.timeout(5000)]),headers:{authorization:'Bearer '+this.token,'content-type':'application/json'},body:JSON.stringify({...proof,owner_user_id:principal.user_id,operation,...fields})})
-  if(!response.ok){await response.body?.cancel();throw new Error('Attachment ownership or execution lease is unavailable')}
-  const value=await boundedJSON(response,256*1024);if(!Array.isArray(value.receipts)||value.receipts.length>100)throw new Error('Invalid attachment authority response');return value.receipts.map(receipt)
+  let response:Response
+  try{response=await this.fetcher(this.authorityURL.replace(/\/+$/u,'')+'/v1/session-attachments/'+encodeURIComponent(ref),{method:'POST',redirect:'error',signal:AbortSignal.any([this.runtime.signal,AbortSignal.timeout(5000)]),headers:{authorization:'Bearer '+this.token,'content-type':'application/json'},body:JSON.stringify({...proof,owner_user_id:principal.user_id,operation,...fields})})}catch{throw new SessionRequestError('session_attachment_unavailable')}
+  if(!response.ok)throw await sessionUpstreamError(response,'attachment')
+  try{const value=await boundedJSON(response,256*1024);if(!Array.isArray(value.receipts)||value.receipts.length>100)throw new Error('Invalid authority response');return value.receipts.map(receipt)}catch{throw new SessionRequestError('session_attachment_unavailable')}
  }
+ private async storage<T>(read:()=>Promise<T>,signal:AbortSignal):Promise<T>{try{return await read()}catch(error){signal.throwIfAborted();if(error instanceof SessionRequestError)throw error;throw new SessionRequestError('session_attachment_unavailable')}}
  async get(principal:Principal,ref:string,id:unknown):Promise<StoredReceipt>{if(!sessionAttachmentID.test(String(id)))throw new Error('A server attachment receipt is required');const rows=await this.call(principal,ref,'get',{receipt_id:id});if(rows.length!==1)throw new Error('Attachment receipt unavailable');return rows[0]!}
  async upload(principal:Principal,ref:string,metadata:SessionAttachmentUpload,source:AsyncIterable<Uint8Array>,signal:AbortSignal,authorize:()=>Promise<void>):Promise<SessionAttachmentReceipt>{
-  if(this.transfers>=2)throw new Error('Attachment transfer capacity reached');this.transfers++
+  if(this.transfers>=2)throw new SessionRequestError('session_attachment_busy');this.transfers++
   const active=AbortSignal.any([signal,this.runtime.signal,AbortSignal.timeout(30_000)])
   try{
    await authorize();const name=attachmentName(metadata.name),mime=attachmentMediaType(metadata.mediaType)
    const data=await attachmentBytes(source,Math.min(this.config.maxUploadBytes??SESSION_ATTACHMENT_MAX_BYTES,textTypes.has(mime)?this.config.maxTextBytes??1024*1024:SESSION_ATTACHMENT_MAX_BYTES),active)
    let native:FileAttachmentRef|ImageAttachmentRef
-   if(textTypes.has(mime)){attachmentText(data);native=await abortable(this.store.saveFileStream({data:(async function*(){yield data})(),name,signal:active}),active)}
-   else native=(await abortable(this.store.saveImages([{data,mediaType:mime as ImageMediaType,name}]),active))[0]!
-   if(native.bytes>(this.config.maxUploadBytes??SESSION_ATTACHMENT_MAX_BYTES))throw new Error('Normalized image exceeds the attachment limit')
+   if(textTypes.has(mime)){attachmentText(data);native=await this.storage(()=>abortable(this.store.saveFileStream({data:(async function*(){yield data})(),name,signal:active}),active),active)}
+   else native=(await this.storage(()=>abortable(this.store.saveImages([{data,mediaType:mime as ImageMediaType,name}]),active),active))[0]!
+   if(native.bytes>(this.config.maxUploadBytes??SESSION_ATTACHMENT_MAX_BYTES))throw new SessionRequestError('session_attachment_too_large')
    await authorize();active.throwIfAborted()
    const rows=await this.call(principal,ref,'create',{receipt:{kind:textTypes.has(mime)?'text':'image',name:native.name??name,media_type:textTypes.has(mime)?'text/plain':(native as ImageAttachmentRef).mediaType,bytes:native.bytes,sha256:native.attachmentId.split('/').at(-1),native_ref:native}})
    await authorize();return publicReceipt(rows[0]!)
   }finally{this.transfers--}
  }
  async download(principal:Principal,ref:string,id:string,signal:AbortSignal,authorize:()=>Promise<void>):Promise<SessionAttachmentDownload>{
-  if(this.transfers>=2)throw new Error('Attachment transfer capacity reached');this.transfers++
+  if(this.transfers>=2)throw new SessionRequestError('session_attachment_busy');this.transfers++
   const active=AbortSignal.any([signal,this.runtime.signal,AbortSignal.timeout(30_000)])
   try{await authorize();const r=await this.get(principal,ref,id);let data:Uint8Array
-   if(r.kind==='image')data=(await abortable(this.store.readImage(r.native_ref as ImageAttachmentRef,active),active)).data
-   else data=await attachmentBytes(this.store.readFileStream(r.native_ref as FileAttachmentRef,active),this.config.maxTextBytes??1024*1024,active)
-   if(data.length!==r.bytes||createHash('sha256').update(data).digest('hex')!==r.sha256)throw new Error('Attachment integrity mismatch');if(r.kind==='text')attachmentText(data)
+   if(r.kind==='image')data=(await this.storage(()=>abortable(this.store.readImage(r.native_ref as ImageAttachmentRef,active),active),active)).data
+   else data=await this.storage(()=>attachmentBytes(this.store.readFileStream(r.native_ref as FileAttachmentRef,active),this.config.maxTextBytes??1024*1024,active),active)
+   if(data.length!==r.bytes||createHash('sha256').update(data).digest('hex')!==r.sha256)throw new SessionRequestError('session_attachment_unavailable');if(r.kind==='text')attachmentText(data)
    await authorize();active.throwIfAborted();return {data,name:r.name,mediaType:r.media_type}
   }finally{this.transfers--}
  }

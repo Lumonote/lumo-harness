@@ -3,6 +3,7 @@ module github.com/lumo-harness/platform/governance
 go 1.24
 
 require (
+	github.com/lumo-harness/platform/storageledger v0.0.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.7.2
@@ -22,3 +23,5 @@ require (
 replace github.com/lumo-harness/platform/observability => ../observability
 
 replace github.com/lumo-harness/platform/heartbeat => ../heartbeat
+
+replace github.com/lumo-harness/platform/storageledger => ../storageledger

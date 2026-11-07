@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/lumo-harness/platform/governance/internal/domain"
+	"github.com/lumo-harness/platform/storageledger"
 )
 
 var taskArtifactHash = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -229,14 +230,29 @@ func (s *Store) CompleteTaskArtifact(ctx context.Context, realm, taskID, runID, 
 	if size <= 0 || size > 50*1024*1024 || !taskArtifactHash.MatchString(sha256) || storageKey != "content/"+sha256 {
 		return domain.TaskArtifact{}, fmt.Errorf("%w: invalid artifact object reference", ErrBadRequest)
 	}
-	var artifact domain.TaskArtifact
-	err := scanTaskArtifact(s.pool.QueryRow(ctx, `UPDATE governance_task_artifacts SET size_bytes=$5,sha256=$6,storage_key=$7,status='ready',ready_at=now()
-WHERE realm=$1 AND task_id=$2 AND run_id=$3 AND id=$4 AND (status='pending' OR (status='ready' AND storage_key=$7 AND sha256=$6 AND size_bytes=$5))
-RETURNING id,realm,task_id,run_id,name,content_type,size_bytes,sha256,storage_key,created_by,status,created_at,ready_at`, realm, taskID, runID, artifactID, size, sha256, storageKey), &artifact)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.TaskArtifact{}, ErrNotFound
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.TaskArtifact{}, err
 	}
-	return artifact, err
+	defer tx.Rollback(ctx)
+	var project string
+	if err = tx.QueryRow(ctx, `SELECT project_id FROM governance_delegation_tasks WHERE realm=$1 AND id=$2 FOR UPDATE`, realm, taskID).Scan(&project); errors.Is(err, pgx.ErrNoRows) {
+		return domain.TaskArtifact{}, ErrNotFound
+	} else if err != nil {
+		return domain.TaskArtifact{}, err
+	}
+	var artifact domain.TaskArtifact
+	err = scanTaskArtifact(tx.QueryRow(ctx, `UPDATE governance_task_artifacts SET size_bytes=$5,sha256=$6,storage_key=$7,status='ready',ready_at=COALESCE(ready_at,now()) WHERE realm=$1 AND task_id=$2 AND run_id=$3 AND id=$4 AND (status='pending' OR (status='ready' AND storage_key=$7 AND sha256=$6 AND size_bytes=$5)) RETURNING id,realm,task_id,run_id,name,content_type,size_bytes,sha256,storage_key,created_by,status,created_at,ready_at`, realm, taskID, runID, artifactID, size, sha256, storageKey), &artifact)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return artifact, ErrNotFound
+	}
+	if err != nil {
+		return artifact, err
+	}
+	if err = storageledger.Register(ctx, tx, storageledger.Charge{Realm: realm, ProjectID: project, Kind: "task-artifact", ReferenceID: artifactID, Bytes: size, ObjectKey: storageKey}); err != nil {
+		return artifact, err
+	}
+	return artifact, tx.Commit(ctx)
 }
 
 func (s *Store) GetTaskArtifact(ctx context.Context, realm, taskID, runID, artifactID string) (domain.TaskArtifact, error) {

@@ -1,12 +1,76 @@
 package observability
 
 import (
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
+
+func TestAddGaugeWithLabelsIsAtomicAndCopiesLabels(t *testing.T) {
+	isolatedDefault(t)
+	labels := map[string]string{"outcome": "success", "operation": "lease"}
+	AddGaugeWithLabels("lumo_add_test", 1, labels)
+	labels["operation"] = "mutated"
+	var group sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for j := 0; j < 100; j++ {
+				AddGaugeWithLabels("lumo_add_test", 1, map[string]string{"operation": "lease", "outcome": "success"})
+			}
+		}()
+	}
+	group.Wait()
+	if got := renderDefaultMetrics(t); !strings.Contains(got, `lumo_add_test{operation="lease",outcome="success"} 3201`) || strings.Contains(got, "mutated") {
+		t.Fatalf("lost updates or labels changed: %s", got)
+	}
+	Default.gaugeMu.RLock()
+	defer Default.gaugeMu.RUnlock()
+	if got := Default.gauges["lumo_add_test\x00{operation=\"lease\",outcome=\"success\"}"].attrs["operation"]; got != "lease" {
+		t.Fatalf("OTLP label mutated: %q", got)
+	}
+}
+
+func TestAddGaugeRejectsInvalidValuesAndPreservesBudgetedSeries(t *testing.T) {
+	isolatedDefault(t)
+	SetMetricCardinalityLimit(1)
+	AddGaugeWithLabels("lumo_add_test", 2, nil)
+	AddGaugeWithLabels("lumo_other", 1, nil)
+	AddGaugeWithLabels("lumo_add_test", 3, nil)
+	AddGaugeWithLabels("lumo_add_test", math.Inf(1), nil)
+	AddGaugeWithLabels("lumo_add_test", math.NaN(), nil)
+	AddGaugeWithLabels("invalid name", 1, nil)
+	AddGaugeWithLabels("lumo_add_test", 1, map[string]string{"bad-name": "x"})
+	if got := renderDefaultMetrics(t); !strings.Contains(got, "lumo_add_test 5\n") || !strings.Contains(got, "lumo_observability_metric_series_dropped_total 5\n") || strings.Contains(got, "lumo_other ") {
+		t.Fatalf("invalid update or budget leak: %s", got)
+	}
+	SetGauge("lumo_add_test", math.MaxFloat64)
+	AddGaugeWithLabels("lumo_add_test", math.MaxFloat64, nil)
+	if Default.droppedGauges.Load() != 6 {
+		t.Fatal("overflow not rejected")
+	}
+}
+
+func TestBusinessMetricsRejectUnboundedEnumsAndRegisterZeroes(t *testing.T) {
+	isolatedDefault(t)
+	RegisterBusinessOperations(BusinessConnectorInvoke)
+	if got := renderDefaultMetrics(t); !strings.Contains(got, `lumo_business_requests_total{operation="connector_invoke",outcome="unknown"} 0`) {
+		t.Fatal("first event has no initial zero")
+	}
+	RecordBusinessResult(BusinessConnectorInvoke, BusinessUnknown)
+	RegisterBusinessOperations(BusinessConnectorInvoke)
+	RecordBusinessResult(BusinessOperation("session-secret"), BusinessSuccess)
+	RecordBusinessResult(BusinessConnectorInvoke, BusinessOutcome("user-secret"))
+	RegisterBusinessOperations(BusinessOperation("realm-secret"))
+	if got := renderDefaultMetrics(t); !strings.Contains(got, `lumo_business_requests_total{operation="connector_invoke",outcome="unknown"} 1`) || strings.Contains(got, "secret") || !strings.Contains(got, "lumo_observability_metric_series_dropped_total 3\n") {
+		t.Fatalf("business vocabulary or totals changed: %s", got)
+	}
+}
 
 func TestMiddlewareExportsRequestAndErrorCounters(t *testing.T) {
 	m := &Metrics{}
