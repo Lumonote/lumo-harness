@@ -149,7 +149,7 @@ while IFS= read -r container; do
 done < <(docker ps -q --filter "label=com.docker.compose.project=$project_name")
 if [[ "${#stopped_containers[@]}" -gt 0 ]]; then
   quiesced=1
-  docker stop --time 30 "${stopped_containers[@]}" >/dev/null
+  docker stop --time 180 "${stopped_containers[@]}" >/dev/null
 fi
 
 created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -171,6 +171,15 @@ archive_component rocketmq /home/rocketmq/store rocketmq-data rocketmq.tar.zst
 archive_component milvus /var/lib/milvus milvus-data milvus.tar.zst
 archive_component registry /var/lib/registry/objects registry-objects registry.tar.zst
 archive_component provisioner /var/lib/lumo/artifacts provisioner-artifacts provisioner.tar.zst
+
+archive_component dsh-node /var/lib/lumo/session-spool session-spool dsh-node-spool.tar.zst
+archive_component dsh-web /var/lib/lumo/session-spool session-spool dsh-web-spool.tar.zst
+archive_component cluster-a-dsh-0 /var/lib/lumo/session-spool session-spool cluster-a-dsh-0-spool.tar.zst
+archive_component cluster-a-dsh-1 /var/lib/lumo/session-spool session-spool cluster-a-dsh-1-spool.tar.zst
+archive_component cluster-b-dsh-0 /var/lib/lumo/session-spool session-spool cluster-b-dsh-0-spool.tar.zst
+archive_component cluster-b-dsh-1 /var/lib/lumo/session-spool session-spool cluster-b-dsh-1-spool.tar.zst
+archive_component cluster-a-bundle /var/lib/lumo/session-spool session-spool cluster-a-bundle-spool.tar.zst
+archive_component cluster-b-bundle /var/lib/lumo/session-spool session-spool cluster-b-bundle-spool.tar.zst
 
 "${compose[@]}" config --images > "$backup_dir/runtime-images.txt"
 record_file "runtime-images.txt" "runtime-images"

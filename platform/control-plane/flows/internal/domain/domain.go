@@ -73,6 +73,29 @@ type Caller struct {
 	Depts []string `json:"depts"`
 }
 
+// BotScope is trusted ingress metadata stored separately from event data.
+// A retry carries the original mapping revision and user; current authority
+// must still be checked at every effect. Empty subject is a legacy channel
+// which grants no capability to external operators.
+type BotScope struct {
+	Channel         string          `json:"channel"`
+	Subject         string          `json:"subject,omitempty"`
+	UserID          string          `json:"user_id,omitempty"`
+	BindingRevision int64           `json:"binding_revision,omitempty"`
+	MessageID       string          `json:"message_id"`
+	Grants          []BotGrantScope `json:"grants,omitempty"`
+}
+
+// BotGrantScope freezes the capabilities available when a message arrived.
+// Renewing a grant must never retroactively authorize an old queued message.
+type BotGrantScope struct {
+	TeamID     string `json:"team_id"`
+	ProjectID  string `json:"project_id"`
+	AgentID    string `json:"agent_id"`
+	Capability string `json:"capability"`
+	Revision   int64  `json:"revision"`
+}
+
 // transitions 合法转移表（与 TS TRANSITIONS 逐格一致）。
 var transitions = map[string]map[string]string{
 	StatusDraft:      {EventSubmit: StatusSubmitted, EventDeprecate: StatusDeprecated},

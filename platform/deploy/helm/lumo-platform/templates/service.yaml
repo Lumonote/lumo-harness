@@ -16,7 +16,7 @@ spec:
          chart deliberately does not make (see docs/cluster-development-tasks.md,
          D3): a Service type is a fact, an ingress topology is an opinion. */}}
   type: {{ default $.Values.service.type $cfg.type }}
-  selector: { lumo.dev/service: {{ $name }} }
+  selector: { lumo.dev/service: {{ $name }}, app.kubernetes.io/instance: {{ $.Release.Name | quote }} }
   ports: [{ name: http, port: {{ $cfg.port }}, targetPort: http }]
 ---
 {{- end }}
@@ -32,7 +32,7 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.deviceGateway.service.type }}
-  selector: { lumo.dev/service: governance }
+  selector: { lumo.dev/service: governance, app.kubernetes.io/instance: {{ .Release.Name | quote }} }
   ports:
     - name: tls-device
       port: {{ .Values.deviceGateway.service.port }}

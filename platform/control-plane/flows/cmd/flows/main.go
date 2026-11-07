@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/lumo-harness/platform/flows/internal/bot"
 	"github.com/lumo-harness/platform/flows/internal/domain"
 	"github.com/lumo-harness/platform/flows/internal/engine"
 	"github.com/lumo-harness/platform/flows/internal/lineage"
@@ -48,6 +50,21 @@ func main() {
 		os.Exit(2)
 	}
 
+	var botChannels []bot.Channel
+	if path := os.Getenv("LUMO_BOT_CHANNELS_FILE"); path != "" {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			log.Error("cannot read bot channel configuration")
+			os.Exit(2)
+		}
+		var configErr error
+		botChannels, configErr = bot.ParseConfig(data, os.Getenv)
+		if configErr != nil {
+			log.Error("invalid bot configuration", "err", configErr)
+			os.Exit(2)
+		}
+	}
+
 	pool, err := pgxpool.New(ctx, *pgDSN)
 	if err != nil {
 		log.Error("PG 连接失败", "err", err)
@@ -68,6 +85,7 @@ func main() {
 		// 决策固化算子（§24.4 第 5 条）的上游。未配置即该算子 unavailable，用它的流程
 		// 连发布都过不去（ValidateDefinition 拒绝）——默认关闭落在配置上，不落在默认频率上。
 		ProjectsURL:    os.Getenv("LUMO_PROJECTS_URL"),
+		GovernanceURL:  os.Getenv("LUMO_GOVERNANCE_URL"),
 		ControlToken:   os.Getenv("LUMO_CONTROL_PLANE_TOKEN"),
 		IdentitySecret: envOr("LUMO_IDENTITY_ASSERTION_SECRET", os.Getenv("LUMO_CONTROL_PLANE_TOKEN")),
 	})
@@ -100,13 +118,18 @@ func main() {
 				err = identityErr
 			} else {
 				executionCtx, cancel := context.WithTimeout(runCtx, store.RunTimeout)
-				// 这次执行是**被事件叫醒的**，唤醒源就是触发本身（event.ID）。把它交给
-				// 执行面，算子出站时带上 X-Lumo-Trace，网关据此写 usage_ledger.trace_id，
-				// 于是「这次唤醒烧了多少钱」可用一条等值查询回答（§24.9 第 1 条、
-				// domain.WakeTrace 的注释给出查询形状）。
-				result, err = flowEngine.Run(
-					engine.WithWakeTrace(engine.WithIdentity(executionCtx, identity), domain.WakeTrace(event.ID)),
-					&def, event.Payload)
+				executionCtx, err = engine.WithBotScope(executionCtx, event.BotScope, binding.FlowID, binding.FlowVersion)
+				if err == nil {
+					executionScope, _ := json.Marshal([]any{"trigger", event.ID, binding.AutomationID, binding.FlowID, binding.FlowVersion})
+					// 这次执行是**被事件叫醒的**，唤醒源就是触发本身（event.ID）。把它交给
+					// 执行面，算子出站时带上 X-Lumo-Trace，网关据此写 usage_ledger.trace_id，
+					// 于是「这次唤醒烧了多少钱」可用一条等值查询回答（§24.9 第 1 条、
+					// domain.WakeTrace 的注释给出查询形状）。
+					result, err = flowEngine.Run(
+						engine.WithExecutionKey(engine.WithWakeTrace(engine.WithIdentity(executionCtx, identity), domain.WakeTrace(event.ID)),
+							string(executionScope)),
+						&def, event.Payload)
+				}
 				cancel()
 			}
 			if err != nil {
@@ -176,9 +199,21 @@ func main() {
 	heartbeat.StartPg(ctx, pool, heartbeat.Options{Service: "flows", Logger: log, Depends: heartbeat.PgDependency(pool)})
 
 	log.Info("flows 启动", "addr", *listen)
-	httpSrv := &http.Server{Addr: *listen, Handler: observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)), ReadHeaderTimeout: 10 * time.Second}
-	if err := observability.Serve(httpSrv); err != nil {
+	httpSrv := &http.Server{Addr: *listen, Handler: observability.Middleware(bot.WithIngress(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux), st, botChannels, log)), ReadHeaderTimeout: 10 * time.Second}
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			log.Warn("flows HTTP shutdown timed out", "err", err)
+			_ = httpSrv.Close()
+		}
+	}()
+	if err := observability.Serve(httpSrv); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("退出", "err", err)
 		os.Exit(1)
 	}
+	<-shutdownDone
 }

@@ -77,6 +77,8 @@ type Task struct {
 	ProjectActiveByCluster map[string]int `json:"-"`
 	// EnqueuedAt is server metadata used only for stable queue ordering.
 	EnqueuedAt time.Time `json:"-"`
+	// FromPending prevents a stale drain selection from reopening a cancelled task.
+	FromPending bool `json:"-"`
 }
 
 // Node 注册进目录的执行节点。
@@ -146,12 +148,13 @@ type Lease struct {
 // Placement 一次放置决策的结果（API 面，wire 按全仓 snake_case 约定输出 ——
 // 任务侧消费端断言 node_id，Task/Node 同训）。
 type Placement struct {
-	TaskID       string    `json:"task_id"`
-	Realm        string    `json:"realm"`
-	NodeID       string    `json:"node_id"`
-	Attempt      int       `json:"attempt"`
-	State        TaskState `json:"state"`
-	FencingToken int64     `json:"fencing_token"`
+	TaskID            string    `json:"task_id"`
+	Realm             string    `json:"realm"`
+	NodeID            string    `json:"node_id"`
+	Attempt           int       `json:"attempt"`
+	State             TaskState `json:"state"`
+	FencingToken      int64     `json:"fencing_token"`
+	AssignedClusterID string    `json:"assigned_cluster_id,omitempty"`
 }
 
 // ControlCommand identifies a durable request sent to an execution node. A
@@ -178,6 +181,10 @@ type PreemptionCandidate struct {
 
 // ErrNotAcquired 租约被他人持有（未过期），本节点不是 leader。调用方不应等待。
 var ErrNotAcquired = fmt.Errorf("lease not acquired")
+
+// A local scheduler may admit work only while the global lease is absent.
+var ErrGlobalLeaderActive = fmt.Errorf("global leader is active")
+var ErrAssignmentMismatch = fmt.Errorf("result does not match the assigned execution node")
 
 // NoLeaderError 无 leader：请求方应快速失败而非等待。
 type NoLeaderError struct{}

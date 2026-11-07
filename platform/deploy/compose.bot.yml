@@ -1,0 +1,12 @@
+# Optional signed Bot ingress for Standalone and Cluster API bundles.
+# Enable via LUMO_COMPOSE_EXTRA_FILES; no channel is enabled by base profiles.
+services:
+  api-bundle:
+    environment:
+      LUMO_BUNDLE_FLOWS_LUMO_BOT_CHANNELS_FILE: /etc/lumo/bot/channels.json
+      LUMO_BUNDLE_FLOWS_LUMO_BOT_ALERTS_KEY: "${LUMO_BOT_ALERTS_KEY:?set a random Bot channel secret of at least 32 bytes}"
+    volumes:
+      - type: bind
+        source: "${LUMO_BOT_CHANNELS_PATH:-./bot/channels.example.json}"
+        target: /etc/lumo/bot/channels.json
+        read_only: true

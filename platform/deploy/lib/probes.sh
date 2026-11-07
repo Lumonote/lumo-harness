@@ -297,6 +297,15 @@ probe_once() {
 # 打印 `<probe_once 的结果>\t<响应体（单行）>`。响应体用于断言**内容**而不只是状态码
 # （例如「503 且 reason 是 no_event_source」与「503 但原因不是它」是两件事）。
 probe_once_body() {
+  local result rc=0
+  result="$(probe_once_body_raw "$@")" || rc=$?
+  printf '%s' "$result" | tr -d '\n'
+  return "$rc"
+}
+
+# Prometheus text uses line boundaries as part of its format. Preserve them
+# for metric parsers instead of concatenating samples with their TYPE headers.
+probe_once_body_raw() {
   local url="$1"; shift
   local out rc=0
   out="$(curl --noproxy '*' --silent --max-time "${LUMO_PROBE_TIMEOUT_SECONDS:-3}" \
@@ -308,7 +317,7 @@ probe_once_body() {
   local code body
   code="${out##*$'\n'}"
   body="${out%$'\n'*}"
-  printf 'ok:%s\t%s' "$code" "$(printf '%s' "$body" | tr -d '\n')"
+  printf 'ok:%s\t%s' "$code" "$body"
   return 0
 }
 

@@ -15,6 +15,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import z from '@deepseek-ai/schemastery'
 import type { Server } from 'node:http'
 import { isIP } from 'node:net'
+import { setTimeout as delay } from 'node:timers/promises'
 import pg from 'pg'
 
 import { createSubagentHost } from './server.ts'
@@ -26,6 +27,9 @@ import { persistCallback, startCallbackDelivery } from './callback-outbox.ts'
 import { PgGovernedDispatch } from './governed-dispatch.ts'
 import { startGovernedDispatch } from './governed-run.ts'
 import { assertWorkerBinding } from './worker-binding.ts'
+import { HostBootLeaseError, PgDurableStartGuard, PgHostBootLease } from './durable-start-guard.ts'
+import { HostLifecycle, type ReplicationHealth } from './lifecycle.ts'
+import { startNacosRegistration, type NacosRegistration, type NacosRegistrationOptions } from '../../../shared/nacos-registration.ts'
 
 export interface SubagentHostConfig {
   /** 监听地址。默认回环 —— 对外暴露必须是显式动作 */
@@ -41,6 +45,9 @@ export interface SubagentHostConfig {
   allowAnonymous?: boolean
   runtimeReport?: RuntimeReportConfig
   connectionString?: string
+  nodeId?: string
+  requireSessionLog?: boolean
+  discovery?: NacosRegistrationOptions
 }
 
 /** Schemastery validation for {@link SubagentHostConfig} */
@@ -52,6 +59,13 @@ export const Config: z<SubagentHostConfig> = z.object({
   callbackOrigins: z.array(z.string()),
   allowAnonymous: z.boolean(),
   connectionString: z.string(),
+  nodeId: z.string(),
+  requireSessionLog: z.boolean(),
+  discovery: z.object({
+    baseUrl: z.string(), serviceName: z.string(), groupName: z.string(),
+    nodeId: z.string(), realm: z.string(), clusterId: z.string(), host: z.string(),
+    port: z.number(), capacity: z.number(), capabilities: z.array(z.string()), residency: z.string(),
+  }),
   runtimeReport: z.object({
     governanceUrl: z.string(), token: z.string(), realm: z.string(), nodeId: z.string(),
     capacity: z.number(),
@@ -76,6 +90,11 @@ export async function registerSubagentHost(ctx: Context, config: SubagentHostCon
   }
 
   if (config.connectionString && tokens.size === 0) throw new Error('subagent-host: durable callbacks require configured realm tokens')
+  const nodeId = config.nodeId ?? config.runtimeReport?.nodeId
+  if (config.connectionString && !nodeId) throw new Error('subagent-host: durable execution requires a stable nodeId')
+  if (config.discovery && (config.discovery.nodeId !== nodeId || config.discovery.port !== port)) {
+    throw new Error('subagent-host: discovery identity must match the execution host')
+  }
 
   if (tokens.size === 0) {
     // 无认证 + 非回环 = 把跨租户子代理放置开放给整个网络。这不是「配置不当」,
@@ -99,17 +118,48 @@ export async function registerSubagentHost(ctx: Context, config: SubagentHostCon
     max: 4, connectionTimeoutMillis: 5_000, query_timeout: 5_000, statement_timeout: 5_000 }) : undefined
   pool?.on('error', () => ctx.logger.warn('subagent-host: callback database connection lost'))
   const receipts = pool ? new PgSubagentReceipts(pool) : undefined
+  const boot = pool ? new PgHostBootLease(pool, nodeId!) : undefined
+  const startGuard = pool ? new PgDurableStartGuard(pool, nodeId, boot) : undefined
   try {
     await receipts?.init()
+    await startGuard?.init()
+    if (boot) {
+      const deadline = Date.now() + boot.ttlMs + 5_000
+      for (;;) {
+        try { await boot.acquire(); break } catch (error) {
+          if (!(error instanceof HostBootLeaseError) || Date.now() >= deadline) throw error
+          await delay(250)
+        }
+      }
+    }
+    await startGuard?.recoverAbandoned([...tokens.keys()], callbackOrigins)
     if (config.runtimeReport && pool) {
       await new PgGovernedDispatch(pool, config.runtimeReport, '').init()
     }
-  } catch (error) { await pool?.end(); throw error }
+  } catch (error) {
+    if (boot?.isOwned()) await boot.release().catch(() => {})
+    await pool?.end(); throw error
+  }
   const runs: RunRegistry = new Map()
   const executions = new Set<Promise<void>>()
   const persistence = new AbortController()
   let delivery: ReturnType<typeof startCallbackDelivery> | undefined
   let governed: ReturnType<typeof startGovernedDispatch> | undefined
+  let discovery: NacosRegistration | undefined
+  let bootFailed = false
+  const replication = () => (ctx as unknown as { sessionLogReplication?: { health(): ReplicationHealth; flush(): Promise<void> } }).sessionLogReplication
+  const lifecycle = new HostLifecycle({
+    active: () => executions.size + (governed?.activeCount() ?? 0),
+    health: () => {
+      const health = replication()?.health() ?? { ready: !config.requireSessionLog, pending: 0,
+        ...(config.requireSessionLog ? { lastError: 'session log replication is not mounted' } : {}) }
+      return bootFailed || (boot && !boot.isOwned()) ? { ...health, ready: false, lastError: 'execution host process lease was lost' } : health
+    },
+    check: async () => { await pool?.query('SELECT 1'); await boot?.assertOwned() },
+    pause: () => governed?.pause(),
+    withdraw: async () => { await discovery?.withdraw() },
+    flush: async () => { await replication()?.flush() },
+  })
   const server: Server = createSubagentHost({
     host,
     port,
@@ -117,16 +167,20 @@ export async function registerSubagentHost(ctx: Context, config: SubagentHostCon
     tokens,
     callbackOrigins,
     governedOnly: !!config.runtimeReport,
+    lifecycle,
+    admit: request => startGuard?.admit(request) ?? Promise.resolve(),
+    persistStop: startGuard ? (realm, childId, attempt, nodeId) => startGuard.stop(realm, childId, attempt, nodeId) : undefined,
     stopGoverned: (realm, runId) => governed?.stop(realm, runId),
     runs,
     // 已发布会话 = 已结集(运行表条目已摘)或他处占用的幂等键:重放闸(见 server.ts)
     sessionExists: (childId) => ctx.agents.get(SessionId(childId)) !== undefined,
     start: (req) => {
+      if (bootFailed) throw new HostBootLeaseError()
       const execution = runChild(ctx, req, runs, receipts ? async (request, body) => {
-        await persistCallback(receipts, request.realm, request.callbackUrl, body, persistence.signal,
+        await persistCallback(startGuard?.callbackStore(request) ?? receipts, request.realm, request.callbackUrl, body, persistence.signal,
           error => ctx.logger.warn('subagent-host: %s', error))
         delivery?.wake()
-      } : undefined).catch((e: unknown) => {
+      } : undefined, startGuard ? () => startGuard.assertMayRun(req) : undefined).catch((e: unknown) => {
         ctx.logger.error('subagent-host: 子代理运行失败: %s', e)
       })
       executions.add(execution)
@@ -139,13 +193,57 @@ export async function registerSubagentHost(ctx: Context, config: SubagentHostCon
     },
   })
 
+  ctx.on('tools/pre-execute', async (_exec, next) => {
+    if (bootFailed) throw new HostBootLeaseError()
+    await boot?.assertOwned()
+    return next()
+  })
+
   ctx.effect(() => {
     let reports: ReturnType<typeof startRuntimeReports> | undefined
-    server.on('error', (e: unknown) => {
-      // 端口占用等致命错误:必须响亮,否则节点看着活着却没有子代理放置能力
-      ctx.logger.error('subagent-host: 监听 %s:%d 失败: %s', host, port, e)
+    let renewing: Promise<void> | undefined
+    let bootTimer: ReturnType<typeof setInterval> | undefined
+    let stopping: Promise<void> | undefined
+    const stopExecution = (): Promise<void> => {
+      if (stopping) return stopping
+      // Fence synchronously, including admission requests already waiting on PG
+      // and tool calls whose database lease has not expired yet.
+      bootFailed = true
+      clearInterval(bootTimer)
+      governed?.pause()
+      for (const run of runs.values()) run.cancel()
+      persistence.abort()
+      const pendingRenewal = renewing
+      const governedClose = governed?.close()
+      const reportsClose = reports?.close()
+      const discoveryClose = discovery?.close()
+      stopping = (async () => {
+        // A failed renew invokes this path from its own catch handler. Do not
+        // return this cleanup Promise from that handler: it must finish first.
+        await pendingRenewal
+        const outcomes = await Promise.allSettled([governedClose, reportsClose, discoveryClose, ...executions])
+        for (const outcome of outcomes) if (outcome.status === 'rejected') {
+          ctx.logger.error('subagent-host: fenced execution cleanup failed: %s', outcome.reason)
+        }
+        await delivery?.close()
+        await boot?.release().catch(error => ctx.logger.warn('subagent-host: process lease release failed: %s', error))
+      })()
+      return stopping
+    }
+    bootTimer = boot ? setInterval(() => {
+      if (renewing || bootFailed) return
+      renewing = boot.renew().catch(error => {
+        void stopExecution().catch(error => ctx.logger.error('subagent-host: process lease cleanup failed: %s', error))
+        ctx.logger.error('subagent-host: process lease lost; execution admission closed: %s', error)
+      }).finally(() => { renewing = undefined })
+    }, Math.floor(boot.ttlMs / 3)) : undefined
+    bootTimer?.unref()
+    server.on('error', (error: unknown) => {
+      ctx.logger.error('subagent-host: 监听 %s:%d 失败: %s', host, port, error)
+      void stopExecution().catch(error => ctx.logger.error('subagent-host: failed listener cleanup: %s', error))
     })
     server.listen(port, host, () => {
+      if (bootFailed || (boot && !boot.isOwned())) return
       if (receipts) {
         delivery = startCallbackDelivery(receipts, [...tokens.keys()], callbackOrigins,
           error => ctx.logger.warn('subagent-host: callback delivery failed: %s', error))
@@ -155,19 +253,18 @@ export async function registerSubagentHost(ctx: Context, config: SubagentHostCon
         governed = startGovernedDispatch(ctx, new PgGovernedDispatch(pool!, config.runtimeReport, reports.instanceId),
           error => ctx.logger.warn('subagent-host: governed execution failed: %s', error))
       }
+      lifecycle.start()
+      if (config.discovery) discovery = startNacosRegistration(config.discovery, {
+        warn: message => ctx.logger.warn('subagent-host: %s', message),
+      }, () => lifecycle.ready())
       ctx.logger.info('subagent-host: 监听 %s:%d(认证=%s)', host, port,
         tokens.size > 0 ? `tokens[${[...tokens.keys()].join(',')}]` : 'anonymous')
     })
     return async () => {
+      const cleanup = stopExecution()
       server.closeAllConnections?.()
       server.close()
-      await governed?.close()
-      await reports?.close()
-      persistence.abort()
-      for (const run of runs.values()) run.cancel()
-      await Promise.allSettled([...executions])
-      await delivery?.close()
-      await pool?.end()
+      try { await cleanup } finally { await pool?.end() }
     }
   })
 }

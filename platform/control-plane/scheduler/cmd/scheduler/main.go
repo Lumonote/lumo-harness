@@ -33,6 +33,9 @@ func main() {
 		instance          = flag.String("instance", envOr("LUMO_INSTANCE", "scheduler-0"), "本实例标识（租约 holder，重启后不得与旧进程重复）")
 		ttlMs             = flag.Int64("ttl-ms", envOrInt("LUMO_TTL_MS", 10000), "租约 TTL（毫秒）")
 		drainMs           = flag.Int64("drain-ms", envOrInt("LUMO_DRAIN_MS", 1000), "drain loop 周期（毫秒）")
+		drainBatch        = flag.Int64("drain-batch", envOrInt("LUMO_DRAIN_BATCH", 64), "每轮持久公平队列扫描上限（1–4096）")
+		pendingBackoff    = flag.Int64("pending-backoff-ms", envOrInt("LUMO_PENDING_BACKOFF_MS", 1000), "不可放置任务重查基础间隔（毫秒）")
+		pendingBackoffMax = flag.Int64("pending-backoff-max-ms", envOrInt("LUMO_PENDING_BACKOFF_MAX_MS", 30000), "不可放置任务重查最大间隔（毫秒）")
 		metricsMs         = flag.Int64("metrics-ms", envOrInt("LUMO_METRICS_MS", 30000), "节点快照刷新周期（毫秒，供集群维度指标使用）")
 		reapMs            = flag.Int64("stall-reap-ms", envOrInt("LUMO_STALL_REAP_MS", 300000), "停滞任务收割周期（毫秒）")
 		maxStallMs        = flag.Int64("max-stall-ms", envOrInt("LUMO_MAX_STALL_MS", 28800000), "停滞判定宽限期（毫秒，默认 8h；负值=关闭停滞收割）")
@@ -53,6 +56,10 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if *drainBatch < 1 || *drainBatch > 4096 || *pendingBackoff < 1 || *pendingBackoffMax < *pendingBackoff || *drainMs < 1 || *ttlMs < 3 {
+		log.Error("调度批量、循环或退避参数非法")
+		os.Exit(2)
+	}
 
 	// 阈值校验放在连库之前：配置反了（suspect ≥ down）时 suspect 永远不可达，
 	// 而「没有可疑集群」与「一切健康」长得一模一样——一个静默失效的状态机比一个
@@ -198,7 +205,7 @@ func main() {
 				if _, err := st.RequeueStaleDispatch(ctx, *ttlMs*2); err != nil {
 					log.Warn("回收过期派发失败", "err", err)
 				}
-				drainOnce(ctx, st, cat, elec.Current(), log, api, workers)
+				drainWithOptions(ctx, st, cat, elec.Current(), log, api, workers, int(*drainBatch), time.Duration(*pendingBackoff)*time.Millisecond, time.Duration(*pendingBackoffMax)*time.Millisecond)
 			}
 		}
 	}()
@@ -342,7 +349,11 @@ func drainOnce(ctx context.Context, st *store.Store, cat catalog.Catalog, lease 
 	if len(directories) > 0 {
 		workers = directories[0]
 	}
-	pending, err := st.PendingTasks(ctx, 32)
+	drainWithOptions(ctx, st, cat, lease, log, api, workers, 64, time.Second, 30*time.Second)
+}
+
+func drainWithOptions(ctx context.Context, st *store.Store, cat catalog.Catalog, lease *domain.Lease, log *slog.Logger, api *server.Server, workers catalog.WorkerDirectory, batch int, backoff, maxBackoff time.Duration) {
+	pending, err := st.TakePending(ctx, lease, batch, backoff)
 	if err != nil {
 		log.Error("取排队任务失败", "err", err)
 		return
@@ -353,6 +364,9 @@ func drainOnce(ctx context.Context, st *store.Store, cat catalog.Catalog, lease 
 	nodes, err := cat.List(ctx)
 	if err != nil {
 		log.Error("列节点失败", "err", err)
+		for _, task := range pending {
+			_ = st.DeferPending(ctx, task.TaskID, "catalog-unavailable", backoff, maxBackoff)
+		}
 		return
 	}
 	active, err := st.ActiveCounts(ctx)
@@ -365,29 +379,43 @@ func drainOnce(ctx context.Context, st *store.Store, cat catalog.Catalog, lease 
 		prepared = append(prepared, &pending[i])
 	}
 	api.PreparePlacement(ctx, prepared)
-	for _, task := range planner.OrderPending(pending, time.Now()) {
+	for _, task := range pending {
 		eligible, err := workers.Filter(ctx, task, nodes)
 		if err != nil {
 			log.Warn("Worker 设备目录不可用，保留排队任务", "task_id", task.TaskID, "err", err)
+			_ = st.DeferPending(ctx, task.TaskID, "worker-directory-unavailable", backoff, maxBackoff)
 			continue
 		}
 		n := api.PickPrepared(ctx, task, eligible, active)
 		if n == nil {
+			reason := "no-capacity"
+			if len(planner.EligibleNodes(task, eligible)) == 0 {
+				reason = "no-compatible-node"
+			}
+			if planner.VersionBlockedCandidates(task, eligible) > 0 {
+				reason = "version-blocked"
+			}
+			_ = st.DeferPending(ctx, task.TaskID, reason, backoff, maxBackoff)
 			continue // Other employees/Agents can still have eligible idle devices.
 		}
 		if err := st.SyncNodeSnapshot(ctx, *n); err != nil {
 			log.Error("同步节点快照失败", "node_id", n.NodeID, "err", err)
+			_ = st.DeferPending(ctx, task.TaskID, "store-unavailable", backoff, maxBackoff)
 			continue
 		}
-		if _, err := st.PlaceTask(ctx, lease, task, n.NodeID); err != nil {
+		placed, err := st.PlaceTask(ctx, lease, task, n.NodeID)
+		if err != nil {
 			var ncap *domain.NoCapacityError
 			if errors.As(err, &ncap) {
+				_ = st.DeferPending(ctx, task.TaskID, "no-capacity", backoff, maxBackoff)
 				continue
 			}
 			log.Error("drain 放置失败", "task_id", task.TaskID, "err", err)
 			continue
 		}
-		active[n.NodeID]++
+		if placed.State.Active() {
+			active[n.NodeID]++
+		}
 	}
 }
 

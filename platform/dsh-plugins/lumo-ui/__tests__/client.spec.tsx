@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ComponentType } from 'react'
+import { webcrypto } from 'node:crypto'
 import { apply } from '../src/client/index.tsx'
 
 interface Registered {
@@ -99,6 +100,7 @@ describe('Lumo native Harness integration', () => {
   // 与协作图读着（`employeeState` 的优先级就靠它们各差一处），动一行就可能让另一条用例
   // 静默变成在测别的规则。缺省为空，只有看板那条用例往这里放行。
   let threadRows: unknown[] = []
+  let fleetResponse: unknown = undefined
   // `/auth/account` 的状态码。默认 200（有会话）；两条登录态用例分别把它改成 401
   // （有鉴权、当前浏览器没会话）与 404（单机版没有 auth 代理）。
   let accountStatus = 200
@@ -118,11 +120,13 @@ describe('Lumo native Harness integration', () => {
     })
     calls.length = 0
     threadRows = []
+    fleetResponse = undefined
     accountStatus = 200
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const path = typeof input === 'string' ? input : input.toString()
       calls.push(`${init?.method ?? 'GET'} ${path}`)
       const body =
+        new URL(path, 'http://lumo.test').pathname === '/lumo/api/collaboration/threads' ? fleetResponse ?? {} :
 		init?.method === 'POST' && path === '/lumo/api/flows/launch-flow/run' ? { order: ['start'], outputs: { start: { source: 'lumo-ui-manual' } } } :
 		init?.method === 'POST' && path === '/lumo/api/flows/launch-flow/runs/12/replay' ? { status: 'queued', replay_trigger_id: 13, already_queued: false } :
 		path === '/lumo/api/flows/launch-flow/versions/1' ? { flow_id: 'launch-flow', version: 1, reviewer: 'reviewer-a', definition: { nodes: [{ id: 'start', operator: 'identity' }], edges: [] } } :
@@ -312,9 +316,6 @@ describe('Lumo native Harness integration', () => {
     fireEvent.click(await screen.findByRole('button', { name: '管理已安装技能' }))
     // 技能名经 localizedSkillName 落地;断言渲染出的中文名,证明 /lumo/api/skills 的响应真驱动了这块
     expect(await screen.findByText('架构与调度图')).toBeTruthy()
-    const spotlight = document.querySelector<HTMLElement>('.lumo-skill-card')!
-    fireEvent.pointerMove(spotlight, { clientX: 40, clientY: 30 })
-    expect(spotlight.style.getPropertyValue('--spot-x')).not.toBe('')
     fireEvent.change(screen.getByRole('textbox', { name: '技能名称' }), { target: { value: 'campaign-review' } })
     fireEvent.change(screen.getByRole('textbox', { name: '技能版本内容' }), { target: { value: '# Campaign review\nReview the launch plan.' } })
     fireEvent.click(screen.getByRole('button', { name: '保存技能草稿' }))
@@ -593,6 +594,190 @@ describe('Lumo native Harness integration', () => {
   // 线程看板（§24.6 注意力路由）。判据全在 thread-board.spec.ts 里，这条用例钉的是另一半：
   // 那些格子真的被画成了**五格**，而且「待深度审」与「待轻量答」没有并成一格——
   // 合成一个「待处理」列表就等于没做这件事，而那种退化在 DOM 上只差一个 class。
+  it('真实控制态进入待轻量答，缺少绑定的其他任务不会遮掉已知审批', async () => {
+    fleetResponse = {
+      threads: [
+        { id: 'registered-1', title: '等待财务批准', business_state: 'EXECUTING', state: 'RUNNING',
+          control_state: 'awaiting-approval', control_updated_at: new Date().toISOString(),
+          updated_at: '2025-01-01T00:00:00Z' },
+        { id: 'legacy', title: '没有会话绑定', business_state: 'EXECUTING', state: 'RUNNING' },
+      ],
+      capabilities: { threadRegistry: true, controlState: true }, errors: [],
+    }
+    const registered = mountLumo()
+    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
+    render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
+    const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
+    fireEvent.click(within(navigation).getByRole('button', { name: '协作空间' }))
+    fireEvent.click(await screen.findByRole('tab', { name: '线程看板' }))
+    await waitFor(() => expect(document.querySelector('.lumo-thread-cell.light-answer')?.textContent).toContain('等待财务批准'))
+    expect(document.querySelector('.lumo-thread-cell.light-answer')?.textContent).toContain('有 1 行没有带控制态')
+    expect(document.querySelector('.lumo-thread-cell.stopped')?.textContent).not.toContain('等待财务批准')
+    expect(calls).toContain('GET /lumo/api/collaboration/threads?task_cursor=&thread_after=')
+  })
+
+  it('线程分页分别遍历同页线程与下一页任务，并能返回与回到首页', async () => {
+    const defaultFetch = globalThis.fetch
+    const requested: Array<[string, string]> = []
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://lumo.test')
+      if (url.pathname !== '/lumo/api/collaboration/threads') return defaultFetch(input, init)
+      const task = url.searchParams.get('task_cursor') ?? ''
+      const thread = url.searchParams.get('thread_after') ?? ''
+      requested.push([task, thread])
+      const title = task === 'tasks-2' ? '后续任务页' : thread === 'threads-500' ? '同任务后续线程' : '首批任务线程'
+      return Response.json({
+        threads: [{ id: title, title, business_state: 'EXECUTING', state: 'RUNNING' }],
+        capabilities: { threadRegistry: true, controlState: true }, errors: [],
+        pagination: { nextTaskCursor: task === '' ? 'tasks-2' : '', nextThreadCursor: task === '' && thread === '' ? 'threads-500' : '', taskCount: task === '' ? 200 : 1 },
+      })
+    }))
+    const registered = mountLumo()
+    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
+    render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '协作空间' }))
+    fireEvent.click(await screen.findByRole('tab', { name: '线程看板' }))
+    const pages = screen.getByRole('navigation', { name: '线程与任务分页' })
+    await screen.findByText('首批任务线程')
+    expect(within(pages).getByRole('button', { name: '返回上一页' }).hasAttribute('disabled')).toBe(true)
+    fireEvent.click(within(pages).getByRole('button', { name: '下一批线程' }))
+    await screen.findByText('同任务后续线程')
+    expect(pages.textContent).toContain('第 2 次读取')
+    expect(within(pages).getByRole('button', { name: '下一批线程' }).hasAttribute('disabled')).toBe(true)
+    fireEvent.click(within(pages).getByRole('button', { name: '下一页任务' }))
+    await screen.findByText('后续任务页')
+    expect(pages.textContent).toContain('本页 1 个任务')
+    expect(within(pages).getByRole('button', { name: '下一页任务' }).hasAttribute('disabled')).toBe(true)
+    fireEvent.click(within(pages).getByRole('button', { name: '返回上一页' }))
+    await screen.findByText('同任务后续线程')
+    fireEvent.click(within(pages).getByRole('button', { name: '回到首页' }))
+    await screen.findByText('首批任务线程')
+    expect(pages.textContent).toContain('第 1 次读取')
+    expect(requested).toEqual([['', ''], ['', 'threads-500'], ['tasks-2', ''], ['', 'threads-500'], ['', '']])
+  })
+
+  it('翻页503或元数据损坏时保留成功页与游标，并可重试同一目标页', async () => {
+    const defaultFetch = globalThis.fetch
+    let attempts = 0
+    let finishPage: ((response: Response) => void) | undefined
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://lumo.test')
+      if (url.pathname !== '/lumo/api/collaboration/threads') return defaultFetch(input, init)
+      if (url.searchParams.get('task_cursor') === 'tasks-2') {
+        attempts++
+        if (attempts === 1) return new Promise<Response>(resolve => { finishPage = resolve })
+        if (attempts === 2) return Response.json({ threads: [], capabilities: { threadRegistry: true, controlState: true }, errors: [], pagination: null })
+        return Response.json({ threads: [{ id: 'second', title: '成功的新页', business_state: 'EXECUTING', state: 'RUNNING' }], capabilities: { threadRegistry: true, controlState: true }, errors: [], pagination: { nextTaskCursor: '', nextThreadCursor: '', taskCount: 1 } })
+      }
+      return Response.json({ threads: [{ id: 'first', title: '上次成功页任务', business_state: 'EXECUTING', state: 'RUNNING' }], capabilities: { threadRegistry: true, controlState: true }, errors: [], pagination: { nextTaskCursor: 'tasks-2', nextThreadCursor: '', taskCount: 200 } })
+    }))
+    const registered = mountLumo()
+    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
+    render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '协作空间' }))
+    fireEvent.click(await screen.findByRole('tab', { name: '线程看板' }))
+    await screen.findByText('上次成功页任务')
+    const pages = screen.getByRole('navigation', { name: '线程与任务分页' })
+    fireEvent.click(within(pages).getByRole('button', { name: '下一页任务' }))
+    await waitFor(() => expect(finishPage).toBeDefined())
+    expect(pages.textContent).toContain('第 1 次读取')
+    expect(pages.textContent).toContain('正在读取')
+    expect(within(pages).getByRole('button', { name: '下一页任务' }).hasAttribute('disabled')).toBe(true)
+    finishPage!(Response.json({ error: 'upstream unavailable' }, { status: 503 }))
+    await screen.findByText(/读取失败，仍显示上次成功读取的页面/)
+    expect(screen.getByText('上次成功页任务')).toBeTruthy()
+    expect(pages.textContent).toContain('第 1 次读取')
+    expect(pages.textContent).not.toContain('仅治理任务首批')
+    expect(within(pages).getByRole('button', { name: '返回上一页' }).hasAttribute('disabled')).toBe(true)
+    fireEvent.click(within(pages).getByRole('button', { name: '下一页任务' }))
+    await waitFor(() => expect(attempts).toBe(2))
+    await waitFor(() => expect(within(pages).getByRole('button', { name: '下一页任务' }).hasAttribute('disabled')).toBe(false))
+    expect(screen.getByText('上次成功页任务')).toBeTruthy()
+    expect(pages.textContent).toContain('第 1 次读取')
+    expect(pages.textContent).not.toContain('仅治理任务首批')
+    fireEvent.click(within(pages).getByRole('button', { name: '下一页任务' }))
+    await screen.findByText('成功的新页')
+    expect(screen.queryByText('上次成功页任务')).toBeNull()
+    expect(pages.textContent).toContain('第 2 次读取')
+    expect(attempts).toBe(3)
+  })
+
+  it('翻页时权限被撤销立即清除上次成功页，不继续展示旧授权数据', async () => {
+    const defaultFetch = globalThis.fetch
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://lumo.test')
+      if (url.pathname !== '/lumo/api/collaboration/threads') return defaultFetch(input, init)
+      if (url.searchParams.get('task_cursor') === 'tasks-2') return Response.json({ error: 'forbidden' }, { status: 403 })
+      return Response.json({ threads: [{ id: 'first', title: '权限撤销前任务', business_state: 'EXECUTING', state: 'RUNNING' }], capabilities: { threadRegistry: true, controlState: true }, errors: [], pagination: { nextTaskCursor: 'tasks-2', nextThreadCursor: '', taskCount: 200 } })
+    }))
+    const registered = mountLumo()
+    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
+    render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '协作空间' }))
+    fireEvent.click(await screen.findByRole('tab', { name: '线程看板' }))
+    await screen.findByText('权限撤销前任务')
+    const pages = screen.getByRole('navigation', { name: '线程与任务分页' })
+    fireEvent.click(within(pages).getByRole('button', { name: '下一页任务' }))
+    await screen.findByText(/线程聚合：403/)
+    expect(screen.queryByText('权限撤销前任务')).toBeNull()
+    expect(pages.textContent).toContain('第 1 次读取')
+    expect(pages.textContent).toContain('本页 0 个任务')
+    expect(within(pages).getByRole('button', { name: '下一页任务' }).hasAttribute('disabled')).toBe(true)
+  })
+
+  it('线程续页降级为仅任务时保留已读线程页，恢复后重试同一线程游标', async () => {
+    const defaultFetch = globalThis.fetch
+    const cursors: string[] = []
+    let attempts = 0
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://lumo.test')
+      if (url.pathname !== '/lumo/api/collaboration/threads') return defaultFetch(input, init)
+      const after = url.searchParams.get('thread_after') ?? ''
+      cursors.push(after)
+      if (after !== '') {
+        attempts++
+        if (attempts === 1) return Response.json({
+          threads: [{ id: 'fallback', title: '注册表失联时的任务投影', business_state: 'EXECUTING', state: 'RUNNING' }],
+          capabilities: { threadRegistry: false, controlState: true }, errors: ['线程注册表暂时不可读'],
+          pagination: { nextTaskCursor: '', nextThreadCursor: '', taskCount: 1 },
+        })
+        return Response.json({
+          threads: [{ id: 'continued', title: '注册表恢复后的线程', business_state: 'EXECUTING', state: 'RUNNING' }],
+          capabilities: { threadRegistry: true, controlState: true }, errors: [],
+          pagination: { nextTaskCursor: '', nextThreadCursor: '', taskCount: 1 },
+        })
+      }
+      return Response.json({
+        threads: [{ id: 'first', title: '已读的真实线程页', business_state: 'EXECUTING', state: 'RUNNING' }],
+        capabilities: { threadRegistry: true, controlState: true }, errors: [],
+        pagination: { nextTaskCursor: '', nextThreadCursor: 'thread-499', taskCount: 1 },
+      })
+    }))
+    const registered = mountLumo()
+    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
+    render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '协作空间' }))
+    fireEvent.click(await screen.findByRole('tab', { name: '线程看板' }))
+    await screen.findByText('已读的真实线程页')
+    const pages = screen.getByRole('navigation', { name: '线程与任务分页' })
+    fireEvent.click(within(pages).getByRole('button', { name: '下一批线程' }))
+    await screen.findByText(/响应不是可读的线程页/)
+    expect(screen.getByText('已读的真实线程页')).toBeTruthy()
+    expect(screen.queryByText('注册表失联时的任务投影')).toBeNull()
+    expect(pages.textContent).toContain('第 1 次读取')
+    expect(within(pages).getByRole('button', { name: '返回上一页' }).hasAttribute('disabled')).toBe(true)
+    fireEvent.click(within(pages).getByRole('button', { name: '下一批线程' }))
+    await screen.findByText('注册表恢复后的线程')
+    expect(screen.queryByText('已读的真实线程页')).toBeNull()
+    expect(pages.textContent).toContain('第 2 次读取')
+    expect(cursors).toEqual(['', 'thread-499', 'thread-499'])
+  })
+
   it('线程看板把等待分成「待深度审」与「待轻量答」两格，并标出静默的执行', async () => {
     const now = Date.now()
     threadRows = [
@@ -869,6 +1054,69 @@ describe('Lumo native Harness integration', () => {
     fireEvent.keyDown(window, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('dialog', { name: '项目运营工作台' })).toBeNull())
     expect(document.activeElement).toBe(opener)
+  })
+
+  it('retains a manual flow creation key after a lost response and rotates it after confirmed success', async () => {
+    const originalFetch = globalThis.fetch
+    const keys: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (input === '/lumo/api/flows/launch-flow/run') {
+        keys.push(new Headers(init?.headers).get('Idempotency-Key') ?? '')
+        if (keys.length === 1) throw new Error('response lost')
+      }
+      return originalFetch(input, init)
+    }))
+    history.replaceState({}, '', '/?lumo=operations')
+    const Overlay = mountLumo().find(item => item.name === 'shell.overlay')!.Component
+    render(<Overlay />)
+    const button = await screen.findByRole<HTMLButtonElement>('button', { name: '试运行' })
+    fireEvent.click(button)
+    await screen.findByText('response lost')
+    await waitFor(() => expect(button.disabled).toBe(false))
+    fireEvent.click(button)
+    await waitFor(() => expect(keys).toHaveLength(2))
+    await waitFor(() => expect(button.disabled).toBe(false))
+    fireEvent.click(button)
+    await waitFor(() => expect(keys).toHaveLength(3))
+    expect(keys[0]).toMatch(/^[A-Za-z0-9_.:-]+$/u)
+    expect(keys[0]).toBe(keys[1])
+    expect(keys[2]).not.toBe(keys[0])
+  })
+
+  it('creates an independent review from the latest completed run and opens its execution details', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const originalFetch = globalThis.fetch
+    const producer = { id: 'producer-task', title: '待审核交付', intent: '交付报告', project_id: 'growth', requester_user_id: 'palmer', assignee_user_id: 'palmer', assignee_worker_id: 'agent:producer', state: 'RUNNING', selected_skills: [], created_at: '2026-11-06T00:00:00Z', updated_at: '2026-11-06T00:00:00Z' }
+    const review = { ...producer, id: 'review-task', title: '独立审核报告', assignee_worker_id: 'agent:contract-review', state: 'QUEUED' }
+    const reviewRun = { id: 'review-run', task_id: review.id, worker_id: 'agent:contract-review', state: 'QUEUED', attempt: 1, created_at: producer.created_at }
+    const requests: RequestInit[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input.toString()
+      let body: unknown
+      if (path === '/lumo/api/delegations') body = { tasks: [producer] }
+      else if (path === '/lumo/api/tasks/producer-task/runs') body = { runs: [{ id: 'producer-run', task_id: producer.id, worker_id: 'agent:producer', state: 'COMPLETED', attempt: 1, created_at: producer.created_at }] }
+      else if (path === '/lumo/api/tasks/producer-task/runs/producer-run/review-tasks') { requests.push(init!); body = { task: review, run: reviewRun } }
+      else if (path === '/lumo/api/tasks/review-task/runs') body = { runs: [reviewRun] }
+      else if (/^\/lumo\/api\/tasks\/(producer-task|review-task)\/audit$/u.test(path)) body = { events: [] }
+      else if (/^\/lumo\/api\/tasks\/(producer-task|review-task)\/collaboration$/u.test(path)) body = null
+      else return originalFetch(input, init)
+      calls.push(`${init?.method ?? 'GET'} ${path}`)
+      return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
+    }))
+    history.replaceState({}, '', '/?lumo=operations')
+    const Overlay = mountLumo().find(item => item.name === 'shell.overlay')!.Component
+    render(<Overlay />)
+    fireEvent.click(await screen.findByRole('button', { name: /协作执行/ }))
+    fireEvent.click(await screen.findByRole('button', { name: '执行详情' }))
+    const panel = await screen.findByRole('region', { name: '独立审核' })
+    fireEvent.change(within(panel).getByRole('combobox', { name: '审核 Agent' }), { target: { value: 'agent:contract-review' } })
+    fireEvent.click(within(panel).getByRole('button', { name: '创建审核任务' }))
+    fireEvent.click(await within(panel).findByRole('button', { name: '打开审核任务 · 独立审核报告' }))
+    expect(await screen.findByText('执行详情 · 独立审核报告', { selector: '.lumo-section-title b' })).toBeTruthy()
+    expect(requests).toHaveLength(1)
+    expect(JSON.parse(requests[0]!.body as string)).toEqual({ reviewer_worker_id: 'agent:contract-review' })
+    expect(new Headers(requests[0]!.headers).get('Idempotency-Key')).toMatch(/^ui-review:[a-f0-9]{64}$/u)
+    expect(calls).toContain('GET /lumo/api/tasks/review-task/runs')
   })
 
   it('does not duplicate root contributions when the client entry is replayed', () => {

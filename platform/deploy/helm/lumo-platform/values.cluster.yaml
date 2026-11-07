@@ -14,7 +14,11 @@
 #
 #   helm upgrade --install lumo-b ./helm/lumo-platform -n lumo \
 #     -f ./helm/lumo-platform/values.cluster.yaml \
-#     --set nameOverride=lumo-platform-b --set dshNode.clusterId=cluster-b
+#     --set nameOverride=lumo-platform-b --set dshNode.clusterId=cluster-b \
+#     --set secrets.create=false
+#
+# The second release reuses the operator-owned shared authentication/trust
+# Secrets. Do not let two Helm releases claim ownership of the same Secret.
 #
 # Every switch below is a decision, and the ones left off say why. They are
 # written out explicitly rather than left implicit so that a future change to
@@ -29,7 +33,14 @@ secrets:
   # (vault token, real registry trust root) never can.
   create: true
 
+availability:
+  podDisruptionBudget: { enabled: true, maxUnavailable: 1 }
+  topologySpread: { enabled: true }
+
 dshNode:
+  workloadKind: StatefulSet
+  spool:
+    persistence: { enabled: true }
   # The definitional cluster capability: a horizontally scalable pool of
   # subagent hosts with an HPA. compose.cluster.yml runs four of these across
   # cluster-a and cluster-b; a single release here is one cluster's pool.
@@ -52,6 +63,9 @@ dshNode:
     enabled: false
 
 dshWeb:
+  workloadKind: StatefulSet
+  spool:
+    persistence: { enabled: true }
   # The operator entry point. compose.cluster.yml always runs it.
   enabled: true
   identityAssertion:

@@ -1,15 +1,17 @@
 // Command collaborator 是知识库文档实时协作服务（§5.4.7）。
 //
-// 平台唯一的有状态业务服务：内存持活跃 CRDT 文档，WAL 先行保证 RPO 0，
-// 归属哈希保证「每个活跃文档由唯一一个实例持有」。
+// 内存持活跃 CRDT 文档；PG 文档租约和 epoch 围栏约束写者，WAL 提交后才确认更新。
+// 跨主机/可用区的数据保留取决于 PG 同步复制和实际故障切换配置。
 //
 // 启动：collaborator -pg <dsn> -redis <addr> -listen :8081 -instance <id>
 package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -53,7 +55,7 @@ func (headerAuth) Authenticate(r *http.Request) (server.Identity, error) {
 func main() {
 	var (
 		pgDSN     = flag.String("pg", envOr("LUMO_PG_DSN", "postgres://lumo:lumo@localhost:55432/lumo"), "PostgreSQL DSN")
-		redisAddr = flag.String("redis", envOr("LUMO_REDIS_ADDR", "localhost:56379"), "Redis 地址（WAL 热层）")
+		redisAddr = flag.String("redis", envOr("LUMO_REDIS_ADDR", "localhost:56379"), "Redis 地址（仅用于停旧写者后的历史 WAL 导入）")
 		listen    = flag.String("listen", envOr("LUMO_LISTEN", ":8081"), "HTTP 监听地址")
 		instance  = flag.String("instance", envOr("LUMO_INSTANCE", "collaborator-0"), "本实例标识（归属哈希用）")
 		peers     = flag.String("peers", os.Getenv("LUMO_PEERS"), "实例列表（逗号分隔；生产由 Nacos watch 下发）")
@@ -116,6 +118,12 @@ func main() {
 	h := hub.New(st, limits)
 
 	ring := ownership.NewRing(*instance)
+	bootNonce := make([]byte, 16)
+	if _, err := rand.Read(bootNonce); err != nil {
+		log.Error("generate writer identity", "err", err)
+		os.Exit(1)
+	}
+	h.ConfigureOwnership(fmt.Sprintf("%s:%x", *instance, bootNonce), ring.IsMine)
 	if *peers != "" {
 		ring.SetInstances(strings.Split(*peers, ","))
 	}
@@ -191,13 +199,17 @@ func main() {
 	// 周期任务：快照落库 + 闲置回收
 	go func() {
 		snapTicker := time.NewTicker(limits.SnapshotInterval)
+		leaseTicker := time.NewTicker(store.DocumentLeaseTTL / 3)
 		evictTicker := time.NewTicker(time.Minute)
 		defer snapTicker.Stop()
+		defer leaseTicker.Stop()
 		defer evictTicker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-leaseTicker.C:
+				h.ReconcileOwnership(ctx)
 			case <-snapTicker.C:
 				if err := h.Snapshot(ctx, merger.Merge); err != nil {
 					log.Error("快照落库失败", "err", err)

@@ -624,10 +624,9 @@ export function ThreadBoardPanel({ threads, error, loading, label, stalledAfterM
     {loading ? <p className="lumo-inline-empty">正在读取线程行。</p> : <div className="lumo-thread-board">{board.columns.map(column => <section key={column.id} className={`lumo-thread-cell ${column.id}`}>
       <header><b>{column.label}</b><span>{column.attention}</span></header>
       <small className="lumo-thread-rule">{column.rule}</small>
-      {column.unreadable !== undefined
-        ? <p className="lumo-thread-gap">{column.unreadable}</p>
-        : column.entries.length === 0
-          ? <p className="lumo-thread-empty">没有线程落在这一格。</p>
+      {column.unreadable !== undefined ? <p className="lumo-thread-gap">{column.unreadable}</p> : null}
+      {column.entries.length === 0
+          ? column.unreadable === undefined ? <p className="lumo-thread-empty">没有线程落在这一格。</p> : null
           : <div className="lumo-thread-entries">{column.entries.map(entry => <div key={entry.id} className={`lumo-thread-entry${entry.silent ? ' silent' : ''}${entry.waitExpired ? ' expired' : ''}`}>
             <b>{entry.title}</b>
             <small>{text(entry.state)} · {entry.owner}</small>
@@ -639,7 +638,7 @@ export function ThreadBoardPanel({ threads, error, loading, label, stalledAfterM
     {!loading && board.outside.length > 0 ? <details className="lumo-thread-outside"><summary>{`五格之外 ${board.outside.length} 条（设计只定义了五格，它们不落格，但也不消失）`}</summary>
       <div className="lumo-cluster-list">{board.outside.map(item => <div key={item.id}><span><b>{item.title}</b><small>{item.reason}</small></span></div>)}</div>
     </details> : null}
-    {loading ? null : <p className="lumo-form-note">静默与等待时长都以「任务行最后一次变更」为准；等待上限按 {duration(waitTtlMs ?? 30 * 60_000)} 判定（agent-teams 的唤醒默认 TTL）。真实的等待 TTL 由 arm 时决定，舰队读面里没有这个数。</p>}
+    {loading ? null : <p className="lumo-form-note">审批等待使用控制态变更时间，其他时长使用任务或线程的最后变更时间。等待上限按 {duration(waitTtlMs ?? 30 * 60_000)} 估算；实际 TTL 由具体等待项决定。</p>}
   </div>
 }
 

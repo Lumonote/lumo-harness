@@ -27,10 +27,12 @@ function response(): { res: import('node:http').ServerResponse; result: { status
 /** 一个假 team 服务。这两个方法就是本路由用到的全部 dsh 面。 */
 function teamsService() {
   return {
-    list: vi.fn().mockResolvedValue([{ id: 'team-1', name: '秋季新品发布', topology: 'pipeline', captainSessionId: 's-1' }]),
+    capabilitiesOrNull: vi.fn().mockReturnValue({ provider: { provider: 'spawn', kind: 'in-process', reason: 'available' }, durableStore: true, durableCourier: false }),
+    list: vi.fn().mockResolvedValue([{ id: 'team-1', name: '秋季新品发布', topology: 'pipeline', captainSessionId: 's-1', realm: 'realm-a', ownerUserId: 'admin-a' }]),
     status: vi.fn().mockResolvedValue({
       team: {
         id: 'team-1', name: '秋季新品发布', topology: 'pipeline', captainSessionId: 's-1',
+        realm: 'realm-a', ownerUserId: 'admin-a',
         members: [
           { name: '规划 Agent', role: 'planner', provider: 'spawn', status: 'working', ownerUserId: 'employee-1' },
           { name: '质检 Agent', provider: 'fork', status: 'idle' },
@@ -52,9 +54,38 @@ async function get(agentTeams: ReturnType<typeof teamsService> | undefined) {
 }
 
 describe('collaboration teams API', () => {
+  it('管理员也不能读取其他租户或无归属的历史团队', async () => {
+    const service = teamsService()
+    service.list.mockResolvedValue([
+      { id: 'foreign', name: 'foreign', topology: 'pipeline', captainSessionId: 's', realm: 'realm-b', ownerUserId: 'admin-a' },
+      { id: 'legacy', name: 'legacy', topology: 'pipeline', captainSessionId: 's' },
+    ])
+    const result = await get(service)
+    expect(result.body).toMatchObject({ teams: [] })
+    expect(service.status).not.toHaveBeenCalled()
+  })
+
+  it('普通用户只看到自己创建的团队，成员归属不授予团队访问权', async () => {
+    const service = teamsService()
+    const own = (await service.list())[0]!
+    service.list.mockResolvedValue([own, { ...own, id: 'another-owner', ownerUserId: 'other' }])
+    const { res, result } = response()
+    await api({ ...config, roles: ['member'] }, undefined, undefined, undefined, undefined,
+      request('GET', '/lumo/api/collaboration/teams') as never, res, undefined, service)
+    expect((result.body as { teams: unknown[] }).teams).toHaveLength(1)
+    expect(service.status).toHaveBeenCalledExactlyOnceWith('team-1')
+  })
+
+  it('列表和详情之间归属变化时再次检查权限', async () => {
+    const service = teamsService()
+    const snapshot = await service.status('team-1')
+    service.status.mockClear().mockResolvedValue({ ...snapshot, team: { ...snapshot.team, realm: 'realm-b' } })
+    expect((await get(service)).body).toMatchObject({ teams: [] })
+  })
   it('把每个团队连同它的进度投影一起交出去', async () => {
     const result = await get(teamsService())
     expect(result.status).toBe(200)
+    expect(result.body).toMatchObject({ capabilities: { provider: { provider: 'spawn', kind: 'in-process', reason: 'available' }, durableStore: true, durableCourier: false } })
     const teams = (result.body as { teams: Array<Record<string, unknown>> }).teams
     expect(teams).toHaveLength(1)
     expect(teams[0]?.id).toBe('team-1')

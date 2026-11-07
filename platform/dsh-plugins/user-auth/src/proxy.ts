@@ -1,9 +1,11 @@
-import { createHmac, randomBytes } from 'node:crypto'
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { Duplex } from 'node:stream'
 
 import { GovernanceApiError, GovernanceAuthClient, type Principal } from './client.ts'
+import { ownedChatHtml, ownedChatScript } from './owned-chat.ts'
+import type { AuthenticatedSessionTransport } from './session-transport.ts'
 import { AUTHENTICATED_APP_HOME } from './app-home.ts'
 import { loginPage, loginScript, resolveLoginTheme, type LoginPageOptions } from './html.ts'
 import { CONNECTOR_OAUTH_CALLBACK, CONNECTOR_OAUTH_COOKIE, ConnectorOAuthClient, ConnectorOAuthError, connectorIDPattern, openConnectorBridge, sealConnectorBridge, type ConnectorOAuthStart } from './connector-oauth.ts'
@@ -41,6 +43,8 @@ export interface AuthProxyOptions {
    * carrier 的浏览器会话 cookie（见 carrier-session.ts）。缺省时不做交接——那种装配下
    * 浏览器会直接看到 carrier 的 401 页面，正是本参数存在的原因。
    */
+  serverRuntimeToken?: string
+  sessionTransport?: AuthenticatedSessionTransport
   carrierCookie?: () => Promise<string | undefined>
   /** carrier 回了 401：让提供者丢掉缓存的 cookie，下一次请求重新交换。 */
   carrierRejected?: () => void
@@ -341,12 +345,35 @@ function oidcRedirectMatches(redirectUrl: string | undefined, options: AuthProxy
 }
 
 export function createAuthProxy(options: AuthProxyOptions): Server {
-  const sessions = new SessionVerifier(options.client, options.realm, options.clusterMode ? 0 : SESSION_CACHE_MS)
+  const appHome = options.sessionTransport ? '/lumo/chat' : AUTHENTICATED_APP_HOME
+  const sessions = new SessionVerifier(options.client, options.realm, options.clusterMode || options.sessionTransport ? 0 : SESSION_CACHE_MS)
   const server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://lumo-auth.local')
       const requestCookies = parseCookies(req)
       const sessionToken = requestCookies.get(SESSION_COOKIE)
+      if (url.pathname.startsWith('/lumo/runtime/teams/')) {
+        const supplied = req.headers.authorization ?? ''
+        const expected = options.serverRuntimeToken ? `Bearer ${options.serverRuntimeToken}` : ''
+        const a = Buffer.from(supplied), b = Buffer.from(expected)
+        if (!expected || a.length !== b.length || !timingSafeEqual(a, b)) { writeJson(res, 401, { error: 'runtime_auth_required' }); return }
+        if (req.method !== 'GET' || !/^\/lumo\/runtime\/teams\/[A-Za-z0-9._-]+$/u.test(url.pathname)) { writeJson(res, 405, { error: 'runtime_read_required' }); return }
+        const runtimeCookie = await options.carrierCookie?.()
+        const upstream = httpRequest({ host: '127.0.0.1', port: options.upstreamPort, method: 'GET', path: req.url,
+          headers: { authorization: expected, 'x-lumo-realm': options.realm, ...(runtimeCookie ? { cookie: runtimeCookie } : {}) },
+          timeout: 5000 }, response => {
+          res.writeHead(response.statusCode ?? 502, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+          let bytes = 0
+          response.on('data', (chunk: Buffer) => { bytes += chunk.length; if (bytes > 128 * 1024) { upstream.destroy(); res.destroy() } else res.write(chunk) })
+          response.on('end', () => res.end())
+        })
+        upstream.on('timeout', () => upstream.destroy())
+        upstream.on('error', () => { if (!res.headersSent) writeJson(res, 503, { error: 'runtime_unavailable' }); else res.end() })
+        req.on('aborted', () => upstream.destroy())
+        upstream.end()
+        return
+      }
+
 
       if (req.method === 'GET' && url.pathname === '/auth/connector-oauth/complete.js') {
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' })
@@ -383,7 +410,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
         return
       }
       if (req.method === 'GET' && url.pathname === '/auth/login') {
-        if (await sessions.get(sessionToken) !== undefined) { redirect(res, AUTHENTICATED_APP_HOME); return }
+        if (await sessions.get(sessionToken) !== undefined) { redirect(res, appHome); return }
         let oidcEnabled = false
         if (options.clusterMode) {
           try {
@@ -396,7 +423,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
       }
       if (req.method === 'GET' && url.pathname === '/auth/oidc/complete.js') {
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
-        res.end(`location.replace(${JSON.stringify(AUTHENTICATED_APP_HOME)})`)
+        res.end(`location.replace(${JSON.stringify(appHome)})`)
         return
       }
       if (req.method === 'GET' && url.pathname === '/auth/oidc/start') {
@@ -427,7 +454,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
           sessions.set(result.token, result.principal)
           res.setHeader('Set-Cookie', [sessionCookie(result, options), clearOIDC])
           // Commit a same-origin document before navigating with the Strict session cookie.
-          writeHtml(res, 200, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>登录中</title><script src="/auth/oidc/complete.js" defer></script></head><body><a href="${AUTHENTICATED_APP_HOME}">进入 Lumo</a></body></html>`)
+          writeHtml(res, 200, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>登录中</title><script src="/auth/oidc/complete.js" defer></script></head><body><a href="${appHome}">进入 Lumo</a></body></html>`)
         } catch (error) {
           const state = error instanceof GovernanceApiError && error.status >= 500 ? 'unavailable' : 'oidc-failed'
           redirect(res, `/auth/login?state=${state}`, { 'Set-Cookie': clearOIDC })
@@ -465,7 +492,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
 			mfaCode: form.get('mfa') ?? '',
           })
           sessions.set(result.token, result.principal)
-          redirect(res, AUTHENTICATED_APP_HOME, { 'Set-Cookie': [
+          redirect(res, appHome, { 'Set-Cookie': [
             authCookie(SESSION_COOKIE, result.token, { secure: options.secureCookie, maxAge: Math.max(1, Math.floor((Date.parse(result.expires_at) - Date.now()) / 1000)) }),
             authCookie(CAPTCHA_COOKIE, '', { secure: options.secureCookie, maxAge: 0 }),
           ] })
@@ -700,6 +727,64 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
         writeJson(res, 204, undefined, { 'Set-Cookie': authCookie(SESSION_COOKIE, '', { secure: options.secureCookie, maxAge: 0 }) })
         return
       }
+      if (options.sessionTransport && req.method === 'GET' && url.pathname === '/lumo/chat') { writeHtml(res, 200, ownedChatHtml); return }
+      if (options.sessionTransport && req.method === 'GET' && url.pathname === '/lumo/chat.js') {
+        res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(ownedChatScript); return
+      }
+      if (url.pathname.startsWith('/lumo/sessions')) {
+        if (!options.sessionTransport) { writeJson(res, 503, { error: 'session_transport_unavailable' }); return }
+        const match = url.pathname.match(/^\/lumo\/sessions\/([a-zA-Z]+)$/u)
+        if (!match || req.method !== 'POST') { writeJson(res, 405, { error: 'session_post_required' }); return }
+        if (req.headers['x-lumo-auth-request'] !== '1') { writeJson(res, 403, { error: 'auth_request_header_required' }); return }
+        let body: Record<string, unknown>
+        try { body = await readJson(req) } catch { writeJson(res, 400, { error: 'invalid_session_request' }); return }
+        const abort = new AbortController()
+        res.once('close', () => abort.abort(new Error('Session transport disconnected')))
+        abort.signal.addEventListener('abort', () => {
+          // Also release a response currently waiting for socket backpressure.
+          if (res.headersSent && !res.writableEnded) res.destroy()
+        }, { once: true })
+        const identity = principalIdentity(principal)
+        const authority = async () => {
+          const current = await sessions.get(sessionToken)
+          if (!current || principalIdentity(current) !== identity) throw new Error('Session authorization expired')
+          await options.client.authorizeSessionProject(current, options.projectId ?? '')
+        }
+        let checking = false
+        const timer = setInterval(() => {
+          if (checking || abort.signal.aborted) return
+          checking = true
+          void sessions.get(sessionToken).then(current => {
+            if (!current || principalIdentity(current) !== identity) abort.abort(new Error('Session authorization expired'))
+            else return options.client.authorizeSessionProject(current, options.projectId ?? '')
+          }).catch(() => abort.abort(new Error('Session authorization unavailable'))).finally(() => { checking = false })
+        }, SESSION_RECHECK_MS)
+        timer.unref()
+        try {
+          const action = match[1]!
+          if (['follow', 'observeState', 'observeEvent', 'observeProjections'].includes(action)) {
+            const source = await options.sessionTransport.stream(principal, action, body, abort.signal)
+            res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
+            for await (const frame of source) {
+              abort.signal.throwIfAborted()
+              if (!res.write(`${JSON.stringify(frame)}\n`)) await new Promise<void>((resolve, reject) => {
+                const close = () => { res.off('drain', drain); reject(new Error('Session stream closed')) }
+                const drain = () => { res.off('close', close); resolve() }
+                res.once('close', close); res.once('drain', drain)
+              })
+            }
+            res.end()
+          } else writeJson(res, 200, await options.sessionTransport.execute(principal, action, body, abort.signal, authority))
+        } catch (error) {
+          options.logger.warn('lumo-user-auth: owned Session request denied: %s', error)
+          if (!res.headersSent) writeJson(res, 403, { error: error instanceof Error && 'code' in error && error.code === 'session_pending_input' ? 'session_pending_input' : 'session_request_denied' })
+          else res.end()
+        } finally { clearInterval(timer); abort.abort() }
+        return
+      }
+      if (options.sessionTransport && (url.pathname === '/' || url.pathname.startsWith('/api') || !url.pathname.startsWith('/lumo/'))) {
+        writeJson(res, 403, { error: 'shared_owner_transport_disabled', message: '请使用认证的 /lumo/sessions 入口' }); return
+      }
       await proxyHttp(req, res, principal, options)
     })().catch((error: unknown) => {
       options.logger.warn('lumo-user-auth: request failed: %s', error)
@@ -711,6 +796,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
   const upgradedSockets = new Set<Duplex>()
   upgradedConnections.set(server, upgradedSockets)
   server.on('upgrade', (req, socket, head) => {
+    if (options.sessionTransport) { rejectUpgrade(socket, 403, 'Shared Owner WebSocket Disabled'); return }
     upgradedSockets.add(socket)
     socket.once('close', () => upgradedSockets.delete(socket))
     void (async () => {

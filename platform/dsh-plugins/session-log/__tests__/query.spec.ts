@@ -26,7 +26,7 @@ async function withBoot(
 ): Promise<void> {
   const dsn = await schemaDsn(DSN!, 'session_log_query_test')
   const ctx = new Context()
-  apply(ctx, {
+  await apply(ctx, {
     connectionString: dsn,
     holder: 'query-test-node',
     leaseTtlMs: 30_000,

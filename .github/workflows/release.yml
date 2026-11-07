@@ -2,7 +2,7 @@
 # docs/superpowers/specs/2026-09-09-readme-license-and-release-workflow-design.md）。
 #
 # 触发语义：
-#   - 推送 v* tag **自动触发**（正式发版路径）：三个平台的桌面包全部成功后，安装包附到
+#   - 推送 v* tag **自动触发**（正式发版路径）：桌面包和真实集群验收全部成功后，安装包附到
 #     同名 GitHub Release（见下方 release job 的 fail-closed 依赖）。
 #   - 推送 **dev** 分支自动触发**测试包**：artifact 名带 -test 后缀，不建 Release、不推镜像。
 #     只认 dev 一个分支：打包依赖 platform/deploy/lib/dsh-source.sh 等脚本，旧 ref 上不存在，
@@ -13,7 +13,7 @@
 #       main / tag v*  → 正式产物（tag v* 另附到 GitHub Release）
 #       其他分支       → 桌面测试包（artifact 名带 -test）
 #
-# 门禁（typecheck / test / vet / 第一铁律）仍由 ci.yml 负责，本 workflow 只产物。
+# 基础门禁（typecheck / test / vet / 第一铁律）由 ci.yml 负责；正式 tag 额外依赖完整集群验收。
 #
 # Action 版本：统一取「首个声明 node24 运行时的主版本」，而不是各自的最新主版本。
 # 目标只是消除 GitHub 的 Node 20 弃用告警（Node 20 已从托管 runner 移除），而跨多个
@@ -47,6 +47,9 @@ permissions:
   contents: read
 
 jobs:
+  cluster-validation:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/cluster-acceptance.yml
   # 桌面安装包。build.sh 的 build_desktop 要求 target == 宿主平台/架构
   # （native wheel 与 Rust 壳都不可跨架构），所以每个 target 必须有自己的 runner。
   desktop:
@@ -191,10 +194,10 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ steps.suffix.outputs.suffix == '-test' && 7 || 30 }}
 
-  # 只在 tag 上运行：桌面包全部成功后才发布 Release（fail-closed）。
+  # 只在 tag 上运行：桌面包和完整集群验收全部成功后才发布 Release。
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [desktop]
+    needs: [desktop, cluster-validation]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -225,7 +228,7 @@ jobs:
           # 同一 tag 重跑时不因 release 已存在而失败，改为覆盖上传并同步正文。
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
-            gh release edit "${GITHUB_REF_NAME}" --notes-file "$RUNNER_TEMP/notes.md"
+            gh release edit "${GITHUB_REF_NAME}" --draft=false --notes-file "$RUNNER_TEMP/notes.md"
           else
             gh release create "${GITHUB_REF_NAME}" \
               --title "${GITHUB_REF_NAME}" \

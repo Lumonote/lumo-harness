@@ -9,6 +9,7 @@ platform_root="$(cd "${script_dir}/.." && pwd)"
 dsh_root="$(cd "${platform_root}/.." && pwd)/deepseek-harness"
 ppt_root="${script_dir}/skills/ppt-master"
 bootstrap_python="${LUMO_PPT_BOOTSTRAP_PYTHON:-}"
+snapshots_only=0
 
 raw_host_os="$(uname -s)"
 case "${raw_host_os}" in
@@ -33,6 +34,7 @@ fi
 target="${LUMO_DESKTOP_TARGET:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --snapshots-only) snapshots_only=1; shift ;;
     --target) [[ $# -ge 2 ]] || { echo "--target 需要参数" >&2; exit 64; }; target="$2"; shift 2 ;;
     --target=*) target="${1#*=}"; shift ;;
     *) echo "usage: $0 [--target darwin-arm64|darwin-x64|win-x64]" >&2; exit 64 ;;
@@ -43,7 +45,7 @@ case "${target}" in
   darwin-arm64|darwin-x64|win-x64) ;;
   *) echo "Lumo: 不支持的 target：${target}（可用：darwin-arm64, darwin-x64, win-x64）" >&2; exit 64 ;;
 esac
-if [[ ( "${host_os}" != "Darwin" && "${host_os}" != "Windows" ) || "${target}" != "${host_target}" ]]; then
+if [[ "$snapshots_only" -ne 1 && ( ( "${host_os}" != "Darwin" && "${host_os}" != "Windows" ) || "${target}" != "${host_target}" ) ]]; then
   echo "Lumo: ${target} 的 PPT venv 必须在同平台同架构宿主上建（当前 ${host_os} ${host_target}）：native wheel 无法跨平台安装。" >&2
   exit 1
 fi
@@ -126,7 +128,7 @@ fi
   echo "Lumo: PPT Master 要求 Python 3.10+。" >&2
   exit 1
 }
-if [[ "${host_os}" == "Darwin" ]] && ! bootstrap_python_usable "${bootstrap_python}"; then
+if [[ "$snapshots_only" -ne 1 && "${host_os}" == "Darwin" ]] && ! bootstrap_python_usable "${bootstrap_python}"; then
   portable_python="$("${bootstrap_python}" -c 'import sys; print(sys.executable)' 2>/dev/null || true)"
   echo "Lumo: 解释器不可重定位：${portable_python}（链接了 Homebrew/其他绝对路径动态库）。" >&2
   echo "Lumo: 桌面包要求可重定位解释器。请改用 python.org 官方安装包或 uv 管理的 standalone Python：" >&2
@@ -175,16 +177,24 @@ fetch_skill_snapshot() {
   local target="${script_dir}/skills/${name}" commit_abbr
   commit_abbr="$(printf '%.12s' "${commit}")"
   echo "Lumo: 快照 ${name} 缺失，按固定提交 ${commit_abbr} 拉取自 ${repository} ..." >&2
-  if ! git clone --no-checkout --filter=blob:none "${repository}" "${work}"; then
-    echo "Lumo: 克隆 ${repository} 失败。请检查网络后重试，或按 platform/upstream/README.md 手动放置快照。" >&2
+  git init -q "${work}"
+  # HTTP/2 promisor streams can end early on the source mirror; configure
+  # this disposable clone only and retry both explicit and lazy blob fetches.
+  git -C "${work}" config http.version HTTP/1.1
+  git -C "${work}" remote add origin "${repository}"
+  if ! retry_snapshot_git git -C "${work}" fetch --depth 1 --filter=blob:none origin "${commit}"; then
+    echo "Lumo: 拉取 ${repository}@${commit} 连续三次失败。请检查网络后重试。" >&2
     exit 1
   fi
   git -C "${work}" sparse-checkout init --cone
   git -C "${work}" sparse-checkout set "${subpath}"
-  if ! git -C "${work}" checkout --detach "${commit}"; then
+  if ! retry_snapshot_git git -C "${work}" checkout --detach "${commit}"; then
     echo "Lumo: 检出固定提交 ${commit} 失败（${repository}#${commit} 未被克隆到）。" >&2
     exit 1
   fi
+  [[ "$(git -C "${work}" rev-parse HEAD)" == "$commit" ]] || {
+    echo "Lumo: snapshot commit verification failed: $name" >&2; exit 1;
+  }
   if [[ ! -e "${work}/${subpath}" ]]; then
     echo "Lumo: 仓库 ${repository} 中不存在 ${subpath}（skill-sources.json 的 path 过时？）。" >&2
     exit 1
@@ -207,6 +217,16 @@ fetch_skill_snapshot() {
     exit 1
   fi
   echo "Lumo: 快照 ${name} 已就位（${subpath}@${commit_abbr}）。" >&2
+}
+
+retry_snapshot_git() {
+  local attempt
+  for attempt in 1 2 3; do
+    if "$@"; then return 0; fi
+    [[ "$attempt" -eq 3 ]] && return 1
+    echo "Lumo: snapshot download retry $attempt/3" >&2
+    sleep 2
+  done
 }
 
 ensure_skill_snapshots() {
@@ -239,6 +259,10 @@ ensure_skill_snapshots() {
 }
 
 ensure_skill_snapshots
+if [[ "$snapshots_only" -eq 1 ]]; then
+  echo "Lumo: pinned skill snapshots are ready; desktop Python environment was not requested."
+  exit 0
+fi
 
 if [[ ! -f "${ppt_root}/requirements.txt" ]]; then
   echo "Lumo: 找不到固定的 PPT Master Skill：${ppt_root}" >&2

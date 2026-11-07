@@ -1,7 +1,7 @@
 # Build the official dsh source and the Lumo adapter from this repository.
 # deepseek-harness is intentionally git-ignored in the host repository, but it
 # is part of this build context and is the authoritative local source.
-FROM node:22-bookworm-slim AS dsh-runtime
+FROM node:24-bookworm-slim AS dsh-runtime-base
 
 # `node` 基镜像不带 C 工具链，而 dsh 的构建要编一个原生插件
 # （`native/system/scripts/build.ts --host-addon-only` 直接用 `cc`）。少了它，
@@ -29,6 +29,8 @@ RUN set -e; \
     done; \
     rm -rf /var/lib/apt/lists/*; \
     corepack enable
+
+FROM dsh-runtime-base AS dsh-dependencies
 WORKDIR /workspace
 
 COPY deepseek-harness/pnpm-lock.yaml /workspace/deepseek-harness/pnpm-lock.yaml
@@ -113,7 +115,9 @@ RUN cd /workspace/deepseek-harness \
        else \
          dsh_commit_hash="$(cat .git/HEAD)"; \
        fi \
-    && DSH_CLIENT_COMMIT_HASH="$dsh_commit_hash" pnpm build \
+    # Keep aggregate checks and artifact compilers sequential in the bounded
+    # Docker VM; overlapping 8 GiB compiler heaps can kill an otherwise valid build.
+    && DSH_CLIENT_COMMIT_HASH="$dsh_commit_hash" pnpm build --serial \
     && node /workspace/platform/dsh-overrides/brand-web.mjs /workspace/deepseek-harness
 
 COPY platform/pnpm-lock.yaml /workspace/platform/pnpm-lock.yaml
@@ -121,12 +125,16 @@ COPY platform/pnpm-workspace.yaml /workspace/platform/pnpm-workspace.yaml
 COPY platform/package.json /workspace/platform/package.json
 RUN cd /workspace/platform && pnpm fetch
 
+COPY platform/upstream/skills/ppt-master/requirements.txt /tmp/lumo-ppt-requirements.txt
+RUN python3 -m venv /opt/lumo-ppt \
+    && /opt/lumo-ppt/bin/python -m pip install --no-cache-dir \
+      -r /tmp/lumo-ppt-requirements.txt
+
+# Source edits do not invalidate the Python or package download layers.
+FROM dsh-dependencies AS dsh-build
 COPY platform /workspace/platform
 RUN cd /workspace/platform && pnpm install --frozen-lockfile --prefer-offline
 RUN cd /workspace/platform && pnpm --filter @lumo/dsh-platform-ui run bundle
-RUN python3 -m venv /opt/lumo-ppt \
-    && /opt/lumo-ppt/bin/python -m pip install --no-cache-dir \
-      -r /workspace/platform/upstream/skills/ppt-master/requirements.txt
 # Profile plugin management follows the pnpm version pinned by the platform
 # workspace. Pre-warm it so first boot can install local link: plugins without
 # a runtime package-manager download.
@@ -140,6 +148,23 @@ RUN python3 -m venv /opt/lumo-ppt \
 # 才真正写默认版本（同时同样预热缓存），使解析结果恒等于工作区 pin。
 RUN corepack install --global pnpm@11.7.0
 
+# Keep fetch stores, compiler caches and intermediate build layers out of the
+# runtime. Workspace node_modules contains the installed packages and keeps
+# its relative workspace links when the complete /workspace tree is copied.
+# Starting from the shared OS layer also retains Python/OCR/native tools used
+# by bundled skills and optional source plugins.
+FROM dsh-runtime-base AS dsh-runtime
+# Source-pinned optional plugins use the official profile manager at boot.
+# Keep Git in the runtime without invalidating the upstream compiler cache.
+RUN set -eu; apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=dsh-build /workspace /workspace
+COPY --from=dsh-build /opt/lumo-ppt /opt/lumo-ppt
+# The outer DSH CLI uses its upstream packageManager pin; profile operations
+# use the platform default outside either workspace. Warm both before boot.
+RUN corepack install --global pnpm@11.7.0 \
+    && cd /workspace/deepseek-harness && corepack install
 WORKDIR /workspace/platform
 ENV NODE_ENV=production
 ENV LUMO_BUNDLED_SKILLS_ROOT=/workspace/platform/upstream/skills

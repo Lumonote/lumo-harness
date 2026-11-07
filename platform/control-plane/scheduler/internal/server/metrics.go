@@ -27,6 +27,8 @@ import (
 // 告警表达式里的名字回来核对「这个名字真的有人写」——散在各处的字面量会让那条
 // 核对退化成字符串碰运气。
 const (
+	MetricPendingReasons    = "lumo_scheduler_pending_by_reason"
+	MetricPendingReasonWait = "lumo_scheduler_pending_reason_oldest_seconds"
 	// MetricPendingTotal 无标签的排队总数。外部 autoscaler 按这个名字扩容，
 	// 是既有契约：新增按集群下钻的序列不能把它撤掉。
 	MetricPendingTotal = "lumo_scheduler_pending_tasks"
@@ -213,6 +215,17 @@ func (s *Server) snapshot() nodeSnapshot {
 // 失败，那会把「少几个指标」升级成「这个实例不可抓取」，反而丢掉本来还能用的
 // 信号。缺失的部分由「序列不存在」表达。
 func (s *Server) publishSchedulerMetrics(ctx context.Context) {
+	if reasons, err := s.store.PendingReasons(ctx); err == nil {
+		counts := make([]observability.GaugePoint, 0, len(reasons))
+		waits := make([]observability.GaugePoint, 0, len(reasons))
+		for _, p := range reasons {
+			labels := map[string]string{"reason": p.Reason}
+			counts = append(counts, observability.GaugePoint{Labels: labels, Value: float64(p.Count)})
+			waits = append(waits, observability.GaugePoint{Labels: labels, Value: p.OldestSeconds})
+		}
+		observability.ReplaceGauges(MetricPendingReasons, counts)
+		observability.ReplaceGauges(MetricPendingReasonWait, waits)
+	}
 	if pending, err := s.store.PendingCount(ctx); err == nil {
 		observability.SetGauge(MetricPendingTotal, float64(pending))
 	} else {

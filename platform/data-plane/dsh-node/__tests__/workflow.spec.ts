@@ -7,7 +7,7 @@ import { localStorageRows, profileLifetimeOverlay, profileStorageRows, workflowE
 
 describe('dsh-node FlowEngine assembly', () => {
   it('overrides the stock unary engine only on a parent node, routing fan-out to lumo-remote', () => {
-    expect(workflowEngineOverlay('agent')).toBe(`- id: workflow-worker-thread
+    expect(workflowEngineOverlay('agent')).toBe(`- id: workflow-ptc
   config:
     provider: lumo-remote
 `)
@@ -22,15 +22,18 @@ describe('dsh-node FlowEngine assembly', () => {
   disabled: true
 - id: headless-runner
   disabled: true
+- id: sandbox-policy
+  inject: []
+  config:
+    mode: !!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'
+    workspaceRoot: !!js process.cwd()
 `)
     expect(profileLifetimeOverlay('headless', true)).toBe('')
     expect(profileLifetimeOverlay('web', false)).toBe('')
   })
 
-  it('mounts the storage hub only for headless profiles that do not already include it', () => {
-    expect(profileStorageRows('headless')).toBe(`    - id: storage
-      name: '@deepseek-ai/dsh-storage'
-`)
+  it('reuses the shared base storage hub in every profile', () => {
+    expect(profileStorageRows('headless')).toBe('')
     expect(profileStorageRows('web')).toBe('')
   })
 

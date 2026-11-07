@@ -92,6 +92,14 @@ volume_for_path() {
 
 restore_components=()
 component_specs=(
+  "dsh-node|/var/lib/lumo/session-spool|dsh-node-spool.tar.zst"
+  "dsh-web|/var/lib/lumo/session-spool|dsh-web-spool.tar.zst"
+  "cluster-a-dsh-0|/var/lib/lumo/session-spool|cluster-a-dsh-0-spool.tar.zst"
+  "cluster-a-dsh-1|/var/lib/lumo/session-spool|cluster-a-dsh-1-spool.tar.zst"
+  "cluster-b-dsh-0|/var/lib/lumo/session-spool|cluster-b-dsh-0-spool.tar.zst"
+  "cluster-b-dsh-1|/var/lib/lumo/session-spool|cluster-b-dsh-1-spool.tar.zst"
+  "cluster-a-bundle|/var/lib/lumo/session-spool|cluster-a-bundle-spool.tar.zst"
+  "cluster-b-bundle|/var/lib/lumo/session-spool|cluster-b-bundle-spool.tar.zst"
   "minio|/data|minio.tar.zst"
   "nacos|/home/nacos/data|nacos.tar.zst"
   "rocketmq|/home/rocketmq/store|rocketmq.tar.zst"

@@ -627,13 +627,21 @@ function runProfileManager(
   env: NodeJS.ProcessEnv,
   args: string[],
 ): ReturnType<typeof spawnSync> {
+  // The outer CLI runs in the selected upstream checkout, whose pnpm pin can
+  // differ from the platform/profile default. The profile shim deliberately
+  // disables project probing, so select the upstream version explicitly.
+  const manifest = JSON.parse(readFileSync(resolve(options.dshRoot, 'package.json'), 'utf8')) as { packageManager?: unknown } | null
+  const manager = manifest?.packageManager
+  if (typeof manager !== 'string' || !/^pnpm@\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(manager)) {
+    throw new Error('dsh-node: upstream packageManager must pin pnpm@<version>')
+  }
   const managerEnv = profileManagerEnv(env)
   const windowsCorepack = process.platform === 'win32'
   return spawnSync(
     windowsCorepack ? 'cmd.exe' : 'corepack',
     windowsCorepack
-      ? ['/d', '/s', '/c', 'corepack.cmd', 'pnpm', 'run', 'dsh', 'plugin', '--profile', options.profile, ...args]
-      : ['pnpm', 'run', 'dsh', 'plugin', '--profile', options.profile, ...args],
+      ? ['/d', '/s', '/c', 'corepack.cmd', manager, 'run', 'dsh', 'plugin', '--profile', options.profile, ...args]
+      : [manager, 'run', 'dsh', 'plugin', '--profile', options.profile, ...args],
     {
       cwd: options.dshRoot,
       env: managerEnv,

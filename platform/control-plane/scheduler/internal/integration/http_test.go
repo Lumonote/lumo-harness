@@ -106,7 +106,7 @@ func TestHTTPNoLeaderFastFailAndFullFlow(t *testing.T) {
 
 	// 回报终态（幂等：二次回报同样成功）
 	for i := 0; i < 2; i++ {
-		resp, body = post("/v1/tasks/t1/result", "r1", `{"state":"COMPLETED"}`)
+		resp, body = post("/v1/tasks/t1/result", "r1", `{"state":"COMPLETED","attempt":1,"node_id":"N1"}`)
 		if resp.StatusCode != http.StatusOK || !strings.Contains(body, "COMPLETED") {
 			t.Fatalf("回报终态失败: %d %s", resp.StatusCode, body)
 		}

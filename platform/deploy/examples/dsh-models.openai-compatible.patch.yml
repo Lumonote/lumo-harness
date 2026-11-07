@@ -1,0 +1,18 @@
+# Native DeepSeek Harness patch for a custom OpenAI Chat Completions endpoint.
+# Replace endpoint/model; export COMPANY_API_KEY or save that native credential reference.
+# "company-api" is a route name, and must match agent-default-model.provider below.
+- id: llm-pi-ai
+  config:
+    providers:
+      company-api:
+        api: openai-completions
+        apiKeyEnv: COMPANY_API_KEY
+        # OpenAI SDK appends /chat/completions to this exact baseURL.
+        baseURL: https://gateway.example.com/v1
+        models:
+          - id: company-model
+
+- id: agent-default-model
+  config:
+    provider: company-api
+    model: company-model

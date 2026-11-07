@@ -16,6 +16,19 @@
 | **[`roadmap.md`](./roadmap.md)** | 实施蓝图与端到端流程（§16–§17）：仓库布局、P0–P4 构建顺序、MVP 建议、五类端到端流程串联验证（含共享编辑 + 多集群监控） | 规划排期与验收时 |
 | **[`design-review.md`](./design-review.md)** | 独立评审意见：架构 / 技术选型 / 业务产品三维度，**5 条 P0 风险** + 对新增章节的评审 + 替代落地顺序 + 待补章节 | **实施前必读** |
 
+### 最新续开发记录
+
+- [2026-11-07 原生模型配置与 Docker 双节点验收](./model-and-docker-acceptance-2026-11-07.md)：沿用 DeepSeek Harness 配置、部署隔离修复、真实 Docker 故障结果及外部供应商拒绝边界。
+- [2026-11-07 Thread 舰队、动态归属、Bot 授权与异构审核](./thread-fleet-delivery-2026-11-07.md)：五项剩余能力、迁移 016–019、配置、最终验证结果与生产验收边界。
+- [2026-11-06 动态会话归属与认证文本入口](./dynamic-session-owner-2026-11-06.md)：不可抢占归属、独立 `/lumo/chat`、非 owner Peer 与 Gateway、纯文本执行及原生共享 owner 入口关闭。
+
+- [2026-11-06 Thread 固定节点与稳定会话执行](./thread-stable-execution-2026-11-06.md)：显式文本轮次、当前治理授权、持久准入/回执、Agent 并发槽与逐轮计量；含配置、迁移前提、真实进程重启验证及未完成能力。
+- [2026-11-06 团队迁移、流程委派与分页](./team-migration-and-governed-flows-2026-11-06.md)：旧团队显式迁移、持久委派回执、`delegation.create`、实际 Run 计量、Go/TS 同矩阵与分页；含真实进程验证和剩余边界。
+- [2026-11-06 团队隔离与线程看板](./team-isolation-and-thread-fleet-2026-11-06.md)：`codex/v1.2.1` 的跨实例 CAS、租户/captain 隔离、控制态批量读与线程聚合；含兼容变化和剩余功能。
+- [2026-11-06 页面、Bot 与智能体团队](./ui-and-agent-capability-2026-11-06.md)：实际交付、验证结果与尚未完成的设计项。
+- [Bot 事件接入](./bot-ingress.md)：签名、持久去重、流程绑定与可选 Compose 接线。
+- [2026-11-06 集群整改与验收](./cluster-remediation-2026-11-06.md)：前阶段本机多节点故障演练的证据与边界。
+
 ### 专题设计（实现相关能力时并读）
 
 | 文档 | 内容 |
@@ -24,6 +37,13 @@
 | **[`cluster-gap-analysis.md`](./cluster-gap-analysis.md)** | **集群模式功能缺口清单**（首版 2026-09-08 / **2026-09-14 复核 / 2026-09-15 再复核与第三轮**）：34 项中 21 项已闭合、2 项部分闭合、3 项判为非缺口。**首版的 A 组（静默 P0）与 B 组（装配缺口）已全部闭合**；E2/E3 经再复核**改判为误读**（首版断言抄了 doc comment、只查了函数调用方而没查表的消费者），单独成节留下「怎么误判的」这个证据。D5（验收链路）同日**全部闭合**——修掉了「步骤全跳过却报通过」的假绿缺陷、补上了端口暴露覆盖文件，并顺带发现 `up.sh` 从未真正启动过拓扑（警告函数在 `set -e` 下返回非 0）。D2/D3（Helm Secret 契约与集群 profile）同日闭合，并顺带发现 `replicaCount: 2` 会让两个 scheduler 以同一 holder 拿到同一个 fencing token（**双 leader 且互相无 fencing**）。**D 组现只剩 D1**（Nebula 进编排，已降为产品决策）。当前剩下的几乎全是 C 组（设计能力零命中）与 E 组两处有意保留的取舍，逐条带 file:line 与建议补齐顺序。排期前请以再复核版为准——首版清单已不反映现状 |
 | **[`2026-09-20-cluster-multi-agent-coordinator-fleet-design.md`](./superpowers/specs/2026-09-20-cluster-multi-agent-coordinator-fleet-design.md)** | **集群模式多智能体协同 §24**（**P6a–P6f 已落地**，另有第二轮五路并行收尾）：协调者一等角色（只收汇报/不执行/低 effort）、两档成员（Worker 一次性 / Thread 可续跑）、Fork 前缀复用与工作目录隔离、项目决策记忆（append-only + supersede）、动作放行三档（AUTO/REVIEW/DENY，分类器**只收窄**）、注意力路由看板、组合正确性闸门、异构审查者。含与文章的**偏离清单**（云沙盒、PR 工作流、厂商配额、`Workflow` DSL 等显式不采纳） |
 | **[`2026-08-29-task-control-and-dispatch-design.md`](./superpowers/specs/2026-08-29-task-control-and-dispatch-design.md)** | **业务控制面 §23**（P5a–P5e 已落地）：统一 Worker（人/Agent 同尺）、五维归一化派单与置信度分档、任务/Run 拆分与评审闸门、证据链汇报（stale fail-closed）、集群派单与本机多智能体入口。含**外部研究稿的选型映射护栏**（§1：Kafka/NATS/LiteLLM/Volcano 等一律不采纳）与 Agent 授权死路径缺陷（§2.3） |
+
+### 集群正确性与部署验收记录
+
+| 文档 | 内容 |
+|------|------|
+| [`cluster-assessment-2026-11-05.md`](./cluster-assessment-2026-11-05.md) | 基线 `bf105cd` 的整改前评估，保留问题证据与验收判据 |
+| [`cluster-remediation-2026-11-06.md`](./cluster-remediation-2026-11-06.md) | 本轮调度、执行恢复、日志、协作存储与部署整改，实际验证结果及生产边界；升级前并读部署回滚说明 |
 
 ## 二、阅读路径
 

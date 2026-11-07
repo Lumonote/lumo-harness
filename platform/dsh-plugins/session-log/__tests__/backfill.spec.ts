@@ -17,8 +17,8 @@ import { schemaDsn, truncateSessionLog } from './pg-schema.ts'
  *   - `store.create(id, { seed })`:种子事件经 Session 构造器进入 events,从不发布到
  *     `session/event`(constructor seeds do not emit);构造函数还会补
  *     `session/end-seed` 标记——都是「构造期事件」的活样本。
- *   - `prepare` → 构造窗口 append → `enter` + `announce`:承载/child 会话的真实
- *     setup 窗口形状(attach 前的 append 不发布),created 于 announce 时发出。
+ *   - `prepare({ seed })` → `enter` + `announce`:承载/child 会话的真实
+ *     setup 窗口形状（announce 完成前禁止 append），created 于 announce 时发出。
  *
  * 断言的是「复制日志完整性」:构造期行全部落库、(session,seq) 幂等一下二次回填
  * 不增产、与 post-attach firehose 事件共存时 seq 连续无隙无重复、他人持租时回填
@@ -91,7 +91,7 @@ async function withBoot(
   ctx.provide('tools', new ToolsStub(ctx))
   await ctx.plugin(SessionStore)
   // 先装插件再 create:created 监听必须在创建之前注册(本插件挂 created/event/disposed)
-  apply(ctx, {
+  await apply(ctx, {
     connectionString: dsn,
     holder: 'backfill-test-node',
     leaseTtlMs: 30_000,
@@ -245,21 +245,20 @@ describe(`回填 —— 对真 PG（需 SESSION_LOG_TEST_DSN，当前${suffix}�
     })
   })
 
-  t('构造窗口 append（prepare → append → enter → announce 的真实 setup 窗口）', async () => {
+  t('高级创建窗口（prepare(seed) → enter → announce）的种子事件只在 announce 后回填', async () => {
     await withBoot(async (ctx, store, pg) => {
-      const session = store.prepare(SessionId('bf-window'))
-      // attach 前的 append：无 store 条目 → 不发布到 session/event
-      session.append('turn/start', { turn: 1 })
-      session.append('step/start', { turn: 1, step: 1 })
+      const session = store.prepare(SessionId('bf-window'), { seed: [eventOf(0), eventOf(1, 'step/start')] })
+      expect(await pg.read('bf-window')).toEqual([])
       const detach = store.enter(session)
+      expect(await pg.read('bf-window')).toEqual([])
       store.announce(session) // created 于此处发出 → 回填
       const rows = await poll(
         () => pg.read('bf-window'),
-        (got) => got.length === 2,
-        '构造窗口 2 条落库',
+        (got) => got.length === 3,
+        '构造窗口种子与 end-seed 共 3 条落库',
       )
-      expect(rows.map((r) => r.seq)).toEqual([0, 1])
-      expect(rows.map((r) => r.type)).toEqual(['turn/start', 'step/start'])
+      expect(rows.map((r) => r.seq)).toEqual([0, 1, 2])
+      expect(rows.map((r) => r.type)).toEqual(['turn/start', 'step/start', 'session/end-seed'])
       detach()
     })
   })

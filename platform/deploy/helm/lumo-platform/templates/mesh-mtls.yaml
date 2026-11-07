@@ -15,6 +15,7 @@ spec:
   selector:
     matchLabels:
       lumo.dev/mesh-mtls: "enabled"
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
   mtls:
     mode: STRICT
 ---
@@ -141,6 +142,7 @@ spec:
   selector:
     matchLabels:
       lumo.dev/mesh-mtls: "enabled"
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
   action: DENY
   rules:
     - from:

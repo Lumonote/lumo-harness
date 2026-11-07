@@ -15,9 +15,9 @@ var ErrTaskIdentityConflict = errors.New("task id belongs to a different executi
 func (s *Store) ExistingPlacement(ctx context.Context, task domain.Task) (*domain.Placement, error) {
 	var p domain.Placement
 	var workerID, projectID string
-	err := s.pool.QueryRow(ctx, `SELECT task_id,realm,state,COALESCE(node_id,''),attempt,fencing_token,worker_id,project_id
+	err := s.pool.QueryRow(ctx, `SELECT task_id,realm,state,COALESCE(node_id,''),attempt,fencing_token,worker_id,project_id,assigned_cluster_id
 	  FROM scheduler_tasks WHERE task_id=$1`, task.TaskID).
-		Scan(&p.TaskID, &p.Realm, &p.State, &p.NodeID, &p.Attempt, &p.FencingToken, &workerID, &projectID)
+		Scan(&p.TaskID, &p.Realm, &p.State, &p.NodeID, &p.Attempt, &p.FencingToken, &workerID, &projectID, &p.AssignedClusterID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -27,7 +27,9 @@ func (s *Store) ExistingPlacement(ctx context.Context, task domain.Task) (*domai
 	if p.Realm != task.Realm || workerID != task.WorkerID || projectID != task.ProjectID {
 		return nil, ErrTaskIdentityConflict
 	}
-	if p.State.Active() || (workerID != "" && p.State.Terminal()) {
+	// Cancellation is sticky: delayed HTTP retries must not resurrect an orphan.
+	// Starting fresh work after cancellation requires a fresh task identity.
+	if p.State.Active() || p.State == domain.StateAborted || (workerID != "" && p.State.Terminal()) {
 		return &p, nil
 	}
 	return nil, nil

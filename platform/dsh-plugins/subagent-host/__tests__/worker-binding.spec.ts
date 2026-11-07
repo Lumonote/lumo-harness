@@ -25,6 +25,11 @@ it.each([{ realm: 'other' }, { project_id: 'other' }, { revision: 8 }, { status:
   expect(() => assertExecutionPreset(binding, 'realm', { ...preset, ...patch })).toThrow()
 })
 
+it('accepts the database default for an absent prompt reference', () => {
+  expect(() => assertExecutionPreset(binding, 'realm', { ...preset, system_prompt_ref: '' })).not.toThrow()
+  expect(() => assertExecutionPreset(binding, 'realm', { ...preset, system_prompt_ref: ' ' })).toThrow()
+})
+
 it('accepts a prompt reference as a lookup key for the protected node source', () => {
   expect(() => assertExecutionPreset(binding, 'realm', { ...preset, system_prompt_ref: 'prompt' })).not.toThrow()
 })

@@ -196,7 +196,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireProjectMember(w, r, f.ProjectID, c); !ok {
 		return
 	}
-	definition, err := s.store.Definition(r.Context(), r.PathValue("id"), c.realm)
+	definition, version, err := s.store.DefinitionSnapshot(r.Context(), r.PathValue("id"), c.realm)
 	if err != nil {
 		http.Error(w, `{"error":"published flow not found"}`, http.StatusNotFound)
 		return
@@ -217,7 +217,18 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	if len(c.depts) > 0 {
 		dept = c.depts[0]
 	}
-	result, err := s.engine.Run(engine.WithIdentity(r.Context(), observability.Identity{
+	executionCtx := r.Context()
+	if key := r.Header.Get("Idempotency-Key"); key != "" {
+		if len(key) > 200 || strings.IndexFunc(key, func(c rune) bool {
+			return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("_.:-", c))
+		}) >= 0 {
+			http.Error(w, `{"error":"invalid Idempotency-Key"}`, http.StatusBadRequest)
+			return
+		}
+		scope, _ := json.Marshal([]string{"manual", f.ID, strconv.Itoa(version), key})
+		executionCtx = engine.WithExecutionKey(executionCtx, string(scope))
+	}
+	result, err := s.engine.Run(engine.WithIdentity(executionCtx, observability.Identity{
 		Realm: c.realm, UserID: c.user, Roles: c.roles, ProjectID: f.ProjectID, DeptID: dept,
 	}), &def, req.Input)
 	if err != nil {

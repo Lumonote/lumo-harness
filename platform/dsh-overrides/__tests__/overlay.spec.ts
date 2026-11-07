@@ -218,7 +218,8 @@ describe('applyLumoDshOverrides', () => {
   it.each([
     '      <div className={css.sectionHeader}>\n',
     '      <div className={clsx(css.sectionHeader, wide && searchSpacingMotionEnabled && css.searchSpacingMotion)}>\n',
-  ])('历史切换兼容两代 header 并保留上游类名:%s', (header) => {
+    '      <div className={clsx(css.sectionHeader, wide && searchSpacingMotionEnabled && css.searchSpacingMotion)} data-sidebar-workspace-header="">\n',
+  ])('历史切换兼容已知 header 并保留上游属性:%s', (header) => {
     const root = stagePristineUpstream('history-header')
     const file = 'packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx'
     writeFileSync(resolve(root, file), `function History() { return (\n${header}        native header\n      </div>\n) }`)
@@ -263,6 +264,9 @@ describe('applyLumoDshOverrides', () => {
     expect(sidebarSlots).toContain("| 'sidebar.navigation'")
     const sidebarRoot = read(root, PATCHED[5]!)
     expect(sidebarRoot).toContain("renderSlot('sidebar.navigation', { wide })")
+    if (sidebarRoot.includes('<div className={css.scrollRegion}>')) {
+      expect(sidebarRoot.indexOf("renderSlot('sidebar.navigation', { wide })")).toBeLessThan(sidebarRoot.indexOf('<div className={css.scrollRegion}>'))
+    }
 
     const history = read(root, 'packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx')
     expect(history).toContain('data-lumo-history-toggle')
@@ -293,11 +297,49 @@ describe('applyLumoDshOverrides', () => {
 
   })
 
-  it('web 启动依据最终激活报告跳过坏插件,引导与渲染错误仍然报告', () => {
-    const root = stagePristineUpstream('best-effort')
+  it('原生启动隔离保留上游源码,optional失败可降级且required失败继续阻断', () => {
+    const root = stagePristineUpstream('native-boot')
+    const files = [
+      'packages/client/web/src/boot-client.ts',
+      'packages/client/modules/src/client/entries.ts',
+      'packages/client/web/src/boot.ts',
+    ]
+    const originals = files.map(file => read(root, file))
+    applyLumoDshOverrides(root)
+    expect(files.map(file => read(root, file))).toEqual(originals)
+    expect(originals[0]).toContain('const requiredClientEntryNames = new Set<string>([')
+    expect(originals[0]).toContain('if (required > 0) {')
+    expect(originals[0]).toContain('throw new Error(`web boot: ${String(required)} required')
+    expect(originals[0]).toContain('warn(`web boot: warning:')
+    expect(originals[1]).toContain('.catch((error: unknown) => { loader.ctx.logger.error(error) })')
+    expect(originals[2]).not.toContain('ClientActivationError')
+  })
+
+  it('旧版web启动仍兼容原有逐插件失败隔离', () => {
+    const root = stagePristineUpstream('legacy-boot')
+    writeFileSync(resolve(root, 'packages/client/web/src/boot-client.ts'),
+      "import { STATE_LABELS } from './loader-status.ts'\n"
+        + "    throw new Error(`web boot: ${String(failures.length)} entr${failures.length === 1 ? 'y' : 'ies'} did not activate\\n${failures.join('\\n')}`)\n")
+    writeFileSync(resolve(root, 'packages/client/modules/src/client/entries.ts'),
+      "      await Promise.all(this.desired.plugins.map(async ({ id }) => {\n"
+        + "        await this.create(loader, id)\n"
+        + "      }))\n"
+        + "      await loader.await()\n")
+    writeFileSync(resolve(root, 'packages/client/web/src/boot.ts'),
+      "import { bootClient } from './boot-client.ts'\n"
+        + "   * Load and activate every client entry, then hand the mount point to the\n"
+        + "   * UI renderer. Plugin failures remain visible on the boot page.\n"
+        + "      await bootClient({\n"
+        + "        ctx,\n"
+        + "        modules: this.modules,\n"
+        + "        manifest: this.manifest,\n"
+        + "        onEntryState: (name, state) => {\n"
+        + "          if (onFailure === undefined || state !== 'failed') this.page.setState(name, state)\n"
+        + "        },\n"
+        + "      })\n"
+        + "      await mountClient(ctx, this.container)\n")
     applyLumoDshOverrides(root)
     const source = read(root, 'packages/client/web/src/boot.ts')
-
     const audit = read(root, 'packages/client/web/src/boot-client.ts')
     expect(source).toContain('LUMO_BEST_EFFORT_BOOT')
     expect(source).toMatch(/try \{\n\s+await bootClient\(\{/u)
@@ -306,6 +348,16 @@ describe('applyLumoDshOverrides', () => {
     expect(source).toContain('if (!(bootFailure instanceof ClientActivationError)) throw bootFailure')
     expect(source).toContain("if (ctx.get('uiRenderer') === undefined)")
     expect(source).toMatch(/for \(const failure of bootFailure.failures\)[^]*await mountClient\(ctx, this\.container\)/u)
+  })
+
+  it('原生启动的未知关键插件失败处理仍会报锚点失配', () => {
+    const root = stagePristineUpstream('unknown-boot')
+    const file = 'packages/client/web/src/boot-client.ts'
+    writeFileSync(resolve(root, file), read(root, file).replace('if (required > 0) {', 'if (required > 1) {'))
+    expect(() => { applyLumoDshOverrides(root) }).toThrow(/boot-client\.ts does not contain the expected upstream anchor/u)
+    expect(diagnoseOverlayAnchors(root)).toEqual([
+      expect.objectContaining({ file, kind: 'missing' }),
+    ])
   })
 
   it('覆盖层改过的包都被登记为「要重建」,否则补丁永远不会进产物', () => {

@@ -60,6 +60,9 @@ export interface StartChildRequest {
   /** 父侧 mint 的 child session id（幂等键：承载侧已存在 → notFound/invalid）。 */
   readonly childId: string
   readonly realm: string
+  /** Scheduler assignment fencing; both fields must travel together. */
+  readonly schedulerAttempt?: number
+  readonly schedulerNodeId?: string
   readonly label?: string
   /** 子代理用户消息内容（模型面 JSON，`ContentBlock[]` 结构等价）。 */
   readonly prompt: unknown[]
@@ -181,6 +184,12 @@ export function assertStartChildRequest(v: unknown): asserts v is StartChildRequ
     throw invalid('subagent-host: StartChildRequest 必须是对象')
   }
   const req = v as Record<string, unknown>
+  if (req.schedulerAttempt !== undefined || req.schedulerNodeId !== undefined) {
+    if (!Number.isSafeInteger(req.schedulerAttempt) || Number(req.schedulerAttempt) < 1
+      || typeof req.schedulerNodeId !== 'string' || !req.schedulerNodeId) {
+      throw invalid('subagent-host: schedulerAttempt and schedulerNodeId must identify one assignment')
+    }
+  }
   // 回执目标是 child 输出的 POST 目的地：无形态校验的话，共享令牌持有者能把 child
   // 输出投到任意内网端点（终审 F3 最小面——只认 http(s) 绝对 URL）。
   assertHttpUrl(requireString(req, 'callbackUrl', 'StartChildRequest'), 'StartChildRequest.callbackUrl')

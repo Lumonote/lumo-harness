@@ -140,13 +140,14 @@ function harness(initial = row(), notices: NodeLossNotice[] = [], config: { runn
 }
 
 describe('线程工具面注册', () => {
-  it('注册全部 6 个 agent_threads_* 工具，名字无遗漏', () => {
+  it('注册全部 9 个 agent_threads_* 工具，名字无遗漏', () => {
     expect([...harness().tools.keys()].sort()).toEqual([
       'agent_threads_advance',
       'agent_threads_await',
       'agent_threads_create',
       'agent_threads_pause',
       'agent_threads_reassign',
+      'agent_threads_run', 'agent_threads_schedule', 'agent_threads_signal',
       'agent_threads_status',
     ])
   })
@@ -164,6 +165,17 @@ describe('线程工具面注册', () => {
 
   it('没有「上报节点丢失」这个工具（模型能自己关掉一条好线程就是要防的形状）', () => {
     expect([...harness().tools.keys()].some(name => name.includes('node'))).toBe(false)
+  })
+})
+
+describe('持久轮次工具', () => {
+  it('从注册表取 task，传递真实协调者与取消信号', async () => {
+    const h = harness(row({ state: 'idle' }))
+    const result = await h.call('agent_threads_run', { threadId: 't-1', attempt: 1, prompt: 'Continue the work' })
+    expect(h.rounds).toEqual([{ threadId: 't-1', attempt: 1, prompt: 'Continue the work' }])
+    expect(result).toMatchObject({ threadId: 't-1', runId: 'child-9', thread: { taskId: 'task-7' } })
+    await expect(h.call('agent_threads_run', { threadId: 't-1', attempt: 0, prompt: 'Work' })).rejects.toThrow()
+    await expect(harness(row(), [], { runner: false }).call('agent_threads_run', { threadId: 't-1', attempt: 1, prompt: 'Work' })).rejects.toThrow('稳定会话')
   })
 })
 

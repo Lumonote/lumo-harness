@@ -5,14 +5,16 @@ metadata:
   name: {{ include "lumo-platform.name" . }}-provisioner
   labels:
     lumo.dev/service: provisioner
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
 spec:
   replicas: 1
   selector:
-    matchLabels: { lumo.dev/service: provisioner }
+    matchLabels: { lumo.dev/service: provisioner, app.kubernetes.io/instance: {{ .Release.Name | quote }} }
   template:
     metadata:
       labels:
         lumo.dev/service: provisioner
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
         {{- if .Values.serviceMesh.istio.enabled }}
         lumo.dev/mesh-mtls: "enabled"
         {{- if .Values.serviceMesh.istio.revision }}
@@ -24,6 +26,7 @@ spec:
         sidecar.istio.io/inject: "true"
       {{- end }}
     spec:
+      {{- include "lumo-platform.topology" (dict "root" . "service" "provisioner") | nindent 6 }}
       containers:
         - name: provisioner
           image: {{ .Values.provisioner.image | quote }}

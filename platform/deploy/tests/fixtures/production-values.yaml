@@ -1,0 +1,47 @@
+# Render-only test data. .invalid endpoints and test Secret names MUST NOT be
+# installed. This fixture proves the contract can render when fully specified;
+# it is not an example of verified HA infrastructure.
+production:
+  databaseSecret: test-database
+  postgresEndpoint: pg.ha.test.invalid:5432
+  dependencyEvidence:
+    postgres: test-evidence/postgres
+    redis: test-evidence/redis
+    rocketmq: test-evidence/rocketmq
+    nacos: test-evidence/nacos
+    vault: test-evidence/vault
+    objectStore: test-evidence/object-store
+  restoreDrillRef: test-evidence/restore-drill
+  durabilityPolicyRef: test-evidence/durability
+redis: { address: redis.ha.test.invalid:6379 }
+rocketmq: { endpoint: rmq.ha.test.invalid:8081 }
+nacos: { address: https://nacos.ha.test.invalid }
+vault: { address: https://vault.ha.test.invalid, tokenSecret: test-vault }
+objectStore:
+  endpoint: s3.ha.test.invalid
+  credentialsSecret: test-object-store
+governance: { authSecret: test-governance-auth }
+networkPolicy:
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { test-ingress: enabled }
+  externalEgress:
+    - to:
+        - ipBlock: { cidr: 192.0.2.0/24 }
+serviceMesh:
+  istio: { trustDomain: cluster.local }
+productionControls:
+  observability:
+    sloDocumentRef: test-evidence/slo
+    collectorUrl: https://otel.test.invalid
+    lokiUrl: https://loki.test.invalid
+    objectStoreBucket: test-traces
+    objectStoreEndpoint: https://s3.ha.test.invalid
+    logsRetentionDays: 7
+    tracesRetentionDays: 7
+    monthlyCostCapUSD: 100
+  compliance:
+    breakGlassPolicyRef: test-evidence/break-glass
+    tenantKeyDestructionPolicyRef: test-evidence/key-destruction
+    marketplaceGovernancePolicyRef: test-evidence/marketplace

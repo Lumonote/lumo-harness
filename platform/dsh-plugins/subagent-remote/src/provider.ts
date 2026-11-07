@@ -42,10 +42,13 @@ import {
   postPlacement,
   postTerminalState,
   terminalStateOf,
+  cancelPlacement,
 } from './client.ts'
 import type { ChildParentDescriptor, StartChildRequest } from '../../../shared/seam-contracts/subagent-host.ts'
 import type { JobControlSeam } from '../../../shared/seam-contracts/job-virtualization.ts'
 import type { CallbackInbox } from '../../../shared/subagent-receipts.ts'
+import type { PlacementRecovery } from './placement-recovery.ts'
+import type { PlacementResult } from './client.ts'
 
 export interface RemoteConfig {
   readonly connectionString?: string
@@ -65,6 +68,7 @@ export interface RemoteConfig {
   /** Restrict placement to the parent node's execution cluster when set. */
   readonly clusterId?: string
   readonly realm: string
+  readonly ownerUserId?: string
   /** 回调接收端口(provider 进程内 createServer)。 */
   readonly callbackPort: number
   readonly callbackHost?: string
@@ -74,6 +78,9 @@ export interface RemoteConfig {
   readonly jobControl?: JobControlSeam
   readonly controlActor?: string
   readonly controlRole?: string
+  readonly placementTimeoutMs?: number
+  readonly placementPollIntervalMs?: number
+  readonly placementRecovery?: PlacementRecovery
 }
 
 export class RemoteSubagentProvider implements SubagentProvider {
@@ -148,16 +155,22 @@ export class RemoteSubagentProvider implements SubagentProvider {
 		resolveResult = resolve
 		rejectResult = reject
 	})
+	// Observe failures that arrive before start() publishes the run handle.
+	// The consumer still receives the original, rejected result Promise.
+	void result.catch(() => {})
 	const pendingEntry: PendingEntry = { secret, settler: settleOf(childId, resolveResult, rejectResult) }
 	this.pending.set(childId, pendingEntry)
 
     // placement 是否已落 scheduler 账:201 之后失败必须回报终态(F1a),
     // 否则 PLACED 槽位无任务级 GC、永久泄漏;202/放置失败则从未占用,无需上报。
-    let placed = false
+    let placement: PlacementResult | undefined
     try {
-		const placement = await postPlacement({ base: this.scheduler, realm: this.realm, childId, clusterId: this.clusterId, controlPlaneToken: this.controlPlaneToken })
+			await this.config.placementRecovery?.begin(childId, (this.config.placementTimeoutMs ?? 120_000) + 60_000)
+			placement = await postPlacement({ base: this.scheduler, realm: this.realm, childId, clusterId: this.clusterId,
+        controlPlaneToken: this.controlPlaneToken, signal: request.signal,
+        placementTimeoutMs: this.config.placementTimeoutMs, pollIntervalMs: this.config.placementPollIntervalMs })
 		pendingEntry.attempt = placement.attempt
-		placed = true
+      pendingEntry.nodeId = placement.nodeId
 		const nodeId = placement.nodeId
 	  const nodeUrl = await this.resolveNodeUrl(nodeId)
       if (nodeUrl === undefined) {
@@ -168,10 +181,14 @@ export class RemoteSubagentProvider implements SubagentProvider {
         throw new SubagentError(`节点 ${nodeId} 未配置承载令牌`, 'HOST_TOKEN_UNKNOWN')
       }
       await this.receipts?.register(this.realm, childId, {
-        secretHash: createHash('sha256').update(secret).digest('hex'), attempt: placement.attempt,
+        secretHash: createHash('sha256').update(secret).digest('hex'), attempt: placement.attempt, nodeId: placement.nodeId,
+        parentSessionId: String(parent.sessionId), ...(this.config.ownerUserId ? { ownerUserId: this.config.ownerUserId } : {}),
       })
-      await postChildStart({ base: nodeUrl.replace(/\/+$/, ''), realm: this.realm, token, request: body })
-      const directStop = () => postChildStop({ base: nodeUrl.replace(/\/+$/, ''), realm: this.realm, token, childId })
+      await postChildStart({ base: nodeUrl.replace(/\/+$/, ''), realm: this.realm, token, signal: request.signal,
+        request: { ...body, schedulerAttempt: placement.attempt, schedulerNodeId: placement.nodeId } })
+      await this.config.placementRecovery?.finish(childId)
+      const directStop = () => postChildStop({ base: nodeUrl.replace(/\/+$/, ''), realm: this.realm, token, childId,
+        attempt: placement!.attempt, nodeId: placement!.nodeId })
       const stop = this.config.jobControl === undefined
         ? directStop
         : async () => {
@@ -189,17 +206,43 @@ export class RemoteSubagentProvider implements SubagentProvider {
     } catch (e) {
       // 未被承载侧接受的 child 不存在可结集回执:摘表,不给 mock host 留幽灵
       this.pending.delete(childId)
-      if (placed) {
-        // F1a:placement 201 已把 childId 计入 scheduler 容量(start 失败 403/超时/
-        // 不可达均不释放,且无任务级 GC —— 4 次即耗尽节点槽位)。fire-and-forget
-        // best-effort:上报失败只记影子,不吞原错(原错照抛)。
-        // 注:超时歧义场景可能误报 —— child 实际已在承载侧跑完,其回执对已摘表的
-        // pending 以 404 被拒;仍优于永久占槽:以 FAILED 结账,scheduler 才能重派。
-		void postTerminalState({ base: this.scheduler, realm: this.realm, childId, state: 'FAILED', attempt: pendingEntry.attempt, controlPlaneToken: this.controlPlaneToken })
-          .catch(() => { /* best-effort:终态上报失败仅留审计,不遮蔽 start 原错 */ })
-      }
+      // A timeout may mean the child actually started. Persist cancellation
+      // before attempting it; never declare a live execution FAILED just to free capacity.
+      try {
+        if (this.config.placementRecovery) await this.config.placementRecovery.cancel(childId, placement)
+        else await cancelPlacement({ base: this.scheduler, realm: this.realm, childId, controlPlaneToken: this.controlPlaneToken, ...placement })
+      } catch { /* Durable recovery retries after connectivity returns. Preserve the start error. */ }
       throw e
     }
+  }
+
+  /** Explicitly reattach transport state; this never starts or replays a child. */
+  async recover(childId: string, parent: Agent): Promise<SubagentRun> {
+    const receipt = await this.receipts?.get(this.realm, childId)
+    if (!receipt?.attempt || !receipt.nodeId || !this.config.ownerUserId || receipt.ownerUserId !== this.config.ownerUserId
+      || !receipt.parentSessionId || receipt.parentSessionId !== String(parent.session.header.id)) {
+      throw new SubagentError('No recoverable child belongs to this parent identity', 'REMOTE_RUN_NOT_RECOVERABLE')
+    }
+    if (this.pending.has(childId)) throw new SubagentError('This child already has an attached result consumer', 'REMOTE_RUN_ALREADY_ATTACHED')
+    let resolve!: (result: SubagentResult) => void
+    let reject!: (error: unknown) => void
+    const result = new Promise<SubagentResult>((yes, no) => { resolve = yes; reject = no })
+    void result.catch(() => {})
+    const entry: PendingEntry = { secretHash: receipt.secretHash, attempt: receipt.attempt,
+      nodeId: receipt.nodeId, settler: settleOf(childId, resolve, reject) }
+    this.pending.set(childId, entry)
+    if (receipt.body) {
+      try {
+        await postTerminalState({ base: this.scheduler, realm: this.realm, childId, state: terminalStateOf(receipt.body),
+          attempt: receipt.attempt, nodeId: receipt.nodeId, controlPlaneToken: this.controlPlaneToken })
+        // A callback can settle while the report is in flight. Resolve at most once.
+        if (this.pending.get(childId) === entry) { entry.settler(receipt.body); this.pending.delete(childId) }
+      } catch (error) { this.pending.delete(childId); throw error }
+    }
+    return remoteRunHandle(childId, result, async () => {
+      await cancelPlacement({ base: this.scheduler, realm: this.realm, childId, attempt: receipt.attempt,
+        nodeId: receipt.nodeId, controlPlaneToken: this.controlPlaneToken })
+    })
   }
 
 	private async resolveNodeUrl(nodeId: string): Promise<string | undefined> {
@@ -290,13 +333,14 @@ export function assembleRemote(config: RemoteConfig, receipts?: CallbackInbox): 
     pending,
     realm: config.realm,
     receipts,
-    reportTerminal: (body, attempt) => postTerminalState({
+    reportTerminal: (body, attempt, nodeId) => postTerminalState({
       base: config.schedulerUrl.replace(/\/+$/, ''),
       controlPlaneToken: config.controlPlaneToken,
       realm: config.realm,
       childId: body.runId,
       state: terminalStateOf(body),
       attempt,
+      nodeId,
     }),
   })
   return { provider: new RemoteSubagentProvider(config, pending, 'lumo-remote', receipts), server }

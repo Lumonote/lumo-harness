@@ -23,6 +23,7 @@ type RuntimeConfig struct {
 	// 固化读面。未配置时该算子登记为 unavailable：**默认关闭**是设计要的取向
 	// （§16 R4 没有给频率默认值），而「关」的判据落在配置上，不落在某条默认 cron 上。
 	ProjectsURL    string
+	GovernanceURL  string
 	ControlToken   string
 	IdentitySecret string
 	Client         *http.Client
@@ -31,6 +32,13 @@ type RuntimeConfig struct {
 type identityKey struct{}
 type nodeKey struct{}
 type wakeTraceKey struct{}
+type executionKey struct{}
+
+// WithExecutionKey supplies a trusted workflow attempt identity. Node input is
+// never allowed to choose a delegation's idempotency scope.
+func WithExecutionKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, executionKey{}, key)
+}
 
 func WithIdentity(ctx context.Context, identity observability.Identity) context.Context {
 	return context.WithValue(ctx, identityKey{}, identity)
@@ -68,6 +76,7 @@ func (e *Engine) registerRuntime(config RuntimeConfig) {
 		// 与本文件其余算子完全同一条链路。频率因此是那条 cron 表达式；**没有任何默认
 		// 频率**（§16 R4：给一个编出来的默认值比留空更糟），不建自动化即关闭。
 		{[]string{"decisions.consolidate"}, config.ProjectsURL, "projects"},
+		{[]string{"delegation.create"}, config.GovernanceURL, "delegation"},
 	} {
 		for _, name := range spec.names {
 			e.Register(name, func(ctx context.Context, input any) (any, error) {
@@ -101,6 +110,10 @@ func (config RuntimeConfig) invoke(ctx context.Context, kind, endpoint string, i
 		return nil, fmt.Errorf("flow execution identity is required")
 	}
 	node, _ := ctx.Value(nodeKey{}).(domain.FlowNode)
+	identity, err = config.authorizeBot(ctx, identity, node)
+	if err != nil {
+		return nil, err
+	}
 	args := map[string]any{}
 	if values, ok := input.(map[string]any); ok {
 		for key, value := range values {
@@ -176,6 +189,8 @@ func (config RuntimeConfig) invoke(ctx context.Context, kind, endpoint string, i
 		}
 		method = http.MethodGet
 		path = "/v1/projects/" + url.PathEscape(projectID) + "/decisions/consolidation-report"
+	case "delegation":
+		return config.createDelegation(ctx, identity, node, input)
 	}
 	var payload []byte
 	if body != nil {

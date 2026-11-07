@@ -7,6 +7,63 @@
 是服务器单例（PG/Redis/MinIO/RocketMQ/Nacos 各一份），`cluster` 是服务器集群。
 Compose 和 Helm 是部署层配置，不应把生产密钥提交到仓库。
 
+## 模型供应商：沿用 DeepSeek Harness 原生配置
+
+DSH 的模型路由、模型参数和默认模型直接使用上游 `cordis.patch.yml`。平台启动器沿用
+官方 profile 与 patch 加载链，不转换另一套 provider JSON。官方 base bundle 已经挂载
+`llm-pi-ai`、`agent-default-model`，配置时修改已有 id，不要用 `insert` 重复注册。
+
+例如 Anthropic Messages API：
+
+```yaml
+- id: llm-pi-ai
+  config:
+    providers:
+      anthropic:
+        baseURL: https://api.anthropic.com
+        models:
+          - id: claude-sonnet-4-5
+- id: agent-default-model
+  config:
+    provider: anthropic
+    model: claude-sonnet-4-5
+```
+
+这里的模型名只是配置示例，实际填写供应商已授权的精确 id。使用 Bearer 凭据时，把
+`ANTHROPIC_AUTH_TOKEN` 注入 DSH 进程并省略 `apiKeyEnv`，由原生 Anthropic adapter
+选择 Bearer 认证。使用 API key 时，在 `anthropic` 下配置
+`apiKeyEnv: ANTHROPIC_API_KEY` 并提供对应凭据，走原生 `x-api-key` 认证。不要把
+Bearer token 填进 API key 字段，也不要同时保留过期的两种凭据。
+
+OpenAI Chat Completions 兼容服务使用自定义 provider 名、`api: openai-completions`、
+`apiKeyEnv` 和 `baseURL`。完整示例分别位于
+[`dsh-models.anthropic.patch.yml`](../platform/deploy/examples/dsh-models.anthropic.patch.yml) 和
+[`dsh-models.openai-compatible.patch.yml`](../platform/deploy/examples/dsh-models.openai-compatible.patch.yml)。
+只启用环境变量不会自动创建 `llm-pi-ai` 路由；例如 `ANTHROPIC_BASE_URL` 或
+`ANTHROPIC_MODEL` 不能代替上述原生 provider/default-model 配置。
+
+`baseURL` 原样交给对应 SDK：Anthropic SDK 追加 `/v1/messages`，因此官方地址填写
+`https://api.anthropic.com`；网关前缀如 `/tenant` 会保留，而填写 `/v1` 会得到
+`/v1/v1/messages`。OpenAI SDK 追加 `/chat/completions`，常见兼容地址填写
+`https://gateway.example.com/v1`。平台不猜测路径、不去重 `/v1`，也不改写模型名
+或把 `[1M]` 等后缀转换成请求参数；应按目标供应商的实际 API 合同填写。
+
+官方加载顺序是 bundle → 当前 profile patch → `$DSH_HOME/cordis.patch.yml` →
+命令行 `--patch`。原生 Models/Settings 页面写当前 profile patch；旧 `settings.yaml`
+仅用于兼容导入，不是新的部署入口。部署层可选挂载的 home patch 是管理员管理的
+配置，其覆盖的字段优先于页面保存值。要修改这些字段，更新源文件并重建容器或滚动
+重启 Pod；未被 home patch 覆盖的字段仍可由原生 Settings 管理。
+
+密钥放在进程环境或原生 credential store，patch/ConfigMap 只保存凭据引用。
+交互式 Web 的原生 store 位于 `$DSH_HOME/.credentials.yaml`，优先于环境变量，
+因此环境凭据轮换前需清理同名旧 store 项。上游 headless profile 默认关闭交互式
+credential store，使用启动时环境凭据。每个 DSH 进程必须有自己的可写 `DSH_HOME`，
+用于 profile、凭据和本地状态；不得让多个进程并发共享同一 home。
+
+Compose 模型 overlay 和 Helm 的 `dshNode.harness` / `dshWeb.harness` 只负责把
+原生文件及凭据送到 DSH。部署命令、持久化和更新步骤见
+[部署说明](../platform/deploy/README.md#原生模型配置的部署)。
+
 ## 关键环境变量
 
 | 范围 | 变量 | 用途 |
@@ -18,6 +75,9 @@ Compose 和 Helm 是部署层配置，不应把生产密钥提交到仓库。
 | DSH Web | `LUMO_IDENTITY_ASSERTION_SECRET` | 身份代理 HMAC Secret（至少 32 字节）；`@lumo/user-auth` 登录成功后签发短期逐请求身份，`/lumo/api` 不回退浏览器自报身份 |
 | DSH Web | `LUMO_GOVERNANCE_URL`、`LUMO_AUTH_HOST`、`LUMO_AUTH_PORT`、`LUMO_AUTH_PUBLIC_URL` | Governance 用户认证地址，以及认证代理的公开监听和规范入口地址 |
 | DSH Web | `LUMO_AUTH_SECURE_COOKIE`、`LUMO_AUTH_TIMEOUT_MS` | HTTPS 部署必须启用 Secure Cookie；认证上游请求超时 |
+| DSH 动态文本会话 | `LUMO_USER_SESSION_EXECUTION` | 默认不设置。完整 JSON 对象固定 authorityUrl/nodeId/projectId/workspaceRoot/provider/model；project 必须匹配部署。启用后使用 `/lumo/chat`，关闭原生共享 owner HTTP/WS，采用持久用户归属和认证 Gateway 文本执行；配置与能力边界见 [动态会话归属](./dynamic-session-owner-2026-11-06.md)。 |
+| DSH Thread | `LUMO_THREAD_EXECUTION` | 默认不设置；显式 JSON 对象指定治理地址、固定 project/Agent/revision/provider/model/timeout。需持久 session、计量和当前治理权限，使用专用 Agent。`distributed: true` 配合必填 `sessionControlUrl` 启用持久异步邮箱，登记目标节点执行文本轮次并支持事件唤醒；原固定本节点档位仍兼容。配置与边界见 [五项交付说明](./thread-fleet-delivery-2026-11-07.md)。 |
+| DSH Thread | `LUMO_THREAD_WORKSPACE_ROOT` | 绝对节点工作区根，Thread 目录按 `thread/<id>/` 派生；持久保留并拒绝符号链接越界。 |
 | Governance 认证 | `LUMO_AUTH_BOOTSTRAP_USERNAME`、`LUMO_AUTH_BOOTSTRAP_PASSWORD`、`LUMO_AUTH_BOOTSTRAP_USER_ID` | 首次为 `governance_users` 用户创建本地凭据；已有凭据不会在重启时被覆盖 |
 | Governance 认证 | `LUMO_AUTH_BOOTSTRAP_DISPLAY_NAME`、`LUMO_AUTH_BOOTSTRAP_DEPARTMENT`、`LUMO_AUTH_BOOTSTRAP_ROLES` | 引导用户的显示名、主部门和角色（角色逗号分隔） |
 | Governance 认证 | `LUMO_AUTH_MAX_ATTEMPTS`、`LUMO_AUTH_LOCK_SECONDS`、`LUMO_AUTH_SESSION_TTL_SECONDS`、`LUMO_AUTH_CAPTCHA_TTL_SECONDS` | 连续失败锁定、会话有效期和一次性点选验证码有效期 |
@@ -171,6 +231,9 @@ dispatcher），LLM 调用、搜索、MCP over HTTP 同路；需要直连的地�
 
 ## LLM provider 注册表管理
 
+本节是独立 Go `llm-gateway` 的 OpenAI Chat Completions 转发配置；DSH 的
+`llm-pi-ai` 使用前文的原生 patch，两者的 URL 拼接合同不同。
+
 `llm-gateway` 的 `llm_providers` 表决定「哪些模型可被路由、往哪转发、按什么费率计费」。
 它此前只能靠运维手写 SQL 维护（E8），现在有管理面接口。**这些接口不豁免控制面鉴权**：
 `cmd/llm-gateway` 把整个 mux 包在 `RequireControlPlaneToken` 里，所以除 `/healthz` 与
@@ -197,7 +260,7 @@ dispatcher），LLM 调用、搜索、MCP over HTTP 同路；需要直连的地�
 # 注册一个新模型（含密钥与费率）。:8088 是 llm-gateway 的 LUMO_LISTEN
 curl -X PUT http://llm-gateway:8088/v1/providers/gpt-4o \
   -H "Authorization: Bearer $LUMO_CONTROL_PLANE_TOKEN" \
-  -d '{"upstreamBaseUrl":"https://api.example.com/v1","apiKey":"sk-…","priceInPerMtok":3,"priceOutPerMtok":15}'
+  -d '{"upstreamBaseUrl":"https://api.example.com","apiKey":"sk-…","priceInPerMtok":3,"priceOutPerMtok":15}'
 
 # 摘出路由（保留费率与密钥，可随时恢复）
 curl -X PUT http://llm-gateway:8088/v1/providers/gpt-4o \
@@ -215,8 +278,9 @@ curl -X PUT http://llm-gateway:8088/v1/providers/gpt-4o \
 `upstreamBaseUrl` 校验与 flows 算子上游、dsh-node seam endpoint 同一套判据：必须
 `http`/`https`，不得带 userinfo、查询串或片段（带 userinfo 会把凭据写进日志；
 带 query 说明作者把它当成了完整 URL，而网关是在它后面拼 `/v1/chat/completions` 的）。
-只 trim 首尾空白，不做别的归一：拼接处已经 `TrimRight(BaseURL,"/")`，而 `/v1` 这类
-路径前缀是上游的真实形态，替运维改写会改出错误地址。
+只 trim 首尾空白，拼接处使用 `TrimRight(BaseURL,"/")`。例如基址
+`https://api.example.com/tenant` 会请求 `/tenant/v1/chat/completions`；不要把末尾
+`/v1` 重复写进基址，否则会请求 `/v1/v1/chat/completions`。
 
 ## 连接器审计查询
 

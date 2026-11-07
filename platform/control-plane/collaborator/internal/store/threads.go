@@ -170,8 +170,17 @@ func (s *Store) threadNodeValues(ctx context.Context, query string, args ...any)
 // 过滤器为空时按 id 排序而不是按时间——排序键必须**唯一**，否则分页与「同一时刻的
 // 两条线程谁在前」都不确定，看板会随查询抖动。
 func (s *Store) ListThreads(ctx context.Context, realm, projectID string, state domain.ThreadState, limit int) ([]domain.Thread, error) {
+	return s.ListThreadsAfter(ctx, realm, projectID, state, limit, "", nil)
+}
+
+// ListThreadsAfter pages on immutable IDs and optionally filters by the task
+// page authorized by governance. This filter never grants cross-realm access.
+func (s *Store) ListThreadsAfter(ctx context.Context, realm, projectID string, state domain.ThreadState, limit int, after string, taskIDs []string) ([]domain.Thread, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
+	}
+	if len(taskIDs) > 200 || len(after) > 200 {
+		return nil, fmt.Errorf("%w: invalid thread page", domain.ErrInvalidThread)
 	}
 	sql := `SELECT ` + threadColumns + ` FROM threads WHERE realm = $1`
 	args := []any{realm}
@@ -185,6 +194,14 @@ func (s *Store) ListThreads(ctx context.Context, realm, projectID string, state 
 		}
 		args = append(args, string(state))
 		sql += fmt.Sprintf(" AND state = $%d", len(args))
+	}
+	if after != "" {
+		args = append(args, after)
+		sql += fmt.Sprintf(" AND id > $%d", len(args))
+	}
+	if taskIDs != nil {
+		args = append(args, taskIDs)
+		sql += fmt.Sprintf(" AND task_id = ANY($%d::text[])", len(args))
 	}
 	args = append(args, limit)
 	sql += fmt.Sprintf(" ORDER BY id LIMIT $%d", len(args))
@@ -205,7 +222,8 @@ func (s *Store) ListThreads(ctx context.Context, realm, projectID string, state 
 	return out, rows.Err()
 }
 
-// TransitionThread 把线程推进到 `to`（唯一的状态写入口）。
+// TransitionThread 把未被持久轮次占用的线程推进到 `to`。
+// 受持久轮次控制的 running/idle 变化由 thread_rounds.go 同事务维护。
 //
 // 事务里的三步各自防一种事故：
 //
@@ -232,6 +250,14 @@ func (s *Store) TransitionThread(ctx context.Context, realm, id string, to domai
 	}
 	if err != nil {
 		return domain.Thread{}, err
+	}
+	// A durable round owns the running lifecycle until its capability is
+	// finished. Ordinary status writes must not make its session available for
+	// a concurrent turn. Node-loss uses the separately fenced failure path.
+	if running, err := threadHasRunningRound(ctx, tx, realm, id); err != nil {
+		return domain.Thread{}, err
+	} else if running {
+		return domain.Thread{}, fmt.Errorf("%w: finish the active round before changing thread state", ErrThreadConflict)
 	}
 	if err := domain.ValidateThreadTransition(current.State, to); err != nil {
 		return domain.Thread{}, err

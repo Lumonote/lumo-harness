@@ -51,7 +51,7 @@ export function assertExecutionPreset(binding: WorkerBinding, realm: string, pre
   }
   // 连接器在执行前由 connectorScope 核对固定身份和可见目录，调用时按 sessionRef 再拦。
   // 引用只允许作为查找键；执行和心跳都须另行确认节点上的受保护文件。
-  if ((preset.system_prompt_ref !== undefined &&
+  if ((preset.system_prompt_ref !== undefined && preset.system_prompt_ref !== '' &&
        (typeof preset.system_prompt_ref !== 'string' || !preset.system_prompt_ref.trim() || preset.system_prompt_ref.length > 256)) ||
       !Array.isArray(preset.connector_ids) ||
       preset.connector_ids.some(id => typeof id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/u.test(id)) ||

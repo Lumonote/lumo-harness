@@ -41,22 +41,6 @@ export function loginPage(options: LoginPageOptions = {}): string {
 <body>
   <main class="shell">
     <section class="manifest" aria-label="Lumo 平台说明">
-      <div class="scene" aria-hidden="true">
-        <div class="scene-grid"></div>
-        <svg class="scene-wires" viewBox="0 0 800 800" preserveAspectRatio="xMidYMid slice">
-          <path d="M-20 533 C115 431 178 488 287 383 S508 270 801 347" />
-          <path d="M19 177 C177 293 192 191 344 307 S571 538 828 476" />
-          <path d="M124 800 C166 604 350 687 459 536 S684 321 822 151" />
-          <circle cx="184" cy="454" r="3" /><circle cx="287" cy="383" r="2" />
-          <circle cx="671" cy="332" r="3" /><circle cx="621" cy="470" r="2" />
-        </svg>
-        <div class="orbit orbit-outer"></div>
-        <div class="orbit orbit-mid"></div>
-        <div class="orbit orbit-inner"></div>
-        <div class="core-halo"></div>
-        <div class="core"><span class="core-mark"></span></div>
-        <div class="scanner"></div>
-      </div>
       <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>Lumo Harness<small>智能协作工作台</small></span></div>
       <div class="copy"><span class="kicker">AGENTIC WORKSPACE / LUMO</span><h1>进入你的<br><em>智能协作空间</em></h1><p>在一个工作台中衔接智能体、任务与产物。使用平台账号登录，继续上次的工作。</p></div>
       <div class="system-note"><i></i><span>智能体 · 任务 · 产物</span></div>

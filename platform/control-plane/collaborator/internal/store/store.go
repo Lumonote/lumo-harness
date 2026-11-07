@@ -1,7 +1,8 @@
-// Package store 实现协作服务的持久化：Redis WAL（热）+ PostgreSQL 快照（权威）。
+// Package store persists acknowledged document updates and fenced snapshots in PostgreSQL.
+// Redis is read only when importing the previous WAL format during a quiesced upgrade.
 //
 // §5.4.7.4 的核心契约：**确认给客户端之前必须已落 WAL**——否则出现
-// 「显示已保存实则丢失」。RPO 目标 0（WAL 已确认即不丢）、RTO 目标 < 10s。
+// 「显示已保存实则丢失」。ACK 等待 PG 同步提交；跨主机 RPO 取决于 PG 的同步复制配置。
 package store
 
 import (
@@ -37,6 +38,22 @@ CREATE TABLE IF NOT EXISTS collab_state (
   state      BYTEA NOT NULL,
   wal_seq    BIGINT NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Lease and sequence allocation share the transaction protecting every write.
+CREATE TABLE IF NOT EXISTS collab_document_runtime (
+  doc_id TEXT PRIMARY KEY REFERENCES collab_documents(doc_id) ON DELETE CASCADE,
+  holder TEXT NOT NULL DEFAULT '',
+  epoch BIGINT NOT NULL DEFAULT 0,
+  expires_at TIMESTAMPTZ NOT NULL DEFAULT '-infinity',
+  head BIGINT NOT NULL DEFAULT 0,
+  migrated BOOLEAN NOT NULL DEFAULT false
+);
+CREATE TABLE IF NOT EXISTS collab_document_wal (
+  doc_id TEXT NOT NULL REFERENCES collab_documents(doc_id) ON DELETE CASCADE,
+  seq BIGINT NOT NULL CHECK (seq > 0),
+  update JSONB NOT NULL,
+  PRIMARY KEY (doc_id, seq)
 );
 
 -- 不可变发布快照（§5.4.7.1；模型只读此表内容 —— 铁律 17）
@@ -137,6 +154,7 @@ CREATE TABLE IF NOT EXISTS threads (
 -- **跨行**的不变量：同一个 session_ref 出现两行、各自写着不同 node_id，就是「一个线程
 -- 同时活在两个节点上」——那种行一旦存在，线程亲和就无从判定（读侧不知道该信哪一行）。
 CREATE UNIQUE INDEX IF NOT EXISTS threads_session ON threads (realm, session_ref);
+CREATE INDEX IF NOT EXISTS threads_task_page ON threads (realm, task_id, id);
 
 -- 重派谱系：旧线程保持终态，同一前身只能有一个直接后继。
 ALTER TABLE threads ADD COLUMN IF NOT EXISTS replaces TEXT REFERENCES threads(id);
@@ -144,6 +162,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS threads_replacement ON threads (realm, replace
   WHERE replaces IS NOT NULL;
 CREATE INDEX IF NOT EXISTS threads_active_nodes ON threads (node_id, realm)
   WHERE state IN ('idle', 'running', 'awaiting');
+
+-- Admission is durable before execution starts. No expiry or reclaim path is
+-- defined: an uncertain running turn must not be started a second time.
+CREATE TABLE IF NOT EXISTS thread_rounds (
+  realm TEXT NOT NULL,
+  thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  node_id TEXT NOT NULL,
+  coordinator_session_ref TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK (attempt >= 1),
+  request_hash TEXT NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+  run_id TEXT NOT NULL,
+  owner_user_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  preset_revision INTEGER NOT NULL CHECK (preset_revision >= 1),
+  max_concurrency INTEGER NOT NULL CHECK (max_concurrency >= 1),
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  session_mode TEXT NOT NULL CHECK (session_mode IN ('create','resume')),
+  token_hash TEXT NOT NULL CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+  state TEXT NOT NULL CHECK (state IN ('running','completed','failed','cancelled')),
+  summary TEXT NOT NULL DEFAULT '' CHECK (char_length(summary) <= 16000),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at TIMESTAMPTZ,
+  PRIMARY KEY (realm, thread_id, attempt),
+  UNIQUE (realm, run_id),
+  CHECK ((state='running' AND finished_at IS NULL) OR (state<>'running' AND finished_at IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS thread_rounds_active
+  ON thread_rounds (realm, thread_id) WHERE state='running';
+CREATE INDEX IF NOT EXISTS thread_rounds_agent_active
+  ON thread_rounds (realm, agent_id) WHERE state='running';
 
 -- 节点失联通知（§24.2.3(4)：标记 failed 之后要**通知协调者**）。
 --
@@ -175,7 +225,7 @@ CREATE INDEX IF NOT EXISTS thread_node_loss_notices_cursor
   ON thread_node_loss_notices (realm, seq);
 `
 
-// Store 组合 PG（权威）与 Redis（WAL 热层）。
+// Store 使用 PG 保存写者租约、WAL 和快照；Redis 仅用于旧数据导入。
 type Store struct {
 	pg  *pgxpool.Pool
 	rdb *redis.Client
@@ -187,27 +237,38 @@ func New(ctx context.Context, pgDSN, redisAddr string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("collaborator: 连接 PG 失败: %w", err)
 	}
-	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("collaborator: 连接 Redis 失败: %w", err)
+	var rdb *redis.Client
+	if redisAddr != "" {
+		rdb = redis.NewClient(&redis.Options{Addr: redisAddr, DialTimeout: 2 * time.Second,
+			ReadTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second, MaxRetries: 0})
 	}
 	return &Store{pg: pool, rdb: rdb}, nil
 }
 
 // NewPGOnly 只用 PostgreSQL 构造 Store（Redis 为空）。
 //
-// 存在意义是让「只碰 PG 的那一半」可被单独装配与测试：发布 outbox 的读取/确认/失败
-// 记录都只走 s.pg。**生产装配必须用 New**——任何 WAL/快照方法在 nil Redis 客户端上
-// 都会失败，而这是运行时才暴露的错误。
+// 新文档的完整运行路径不依赖 Redis；已有 Redis WAL 的文档须先停旧写者，
+// 再以带 Redis 连接的 New 完成首次导入，不能跳过旧尾部。
 func NewPGOnly(pool *pgxpool.Pool) *Store { return &Store{pg: pool} }
 
 // Init 幂等建表。
 func (s *Store) Init(ctx context.Context) error {
-	if _, err := s.pg.Exec(ctx, DDL); err != nil {
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// IF NOT EXISTS does not serialize catalog/type creation across replicas.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(671839418)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, DDL); err != nil {
 		return fmt.Errorf("collaborator: 建表失败: %w", err)
 	}
-	return nil
+	if _, err := tx.Exec(ctx, threadCommandsDDL); err != nil {
+		return fmt.Errorf("initialize thread commands: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) Close() {
@@ -223,77 +284,9 @@ func (s *Store) Pool() *pgxpool.Pool { return s.pg }
 
 func walKey(id domain.DocumentID) string { return "collab:wal:" + string(id) }
 
-func walSeqKey(id domain.DocumentID) string { return "collab:wal-seq:" + string(id) }
-
-// 序号必须在 Redis 内分配，不能先 JSON 序列化再依赖 RPush 的返回值；否则
-// 持久化的 WAL 记录拿不到自己的全局序号。
-var appendWALScript = redis.NewScript(`
-local seq = redis.call('INCR', KEYS[2])
-redis.call('RPUSH', KEYS[1], '{"seq":' .. seq .. ',"update":' .. ARGV[1] .. '}')
-return seq
-`)
-
-// 恢复时以 PG 快照/WAL 中已知的最大序号抬升 Redis 计数器。这样即使
-// Redis 计数 key 因故丢失，重启后的新 update 也不会复用旧序号。
-var ensureWALSeqScript = redis.NewScript(`
-local current = tonumber(redis.call('GET', KEYS[1]) or '0')
-local desired = tonumber(ARGV[1])
-if current < desired then
-  redis.call('SET', KEYS[1], desired)
-  return desired
-end
-return current
-`)
-
-// Redis list 裁剪使用的是物理下标，而应用序号在前缀裁剪后仍需单调递增；
-// 扫描 envelope 找到第一个未覆盖序号，避免把全局 seq 当 list index。
-var trimWALScript = redis.NewScript(`
-local values = redis.call('LRANGE', KEYS[1], 0, -1)
-for i, value in ipairs(values) do
-  local seq = string.match(value, '^%{"seq":([0-9]+),')
-  if seq == nil then
-    return -1
-  end
-  if tonumber(seq) > tonumber(ARGV[1]) then
-    redis.call('LTRIM', KEYS[1], i - 1, -1)
-    return i - 1
-  end
-end
-redis.call('DEL', KEYS[1])
-return 0
-`)
-
 type walEntry struct {
 	Seq    int64         `json:"seq"`
 	Update domain.Update `json:"update"`
-}
-
-// AppendWAL 追加一条 CRDT update 到 WAL，返回分配的序号。
-//
-// **这是确认给客户端的前提**：本调用返回后数据已在 Redis AOF 中；
-// 调用方必须在本调用成功后才向客户端 ack（RPO 0 的实现点）。
-func (s *Store) AppendWAL(ctx context.Context, u domain.Update) (int64, error) {
-	blob, err := json.Marshal(u)
-	if err != nil {
-		return 0, fmt.Errorf("collaborator: 序列化 update 失败: %w", err)
-	}
-	seq, err := appendWALScript.Run(ctx, s.rdb, []string{walKey(u.DocID), walSeqKey(u.DocID)}, blob).Int64()
-	if err != nil {
-		return 0, fmt.Errorf("collaborator: 写 WAL 失败: %w", err)
-	}
-	return seq, nil
-}
-
-// EnsureWALSeq 将 Redis 中的序号至少推进到 atLeast，且不会回退已有序号。
-// 该操作在文档恢复时调用，兼容 Redis 热层重建或计数 key 缺失的场景。
-func (s *Store) EnsureWALSeq(ctx context.Context, id domain.DocumentID, atLeast int64) error {
-	if atLeast < 0 {
-		atLeast = 0
-	}
-	if _, err := ensureWALSeqScript.Run(ctx, s.rdb, []string{walSeqKey(id)}, atLeast).Int64(); err != nil {
-		return fmt.Errorf("collaborator: 校准 WAL 序号失败: %w", err)
-	}
-	return nil
 }
 
 // ReadWALFrom 读取 WAL 中序号大于 from 的增量，用于崩溃后重建。
@@ -327,33 +320,6 @@ func (s *Store) ReadWALFrom(ctx context.Context, id domain.DocumentID, from int6
 		out = append(out, u)
 	}
 	return out, nil
-}
-
-// TrimWAL 快照落库后裁剪 WAL 前缀（快照已覆盖的部分）。
-func (s *Store) TrimWAL(ctx context.Context, id domain.DocumentID, upto int64) error {
-	trimmed, err := trimWALScript.Run(ctx, s.rdb, []string{walKey(id)}, upto).Int64()
-	if err != nil {
-		return fmt.Errorf("collaborator: 裁剪 WAL 失败: %w", err)
-	}
-	if trimmed < 0 {
-		// 旧格式没有 envelope 序号，保留数据等待自然迁移，不能冒险删除。
-		return nil
-	}
-	return nil
-}
-
-// SaveState 周期性把内存 CRDT 状态合并落 PG（权威层）。
-func (s *Store) SaveState(ctx context.Context, id domain.DocumentID, state []byte, walSeq int64) error {
-	_, err := s.pg.Exec(ctx,
-		`INSERT INTO collab_state (doc_id, state, wal_seq, updated_at)
-		 VALUES ($1,$2,$3, now())
-		 ON CONFLICT (doc_id) DO UPDATE SET
-		   state = EXCLUDED.state, wal_seq = EXCLUDED.wal_seq, updated_at = now()`,
-		string(id), state, walSeq)
-	if err != nil {
-		return fmt.Errorf("collaborator: 保存状态失败: %w", err)
-	}
-	return nil
 }
 
 // LoadState 读取最近的 CRDT 状态快照与其 WAL 位点（崩溃恢复入口）。
@@ -392,15 +358,33 @@ func (s *Store) FindDocument(ctx context.Context, id domain.DocumentID, realm do
 
 // EnsureDocument 幂等登记文档元数据。
 func (s *Store) EnsureDocument(ctx context.Context, d domain.Document) error {
-	_, err := s.pg.Exec(ctx,
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := tx.Exec(ctx,
 		`INSERT INTO collab_documents (doc_id, realm, space, title)
 		 VALUES ($1,$2,$3,$4)
-		 ON CONFLICT (doc_id) DO UPDATE SET title = EXCLUDED.title, updated_at = now()`,
+		 ON CONFLICT (doc_id) DO NOTHING`,
 		string(d.ID), string(d.Realm), string(d.Space), d.Title)
 	if err != nil {
 		return fmt.Errorf("collaborator: 登记文档失败: %w", err)
 	}
-	return nil
+	if result.RowsAffected() == 1 {
+		// A newly created document has no Redis legacy tail to import.
+		if _, err := tx.Exec(ctx, `INSERT INTO collab_document_runtime(doc_id,migrated) VALUES ($1,true) ON CONFLICT DO NOTHING`, string(d.ID)); err != nil {
+			return err
+		}
+	}
+	var realm string
+	if err := tx.QueryRow(ctx, `SELECT realm FROM collab_documents WHERE doc_id=$1`, string(d.ID)).Scan(&realm); err != nil {
+		return err
+	}
+	if realm != string(d.Realm) {
+		return &domain.ErrForbidden{Detail: "document belongs to another realm"}
+	}
+	return tx.Commit(ctx)
 }
 
 // Publish 发布快照：**快照 + 版本号 + outbox 同事务**。

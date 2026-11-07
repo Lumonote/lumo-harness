@@ -84,7 +84,7 @@ export class PgSessionLog implements SessionLogSeam {
   private pool: pg.Pool
 
   constructor(connectionString: string) {
-    this.pool = new pg.Pool({ connectionString })
+    this.pool = new pg.Pool({ connectionString, max: 8, connectionTimeoutMillis: 5000, query_timeout: 5000, statement_timeout: 5000 })
   }
 
   async publishHead(sessionRef: string, seq: number, token: number): Promise<void> {
@@ -187,8 +187,8 @@ export class PgSessionLog implements SessionLogSeam {
       await client.query('BEGIN')
 
       // 锁租约行：既做 fencing 校验，又把同一会话的并发 append 串行化。
-      const leaseRes = await client.query<{ fencing_token: string; expires_at: string }>(
-        `SELECT fencing_token, expires_at FROM session_writer_lease
+      const leaseRes = await client.query<{ fencing_token: string; expires_at: string; expired: boolean }>(
+        `SELECT fencing_token, expires_at, expires_at < ${NOW_MS} AS expired FROM session_writer_lease
          WHERE session_ref = $1 FOR UPDATE`,
         [record.sessionRef],
       )
@@ -201,7 +201,7 @@ export class PgSessionLog implements SessionLogSeam {
         throw new FencedOutError(record.sessionRef, fencingToken, current)
       }
       // 租约过期即使令牌相同也拒写：此刻任何人都可接管，本节点已无排他性。
-      if (Number(lease!.expires_at) < Date.now() - CLOCK_SKEW_ALLOWANCE_MS) {
+      if (lease!.expired) {
         await client.query('ROLLBACK')
         throw new FencedOutError(record.sessionRef, fencingToken, current)
       }
@@ -277,15 +277,6 @@ export class PgSessionLog implements SessionLogSeam {
     await this.pool.end()
   }
 }
-
-/**
- * 节点本地时钟与库端时钟的容差。
- *
- * 只用在「令牌正确但租约刚过期」这一道附加检查上——放宽它最坏是多放行一次写，
- * 而该写仍受令牌保护（真被接管了令牌就已经变了）。收紧它则会在正常时钟抖动下
- * 误拒合法写入。
- */
-const CLOCK_SKEW_ALLOWANCE_MS = 5_000
 
 /**
  * 事件内容摘要。

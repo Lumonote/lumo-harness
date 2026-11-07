@@ -128,6 +128,9 @@ function nodeEnv() {
   return {
     ...commonDshEnv(),
     LUMO_NODE_ID: nodeId,
+    DSH_HOME: `/var/lib/lumo/dsh/${nodeId}`,
+    LUMO_PATCH_PATH: `/var/lib/lumo/dsh/${nodeId}/lumo.patch.yml`,
+    LUMO_SESSION_LOG_SPOOL_DIR: `${process.env.LUMO_SESSION_LOG_SPOOL_DIR || "/var/lib/lumo/session-spool"}/${nodeId}`,
     LUMO_ROLE: 'node',
     LUMO_SEAM_MODE: 'host',
     LUMO_SEAM_BIND: '0.0.0.0',
@@ -155,6 +158,9 @@ function agentEnv() {
   return {
     ...commonDshEnv(),
     LUMO_NODE_ID: agentId,
+    DSH_HOME: `/var/lib/lumo/dsh/${agentId}`,
+    LUMO_PATCH_PATH: `/var/lib/lumo/dsh/${agentId}/lumo.patch.yml`,
+    LUMO_SESSION_LOG_SPOOL_DIR: `${process.env.LUMO_SESSION_LOG_SPOOL_DIR || "/var/lib/lumo/session-spool"}/${agentId}`,
     LUMO_ROLE: 'agent',
     LUMO_SEAM_MODE: 'proxy',
     LUMO_SEAM_ENDPOINTS: 'http://127.0.0.1:8090',

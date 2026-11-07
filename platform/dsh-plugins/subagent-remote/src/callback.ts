@@ -35,12 +35,14 @@ export type ChildResultSettler = (body: ChildResultBody) => void
  * 的信息量忽略不计,无需 timingSafeEqual(常量时间在「猜不中」面前无增益)。
  */
 export interface PendingEntry {
-	readonly secret: string
+	readonly secret?: string
+  readonly secretHash?: string
 	readonly settler: ChildResultSettler
 	attempt?: number
+  nodeId?: string
 }
 
-export type ReportTerminal = (body: ChildResultBody, attempt?: number) => void | Promise<void>
+export type ReportTerminal = (body: ChildResultBody, attempt?: number, nodeId?: string) => void | Promise<void>
 
 export interface CallbackServerOptions {
   /** runId → 条目。server 只读查询 + 首次结算后摘除;登记/删除由 provider.start 做。 */
@@ -64,13 +66,18 @@ export function createCallbackServer(options: CallbackServerOptions): Server {
       const entry = options.pending.get(childId)
       const stored = options.receipts ? await options.receipts.get(options.realm ?? '', childId) : completed.get(childId)
       const secretHash = createHash('sha256').update(secret).digest('hex')
-      if (body.runId !== childId || (entry ? entry.secret !== secret : stored?.secretHash !== secretHash)) {
+      const expectedHash = entry?.secretHash ?? (entry?.secret ? createHash('sha256').update(entry.secret).digest('hex') : stored?.secretHash)
+      if (body.runId !== childId || expectedHash !== secretHash) {
         throw new CallbackNotRegistered()
       }
       const receipt: CallbackReceipt = { secretHash, body, ...(entry?.attempt === undefined ? {} : { attempt: entry.attempt }) }
+      if (entry?.nodeId) receipt.nodeId = entry.nodeId
       if (stored) {
         if (stored.secretHash !== secretHash || (stored.body && !isDeepStrictEqual(stored.body, body))) throw new ReceiptConflictError()
         receipt.attempt = stored.attempt
+        receipt.nodeId = stored.nodeId
+        receipt.parentSessionId = stored.parentSessionId
+        receipt.ownerUserId = stored.ownerUserId
       }
       if (options.receipts) {
         await options.receipts.put(options.realm ?? '', receipt)
@@ -79,7 +86,7 @@ export function createCallbackServer(options: CallbackServerOptions): Server {
         // Legacy in-memory assemblies retain a bounded lost-ack replay window.
         if (completed.size > 1_024) completed.delete(completed.keys().next().value!)
       }
-      try { await options.reportTerminal(body, receipt.attempt) } catch { throw new CallbackPending() }
+      try { await options.reportTerminal(body, receipt.attempt, receipt.nodeId) } catch { throw new CallbackPending() }
       if (entry && options.pending.get(childId) === entry) {
         entry.settler(body)
         options.pending.delete(childId)

@@ -1,5 +1,23 @@
 # Implementation status (2026-09-15)
 
+## 2026-11-07 原生模型配置与 Docker 故障验收
+
+已对齐 DeepSeek Harness 原生 patch、默认模型与凭据加载，补齐 Compose/Helm 模型配置挂载和每进程 home 隔离，修复 compact 重复启动独立节点及共享生成 patch。4 项原生 HTTP 合约、26 项部署定向检查、4 个部署回归测试及本机 Helm 全组合通过。Docker 双节点 Thread 的 28 个断言、完整集群的 22 个故障断言及故障前后健康/行为探针通过。外部原生供应商调用返回 `AUTH / access-denied`，真实两轮历史和用量未通过；物理跨主机和生产 HA 仍未验收。详见[配置与 Docker 验收记录](./model-and-docker-acceptance-2026-11-07.md)。
+
+## 2026-11-07 五项剩余能力
+
+`codex/v1.2.1` 已新增异步跨节点 Thread 命令、持久等待事件自动执行、动态 owner 认证文本入口、Bot sender/团队能力授权和封闭文本输出上的强制异构审核。代码、配置、迁移 016–019 与实际验收边界见 [本批交付说明](./thread-fleet-delivery-2026-11-07.md)。动态文本入口会阻断共享 owner 原生入口；未知外部影响不会被自动视为审核通过。以下各批状态按其日期保留为历史。
+
+最终回归：TS **1180 PASS / 0 FAIL / 0 SKIP**（112 文件），四个 Go 模块全包 race **812 PASS / 0 FAIL / 0 SKIP**；全平台 typecheck、四模块 vet/build、Helm 新配置正反例通过。真实控制面与执行运行时重启后的自动唤醒、两轮历史、去重和撤权冒烟通过，使用确定性模型 adapter。该批测试容器与临时凭据已清理；随后完成的 Docker 故障验收及失败的外部供应商验收见上方记录。物理多主机生产故障及浏览器视觉验收尚未完成，未发布生产。
+
+## 2026-11-06 续开发
+
+当前集群整改证据见 [本机集群验收记录](./cluster-remediation-2026-11-06.md)。页面重整、团队任务入口、Bot 签名接入与持久去重见 [本轮能力与验证范围](./ui-and-agent-capability-2026-11-06.md)，接入方式见 [Bot 事件接入](./bot-ingress.md)。上述记录同时列出仍未实现或未验收的边界；下方早期条目保留为历史。
+
+`codex/v1.2.1` 已完成团队 realm/owner/revision、PG CAS 与删除墓碑、captain 工具隔离、控制态批量读和治理可见任务→Thread→控制态聚合；首阶段证据见 [团队隔离与线程看板](./team-isolation-and-thread-fleet-2026-11-06.md)。随后补齐旧团队显式归属迁移、治理委派持久幂等、Flow `delegation.create`、governed Run 实际计量与 §24.7/§24.8 同一 Go/TS 矩阵，并补任务/线程分页。迁移、Flow 与分页阶段通过 TS **995 PASS / 0 FAIL / 0 SKIP**（94 文件）、governance race **102 PASS**、flows race **239 PASS**；collaborator race **84 PASS / 1 SKIP**，缺席的 Redis WAL 迁移用例随后在独立 PG + Redis 补跑通过。真实 Bot→已审核 Flow→Governance 进程与 PG 联测通过，任务列表/详情的祖先可见性与项目权限回归也已补齐。该阶段交付、迁移 012–014、部署接线和验证限制见 [团队迁移、流程委派与分页](./team-migration-and-governed-flows-2026-11-06.md)。
+
+最新补齐显式本节点 Thread 稳定会话、持久轮次回执、逐轮计量与当前治理授权，详见 [Thread 稳定执行](./thread-stable-execution-2026-11-06.md)。本批最终 TS **1122 PASS / 0 FAIL / 0 SKIP**（105 文件），governance race **137 PASS / 0 FAIL / 0 SKIP**，collaborator race **103 PASS / 0 FAIL / 0 SKIP**（真实 PG + Redis）；全平台 typecheck、两个 Go 模块的 vet/build，以及独立控制面进程重启后保留两轮稳定会话的冒烟通过。此链路使用确定性模型 adapter，尚未做外部供应商验收。该阶段仅执行本节点文本，后续五项能力已在 11-07 批次补齐，具体范围见上方交付说明。
+
 配置变量与开发默认值边界见 [`configuration.md`](./configuration.md)。
 
 > 集群模式下**代码与装配层面**的功能缺口清单见 [`cluster-gap-analysis.md`](./cluster-gap-analysis.md)（首版 2026-09-08，**2026-09-14 逐项复核、2026-09-15 再复核、2026-09-16 修正计数并复核 C 组、2026-09-17 改判 E7b**：现合计 34 项 = **28 已闭合 / 3 部分闭合 / 0 仍未闭合 / 3 非缺口**。首版 A/B 两组已全部闭合；E2 与 E3 经再复核**改判为误读**，不是缺口；C8 于 2026-09-16 闭合；**C7 流程血缘同样于 2026-09-16 判为已闭合**（血缘事实落 PG outbox、Nebula 降为可选呈现层）；**C3 边缘网关 / C4 终端网关为部分闭合**——代码与两种 compose 形态早已落地，是清单没跟上；那次逐点核对接线面还发现二者**不在 Helm chart 的 `services` 里**，所以当时是「已实现但没接线」。**这两个服务当天就补进了 chart**（路由表由模板从 release 名与各服务端口派生、以目录挂载；入口层的 Service 类型保持 ClusterIP、需要暴露时按服务覆盖），于是它们的残留换成了同一条：**真集群端到端验收**——`acceptance-cluster.sh` 对 C3/C4/C7 三者零探针）。**计数以缺口清单文末的表为准**——此处此前写的 18/2/11 与那份表自相矛盾（把 C 组的「部分闭合」当成「未闭合」多加了一次），凡引用请回去加一遍；**2026-09-17 又发现同一处第四次分叉**：E6 的行早在 09-16 就写着「已闭合」而表没跟改，与 E7b 一起从「仍未闭合」移出，故由 26/3/2/3 变为 28/3/0/3。**「以表为准」这条规则本身是有条件的**——那一次是**表错、行对**（行带行号与用例名，表只有一个数字），冲突时先看哪一边带了证据。本文记录的是外部集成边界与生产验收事项，两者互补。
@@ -30,10 +48,12 @@ TypeScript 检查、heartbeat 竞态检查、Go vet、Helm 门禁及完整 Compo
 
 - 真实 Nacos 和多节点故障演练尚未运行。本轮 Nacos 使用真实 HTTP 传输的协议替身，
   数据库使用真实 PostgreSQL；不能据此声称已通过真实集群端到端验收。
-- `startThreadRound` 仍复用 one-shot 成员执行面，当前仅在 `label` 上写线程与轮次；
-  注册表 `node_id/session_ref` 与实际执行节点、稳定会话的强绑定仍需继续补齐。
-- dsh Run/Thread 轮次计量归因、看板控制态列表/协作注册表读面、可证影响面的强制异构
-  审查、§24.7/§24.8 的跨语言矩阵仍属后续协同工作。
+- 09-30 时 `startThreadRound` 仅复用 one-shot label；11-06 后续已移除该错误接线。
+  11-06 显式本节点文本档位绑定登记节点与稳定会话；11-07 已补异步跨节点命令与自动唤醒，范围见上方最新记录。
+- 下列为 09-30 的边界；看板控制态列表/协作注册表读面已由 11-06 续开发接线。
+- 以下是 09-30 的历史边界：当时 Run/Thread 轮次计量、强制异构与跨语言矩阵未完成。
+  11-06 已补 governed Run 与显式 Thread 轮次计量及 §24.7/§24.8 Go/TS 同矩阵；
+  可信完整影响面的强制异构仍待接线，见上方最新记录。
 
 ## 2026-09-21 实施：控制面构建的重试与缓存（`unexpected EOF` 不是被墙）
 
@@ -1842,7 +1862,7 @@ present, but **dispatch transport** and end-to-end device acceptance remain open
   不能只看全仓 typecheck 的红绿。** 本次的替代判据：用一份把 `include` 收窄到
   `dsh-plugins/connector/src/**` 的临时 tsconfig 单独编译，**exit=0 且无输出**（临时文件用完已删）。
 - **第二件是真缺口**：`platform/tsconfig.json` 的 `include` 里写的是
-  `dsh-plugins/*/tests/**/*.ts`，而**实际约定是 `__tests__/`**——全仓 27 个插件里
+  `dsh-plugins/*/tests/**/*.ts`，而**实际约定是 `__tests__/`**——全仓 28 个插件里
   **25 个用 `__tests__/`、只有 2 个（`provenance` / `recovery`）用 `tests/`**。
   那份 glob 因此只匹配到 3 个测试文件，**其余插件的测试文件从未被任何 tsconfig 覆盖**
   （`grep __tests__ tsconfig*.json` 零命中），而 vitest 走 esbuild **不做类型检查**。

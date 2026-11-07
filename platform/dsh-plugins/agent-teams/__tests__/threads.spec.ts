@@ -283,6 +283,19 @@ describe('节点丢失与对账', () => {
 })
 
 describe('工作目录物化（§24.3.2）', () => {
+  it('祖先符号链接被拒，不在根之外创建工作目录', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lumo-thread-'))
+    const outside = await mkdtemp(join(tmpdir(), 'lumo-thread-outside-'))
+    try {
+      await symlink(outside, join(root, 'thread'))
+      const threads = runtime({ registry: registrySpy(row()).registry, workspaceRoot: root })
+      await expect(threads.materializeWorkspace(row())).rejects.toThrow(ThreadWorkspaceError)
+      await expect(stat(join(outside, 't-1'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
   it('建出目录：相对节点工作区根，且绝不进复制日志', async () => {
     const root = await mkdtemp(join(tmpdir(), 'lumo-thread-'))
     try {

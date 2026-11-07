@@ -32,3 +32,17 @@ Arguments (dict): namespace, name, key, length.
 {{- randAlphaNum (int .length) | b64enc -}}
 {{- end -}}
 {{- end }}
+
+{{/* Scope every scheduler/policy selector to one Helm release. */}}
+{{- define "lumo-platform.topology" -}}
+{{- if .root.Values.availability.topologySpread.enabled }}
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: {{ .root.Values.availability.topologySpread.topologyKey | quote }}
+    whenUnsatisfiable: {{ .root.Values.availability.topologySpread.whenUnsatisfiable }}
+    labelSelector:
+      matchLabels:
+        lumo.dev/service: {{ .service }}
+        app.kubernetes.io/instance: {{ .root.Release.Name | quote }}
+{{- end }}
+{{- end }}

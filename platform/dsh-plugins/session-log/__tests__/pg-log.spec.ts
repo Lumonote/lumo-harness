@@ -139,20 +139,19 @@ describe(`append 的 fencing 与幂等 —— 对真 PG（当前${suffix}）`, (
     })
   })
 
-  t('租约过期超过时钟容差即使令牌相同也拒写（排他性随租约消失）', async () => {
+  t('数据库时钟确认过期后即使令牌相同也拒写（排他性随租约消失）', async () => {
     await withLog(async (log) => {
       await log.acquire('s1', 'node-a', 60_000)
-      // 拨到远超 5s 容差的过去——此刻任何人都可接管，本节点已无排他性
+      // 此刻任何人都可接管，本节点已无排他性
       await log.raw(`UPDATE session_writer_lease SET expires_at = 0 WHERE session_ref = 's1'`)
       await expect(log.append(eventOf('s1', 1), 1)).rejects.toBeInstanceOf(FencedOutError)
     })
   })
 
-  t('刚过期的租约在时钟容差内放行（容差取舍：最坏多一次写，仍受令牌保护）', async () => {
+  t('刚过期的租约也拒写，防止旧节点在接管窗口继续产生副作用', async () => {
     await withLog(async (log) => {
-      await log.acquire('s1', 'node-a', -1) // 仅过期 1ms——容差窗口内
-      const r = await log.append(eventOf('s1', 1), 1)
-      expect(r).toEqual({ status: 'appended', seq: 1 })
+      await log.acquire('s1', 'node-a', -1)
+      await expect(log.append(eventOf('s1', 1), 1)).rejects.toBeInstanceOf(FencedOutError)
     })
   })
 

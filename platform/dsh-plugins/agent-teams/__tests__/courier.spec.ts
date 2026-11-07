@@ -149,7 +149,7 @@ describe('MailboxCourier（集群）', () => {
     const { seam, calls } = fakeMailbox()
     const courier = new MailboxCourier(seam, 'realm-a')
     await courier.open('c1', 5_000)
-    expect(calls).toEqual(['create:c1:realm-a:5000'])
+    expect(calls).toEqual(['create:lumo-agent-teams:realm-a:c1:realm-a:5000'])
   })
 
   it('兑现/失败/等待全部委托，并归一状态闭集', async () => {
@@ -158,14 +158,14 @@ describe('MailboxCourier（集群）', () => {
     expect(await courier.settle('c1', { v: 1 })).toEqual({ status: 'settled' })
     expect(await courier.fail('c1', 'boom')).toEqual({ status: 'already-settled' })
     expect(await courier.await('c1', 100)).toEqual({ state: 'expired', error: 'ttl' })
-    expect(calls).toEqual(['resolve:c1:{"v":1}', 'reject:c1:boom', 'wait:c1:100'])
+    expect(calls).toEqual(['resolve:lumo-agent-teams:r:c1:{"v":1}', 'reject:lumo-agent-teams:r:c1:boom', 'wait:lumo-agent-teams:r:c1:100'])
   })
 
   it('state 经 poll 读既有记录，不阻塞也不改状态', async () => {
     const { seam, calls } = fakeMailbox()
     const courier = new MailboxCourier(seam, 'r')
     expect(await courier.state('c1')).toBe('pending')
-    expect(calls).toEqual(['poll:c1'])
+    expect(calls).toEqual(['poll:lumo-agent-teams:r:c1'])
   })
 
   it('state 把「不存在」与「闭集外的状态」都归一为 unknown', async () => {

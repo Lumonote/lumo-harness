@@ -34,7 +34,7 @@ func testDSN(t *testing.T) string {
 
 // newTestServer 返回（测试服，种子函数）。种子函数直插 projects/project_members
 // 最小同构（表属 projects 服务 DDL 真相源——完整形状漂移由 integration 断言）。
-func newTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, func(pid string, members map[string]string)) {
+func newTestServer(t *testing.T, runtime ...engine.RuntimeConfig) (*httptest.Server, *pgxpool.Pool, func(pid string, members map[string]string)) {
 	t.Helper()
 	schema := fmt.Sprintf("flows_srv_%d", time.Now().UnixNano())
 	base := testDSN(t)
@@ -80,11 +80,15 @@ func newTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, func(pid stri
 	// available:false）。本文件测的是 HTTP 生命周期与权限，不是算子可用性，
 	// 所以显式注入一份「上游已配」的 engine：与 cmd/flows/main.go 同构，只是
 	// 地址是占位域名（这些用例从不真正执行流程，不会发出请求）。
-	server.New(st, nil, engine.New(engine.RuntimeConfig{
+	config := engine.RuntimeConfig{
 		LLMURL: "http://llm.test", ConnectorURL: "http://connector.test",
 		KnowledgeURL: "http://knowledge.test", ControlToken: "test-control-token",
 		IdentitySecret: strings.Repeat("s", 32),
-	})).Register(mux)
+	}
+	if len(runtime) > 0 {
+		config = runtime[0]
+	}
+	server.New(st, nil, engine.New(config)).Register(mux)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	seed := func(pid string, members map[string]string) {

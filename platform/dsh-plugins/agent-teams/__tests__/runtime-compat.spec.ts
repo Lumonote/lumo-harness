@@ -9,8 +9,8 @@ import { MockAdapter, textResponse } from '../../../../deepseek-harness/packages
 import { createUserMessage } from '../../../../deepseek-harness/packages/llm/llm/lib/index.js'
 import { SessionId } from '../../../../deepseek-harness/packages/core/session/lib/index.js'
 import SubagentService from '../../../../deepseek-harness/packages/subagent/subagent/lib/index.js'
-import TeamService from '../../../../deepseek-harness/packages/experimental/agent-team/lib/index.js'
-import * as nativeTeamTools from '../../../../deepseek-harness/packages/experimental/tool-agent-team/lib/index.js'
+import TeamService from '../../../../deepseek-harness/packages/team/agent-team/lib/index.js'
+import * as nativeTeamTools from '../../../../deepseek-harness/packages/team/tool-agent-team/lib/index.js'
 import * as JsonlSessionPersistence from '../../../../deepseek-harness/packages/session/session-persistence-jsonl/lib/index.js'
 import SessionQueryEngine from '../../../../deepseek-harness/packages/session-query/session-query/lib/index.js'
 import { mountAgentLoopTestDependencies } from '../../../../deepseek-harness/packages/test-support/agent-loop-testkit/lib/index.js'
@@ -51,11 +51,10 @@ describe('平台团队与原生会话兼容', () => {
       const adapter = new MockAdapter([textResponse('first reply'), textResponse('second reply')])
       ctx.llm.registerAdapter(['mock'], adapter)
       for (const id of ['first', 'second']) {
-        // agentLoop.create publishes agent/created, where the native tool
-        // plugin calls agentTeams.tryMembership. The collision used to throw
-        // before the new session could finish creating.
+        // Assert the current native public task API against the exact live agent.
         const agent = await ctx.agentLoop.create(SessionId(id), { provider: 'mock', model: 'mock' })
-        expect(native.tryMembership(agent)?.role).toBe('lead')
+        await native.setEnabled(agent, true)
+        expect(native.listTasks(agent)).toEqual([])
         agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } }))
         await agent.whenIdle()
       }

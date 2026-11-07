@@ -5,7 +5,7 @@ import { assertChildResultBody } from '../../../shared/seam-contracts/subagent-h
 import { ReceiptConflictError, type CallbackOutboxStore } from '../../../shared/subagent-receipts.ts'
 import type { ChildResultBody } from '../../../shared/seam-contracts/subagent-host.ts'
 
-export async function persistCallback(store: CallbackOutboxStore, realm: string, url: string, body: ChildResultBody,
+export async function persistCallback(store: Pick<CallbackOutboxStore, 'enqueue'>, realm: string, url: string, body: ChildResultBody,
   signal: AbortSignal, onError: (error: unknown) => void,
 ): Promise<void> {
   for (;;) {

@@ -100,7 +100,7 @@ func (s *Store) RecordTaskResult(ctx context.Context, realm string, result domai
 // Validation lives here rather than in the callers on purpose: this is the only
 // place a result row is ever written, so it is the only place the check cannot
 // be forgotten.
-func recordTaskResultTx(ctx context.Context, tx pgx.Tx, realm string, result *domain.TaskResult, actor string) error {
+func recordTaskResultTx(ctx context.Context, tx pgx.Tx, realm string, result *domain.TaskResult, actor string, trusted ...bool) error {
 	if err := result.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrBadRequest, err)
 	}
@@ -145,6 +145,9 @@ func recordTaskResultTx(ctx context.Context, tx pgx.Tx, realm string, result *do
 	}
 	if task.BusinessState == domain.BusinessDone || task.BusinessState == domain.BusinessRejected || task.BusinessState == domain.BusinessArchived {
 		return fmt.Errorf("%w: task is closed for execution results", ErrConflict)
+	}
+	if err := sealRunOutputTx(ctx, tx, realm, *result, len(trusted) > 0 && trusted[0]); err != nil {
+		return err
 	}
 	if err := tx.QueryRow(ctx, `INSERT INTO governance_task_results(run_id,realm,task_id,payload) VALUES($1,$2,$3,$4) RETURNING created_at`, result.RunID, realm, result.TaskID, raw).Scan(&result.CreatedAt); err != nil {
 		return err

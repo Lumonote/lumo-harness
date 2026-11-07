@@ -65,14 +65,21 @@ export class PgColdLogArchiver implements ColdLogSeam {
   private maxItems: number
 
   constructor(options: ColdLogOptions, objectStore: ObjectStoreSeam) {
-    this.pool = new pg.Pool({ connectionString: options.connectionString })
+    this.pool = new pg.Pool({ connectionString: options.connectionString, max: 4,
+      connectionTimeoutMillis: 5000, query_timeout: 5000, statement_timeout: 5000 })
     this.objectStore = objectStore
     this.realm = options.realm
     this.maxItems = options.maxItems ?? 1_000
   }
 
   async init(): Promise<void> {
-    await this.pool.query(ARCHIVE_DDL)
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('lumo.session-log.archive.schema.v1'))")
+      await client.query(ARCHIVE_DDL)
+      await client.query('COMMIT')
+    } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
   }
 
   /** 只读真源，按 seq 有序。 */

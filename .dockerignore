@@ -18,3 +18,9 @@
 # Generated desktop/runtime staging trees are not inputs to image builds.
 platform/.build
 platform/desktop/lumo-runtime
+# Runtime credentials belong to the mounted DSH home or deployment Secrets.
+# Keep only explicitly named environment templates in the image build context.
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.*.example

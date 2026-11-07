@@ -505,20 +505,19 @@ describe('证据与验收判据的接线（§24.1 / §23.4）', () => {
     expect(target !== undefined && 'evidence' in target).toBe(false)
   })
 
-  it('写回被拒时不给验收结论（不给基于旧状态编出来的结论）', async () => {
+  it('已经失效的认领在派发前拒绝，既不执行也不给验收结论', async () => {
     // 代数不符：写回作废，任务板上没有这次交付。此时若还回一个 accept，
     // 协调者会以为「这次交付被验过了」——而它根本没上板。
-    const { seam } = recordingSeam()
+    const { seam, calls } = recordingSeam()
     const service = makeService(seam)
     const id = await teamWith(service, 'pipeline', ['取数'])
     await service.claim(id, 't1', 'alice')
     await service.reassign(id, 't1', 'bob')          // 代数 +1，alice 的写回随之作废
 
-    const stale = await service.dispatchClaimed({
+    await expect(service.dispatchClaimed({
       teamId: id, taskId: 't1', member: 'bob', attempt: 1, parent: {}, signal: SIGNAL,
-    })
-    expect(stale.ok).toBe(true)
-    expect(stale.acceptance).toBeUndefined()
+    })).rejects.toMatchObject({ code: 'CONFLICT' })
+    expect(calls).toEqual([])
   })
 })
 

@@ -1,0 +1,18 @@
+# Native DeepSeek Harness home/profile patch. The base bundle already owns both ids.
+# Replace the endpoint and model with values your provider actually serves.
+# For a Bearer token, export ANTHROPIC_AUTH_TOKEN to the DSH process and omit apiKeyEnv.
+# For an API key, set apiKeyEnv: ANTHROPIC_API_KEY instead and supply that credential.
+# Keep secrets in the native credential store or environment, never in this patch.
+- id: llm-pi-ai
+  config:
+    providers:
+      anthropic:
+        # Anthropic SDK appends /v1/messages; preserve any gateway prefix here.
+        baseURL: https://api.anthropic.com
+        models:
+          - id: claude-sonnet-4-5
+
+- id: agent-default-model
+  config:
+    provider: anthropic
+    model: claude-sonnet-4-5

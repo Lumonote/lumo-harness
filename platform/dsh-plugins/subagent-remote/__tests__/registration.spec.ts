@@ -45,7 +45,7 @@ it.each([false, true])('persists callback registration before starting the child
       const run = await promise
       const secret = new URL(start!.callbackUrl).pathname.split('/').at(-1)!
       expect(receipts.register).toHaveBeenCalledExactlyOnceWith('realm', String(run.id), {
-        secretHash: createHash('sha256').update(secret).digest('hex'), attempt: 6,
+        secretHash: createHash('sha256').update(secret).digest('hex'), attempt: 6, nodeId: 'node', parentSessionId: 'parent',
       })
     }
   } finally { await ctx.fiber.dispose() }

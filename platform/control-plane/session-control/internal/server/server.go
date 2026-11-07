@@ -62,6 +62,7 @@ const (
 
 // Options 装配服务。
 type Options struct {
+	Owners SessionOwnerStore
 	// Execute 是裁决器（实现见 internal/control）。用函数而不是接口：写面只用到
 	// 一个方法，而接口会让测试里也要造一个类型出来。
 	Execute func(ctx context.Context, req control.Request) (control.Result, error)
@@ -80,6 +81,10 @@ type Options struct {
 type StateReader interface {
 	Load(ctx context.Context, sessionRef string) (store.Row, error)
 	Timeline(ctx context.Context, sessionRef string, afterID int64, limit int) ([]store.AuditRow, error)
+}
+
+type realmTimelineReader interface {
+	TimelineForRealm(context.Context, string, string, int64, int) ([]store.AuditRow, error)
 }
 
 // ReviewStore 是动作放行记录面依赖（消费方定义接口，实现见 internal/store）。
@@ -119,6 +124,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("/metrics", observability.Handler)
 	mux.HandleFunc("/v1/sessions/", s.handleSession)
+	mux.HandleFunc("/v1/session-controls", s.handleControls)
+	mux.HandleFunc("/v1/session-owners", s.handleSessionOwners)
+	mux.HandleFunc("/v1/session-owners/", s.handleSessionOwners)
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -253,15 +261,20 @@ func (s *Server) handleRecordActionReview(w http.ResponseWriter, r *http.Request
 
 // handleActionReviews 读某会话的动作放行记录（最新在前）。
 //
-// `realm` 是**必填的查询参数**，缺了直接 400：本表跨租户共表，realm 是唯一的隔离边界，
-// 「没给 realm」不能被解释成「不过滤」——那正是跨租户读。给了 realm 但该会话属于别的
-// realm 时返回**空列表**（见 store 的注释：报 403/404 会泄露「别的 realm 里存在这个会话」）。
+// 可信代理传入身份时，只使用身份中的 realm；旧服务调用方仍可用 realm 查询参数。
+// 跨租户和未知会话均为空列表，不泄露其他 realm 的会话是否存在。
 func (s *Server) handleActionReviews(w http.ResponseWriter, r *http.Request, sessionRef string) {
+	realm, scoped, ok := trustedReadRealm(w, r)
+	if !ok {
+		return
+	}
 	if s.opts.Reviews == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_store", "控制面未装配动作放行记录的读面")
 		return
 	}
-	realm := strings.TrimSpace(r.URL.Query().Get("realm"))
+	if !scoped {
+		realm = strings.TrimSpace(r.URL.Query().Get("realm"))
+	}
 	if realm == "" {
 		writeError(w, http.StatusBadRequest, "invalid_realm",
 			"realm 必填：它是本表的租户边界，缺省不过滤等于跨 realm 读")
@@ -400,6 +413,10 @@ type lastControl struct {
 }
 
 func (s *Server) handleConsole(w http.ResponseWriter, r *http.Request, sessionRef string) {
+	realm, scoped, ok := trustedReadRealm(w, r)
+	if !ok {
+		return
+	}
 	if s.opts.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_store", "控制面未装配存储读面")
 		return
@@ -407,6 +424,9 @@ func (s *Server) handleConsole(w http.ResponseWriter, r *http.Request, sessionRe
 	view := consoleView{SessionRef: sessionRef, BaseState: control.InitialState}
 
 	row, err := s.opts.Store.Load(r.Context(), sessionRef)
+	if err == nil && scoped && row.Realm != realm {
+		err = store.ErrNotFound
+	}
 	switch {
 	case err == nil:
 		st := row.State
@@ -429,7 +449,7 @@ func (s *Server) handleConsole(w http.ResponseWriter, r *http.Request, sessionRe
 	}
 
 	view.Available = state.AvailableCommands(view.BaseState)
-	if s.opts.Queue != nil {
+	if s.opts.Queue != nil && (!scoped || view.Registered) {
 		snapshot := s.opts.Queue.Snapshot(sessionRef)
 		view.Queue = &snapshot
 	}
@@ -437,6 +457,10 @@ func (s *Server) handleConsole(w http.ResponseWriter, r *http.Request, sessionRe
 }
 
 func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request, sessionRef string) {
+	realm, scoped, ok := trustedReadRealm(w, r)
+	if !ok {
+		return
+	}
 	if s.opts.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_store", "控制面未装配存储读面")
 		return
@@ -455,11 +479,38 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request, sessionR
 		}
 		limit = min(n, maxTimelineLimit)
 	}
-	events, err := s.opts.Store.Timeline(r.Context(), sessionRef, after, limit)
+	visible := true
+	if scoped {
+		row, loadErr := s.opts.Store.Load(r.Context(), sessionRef)
+		switch {
+		case errors.Is(loadErr, store.ErrNotFound), loadErr == nil && row.Realm != realm:
+			visible = false
+		case loadErr != nil:
+			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "控制态暂时不可读")
+			return
+		}
+	}
+	events := make([]store.AuditRow, 0)
+	if visible {
+		if reader, ok := s.opts.Store.(realmTimelineReader); scoped && ok {
+			events, err = reader.TimelineForRealm(r.Context(), realm, sessionRef, after, limit)
+		} else {
+			events, err = s.opts.Store.Timeline(r.Context(), sessionRef, after, limit)
+		}
+	}
 	if err != nil {
 		s.log.Error("读控制时间线失败", "session", sessionRef, "err", err)
 		writeError(w, http.StatusServiceUnavailable, "store_unavailable", err.Error())
 		return
+	}
+	if scoped {
+		filtered := make([]store.AuditRow, 0, len(events))
+		for _, event := range events {
+			if event.Realm == realm && event.SessionRef == sessionRef {
+				filtered = append(filtered, event)
+			}
+		}
+		events = filtered
 	}
 	// next_after 只在读满一页时给出：它是「继续翻」的游标，读不满说明已经到底。
 	var nextAfter int64
@@ -472,6 +523,22 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request, sessionR
 		"next_after":  nextAfter,
 		"limit":       limit,
 	})
+}
+
+// Identity headers come from authenticated services, never directly from the browser.
+// Headerless calls retain the existing trusted-service contract; partial identity
+// must not downgrade to it. Service-token authentication is enforced by main.
+func trustedReadRealm(w http.ResponseWriter, r *http.Request) (string, bool, bool) {
+	rawRealm, rawUser := r.Header.Get("X-Lumo-Realm"), r.Header.Get("X-Lumo-User")
+	if rawRealm == "" && rawUser == "" {
+		return "", false, true
+	}
+	realm := strings.TrimSpace(rawRealm)
+	if realm == "" || strings.TrimSpace(rawUser) == "" {
+		writeError(w, http.StatusUnauthorized, "identity_required", "需要可信调用方的 realm 与用户身份")
+		return "", true, false
+	}
+	return realm, true, true
 }
 
 func parseNonNegative(raw string) (int64, error) {

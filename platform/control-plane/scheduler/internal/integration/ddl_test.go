@@ -42,7 +42,7 @@ func TestDDLIdempotent(t *testing.T) {
 	} {
 		var n int
 		if err := st.Pool().QueryRow(ctx,
-			`SELECT count(*) FROM information_schema.tables WHERE table_name = $1`, table).Scan(&n); err != nil {
+			`SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1`, table).Scan(&n); err != nil {
 			t.Fatalf("查表 %s 失败: %v", table, err)
 		}
 		if n != 1 {

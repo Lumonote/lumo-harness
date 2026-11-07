@@ -91,7 +91,7 @@ async function withAssembly(
   await truncateSessionLog((sql) => pg.raw(sql))
   const ctx = new Context()
   ctx.provide('tools', new ToolsStub(ctx))
-  apply(ctx, {
+  await apply(ctx, {
     connectionString: dsn,
     holder: 'hot-test-node',
     leaseTtlMs: 30_000,

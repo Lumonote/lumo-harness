@@ -8,13 +8,14 @@ import { SubagentError } from '@deepseek-ai/dsh-subagent'
 import { SeamError } from '../../../shared/seam-contracts/errors.ts'
 import { codeForStatus, type SeamErrorCode } from '../../../shared/seam-contracts/remote.ts'
 import type { ChildResultBody, StartChildRequest, StartChildFail } from '../../../shared/seam-contracts/subagent-host.ts'
+import { setTimeout as delay } from 'node:timers/promises'
 
 /** 单次调用超时(控制面内网调用;过短误杀健康节点,undici 默认 300s 又太长)。 */
 const TIMEOUT_MS = 30_000
 
 /**
  * Scheduler 放置:`POST {schedulerUrl}/v1/placements`(X-Lumo-Realm 头)。
- * 201 → node_id(放置成功);202 → 域外(队列形态不支持,`REMOTE_PLACEMENT_QUEUED`);
+ * 201 → node_id; 202 → poll the durable placement until assigned or cancelled.
  * 其它 → 基础设施 `SubagentError`(服务端错误码透传)。
  */
 export interface PlacementResult {
@@ -28,17 +29,24 @@ export async function postPlacement(opts: {
   childId: string
   clusterId?: string
   controlPlaneToken?: string
+  signal?: AbortSignal
+  placementTimeoutMs?: number
+  pollIntervalMs?: number
 }): Promise<PlacementResult> {
+  const signal = AbortSignal.any([...(opts.signal ? [opts.signal] : []), AbortSignal.timeout(opts.placementTimeoutMs ?? 120_000)])
   const res = await rawFetch(`${opts.base}/v1/placements`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-lumo-realm': opts.realm, ...(opts.controlPlaneToken ? { Authorization: `Bearer ${opts.controlPlaneToken}` } : {}) },
     body: JSON.stringify({ task_id: opts.childId, cluster_id: opts.clusterId ?? '', requires: [], priority: 0 }),
+    signal,
   })
   if (res.status === 202) {
-    throw new SubagentError(
-      `Scheduler 已排队(task_id=${opts.childId}):队列形态域外 —— 本切片要求同步放置`,
-      'REMOTE_PLACEMENT_QUEUED',
-    )
+    for (;;) {
+      const placement = await getPlacement({ ...opts, signal })
+      if (placement.state === 'PLACED' || placement.state === 'RUNNING') return parseAssignment(placement)
+      if (placement.state !== 'PENDING') throw new SubagentError(`Queued child ended before dispatch: ${placement.state}`, 'REMOTE_PLACEMENT_CANCELLED')
+      await delay(opts.pollIntervalMs ?? 250, undefined, { signal })
+    }
   }
   if (res.status !== 201) {
     const detail = await schedulerErrorOf(res)
@@ -47,7 +55,15 @@ export async function postPlacement(opts: {
       detail.error ?? 'internal',
     )
   }
-  const body = (await res.json()) as Record<string, unknown>
+  const placement = await res.json() as Record<string, unknown>
+  // Scheduler replays durable terminal placements as 201, too.
+  if (placement['state'] !== undefined && !['PLACED', 'RUNNING'].includes(String(placement['state']))) {
+    throw new SubagentError(`Child ended before dispatch: ${placement['state']}`, 'REMOTE_PLACEMENT_CANCELLED')
+  }
+  return parseAssignment(placement)
+}
+
+function parseAssignment(body: Record<string, unknown>): PlacementResult {
   const nodeId = body['node_id']
   const attempt = body['attempt']
   const nodeIdBad = typeof nodeId !== 'string' || nodeId === ''
@@ -60,6 +76,32 @@ export async function postPlacement(opts: {
   return { nodeId, attempt }
 }
 
+export interface PlacementIdentity { base: string; realm: string; childId: string; controlPlaneToken?: string; signal?: AbortSignal }
+export async function getPlacement(opts: PlacementIdentity): Promise<Record<string, unknown>> {
+  const res = await rawFetch(`${opts.base}/v1/placements/${encodeURIComponent(opts.childId)}`, {
+    headers: schedulerHeaders(opts), signal: opts.signal,
+  })
+  if (!res.ok) throw new SubagentError(`Scheduler placement query failed (HTTP ${res.status})`, 'PLACEMENT_QUERY_FAILED')
+  return await res.json() as Record<string, unknown>
+}
+
+/** Cancellation is durable server-side; a 202 remains pending until the host settles. */
+export async function cancelPlacement(opts: PlacementIdentity & { attempt?: number; nodeId?: string }): Promise<boolean> {
+  const res = await rawFetch(`${opts.base}/v1/tasks/${encodeURIComponent(opts.childId)}/cancel`, {
+    method: 'POST', headers: schedulerHeaders(opts),
+    body: JSON.stringify({ ...(opts.attempt ? { attempt: opts.attempt, node_id: opts.nodeId } : {}) }),
+  })
+  if (res.status === 404) return true
+  if (!res.ok) throw new SubagentError(`Scheduler cancellation failed (HTTP ${res.status})`, 'PLACEMENT_CANCEL_FAILED')
+  const body = await res.json() as Record<string, unknown>
+  return ['ABORTED', 'COMPLETED', 'FAILED', 'LOST'].includes(String(body.state))
+}
+
+function schedulerHeaders(opts: Pick<PlacementIdentity, 'realm' | 'controlPlaneToken'>): Record<string, string> {
+  return { 'content-type': 'application/json', 'x-lumo-realm': opts.realm,
+    ...(opts.controlPlaneToken ? { Authorization: `Bearer ${opts.controlPlaneToken}` } : {}) }
+}
+
 /**
  * 承载 start:`POST {nodeUrl}/subagent/start`(realm + 令牌头)。
  * 200 → 成功;StartChildFail → `SeamError`(code 透传,重试与否由 code 定);
@@ -70,11 +112,13 @@ export async function postChildStart(opts: {
   realm: string
   token?: string
   request: StartChildRequest
+  signal?: AbortSignal
 }): Promise<void> {
   const res = await rawFetch(`${opts.base}/subagent/start`, {
     method: 'POST',
     headers: jsonHeaders(opts.realm, opts.token),
     body: JSON.stringify(opts.request),
+    signal: opts.signal,
   })
   if (res.ok) return
   const fail = await startChildFailOf(res)
@@ -87,11 +131,13 @@ export async function postChildStop(opts: {
   realm: string
   token?: string
   childId: string
+  attempt?: number
+  nodeId?: string
 }): Promise<void> {
   const res = await rawFetch(`${opts.base}/subagent/stop`, {
     method: 'POST',
     headers: jsonHeaders(opts.realm, opts.token),
-    body: JSON.stringify({ childId: opts.childId }),
+    body: JSON.stringify({ childId: opts.childId, attempt: opts.attempt, nodeId: opts.nodeId }),
   })
   if (res.ok) return
   const fail = await startChildFailOf(res)
@@ -121,12 +167,16 @@ export async function postTerminalState(opts: {
   childId: string
   state: string
   attempt?: number
+  nodeId?: string
   controlPlaneToken?: string
 }): Promise<void> {
+  if (!Number.isSafeInteger(opts.attempt) || !opts.attempt || !opts.nodeId) {
+    throw new SubagentError('Scheduler result requires the original attempt and execution node', 'RESULT_IDENTITY_MISSING')
+  }
   const res = await rawFetch(`${opts.base}/v1/tasks/${encodeURIComponent(opts.childId)}/result`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-lumo-realm': opts.realm, ...(opts.controlPlaneToken ? { Authorization: `Bearer ${opts.controlPlaneToken}` } : {}) },
-    body: JSON.stringify({ state: opts.state, ...(opts.attempt !== undefined ? { attempt: opts.attempt } : {}) }),
+    body: JSON.stringify({ state: opts.state, attempt: opts.attempt, node_id: opts.nodeId }),
   })
   if (res.ok) return
   const detail = await schedulerErrorOf(res)
@@ -161,8 +211,9 @@ function jsonHeaders(realm: string, token?: string): Record<string, string> {
  */
 async function rawFetch(url: string, init: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) })
+    return await fetch(url, { ...init, signal: AbortSignal.any([...(init.signal ? [init.signal] : []), AbortSignal.timeout(TIMEOUT_MS)]) })
   } catch (e) {
+    if (init.signal?.aborted) throw init.signal.reason
     if (e instanceof DOMException && e.name === 'TimeoutError') {
       throw new SeamError('timeout', `调用 ${url} 超时(${TIMEOUT_MS}ms)`)
     }

@@ -1,0 +1,112 @@
+name: cluster-acceptance
+
+on:
+  schedule:
+    - cron: '25 18 * * *'
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cluster-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  full-topology:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      COMPOSE_PROJECT_NAME: lumo-fault-ci
+      LUMO_CLUSTER_TOPOLOGY: full
+      LUMO_ENV_FILE: ${{ github.workspace }}/platform/deploy/.env.ci
+      LUMO_ACCEPTANCE_REPORT_DIR: ${{ github.workspace }}/cluster-acceptance-report
+      LUMO_SMOKE_TIMEOUT_SECONDS: '1200'
+      # Real CPU inference with a bounded test footprint; this gate measures
+      # cluster correctness rather than the production BGE model throughput.
+      LUMO_EMBEDDING_MODEL: BAAI/bge-small-en-v1.5
+      LUMO_EMBEDDING_DIMENSION: '384'
+      LUMO_RERANK_MODEL: cross-encoder/ms-marco-MiniLM-L-6-v2
+      LUMO_TEI_MAX_BATCH_TOKENS: '512'
+      LUMO_TEI_MAX_BATCH_REQUESTS: '1'
+      LUMO_TEI_MAX_CONCURRENT_REQUESTS: '4'
+      LUMO_TEI_TOKENIZATION_WORKERS: '1'
+      LUMO_TEI_CPU_THREADS: '1'
+      LUMO_TEST_PG_DSN: postgres://lumo:lumo@127.0.0.1:15432/lumo?sslmode=disable
+      LUMO_TEST_RMQ_ENDPOINT: 127.0.0.1:8081
+      LUMO_TEST_REDIS_ADDR: 127.0.0.1:16379
+      SESSION_LOG_TEST_REDIS: 127.0.0.1:16379
+      LUMO_TEST_NACOS_HEALTH_URL: http://127.0.0.1:18848/nacos/v1/console/health/readiness
+      LUMO_TEST_MILVUS_HEALTH_URL: http://127.0.0.1:19091/healthz
+      LUMO_TEST_OPA_HEALTH_URL: http://127.0.0.1:18181/health
+      LUMO_TEST_VAULT_HEALTH_URL: http://127.0.0.1:18200/v1/sys/health
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: master
+          fetch-depth: 0
+          path: deepseek-harness
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+      - name: Verify all upstream overlay anchors before image downloads
+        run: node platform/dsh-overrides/check-compatibility.mjs deepseek-harness
+      - name: Install and build test runtime
+        run: |
+          pnpm --dir deepseek-harness install --frozen-lockfile
+          pnpm --dir platform install --frozen-lockfile
+          node platform/dsh-overrides/build-host.mjs deepseek-harness
+      - name: Create isolated CI credentials and reports
+        run: |
+          mkdir -p "$LUMO_ACCEPTANCE_REPORT_DIR"
+          token="$(openssl rand -hex 32)"
+          echo "::add-mask::$token"
+          echo "LUMO_CONTROL_PLANE_TOKEN=$token" >> "$GITHUB_ENV"
+          echo "LUMO_CONTROL_PLANE_TOKEN=$token" > "$LUMO_ENV_FILE"
+          echo "LUMO_IDENTITY_ASSERTION_SECRET=$(openssl rand -hex 32)" >> "$LUMO_ENV_FILE"
+          git rev-parse HEAD > "$LUMO_ACCEPTANCE_REPORT_DIR/platform-commit.txt"
+          git -C deepseek-harness rev-parse HEAD > "$LUMO_ACCEPTANCE_REPORT_DIR/dsh-commit.txt"
+      - name: Build full topology images
+        run: |
+          bash platform/upstream/install-components.sh --snapshots-only
+          docker compose --env-file "$LUMO_ENV_FILE" -f platform/deploy/compose.shared.yml -f platform/deploy/compose.control-plane.bundle.yml -f platform/deploy/compose.cluster.yml -f platform/deploy/compose.minio-source.yml --profile cluster-full build
+      - name: Start independent cluster failure domains
+        run: |
+          docker compose --env-file "$LUMO_ENV_FILE" -f platform/deploy/compose.shared.yml -f platform/deploy/compose.control-plane.bundle.yml -f platform/deploy/compose.cluster.yml -f platform/deploy/compose.cluster.acceptance.yml --profile cluster-full up -d
+          platform/deploy/smoke-cluster.sh
+      - name: Run real dependency acceptance with no empty test passes
+        run: platform/deploy/acceptance-cluster.sh
+      - name: Crash leader and node, verify fencing, task replay and graceful drain
+        env:
+          LUMO_ALLOW_FAULT_INJECTION: '1'
+        run: python3 platform/deploy/fault-injection-cluster.py
+      - name: Verify upstream tracked source stayed pristine
+        run: |
+          test -z "$(git -C deepseek-harness status --porcelain -uno)"
+          describe="$(git -C deepseek-harness describe --always --tags --dirty)"
+          test "${describe%-dirty}" = "$describe"
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p "$LUMO_ACCEPTANCE_REPORT_DIR"
+          compose=(docker compose --env-file "$LUMO_ENV_FILE" -f platform/deploy/compose.shared.yml -f platform/deploy/compose.control-plane.bundle.yml -f platform/deploy/compose.cluster.yml -f platform/deploy/compose.cluster.acceptance.yml --profile cluster-full)
+          "${compose[@]}" ps -a > "$LUMO_ACCEPTANCE_REPORT_DIR/containers.txt"
+          "${compose[@]}" logs --no-color --tail=200 > "$LUMO_ACCEPTANCE_REPORT_DIR/containers.log" 2>&1
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: cluster-acceptance-${{ github.sha }}
+          path: cluster-acceptance-report/
+          retention-days: 14
+      - name: Stop isolated test topology
+        if: always()
+        run: docker compose --env-file "$LUMO_ENV_FILE" -f platform/deploy/compose.shared.yml -f platform/deploy/compose.control-plane.bundle.yml -f platform/deploy/compose.cluster.yml -f platform/deploy/compose.cluster.acceptance.yml --profile cluster-full down -v --remove-orphans

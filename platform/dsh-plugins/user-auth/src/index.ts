@@ -3,6 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
+import { createSessionTransport, type SessionTransportConfig } from './session-transport.ts'
 import { CarrierSession } from './carrier-session.ts'
 import { GovernanceAuthClient } from './client.ts'
 import { ConnectorOAuthClient } from './connector-oauth.ts'
@@ -29,6 +30,7 @@ export interface Config {
   realm: string
   projectId?: string
   identityAssertionSecret: string
+  sessionTransport?: SessionTransportConfig
   timeoutMs?: number
 }
 
@@ -45,6 +47,7 @@ export const Config: z<Config> = z.object({
   realm: z.string(),
   projectId: z.string(),
   identityAssertionSecret: z.string(),
+  sessionTransport: z.any(),
   timeoutMs: z.number().default(5000),
 }) as z<Config>
 
@@ -74,7 +77,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     },
     logger: { warn: (format, ...args) => ctx.logger.warn(format, ...args) },
   })
+  if (config.sessionTransport && config.sessionTransport.projectId !== config.projectId) throw new Error('Dynamic Session project must match the authenticated deployment project')
+  const sessionTransport = config.sessionTransport ? createSessionTransport(ctx, config.sessionTransport, config.controlPlaneToken, principal => client.authorizeSessionProject(principal, config.sessionTransport!.projectId)) : undefined
   const server = createAuthProxy({
+    ...(sessionTransport ? { sessionTransport } : {}),
+    serverRuntimeToken: config.controlPlaneToken,
     host: config.host,
     port: config.port,
     ...(config.publicBaseUrl === undefined ? {} : { publicBaseUrl: config.publicBaseUrl }),

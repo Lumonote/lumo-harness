@@ -269,6 +269,7 @@ build_images() {
   echo "== 镜像（${#go_images[@]} 个 Go + ${#root_images[@]} 个仓库根 context，并行度 ${jobs}）=="
   [[ $push -eq 1 ]] && check_version_consistency
   ensure_dsh_source_unless_dry
+  run bash "$platform_root/upstream/install-components.sh" --snapshots-only
 
   # 每个 Dockerfile 必须 COPY 它 go.mod 里 replace 的兄弟模块。漏一个，那个镜像就建不出来，
   # 而错误要跑到容器里下完依赖才出现（`reading /heartbeat/go.mod: no such file or directory`）——

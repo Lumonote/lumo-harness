@@ -48,9 +48,9 @@ function toolsSpy(): ToolsSpy {
 }
 
 /** `ctx.subagents` 的结构等价子集：装配用例只探测，不派发 activation。 */
-function subagentsSpy(providers: string[]): { list: () => string[]; startActivation: () => Promise<never> } {
+function subagentsSpy(providers: string[]): { getProvider: (name: string) => unknown; startActivation: () => Promise<never> } {
   return {
-    list: () => providers,
+    getProvider: name => providers.includes(name) ? { name } : undefined,
     startActivation: () => Promise.reject(new Error('本用例不派发')),
   }
 }
@@ -65,6 +65,12 @@ function storageSpy(): StorageFacetLike {
     },
     deleteRecord: async (_table, key) => {
       records.delete(key)
+    },
+    compareAndSetRecord: async (_table, key, expected, next) => {
+      if (JSON.stringify(records.get(key)) !== JSON.stringify(expected)) return false
+      if (next === undefined) records.delete(key)
+      else records.set(key, next)
+      return true
     },
     close: async () => {},
   }
@@ -128,11 +134,11 @@ describe('装配', () => {
     const result = Promise.resolve({ output: [], stopReason: 'completed' })
     const activation = { childId: 'child', result, async dispose() { expect(this).toBe(activation) } }
     const startActivation = vi.fn(async () => activation)
-    const seam = createMemberSeam({ list: () => ['spawn'], startActivation })
+    const seam = createMemberSeam({ getProvider: name => name === 'spawn' ? { name } : undefined, startActivation })
     const run = await seam.start('spawn', { label: 'task', parent, prompt: [], signal, maxDepth: 3 })
     expect(startActivation).toHaveBeenCalledExactlyOnceWith({
       provider: 'spawn', label: 'task', signal, delivery: 'caller',
-      request: { parent, prompt: [], maxDepth: 3 },
+      parent, prompt: [], maxDepth: 3,
     })
     expect(run.id).toBe('child')
     expect(run.result).toBe(result)
@@ -141,11 +147,11 @@ describe('装配', () => {
 
   it('只有 tools 也能装起来：工具面注册齐全，能力画像为「不能派发」', async () => {
     const { ctx, tools, service } = boot()
-    // 11 个团队工具 + 6 个线程工具（§24.2：建/查/推进/暂停/等/重派）。
-    expect(tools.names).toHaveLength(17)
+    // 11 个团队工具 + 7 个线程工具（含持久轮次执行）。
+    expect(tools.names).toHaveLength(20)
     expect(tools.names.filter(name => name.startsWith('agent_threads_'))).toEqual([
       'agent_threads_create', 'agent_threads_status', 'agent_threads_advance',
-      'agent_threads_pause', 'agent_threads_await', 'agent_threads_reassign',
+      'agent_threads_pause', 'agent_threads_await', 'agent_threads_reassign', 'agent_threads_run', 'agent_threads_schedule', 'agent_threads_signal',
     ])
     await flush()
     expect(service().capabilitiesOrNull()).toBeNull()
@@ -261,6 +267,45 @@ describe('装配', () => {
     await ctx.fiber.dispose()
   })
 
+  it('Worker provider 不再冒充稳定会话执行面；Thread 执行必须显式配置', async () => {
+    const { ctx } = boot({}, { subagents: ['lumo-remote', 'spawn'] })
+    await flush()
+    expect((ctx.get('agentThreads') as ThreadsRuntime).capabilities().roundRunner).toBe(false)
+    await ctx.fiber.dispose()
+  })
+
+  it('distributed Thread execution refuses a missing persistent owner authority', async () => {
+    const ctx = new Context()
+    ctx.provide('tools', toolsSpy())
+    expect(() => apply(ctx, {realm: 'r1', actingUserId: 'u1', nodeId: 'n1', workspaceRoot: '/srv/workspaces',
+      collaboratorUrl: 'http://collaborator', controlPlaneToken: 'service-token', threadExecution: {
+        governanceUrl: 'http://governance', projectId: 'p1', agentId: 'a1', presetRevision: 1, provider: 'mock', model: 'mock', distributed: true,
+      }})).toThrow('session owner authority')
+    await ctx.fiber.dispose()
+  })
+
+  it('Thread 执行按公开服务晚挂载，并随服务卸载撤销能力', async () => {
+    const ctx = new Context()
+    ctx.provide('tools', toolsSpy())
+    apply(ctx, { realm: 'r1', actingUserId: 'u1', nodeId: 'n1', workspaceRoot: '/srv/workspaces',
+      collaboratorUrl: 'http://collaborator', controlPlaneToken: 'service-token', threadExecution: {
+        governanceUrl: 'http://governance', projectId: 'p1', agentId: 'a1', presetRevision: 1, provider: 'mock', model: 'mock',
+      } })
+    await flush()
+    const threads = ctx.get('agentThreads') as ThreadsRuntime
+    expect(threads.capabilities().roundRunner).toBe(false)
+    const child = ctx.extend()
+    child.provide('agents', {})
+    child.provide('sessionPersistence', { identity: Symbol('durable') })
+    child.provide('meteringScope', { bind: () => () => {}, resolve: () => undefined })
+    await flush()
+    expect(threads.capabilities().roundRunner).toBe(true)
+    await child.fiber.dispose()
+    await flush()
+    expect(threads.capabilities().roundRunner).toBe(false)
+    await ctx.fiber.dispose()
+  })
+
   it('线程档位：配了协作服务地址但漏了身份时响亮留痕，线程面仍可用但不带注册表', async () => {
     // 症状是「线程动作全部拒绝」，没有这条日志，现场会先怀疑协作服务挂了。
     const ctx = new Context()
@@ -301,7 +346,7 @@ describe('装配', () => {
     const { ctx, tools, service } = boot({}, { subagents: ['spawn'] })
     await flush()
     await service().create({ id: 'demo', name: '演示', topology: 'pipeline', subjects: ['a'], captainSessionId: 's' })
-    expect(tools.live()).toBe(17)
+    expect(tools.live()).toBe(20)
 
     await ctx.fiber.dispose()
 

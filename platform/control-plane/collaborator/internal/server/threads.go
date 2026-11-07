@@ -99,8 +99,8 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
-	list, err := s.store.ListThreads(r.Context(), string(ident.Realm),
-		query.Get("project_id"), domain.ThreadState(query.Get("state")), limit)
+	list, err := s.store.ListThreadsAfter(r.Context(), string(ident.Realm),
+		query.Get("project_id"), domain.ThreadState(query.Get("state")), limit, query.Get("after"), query["task_id"])
 	if err != nil {
 		writeThreadErr(w, err)
 		return

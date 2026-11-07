@@ -15,12 +15,19 @@ describe('subagent-remote scheduler client', () => {
       base: 'http://scheduler', realm: 'realm-a', childId: 'child-1', controlPlaneToken: 'control-token',
     })).resolves.toEqual({ nodeId: 'node-1', attempt: 2 })
     await expect(postTerminalState({
-      base: 'http://scheduler', realm: 'realm-a', childId: 'child-1', state: 'COMPLETED', attempt: 2, controlPlaneToken: 'control-token',
+      base: 'http://scheduler', realm: 'realm-a', childId: 'child-1', state: 'COMPLETED', attempt: 2, nodeId: 'node-1', controlPlaneToken: 'control-token',
     })).resolves.toBeUndefined()
 
+    expect(JSON.parse(String(fetch.mock.calls[1]?.[1]?.body))).toEqual({ state: 'COMPLETED', attempt: 2, node_id: 'node-1' })
     for (const [, init] of fetch.mock.calls) {
       expect(init?.headers).toMatchObject({ Authorization: 'Bearer control-token', 'x-lumo-realm': 'realm-a' })
     }
+  })
+
+  it.each(['ABORTED', 'FAILED', 'COMPLETED', 'CANCELLING'])('rejects a replayed terminal or cancelling 201 placement: %s', async state => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ node_id: 'node-1', attempt: 1, state }, { status: 201 })))
+    await expect(postPlacement({ base: 'http://scheduler', realm: 'realm-a', childId: 'child' }))
+      .rejects.toMatchObject({ code: 'REMOTE_PLACEMENT_CANCELLED' })
   })
 
   it('names the field that actually failed when a 201 body is incomplete', async () => {

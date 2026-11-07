@@ -3,11 +3,15 @@ import { describe, expect, it, vi } from 'vitest'
 import { PgKvUnit } from '../src/unit.ts'
 
 function fixture() {
-  const query = vi.fn(async () => ({ rows: [] }))
-  const unit = new PgKvUnit({ query } as unknown as pg.Pool, {
+  const query = vi.fn(async (sql: string, _values?: unknown[]) => ({
+    rows: sql.startsWith('SELECT version') ? [{ version: 1 }] : [], rowCount: sql.startsWith('DELETE') ? 1 : 0,
+  }))
+  const release = vi.fn()
+  const connect = vi.fn(async () => ({ query, release }))
+  const unit = new PgKvUnit({ query, connect } as unknown as pg.Pool, {
     name: 'batch', version: 1, tables: ['records'], hasGlobal: false,
   }, () => {})
-  return { query, unit }
+  return { query, unit, release }
 }
 
 describe('PG batch deletion', () => {
@@ -15,10 +19,12 @@ describe('PG batch deletion', () => {
     const { query, unit } = fixture()
     const keys = ['duplicate', 'duplicate', "quote'; --", 'missing']
     await unit.deleteRecords('records', keys)
-    expect(query).toHaveBeenCalledExactlyOnceWith(
+    expect(query).toHaveBeenCalledWith(
       'DELETE FROM "u_batch_records" WHERE key = ANY($1::text[])', [keys],
     )
     expect(keys).toHaveLength(4)
+    expect(query.mock.calls[0]).toEqual(['BEGIN'])
+    expect(query.mock.calls.at(-1)).toEqual(['COMMIT'])
   })
 
   it('makes an empty batch a no-op while validating the unit and table', async () => {
@@ -34,6 +40,13 @@ describe('PG batch deletion', () => {
     const { query, unit } = fixture()
     query.mockRejectedValueOnce(new Error('database unavailable'))
     await expect(unit.deleteRecords('records', ['a', 'b'])).rejects.toThrow('database unavailable')
-    expect(query).toHaveBeenCalledTimes(1)
+    expect(query.mock.calls.map(call => call[0])).toEqual(['BEGIN', 'ROLLBACK'])
+  })
+
+  it('discards a connection whose rollback failed', async () => {
+    const { query, unit, release } = fixture()
+    query.mockRejectedValueOnce(new Error('write failed')).mockRejectedValueOnce(new Error('rollback failed'))
+    await expect(unit.deleteRecords('records', ['a'])).rejects.toMatchObject({ code: 'unknown-state' })
+    expect(release).toHaveBeenCalledWith(true)
   })
 })

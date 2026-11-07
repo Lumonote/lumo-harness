@@ -16,6 +16,8 @@ x-cluster-bundle-environment: &cluster-bundle-environment
   LUMO_CONNECTOR_GATEWAY_URL: http://connector-gateway:8082
   LUMO_GOVERNANCE_URL: http://governance:8089
   LUMO_SESSION_CONTROL_URL: http://session-control:8092
+  # Inherited by both DSH children; the fixed binding must be authorized on each.
+  LUMO_THREAD_EXECUTION: "${LUMO_THREAD_EXECUTION:-}"
   LUMO_NACOS_ADDR: http://nacos:8848
   LUMO_NACOS_SERVICE: lumo-dsh-node
   LUMO_NACOS_GROUP: DEFAULT_GROUP
@@ -63,6 +65,7 @@ services:
         aliases: [scheduler-0, scheduler-1, collaborator-0, collaborator-1]
 
   cluster-a-bundle:
+    stop_grace_period: 180s
     profiles: [cluster-compact]
     build:
       context: ../..
@@ -72,6 +75,7 @@ services:
     restart: unless-stopped
     env_file: [./cluster-runtime.env]
     environment:
+      LUMO_SESSION_LOG_SPOOL_DIR: /var/lib/lumo/session-spool
       <<: *cluster-bundle-environment
       LUMO_BUNDLE_CLUSTER_ID: cluster-a
       LUMO_CLUSTER_A_VERSION: "${LUMO_CLUSTER_A_VERSION:-dev}"
@@ -82,6 +86,9 @@ services:
       LUMO_CLUSTER_A_AGENT_PROVIDER: "${LUMO_CLUSTER_A_AGENT_PROVIDER:-}"
       LUMO_CLUSTER_A_AGENT_MODEL: "${LUMO_CLUSTER_A_AGENT_MODEL:-}"
     volumes:
+      - cluster-ahome-0:/var/lib/lumo/dsh/cluster-a-dsh-0
+      - cluster-ahome-1:/var/lib/lumo/dsh/cluster-a-dsh-1
+      - cluster-aspool:/var/lib/lumo/session-spool
       - provisionerdata:/var/lib/lumo/artifacts:ro
     depends_on:
       postgres: { condition: service_healthy }
@@ -101,15 +108,14 @@ services:
         aliases: [scheduler-cluster-a, cluster-a-dsh-0, cluster-a-dsh-1]
 
   cluster-b-bundle:
+    stop_grace_period: 180s
     profiles: [cluster-compact]
-    build:
-      context: ../..
-      dockerfile: platform/data-plane/dsh-node/Dockerfile
-      target: cluster-bundle
+    # 复用 cluster-a-bundle 构建的镜像。
     image: "${LUMO_CLUSTER_BUNDLE_IMAGE:-lumo/dsh-cluster-bundle:dev}"
     restart: unless-stopped
     env_file: [./cluster-runtime.env]
     environment:
+      LUMO_SESSION_LOG_SPOOL_DIR: /var/lib/lumo/session-spool
       <<: *cluster-bundle-environment
       LUMO_BUNDLE_CLUSTER_ID: cluster-b
       LUMO_CLUSTER_B_VERSION: "${LUMO_CLUSTER_B_VERSION:-dev}"
@@ -120,6 +126,9 @@ services:
       LUMO_CLUSTER_B_AGENT_PROVIDER: "${LUMO_CLUSTER_B_AGENT_PROVIDER:-}"
       LUMO_CLUSTER_B_AGENT_MODEL: "${LUMO_CLUSTER_B_AGENT_MODEL:-}"
     volumes:
+      - cluster-bhome-0:/var/lib/lumo/dsh/cluster-b-dsh-0
+      - cluster-bhome-1:/var/lib/lumo/dsh/cluster-b-dsh-1
+      - cluster-bspool:/var/lib/lumo/session-spool
       - provisionerdata:/var/lib/lumo/artifacts:ro
     depends_on:
       postgres: { condition: service_healthy }
@@ -137,3 +146,11 @@ services:
     networks:
       default:
         aliases: [scheduler-cluster-b, cluster-b-dsh-0, cluster-b-dsh-1]
+
+volumes:
+  cluster-aspool:
+  cluster-bspool:
+  cluster-ahome-0:
+  cluster-ahome-1:
+  cluster-bhome-0:
+  cluster-bhome-1:

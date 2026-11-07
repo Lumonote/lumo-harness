@@ -1,0 +1,42 @@
+# Intentionally incomplete: supply an operator-owned values file after this
+# overlay. helm template/install MUST fail until the real endpoints, evidence
+# references, network peers, mesh trust domain and existing Secrets are supplied.
+# Load after values.cluster.yaml. This profile does not install HA middleware.
+production:
+  enabled: true
+  databaseSecret: ""
+  postgresEndpoint: ""
+  dependencyEvidence: {}
+  restoreDrillRef: ""
+  durabilityPolicyRef: ""
+secrets: { create: false }
+objectStore: { enabled: true, endpoint: "", useSSL: true, credentialsSecret: "" }
+postgres: { dsn: "" }
+redis: { address: "" }
+rocketmq: { endpoint: "" }
+nacos: { address: "" }
+vault: { address: "", tokenSecret: "" }
+governance: { authSecret: "" }
+replicaCount: 2
+availability:
+  podDisruptionBudget: { enabled: true, maxUnavailable: 1 }
+  topologySpread: { enabled: true, whenUnsatisfiable: DoNotSchedule }
+networkPolicy:
+  enabled: true
+  ingress: []
+  externalEgress: []
+serviceMesh:
+  istio: { enabled: true, trustDomain: "" }
+productionControls:
+  enforced: true
+  observability: { enabled: true }
+dshNode:
+  workloadKind: StatefulSet
+  spool:
+    persistence: { enabled: true }
+dshWeb:
+  workloadKind: StatefulSet
+  replicas: 2
+  spool:
+    persistence: { enabled: true }
+  identityAssertion: { allowStaticIdentity: false }

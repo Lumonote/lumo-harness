@@ -144,6 +144,11 @@ export class GovernanceAuthClient {
     return body.principal
   }
 
+  async authorizeSessionProject(principal: Principal, projectId: string): Promise<void> {
+    const body = await this.json<{ decisions?: Array<{ action: string; allowed: boolean }> }>(`/v1/effective-permissions?project_id=${encodeURIComponent(projectId)}`, { headers: { 'X-Lumo-Realm': principal.realm, 'X-Lumo-User': principal.user_id, 'X-Lumo-Roles': principal.roles.join(',') } })
+    if (!body.decisions?.some(d => d.action === 'task:delegate' && d.allowed === true)) throw new GovernanceApiError(403, 'session_project_denied', '当前用户无项目会话执行权限')
+  }
+
   async logout(token: string): Promise<void> {
     await this.call('/v1/auth/logout', { method: 'POST', headers: { 'X-Lumo-Session': token } })
   }

@@ -86,28 +86,46 @@ export class PgStorageBackend implements StorageBackend {
 
   private async materializeUnit(descriptor: KvUnitDescriptor): Promise<PgKvUnit> {
     await this.ready
-    const { rows } = await this.pool.query('SELECT version FROM units WHERE name = $1', [descriptor.name])
-    const row = rows[0] as { version: number } | undefined
-    if (row === undefined) {
-      await this.pool.query('INSERT INTO units (name, version) VALUES ($1, $2)', [descriptor.name, descriptor.version])
-    } else if (row.version !== descriptor.version) {
-      throw new StorageError(
-        'version-mismatch',
-        `kv unit '${descriptor.name}' is stamped version ${row.version} on the medium, incompatible with descriptor version ${descriptor.version}`,
-      )
-    }
-    for (const table of descriptor.tables) {
-      // Both segments passed UNIT_NAME_RE, so the identifier is safe in DDL.
-      await this.pool.query(`
-        CREATE TABLE IF NOT EXISTS "${recordTableName(descriptor.name, table)}" (
-          key   TEXT PRIMARY KEY,
-          value TEXT NOT NULL
+    const client = await this.pool.connect()
+    let discard = false
+    let storedVersion = descriptor.version
+    try {
+      await client.query('BEGIN')
+      await client.query("SELECT pg_advisory_xact_lock(hashtext(current_schema()), hashtext($1))", [`lumo.storage.unit.${descriptor.name}`])
+      await client.query('INSERT INTO units (name, version) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING', [descriptor.name, descriptor.version])
+      const { rows } = await client.query('SELECT version FROM units WHERE name = $1', [descriptor.name])
+      const row = rows[0] as { version: number }
+      storedVersion = row.version
+      if (row.version !== descriptor.version && !descriptor.compatibleVersions?.includes(row.version)) {
+        throw new StorageError(
+          'version-mismatch',
+          `kv unit '${descriptor.name}' is stamped version ${row.version} on the medium, incompatible with descriptor version ${descriptor.version}`,
         )
-      `)
+      }
+      for (const table of descriptor.tables) {
+        // Both segments passed UNIT_NAME_RE, so the identifier is safe in DDL.
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS "${recordTableName(descriptor.name, table)}" (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+          )
+        `)
+      }
+      await client.query('COMMIT')
+    } catch (error) {
+      try { await client.query('ROLLBACK') } catch (rollbackError) {
+        discard = true
+        throw new StorageError('unknown-state', 'PG unit initialization and rollback failed; the connection was discarded', {
+          cause: new AggregateError([error, rollbackError], 'initialization and rollback failed'),
+        })
+      }
+      throw error
+    } finally {
+      client.release(discard)
     }
     return new PgKvUnit(this.pool, descriptor, () => {
       this.units.delete(descriptor.name)
-    })
+    }, storedVersion)
   }
 
   /**
@@ -126,6 +144,7 @@ export class PgStorageBackend implements StorageBackend {
     } catch {
       // The medium never opened; that failure already rejected the opener and
       // every unit call, so there is nothing left to release here.
+      await this.pool.end()
       return
     }
     for (const pending of [...this.units.values()]) {

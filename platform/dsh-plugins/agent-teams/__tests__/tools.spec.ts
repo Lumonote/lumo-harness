@@ -113,6 +113,31 @@ async function seed(h: Harness, subjects = ['取数', '清洗']): Promise<string
 }
 
 describe('工具面注册', () => {
+  it('所有团队工具拒绝其他会话，列表只返回本会话团队', async () => {
+    const h = harness()
+    await seed(h)
+    const outsider = { agent: { id: 'another-session' }, signal: SIGNAL } as unknown as ToolRunContext
+    expect(await h.call('agent_teams_status', {}, outsider)).toEqual({ teams: [] })
+    for (const name of [
+      'agent_teams_add_member', 'agent_teams_remove_member', 'agent_teams_create_task',
+      'agent_teams_reassign_task', 'agent_teams_cancel_task', 'agent_teams_run',
+      'agent_teams_status', 'agent_teams_await_task', 'agent_teams_reconcile', 'agent_teams_delete',
+    ]) {
+      await expect(h.call(name, {
+        teamId: 'demo', name: 'alice', taskId: 't1', member: 'alice', assignee: 'alice', tasks: [{ subject: 'attack' }],
+      }, outsider), name).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    }
+    expect(h.calls).toEqual([])
+    expect((await h.service.get('demo')).tasks).toHaveLength(2)
+  })
+
+  it('缺少真实会话的工具调用不会建出 unknown-captain 团队', async () => {
+    const h = harness()
+    await expect(h.call('agent_teams_create', {
+      teamId: 'anonymous', name: 'anonymous', topology: 'pipeline', subjects: [],
+    }, { signal: SIGNAL } as ToolRunContext)).rejects.toThrow(/会话身份不可用/)
+    expect(await h.service.list()).toEqual([])
+  })
   it('注册全部 11 个 agent_teams_* 工具，名字无遗漏', () => {
     const h = harness()
     expect([...h.tools.keys()].sort()).toEqual([

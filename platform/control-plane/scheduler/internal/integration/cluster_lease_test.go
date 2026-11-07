@@ -18,7 +18,7 @@ import (
 func clusterLeaseNode(t *testing.T, st *store.Store) {
 	t.Helper()
 	if err := (&catalog.Pg{Pool: st.Pool()}).Upsert(context.Background(),
-		domain.Node{NodeID: "N1", Realm: "r1", ClusterID: "c1", Capacity: 16, Capabilities: []string{"llm"}}); err != nil {
+		domain.Node{NodeID: "N1", Realm: "r1", ClusterID: "cluster-a", Capacity: 16, Capabilities: []string{"llm"}}); err != nil {
 		t.Fatalf("登记节点失败: %v", err)
 	}
 }
@@ -110,19 +110,19 @@ func TestPlacementFencingUsesTheLeasesOwnTable(t *testing.T) {
 	}
 	var fo *domain.FencedOutError
 
-	// 两把锁都在 → 两条路径都能放行。
+	// A follower cannot enter local admission while a global leader is live.
 	if _, err := st.PlaceTask(ctx, global, task("t1"), "N1"); err != nil {
 		t.Fatalf("全局租约应能放置: %v", err)
 	}
-	if _, err := st.PlaceTask(ctx, cluster, task("t2"), "N1"); err != nil {
-		t.Fatalf("集群租约应能放置: %v", err)
+	if _, err := st.PlaceTask(ctx, cluster, task("t2"), "N1"); !errors.Is(err, domain.ErrGlobalLeaderActive) {
+		t.Fatalf("有效全局租约应阻止本地放置: %v", err)
 	}
 
 	// 释放**集群**租约：集群租约被围栏拒，而全局租约不受影响。
 	if err := st.ReleaseCluster(ctx, "cluster-a", "node-a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.PlaceTask(ctx, cluster, task("t3"), "N1"); !errors.As(err, &fo) {
+	if _, err := st.PlaceTask(ctx, cluster, task("t3"), "N1"); !errors.Is(err, domain.ErrGlobalLeaderActive) {
 		t.Fatalf("已释放的集群租约应被围栏拒, got %v", err)
 	}
 	if _, err := st.PlaceTask(ctx, global, task("t4"), "N1"); err != nil {

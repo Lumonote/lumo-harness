@@ -2,7 +2,7 @@
  * @lumo/metering —— 计量单截面插件（§6.4 + 评审 N3 并行预算树）。
  *
  * 挂接点：llm/stream 瀑布（必须 next()，观察流并累计 usage）；
- * 归因：user/dept/role/project 由装配层配置（agent/request baggage 注入为 P2）；
+ * 归因：装配层配置为默认，受治理执行按可信 session 绑定 owner/project/agent/run；
  * 预算：PG 双树（user/project），reserve 前置拦截；明细入 usage_ledger。
  *
  * 采用 dsh 原生 ctx.tokenMeter（TokenUsageProjection 口径）作为 token 核算底座，
@@ -14,10 +14,11 @@ import { Context } from '@deepseek-ai/cordis'
 
 import { PgMeteringSeam } from './pg-meter.ts'
 import type { MeterContext, MeterRecord } from '../../../shared/seam-contracts/metering.ts'
+import { SessionMeterRegistry } from '../../../shared/seam-contracts/meter-attribution.ts'
 
 export interface MeteringConfig {
   connectionString: string
-  /** 归因上下文（单节点装配层注入；P2 后改从 agent/request baggage 派生） */
+  /** 未显式绑定执行身份时的节点归因上下文。 */
   userId: string
   deptId: string
   role: string
@@ -58,7 +59,18 @@ export function apply(ctx: Context, config: MeteringConfig): void {
   // ——受治理执行在开跑前给它那一次执行封顶——而配额本身由这里执法。没有这个服务，调用方
   // 唯一的办法是直连 PG 写本插件的表，那就等于把 schema 复制一份出去（本仓明确反对：
   // 「各自直连 PG 写台账就会有 N 份 schema 副本，必然漂移」）。
-  ctx.provide('meteringCaps', meter)
+  const scopes = new SessionMeterRegistry()
+  ctx.provide('meteringScope', scopes)
+  // Admission and accounting both await the same initialization, including failures.
+  const ready = meter.init().then(async () => {
+    await meter.seedDefaultBudget('user', config.userId, config.defaultBudget)
+    await meter.seedDefaultBudget('project', config.projectId, config.defaultBudget)
+  })
+  ctx.provide('meteringCaps', {
+    setCap: async (...args: Parameters<typeof meter.setCap>) => { await ready; return meter.setCap(...args) },
+    clearCap: async (...args: Parameters<typeof meter.clearCap>) => { await ready; return meter.clearCap(...args) },
+    spentCents: async (...args: Parameters<typeof meter.spentCents>) => { await ready; return meter.spentCents(...args) },
+  })
 
   const drainIntervalMs = Math.max(config.drainIntervalMs ?? 1000, 100)
   const drainBatchSize = config.drainBatchSize ?? 100
@@ -69,16 +81,8 @@ export function apply(ctx: Context, config: MeteringConfig): void {
   ctx.effect(() => {
     let timer: ReturnType<typeof setInterval> | undefined
     let disposed = false
-    // 幂等初始化（建表/迁移）；失败即加载失败（响亮失败，§15）。
-    // 种子与轮询必须等建表完成再起，否则前几轮全是「表不存在」噪音。
-    void meter.init().then(async () => {
-      // 默认预算种子：**仅当无行时插入**（§6.4 预算树）。
-      // 此处曾调用 setBudget——那是一年期初重配语义（remaining=total），每次插件重启都会
-      // 把运维配置的总额/硬停冲回 defaultBudget（1e9）；且哪怕旧语义也覆盖了运维在
-      // budget_trees 上的显式配置（注释写「仅当未显式配置时生效」，实现却是无条件 upsert，
-      // 注释与实现不符）。seedDefaultBudget 用 DO NOTHING + 旧模式行，两者都对齐。
-      await meter.seedDefaultBudget('user', config.userId, config.defaultBudget)
-      await meter.seedDefaultBudget('project', config.projectId, config.defaultBudget)
+    // 种子、准入和轮询共用 ready；初始化失败时模型准入也拒绝。
+    void ready.then(() => {
       if (disposed) return
       // 互斥装配（设计说明 §2）：rmq 形态下 drain 轮询不起——台账搬运归
       // usage-ledger Go 服务（publisher/consumer）。此处继续留着的 init/种子
@@ -111,48 +115,46 @@ export function apply(ctx: Context, config: MeteringConfig): void {
   // 计量单截面：llm/stream 瀑布观察（必须 next() —— §8.3/事件瀑布规则；next 同步返回 AsyncIterable）
   ctx.on('llm/stream', function (options, next) {
     // 单截面计量：所有模型调用流经 ctx.llm.stream —— 此处为唯一计费截面（§6.4）
-    const stream = next()
-    const sessionRef = (options as { session?: { id?: string } }).session?.id ?? 'system'
-    const sessCtx = { ...context, sessionRef }
+    const sessionRef = options.sessionId ?? (options as { session?: { id?: string } }).session?.id ?? 'system'
+    const attribution = scopes.resolve(sessionRef)
+    const sessCtx = { ...context, ...attribution?.context, sessionRef }
     // 输入 / 输出**分开累计**：费率表给的是两个价（每百万 token），合并成一个数就没法
     // 按各自的价格算。这里少记一个变量，下游就得拿「较高的那个价」去兜（见 pg-meter 的
     // costOf），而兜出来的数比真实成本高——账是 append-only 的，写进去就改不回来了。
     let inputTokens = 0
     let outputTokens = 0
-    let model = (options as { model?: string }).model ?? 'unknown'
+    const model = options.model
     const delegatingStream = (async function* () {
+      await ready
       // 前置拦截：首 token 发出前预检双树预算（§6.4 限流前置语义）
       const approval = await meter.reserve(sessCtx)
       if (!approval.approved) {
         throw new Error(`metering: 预算拒绝 —— ${approval.reason}（feature=${config.feature}）`)
       }
-      for await (const chunk of stream) {
-        const usage = (chunk as { usage?: Record<string, unknown> }).usage
-        if (usage) {
-          const u = usage as { input_tokens?: number; output_tokens?: number; prompt_tokens?: number; completion_tokens?: number }
-          inputTokens = u.input_tokens ?? u.prompt_tokens ?? 0
-          outputTokens = u.output_tokens ?? u.completion_tokens ?? 0
+      try {
+        for await (const chunk of next()) {
+          // Current DSH normalizes usage to camelCase; keep old adapter counters readable.
+          const usage = (chunk as { usage?: Record<string, unknown> }).usage
+          if (usage) {
+            const u = usage as { inputTokens?: number; outputTokens?: number; input_tokens?: number; output_tokens?: number; prompt_tokens?: number; completion_tokens?: number }
+            inputTokens = u.inputTokens ?? u.input_tokens ?? u.prompt_tokens ?? inputTokens
+            outputTokens = u.outputTokens ?? u.output_tokens ?? u.completion_tokens ?? outputTokens
+          }
+          yield chunk
         }
-        yield chunk
-      }
-      // 流结束：扣账（明细 + 双树扣减）
-      //
-      // **不给 `costUsd`**：节点侧拿不到上游账单，价格只能由记账方从 `llm_providers`
-      // 的费率推（与网关侧同一个公式）。此前这里写死 `costUsd: 0`，于是 **agent 发起的
-      // 调用在台账里完全没有成本**——`usage_ledger.cost_usd` 恒为 0，分析读面的
-      // `SUM(cost_usd)` 一直少算这一路。网关侧那条路（南北向入口）不受影响，它自己算。
-      const tokens = inputTokens + outputTokens
-      if (tokens > 0) {
-        void meter.commit(meterRecordOf(sessCtx, inputTokens, outputTokens, model))
+      } finally {
+        // Await accounting before another turn can reserve. Preserve reported usage
+        // on adapter errors and consumer cancellation; never invent missing usage.
+        if (inputTokens + outputTokens > 0) {
+          await meter.commit({ ...meterRecordOf(sessCtx, inputTokens, outputTokens, model),
+            ...attribution === undefined ? {} : { traceId: attribution.traceId } })
+        }
       }
     })()
     return delegatingStream
   })
 
-  // 由 control/计量核算单元完成实际记扣（token-meter 的 tokenUsage 口径），此处残余项留 P2
-  ctx.effect(() => () => {
-    void meter.close()
-  })
+  ctx.effect(() => () => ready.catch(() => {}).then(() => meter.close()))
 }
 
 /**

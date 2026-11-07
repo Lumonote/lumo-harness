@@ -1,14 +1,14 @@
-# 推送 v* tag 即自动创建（或更新）GitHub Release，正文取自 CHANGELOG.md 对应版本的小节。
+# 推送 v* tag 自动准备 Release 草稿（或同步已有 Release 正文），不提前发布。
 #
 # 与 release.yml 的分工：
-#   - 本 workflow 只把 CHANGELOG 同步到 Release 页面，不构建任何东西，秒级完成；
-#   - release.yml 负责构建桌面安装包并上传到同一个 Release（同样由 tag 推送触发，耗时数十分钟）。
+#   - 本 workflow 只把 CHANGELOG 同步到草稿或已有 Release 页面；
+#   - release.yml 在桌面构建及真实集群验收通过后上传产物并发布同一个 Release。
 # 两者都对「Release 已存在」做了幂等处理（更新 / 覆盖上传），所以先后顺序无所谓。
 # 正文抽取逻辑与 release.yml 共用 .github/scripts/release-notes.sh，保证两边一致。
 #
-# 为什么要显式 --draft=false：删除一个 tag 会把它的 Release 退回 Draft（GitHub 的既有行为），
-# 于是「删 tag → 在新提交上重打同名 tag」这类修正动作会让 Release 静默变成草稿，而
-# gh release edit 会保留草稿状态、不会把它重新发布。这里显式声明发布态，使重打 tag 能自愈。
+# Only prepare a draft when the Release does not exist. release.yml publishes
+# it after desktop builds AND real cluster fault acceptance pass; this fast
+# notes workflow must not bypass that release gate or demote an existing release.
 name: changelog-release
 
 on:
@@ -43,10 +43,9 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" \
               --title "$GITHUB_REF_NAME" \
-              --draft=false \
               --notes-file "$RUNNER_TEMP/notes.md"
           else
-            gh release create "$GITHUB_REF_NAME" \
+            gh release create "$GITHUB_REF_NAME" --draft \
               --title "$GITHUB_REF_NAME" \
               --notes-file "$RUNNER_TEMP/notes.md" \
               --verify-tag

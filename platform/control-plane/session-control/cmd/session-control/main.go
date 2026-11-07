@@ -170,6 +170,7 @@ func main() {
 
 	srv := server.New(server.Options{
 		Execute: controller.Execute,
+		Owners:  persistence,
 		Store:   persistence,
 		// 同一个 Store 同时当动作放行记录的读写面：`action_reviews` 与本服务的另外两张表
 		// 同族（同一次 Init 建、同一个池读写），没有理由为它另开一条连接。

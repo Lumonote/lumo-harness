@@ -9,7 +9,7 @@
  * ```
  * runRound(teamId)
  *   ├─ 读团队状态 → 前沿 = 依赖已齐且未指派给别人的任务
- *   ├─ 对每条前沿任务：claim（在写链内，防两个成员抢同一条）
+ *   ├─ 对每条前沿任务：claim（写链排序 + 存储 CAS，防跨节点重复认领）
  *   └─ 并行派发（provider 由 roster 探测决定：单机进程内 / 集群远端）
  *        └─ 写回：complete / fail（带 attempt 代数，拒绝迟到写回）
  * ```
@@ -22,6 +22,8 @@
  * agent-teams 的「continuable 成员共享上下文」换成 one-shot 之后必须补上的一环。
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { randomUUID } from 'node:crypto'
 import {
   addMember,
   addTasks,
@@ -124,6 +126,11 @@ export interface MemberSurface {
 
 /** 服务构造参数。三个协作者都是**解析器**而不是实例，理由见类注释。 */
 export interface AgentTeamsServiceOptions {
+  /** 来自节点装配的可信身份，工具参数无法覆盖。 */
+  realm?: string
+  ownerUserId?: string
+  /** PG 装配在持久存储就绪前拒绝团队读写，避免内存分叉。 */
+  requireDurableStore?: boolean
   /** 存储解析器。 */
   resolveStore: () => { store: AgentTeamStore; durable: boolean }
   /** 会合面解析器。 */
@@ -138,18 +145,9 @@ export interface AgentTeamsServiceOptions {
 }
 
 /**
- * 团队编排服务。所有对团队状态的修改都经 {@link mutate}，从而在同一团队的写链上
- * 串行执行 —— 这是「两个成员同时认领/写回不互相覆盖」的唯一保证。
- *
- * ## 写链为什么挂在这里，而不是某个 store 实现里
- *
- * `KvUnit` 契约明说「the unit does NOT serialize concurrent writes — write ordering
- * is the caller's responsibility」，而**调用方就是本服务**。把链条放进
- * `StorageHubTeamStore` 曾经是个真实的 bug：`mutate` 只对那一个实现走链条，
- * 内存兜底存储（以及任何未来的存储实现）退化成无保护的读-改-写 ——
- * 两个成员并行写回时后写的覆盖先写的，任务永久停在 `claimed`。
- *
- * 所以链条是**服务**的协调不变量：换介质不该让这条保证失效。
+ * 团队编排服务。同实例修改按团队写链排序；跨实例通过存储 CAS 条件提交。
+ * CAS 冲突时重读最新快照并重新执行同步守卫，最多重试 32 次。写链减少本实例
+ * 争用，跨节点正确性由 CAS 保证；仅靠进程内写链无法防止其他节点覆盖状态。
  *
  * ## 为什么三个协作者都是解析器而不是实例
  *
@@ -164,6 +162,25 @@ export class AgentTeamsService {
   private readonly warn: (message: string) => void
   /** 每个团队 id 一条串行写链。 */
   private readonly writeChains = new Map<string, Promise<unknown>>()
+  private readonly caller = new AsyncLocalStorage<string>()
+
+  /** 模型工具的权限边界；异步派发与写回保留同一个船长身份。 */
+  asCaptain<T>(captainSessionId: string, run: () => Promise<T>): Promise<T> {
+    if (captainSessionId.trim() === '' || captainSessionId === 'unknown-captain') {
+      return Promise.reject(new TeamError('缺少可信船长会话身份', 'FORBIDDEN'))
+    }
+    return this.caller.run(captainSessionId, run)
+  }
+
+  private canAccess(team: TeamState): boolean {
+    return team.realm === (this.options.realm ?? 'agent-teams')
+      && (this.options.ownerUserId === undefined || team.ownerUserId === this.options.ownerUserId)
+      && (this.caller.getStore() === undefined || team.captainSessionId === this.caller.getStore())
+  }
+
+  private assertAccess(team: TeamState): void {
+    if (!this.canAccess(team)) throw new TeamError(`团队 ${team.id} 不存在或不属于当前身份`, 'NOT_FOUND')
+  }
 
   constructor(private readonly options: AgentTeamsServiceOptions) {
     this.now = options.now ?? (() => Date.now())
@@ -172,7 +189,11 @@ export class AgentTeamsService {
   }
 
   private get store(): AgentTeamStore {
-    return this.options.resolveStore().store
+    const resolved = this.options.resolveStore()
+    if (this.options.requireDurableStore && !resolved.durable) {
+      throw new TeamError('集群团队持久存储尚未就绪', 'BAD_STATE')
+    }
+    return resolved.store
   }
 
   private get courier(): TeamCourier {
@@ -228,22 +249,30 @@ export class AgentTeamsService {
     return next
   }
 
-  /** 读-改-写（团队必须已存在）。整段在写链内，故守卫看到的永远是最新状态。 */
+  /** 读-改-CAS；冲突时重读并重跑同步守卫，拒绝覆盖其他实例已经提交的状态。 */
   private mutate(teamId: string, change: (current: TeamState) => TeamState): Promise<TeamState> {
     return this.chain(teamId, async () => {
-      const current = await this.store.load(teamId)
-      if (current === undefined) throw new TeamError(`团队 ${teamId} 不存在`, 'NOT_FOUND')
-      const updated = change(current)
-      await this.store.save(updated)
-      return updated
+      // 固定一次操作使用的 store，避免晚挂载后端把读和写拆到两个介质。
+      const store = this.store
+      for (let retry = 0; retry < 32; retry += 1) {
+        const current = await store.load(teamId)
+        if (current === undefined) throw new TeamError(`团队 ${teamId} 不存在`, 'NOT_FOUND')
+        this.assertAccess(current)
+        const updated = { ...change(current), revision: randomUUID() }
+        if (updated.id !== current.id || updated.realm !== current.realm
+          || updated.ownerUserId !== current.ownerUserId || updated.captainSessionId !== current.captainSessionId) {
+          throw new TeamError('团队身份归属不可变更', 'FORBIDDEN')
+        }
+        if (await store.compareAndSet(teamId, current, updated)) return updated
+      }
+      throw new TeamError(`团队 ${teamId} 写入冲突过多，请重试`, 'CONFLICT')
     })
   }
 
   /**
    * 建团队并按拓扑铺种子任务。
    *
-   * 「已存在即拒」放在写链内而不是链外先查后写：链外查会与并发建同名团队形成
-   * check-then-act 竞态，两边都查到「不存在」然后互相覆盖。
+   * insert-only CAS 保证多个实例创建同名团队时仅一个成功；删除墓碑也视为已占用。
    */
   async create(input: {
     id: string
@@ -256,10 +285,10 @@ export class AgentTeamsService {
     // id 会当存储键（per-record 布局下是路径段），先闸住再铺任务，
     // 好过铺了一半在 save 时才炸。方法本身是 async，故非法 id 表现为 rejection。
     assertTeamId(input.id)
+    if (this.caller.getStore() !== undefined && this.caller.getStore() !== input.captainSessionId) {
+      throw new TeamError('船长身份不可由调用参数覆盖', 'FORBIDDEN')
+    }
     return this.chain(input.id, async () => {
-      if (await this.store.load(input.id) !== undefined) {
-        throw new TeamError(`团队 ${input.id} 已存在`, 'DUPLICATE_TEAM')
-      }
       const base = createTeam({
         id: input.id,
         name: input.name,
@@ -268,25 +297,42 @@ export class AgentTeamsService {
         captainSessionId: input.captainSessionId,
         now: this.now(),
       })
-      const seeded = addTasks(base, seedTasks(input.topology, input.subjects), this.now()).team
-      await this.store.save(seeded)
+      const seeded = {
+        ...addTasks(base, seedTasks(input.topology, input.subjects), this.now()).team,
+        realm: this.options.realm ?? 'agent-teams',
+        ...this.options.ownerUserId === undefined ? {} : { ownerUserId: this.options.ownerUserId },
+        revision: randomUUID(),
+      }
+      if (!await this.store.compareAndSet(input.id, undefined, seeded)) {
+        throw new TeamError(`团队 ${input.id} 已存在或已删除，id 不可复用`, 'DUPLICATE_TEAM')
+      }
       return seeded
     })
   }
 
-  list(): Promise<TeamState[]> {
-    return this.store.list()
+  async list(): Promise<TeamState[]> {
+    return (await this.store.list()).filter(team => this.canAccess(team))
   }
 
   async get(teamId: string): Promise<TeamState> {
     const team = await this.store.load(teamId)
     if (team === undefined) throw new TeamError(`团队 ${teamId} 不存在`, 'NOT_FOUND')
+    this.assertAccess(team)
     return team
   }
 
-  /** 删除也走写链：免得删掉之后一条在途的写回把团队又写回来。 */
+  /** 删除也按快照 CAS 并保留墓碑，阻止其他节点的迟到写回复活团队。 */
   remove(teamId: string): Promise<void> {
-    return this.chain(teamId, () => this.store.remove(teamId))
+    return this.chain(teamId, async () => {
+      const store = this.store
+      for (let retry = 0; retry < 32; retry += 1) {
+        const current = await store.load(teamId)
+        if (current === undefined) return
+        this.assertAccess(current)
+        if (await store.compareAndSet(teamId, current, undefined)) return
+      }
+      throw new TeamError(`团队 ${teamId} 删除冲突过多，请重试`, 'CONFLICT')
+    })
   }
 
   /** 加成员。provider 由 roster 探测结果落定，成员自己不选 transport。 */
@@ -382,6 +428,10 @@ export class AgentTeamsService {
     const team = await this.get(input.teamId)
     const task = taskById(team, input.taskId)
     const member = memberByName(team, input.member)
+    if (task.attempt !== input.attempt || task.assignee !== member.name
+      || (task.status !== 'claimed' && task.status !== 'in_progress')) {
+      throw new TeamError('任务认领已失效，拒绝启动旧执行', 'CONFLICT')
+    }
     const channel = channelId(team.id, task.id, input.attempt)
     await this.openChannel(channel)
 
@@ -410,16 +460,16 @@ export class AgentTeamsService {
     // 身份。分开写会出现「结论已上板、证据还没到」的窗口，而那个窗口里任何一次验收都会
     // 判 `no-evidence` —— 拒收一个其实有证据的交付。
     let written: TeamState | undefined
-    await this.mutate(input.teamId, (current) => {
+    written = await this.mutate(input.teamId, (current) => {
       const next = outcome.ok
         ? completeTask(current, task.id, member.name, outcome.text, this.now(), input.attempt,
           [evidenceOfRun(outcome.runId)])
         : failTask(current, task.id, member.name, outcome.text, this.now(), input.attempt)
-      written = next
       return next
     }).catch((error: unknown) => {
       // 写回被拒（代数不符 / 任务已被取消）不该让整轮调度炸掉，但要留痕。
       this.warn(`agent-teams: 任务 ${task.id} 的结果写回被拒：${describe(error)}`)
+      return undefined
     })
 
     // 验收判据在**写回之后**才算：它读的是任务板上的既成事实（验收条件 + 这次带上板的证据）。
@@ -516,7 +566,12 @@ export class AgentTeamsService {
         continue
       }
       try {
-        await this.mutate(teamId, current => requeueTask(current, task.id, this.now()))
+        await this.mutate(teamId, current => {
+          if (taskById(current, task.id).attempt !== task.attempt) {
+            throw new TeamError('执行代数已变化，拒绝使用旧通道状态重派', 'CONFLICT')
+          }
+          return requeueTask(current, task.id, this.now())
+        })
         requeued.push(task.id)
       } catch (error: unknown) {
         this.warn(`agent-teams: 任务 ${task.id} 退回待认领失败：${describe(error)}`)

@@ -217,7 +217,8 @@ export interface ReviewerFacts {
  * 而「没差别」在这里是拒绝侧。
  */
 export function reviewerEligibility(facts: ReviewerFacts): ReviewerEligibility {
-  if (!Number.isSafeInteger(facts.affectedArtifacts) || facts.affectedArtifacts < 0) {
+  if (!Number.isSafeInteger(facts.affectedArtifacts) || facts.affectedArtifacts < 0
+    || !facts.dispatcher.trim() || !facts.reviewer.trim()) {
     return { eligible: false, reason: 'invalid-input' }
   }
 
@@ -227,7 +228,7 @@ export function reviewerEligibility(facts: ReviewerFacts): ReviewerEligibility {
   }
 
   const differs = (a: string | undefined, b: string | undefined): boolean =>
-    a !== undefined && b !== undefined && a !== b
+    a !== undefined && b !== undefined && a.trim() !== '' && b.trim() !== '' && a !== b
   const presetDiffers = differs(facts.dispatcherPreset, facts.reviewerPreset)
   const modelDiffers = differs(facts.dispatcherModel, facts.reviewerModel)
   const nodeDiffers = differs(facts.dispatcherNode, facts.reviewerNode)

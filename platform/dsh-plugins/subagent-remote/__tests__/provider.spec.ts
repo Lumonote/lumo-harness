@@ -33,7 +33,7 @@ interface RecordedCall {
 interface Harness {
   provider: RemoteSubagentProvider
   sched: Server
-  schedCalls: { placements: RecordedCall[]; results: RecordedCall[] }
+  schedCalls: { placements: RecordedCall[]; results: RecordedCall[]; cancellations: RecordedCall[] }
   host: Server
   hostCalls: { starts: RecordedCall[]; stops: RecordedCall[] }
   assembly: ReturnType<typeof assembleRemote>
@@ -42,6 +42,7 @@ interface Harness {
 
 interface SetupOptions {
   /** 放置应答;缺省 201 { node_id: 'N1', attempt: 1 }(与 domain.Placement 的 JSON 契约一致 —— 两个字段都非 omitempty)。 */
+  poll?: () => Record<string, unknown>
   schedule?: () => { status: number; body: Record<string, unknown> }
   /** 承载节点期望的令牌;缺省 't0k'。置于预期之外(hostTokens 覆写)即 403 场景。 */
   hostExpects?: string
@@ -49,6 +50,7 @@ interface SetupOptions {
   nodeTokens?: Record<string, string>
   /** Present means dispose must use the global job-control mailbox, not HTTP stop. */
   jobControl?: JobControlSeam
+  beforeStartAck?: (request: StartChildRequest) => Promise<void>
 }
 
 const all: Array<{ close(): Promise<void> }> = []
@@ -59,7 +61,7 @@ afterEach(async () => {
 })
 
 async function setup(opts: SetupOptions = {}): Promise<Harness> {
-  const schedCalls = { placements: [] as RecordedCall[], results: [] as RecordedCall[] }
+  const schedCalls = { placements: [] as RecordedCall[], results: [] as RecordedCall[], cancellations: [] as RecordedCall[] }
   const hostCalls = { starts: [] as RecordedCall[], stops: [] as RecordedCall[] }
   const hostExpects = opts.hostExpects ?? 't0k'
 
@@ -71,6 +73,15 @@ async function setup(opts: SetupOptions = {}): Promise<Harness> {
         schedCalls.placements.push({ headers: req.headers, body })
         const reply = opts.schedule?.() ?? { status: 201, body: { node_id: 'N1', attempt: 1 } }
         json(res, reply.status, reply.body)
+        return
+      }
+      if (req.method === 'GET' && url.pathname.startsWith('/v1/placements/')) {
+        json(res, 200, opts.poll?.() ?? { state: 'PLACED', node_id: 'N1', attempt: 1 })
+        return
+      }
+      if (req.method === 'POST' && url.pathname.endsWith('/cancel')) {
+        schedCalls.cancellations.push({ headers: req.headers, body: await readJson(req) })
+        json(res, 200, { state: 'ABORTED' })
         return
       }
       if (req.method === 'POST' && /^\/v1\/tasks\/[^/]+\/result$/.test(url.pathname)) {
@@ -104,6 +115,7 @@ async function setup(opts: SetupOptions = {}): Promise<Harness> {
           return
         }
         if (url.pathname === '/subagent/start') {
+          await opts.beforeStartAck?.(body as StartChildRequest)
           json(res, 200, { ok: true, childId: body.childId })
         } else {
           json(res, 200, { ok: true })
@@ -300,6 +312,25 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
     await flow.dispose()
   }, 30_000)
 
+  it('preserves an early failed callback before host start acknowledges without an unhandled rejection', async () => {
+    let startPublished = false
+    let callbackStatus: number | undefined
+    const h = await setup({ beforeStartAck: async request => {
+      const response = await fetch(request.callbackUrl, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ runId: request.childId, ok: false, code: 'HOST_PROCESS_LOST', message: 'previous host boot stopped' }) })
+      callbackStatus = response.status
+      expect(startPublished).toBe(false)
+      // An event-loop turn before publishing the handle exposes a missing
+      // rejection observer to Vitest's unhandled-rejection guard.
+      await new Promise<void>(resolve => setTimeout(resolve, 20))
+    } })
+    const run = await h.provider.start(startRequest())
+    startPublished = true
+    expect(callbackStatus).toBe(200)
+    await expect(run.result).rejects.toMatchObject({ code: 'HOST_PROCESS_LOST' })
+    expect(h.schedCalls.results[0]?.body).toEqual({ state: 'FAILED', attempt: 1, node_id: 'N1' })
+  })
+
   it('happy path:place 201 → host start 200 → 回执结集;父描述真实采集;终态上报 scheduler', async () => {
     const h = await setup()
     const run = await h.provider.start(startRequest())
@@ -357,32 +388,45 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
     // 带上放置时拿到的 attempt —— scheduler 的 resultRequest 用它给陈旧上报做栅栏。
     const report = await waitFor(() => h.schedCalls.results[0], 'scheduler 终态上报')
     expect(report.headers['x-lumo-realm']).toBe('dev')
-    expect(report.body).toEqual({ state: 'COMPLETED', attempt: 1 })
+    expect(report.body).toEqual({ state: 'COMPLETED', attempt: 1, node_id: 'N1' })
   })
 
-  it('排队 202:start 拒绝 REMOTE_PLACEMENT_QUEUED,host 未被请求', async () => {
-    const h = await setup({ schedule: () => ({ status: 202, body: { task_id: 'x', state: 'PENDING' } }) })
-    const error = await h.provider.start(startRequest()).then(() => undefined, (e: unknown) => e)
-    expect(error).toBeInstanceOf(SubagentError)
-    expect((error as SubagentError).code).toBe('REMOTE_PLACEMENT_QUEUED')
+  it('waits for a queued placement before starting the assigned host', async () => {
+    let polls = 0
+    const h = await setup({
+      schedule: () => ({ status: 202, body: { state: 'PENDING' } }),
+      poll: () => ++polls === 1 ? { state: 'PENDING' } : { state: 'PLACED', node_id: 'N1', attempt: 1 },
+    })
+    const run = await h.provider.start(startRequest())
+    expect(polls).toBe(2)
+    expect(h.hostCalls.starts).toHaveLength(1)
+    expect(h.hostCalls.starts[0]?.body).toMatchObject({ schedulerAttempt: 1, schedulerNodeId: 'N1' })
+    await postCallback(h, { runId: String(run.id), ok: true, stopReason: 'completed' })
+    await run.result
+  })
+
+  it('cancels a queued task when the caller aborts before assignment', async () => {
+    const h = await setup({ schedule: () => ({ status: 202, body: { state: 'PENDING' } }), poll: () => ({ state: 'PENDING' }) })
+    const controller = new AbortController()
+    const pending = h.provider.start({ ...startRequest(), signal: controller.signal })
+    await waitFor(() => h.schedCalls.placements[0], 'queued placement')
+    controller.abort(new Error('parent stopped'))
+    await expect(pending).rejects.toThrow()
     expect(h.hostCalls.starts).toHaveLength(0)
-    expect(h.schedCalls.placements).toHaveLength(1)
-    // 202 = 槽位未落账(域外排队):没有 FAILED 上报(F1a 只覆盖「已放置后失败」)
+    expect(h.schedCalls.cancellations).toHaveLength(1)
     expect(h.schedCalls.results).toHaveLength(0)
   })
 
-  it('令牌错 host 403:reject SeamError,code 透传 forbidden;placement 已落账 → FAILED 终态上报', async () => {
+  it('host rejection cancels the assigned attempt without falsely failing a possibly live child', async () => {
     const h = await setup({ nodeTokens: { N1: 'wrong' } })
     const error = await h.provider.start(startRequest()).then(() => undefined, (e: unknown) => e)
     expect(error).toBeInstanceOf(SeamError)
     expect((error as SeamError).code).toBe('forbidden')
     expect(h.schedCalls.placements).toHaveLength(1)
     expect(h.hostCalls.starts).toHaveLength(1)
-    // F1a:placement 201 已把 childId 计入 scheduler PLACED 容量(无任务级 GC),
-    // start 失败不报终态 = 槽位永久泄漏 —— best-effort FAILED 上报必须发生
-    const failedReport = await waitFor(() => h.schedCalls.results[0], 'start 失败后的 FAILED 终态上报')
-    expect(failedReport.headers['x-lumo-realm']).toBe('dev')
-    expect(failedReport.body).toEqual({ state: 'FAILED', attempt: 1 })
+    expect(h.schedCalls.cancellations).toHaveLength(1)
+    expect(h.schedCalls.cancellations[0]?.body).toEqual({ attempt: 1, node_id: 'N1' })
+    expect(h.schedCalls.results).toHaveLength(0)
   })
 
   it('dispose → host stop 收到;dispose 幂等(两次调用只一次 fetch);回调 aborted 结集', async () => {
@@ -391,7 +435,7 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
     await run.dispose()
     await run.dispose()
     expect(h.hostCalls.stops).toHaveLength(1)
-    expect(h.hostCalls.stops[0]!.body).toEqual({ childId: String(run.id) })
+    expect(h.hostCalls.stops[0]!.body).toEqual({ childId: String(run.id), attempt: 1, nodeId: 'N1' })
 
     const status = await postCallback(h, { runId: String(run.id), ok: true, output: [], stopReason: 'aborted' })
     expect(status).toBe(200)

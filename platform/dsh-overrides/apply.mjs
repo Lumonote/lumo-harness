@@ -212,11 +212,18 @@ export function applyLumoDshOverrides(root) {
     ],
   ], 'LUMO_SIDEBAR_NAVIGATION')
 
-  patchFile(root, 'packages/client/ui-sidebar/src/client/SidebarRoot.tsx', [
+  // The browsing region now wraps the panel list and history in scrollRegion;
+  // retain the same seat position after New Session for both known layouts.
+  const sidebarRootFile = 'packages/client/ui-sidebar/src/client/SidebarRoot.tsx'
+  const sidebarRootSource = readFileSync(resolve(root, sidebarRootFile), 'utf8')
+  const browsingRegion = sidebarRootSource.includes('      <div className={css.scrollRegion}>\n')
+    ? '      <div className={css.scrollRegion}>\n'
+    : '      {/* The browsing region fills the column between the controls and the\n'
+  patchFile(root, sidebarRootFile, [
     [
-      "      {/* The browsing region fills the column between the controls and the\n",
+      browsingRegion,
       "      {renderSlot('sidebar.navigation', { wide })} {/* LUMO_SIDEBAR_NAVIGATION */}\n\n"
-        + "      {/* The browsing region fills the column between the controls and the\n",
+        + browsingRegion,
     ],
   ], 'LUMO_SIDEBAR_NAVIGATION')
 
@@ -224,9 +231,10 @@ export function applyLumoDshOverrides(root) {
   // intact; the Lumo controls are siblings, not a replacement for native chrome.
   const historyFile = 'packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx'
   const historySource = readFileSync(resolve(root, historyFile), 'utf8')
-  const historyHeader = historySource.includes('      <div className={css.sectionHeader}>\n')
-    ? '      <div className={css.sectionHeader}>\n'
-    : '      <div className={clsx(css.sectionHeader, wide && searchSpacingMotionEnabled && css.searchSpacingMotion)}>\n'
+  // Match the class expression, preserving new upstream DOM attributes too.
+  const historyHeader = historySource.includes('      <div className={css.sectionHeader}')
+    ? '      <div className={css.sectionHeader}'
+    : '      <div className={clsx(css.sectionHeader, wide && searchSpacingMotionEnabled && css.searchSpacingMotion)}'
   patchFile(root, historyFile, [[
     historyHeader,
     `      {wide && (
@@ -494,6 +502,59 @@ export function applyLumoDshOverrides(root) {
     ],
   ], 'LUMO_STREAM_RESILIENCE')
 
+  const bootAuditFile = 'packages/client/web/src/boot-client.ts'
+  const bootAuditSource = readFileSync(resolve(root, bootAuditFile), 'utf8')
+  if (bootAuditSource.includes('const requiredClientEntryNames = new Set<string>([')) {
+    // fcc0ad46 upstream now owns optional-entry isolation and the required-entry
+    // boot gate. Keep those sources intact; these no-op anchors still reject
+    // unknown layouts instead of silently bypassing compatibility diagnostics.
+    const nativeBootAnchors = [
+      [bootAuditFile, [
+        "const requiredClientEntryNames = new Set<string>([\n"
+          + "  '@deepseek-ai/dsh-client-modules',\n"
+          + "  '@deepseek-ai/dsh-api-session-controller',\n"
+          + "  '@deepseek-ai/dsh-client-ui-renderer',\n"
+          + "  '@deepseek-ai/dsh-client-ui-layout',\n"
+          + "  '@deepseek-ai/dsh-client-ui-session',\n"
+          + "  '@deepseek-ai/dsh-client-ui-chat',\n"
+          + "  '@deepseek-ai/dsh-client-ui-sidebar',\n"
+          + "])\n",
+        "  if (required > 0) {\n"
+          + "    const lines = failures.map(({ name, reason }) => `${name}${isRequired(name) ? ' (required)' : ''}: ${reason}`)\n"
+          + "    throw new Error(`web boot: ${String(required)} required ${entryNoun(required)} did not activate\\n${lines.join('\\n')}`)\n"
+          + "  }\n",
+        "  warn(`web boot: warning: ${String(failures.length)} ${entryNoun(failures.length)} did not activate\\n${lines.join('\\n')}`)\n",
+      ]],
+      ['packages/client/modules/src/client/entries.ts', [
+        "      await Promise.all(this.desired.plugins.map(async ({ id }) => {\n"
+          + "        await this.create(loader, id).catch((error: unknown) => { loader.ctx.logger.error(error) })\n"
+          + "      }))\n"
+          + "      await loader.await()\n",
+      ]],
+      ['packages/client/web/src/boot.ts', [
+        "import { bootClient } from './boot-client.ts'\n",
+        "      await bootClient({\n"
+          + "        ctx,\n"
+          + "        modules: this.modules,\n"
+          + "        manifest: this.manifest,\n"
+          + "        // A failed entry may be optional; only the audit decides whether the boot page reports a failure.\n"
+          + "        onEntryState: (name, state) => {\n"
+          + "          if (state !== 'failed') this.page.setState(name, state)\n"
+          + "        },\n"
+          + "      })\n",
+        "      await mountClient(ctx, this.container)\n"
+          + "    } catch (reason) {\n"
+          + "      console.error(reason)\n"
+          + "      if (onFailure !== undefined) onFailure(reason)\n"
+          + "      else this.page.fail(reason instanceof Error ? reason.message : String(reason))\n",
+      ]],
+    ]
+    for (const [file, anchors] of nativeBootAnchors) {
+      const source = readFileSync(resolve(root, file), 'utf8')
+      for (const anchor of anchors) replaceExactlyOnce(source, anchor, anchor, file)
+    }
+    return
+  }
   // A fiber starts PENDING and emits internal/status only on transitions. The
   // activation audit owns the final states; an event ledger can miss a plugin
   // that never receives a required service such as settingsScope.

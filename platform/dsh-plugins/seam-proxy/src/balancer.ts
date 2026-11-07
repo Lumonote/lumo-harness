@@ -60,6 +60,7 @@ export class Balancer {
     for (let i = 0; i < n; i++) {
       const slot = this.slots[(this.cursor + i) % n]!
       if (this.usable(slot)) {
+        if (slot.failures >= this.threshold) slot.halfOpen = true
         this.cursor = (this.cursor + i + 1) % n
         return slot.url
       }
@@ -80,11 +81,7 @@ export class Balancer {
 
   private usable(slot: Slot): boolean {
     if (slot.failures < this.threshold) return true
-    if (this.now() - slot.openedAt >= this.openForMs) {
-      slot.halfOpen = true // 放一个探针过去
-      return true
-    }
-    return false
+    return !slot.halfOpen && this.now() - slot.openedAt >= this.openForMs
   }
 
   succeed(url: string): void {
@@ -116,7 +113,7 @@ export class Balancer {
   health(): EndpointHealth[] {
     return this.slots.map((s) => ({
       url: s.url,
-      state: !this.usable(s) ? 'open' : s.halfOpen ? 'half-open' : 'closed',
+      state: s.halfOpen ? 'half-open' : s.failures >= this.threshold ? 'open' : 'closed',
       failures: s.failures,
       openedAt: s.openedAt,
     }))

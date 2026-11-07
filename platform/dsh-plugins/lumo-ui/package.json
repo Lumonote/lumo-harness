@@ -14,6 +14,7 @@
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": { "patch": "cordis.patch.yml" },
     "client": {
       "inject": ["@deepseek-ai/dsh-client-ui-renderer", "@deepseek-ai/dsh-client-ui-layout", "@deepseek-ai/dsh-client-ui-sidebar", "@deepseek-ai/dsh-client-ui-slots", "@deepseek-ai/dsh-client-ui-conversation", "@deepseek-ai/dsh-client-ui-theme"],
       "external": ["@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client"],
@@ -42,5 +43,5 @@
     "@types/node": "link:../../../deepseek-harness/node_modules/@types/node",
     "@types/react": "~18.3.1"
   },
-  "files": ["lib/index.js", "lib/client.js", "lib/types/**/*.d.ts"]
+  "files": ["lib/index.js", "lib/client.js", "lib/types/**/*.d.ts", "cordis.patch.yml"]
 }

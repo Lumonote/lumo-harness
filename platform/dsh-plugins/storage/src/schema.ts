@@ -34,8 +34,11 @@ export function recordTableName(unit: string, table: string): string {
  */
 export async function ensureSchema(pool: pg.Pool): Promise<void> {
   const client = await pool.connect()
+  let discard = false
   try {
     await client.query('BEGIN')
+    // Serialize first boot across replicas before CREATE TABLE's catalog checks.
+    await client.query("SELECT pg_advisory_xact_lock(hashtext(current_schema()), hashtext('lumo.storage.schema'))")
     await client.query(`
       CREATE TABLE IF NOT EXISTS storage_meta (
         key   TEXT PRIMARY KEY,
@@ -71,9 +74,14 @@ export async function ensureSchema(pool: pg.Pool): Promise<void> {
     }
     await client.query('COMMIT')
   } catch (e) {
-    await client.query('ROLLBACK').catch(() => {})
+    try { await client.query('ROLLBACK') } catch (rollbackError) {
+      discard = true
+      throw new StorageError('unknown-state', 'PG schema initialization and rollback failed; the connection was discarded', {
+        cause: new AggregateError([e, rollbackError], 'initialization and rollback failed'),
+      })
+    }
     throw e
   } finally {
-    client.release()
+    client.release(discard)
   }
 }

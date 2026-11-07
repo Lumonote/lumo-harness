@@ -26,6 +26,7 @@ Istio SDS 管理，不应创建或挂载通用私钥 Secret。上线前还应启
 | `compose.standalone.yml` | 服务器单例 | Docker Compose 形态覆盖 | 将 10 个 API、单实例调度与协作进程合并到 `api-bundle`，另运行 DSH Web |
 | `compose.cluster.yml` | 服务器集群 | Docker Compose 形态覆盖 | 声明集群专属中间件、DSH Web、策略与模型服务；共享组件只覆盖差异项 |
 | `compose.cluster.compact.yml` | Cluster 默认开发 | Compose 叠加文件 | 将双 Scheduler、双 Collaborator 并入 `api-bundle`；每集群一个 DSH bundle 容器 |
+| `compose.models.standalone.yml` / `compose.models.cluster.yml` / `compose.models.cluster.compact.yml` | 原生模型配置 | Compose 可选叠加文件 | 按形态挂载官方 home patch，并注入原生供应商凭据环境文件 |
 | `compose.cluster.devices.yml` | Cluster 设备接入 | Compose 叠加文件 | 独立设备 TLS 监听、服务端证书和设备签发 CA 挂载 |
 | `helm/` | Cluster | 生产 | 控制面服务 Helm chart、健康探针和依赖配置 |
 | `compose.local.yml` | Legacy Local-lite | 本地 | 仅开发/CI：PG + Redis + Embedding，不作为产品发行包 |
@@ -55,11 +56,117 @@ TLS 握手，使用 TCP 负载均衡或 TLS passthrough，且不注入 PROXY pro
 
 ## 原生 DSH Web + Lumo 运营面
 
+服务端可选动态文本会话入口通过 `LUMO_USER_SESSION_EXECUTION` JSON 显式开启，Compose
+将其传给 Web，Compact 继承相同 Web 定义。Helm 使用 `dshWeb.userSessionExecution` 对象；
+默认 `{}` 不启用。它要求单个稳定 Web 执行进程，Helm 会拒绝开启后的多副本配置。
+完整配置与当前能力范围见[动态用户会话合同](../../docs/dynamic-session-owner-2026-11-06.md)。
+
+Thread 连续文本执行使用独立的 `LUMO_THREAD_EXECUTION` JSON；Compose 各 DSH 进程和
+Compact 子进程透传，Helm 分别使用 `dshNode.threadExecution` / `dshWeb.threadExecution`。
+空值/空对象默认关闭；启用必须显式配置 `distributed: true`、`sessionControlUrl`、
+`governanceUrl`、`projectId`、`agentId`、`presetRevision`、`provider`、`model`，并满足
+运行时固定 owner、工作区和服务凭据校验。不要把 Web 的配置直接套给未授权的 Worker。
+执行合同见[Thread 稳定执行](../../docs/thread-stable-execution-2026-11-06.md)。
+
+### 原生模型配置的部署
+
+模型配置沿用 DeepSeek Harness 的 `cordis.patch.yml`、Models/Settings 页面和原生
+credential store。详细字段、API 地址及认证语义见
+[配置边界](../../docs/configuration.md#模型供应商沿用-deepseek-harness-原生配置)。
+默认不挂载管理员模型 patch，也不注入供应商密钥；可通过原生 Settings 配置。
+
+Compose 提供三份可选 overlay；需要 Docker Compose **2.30.0 或更新版本**，以支持
+`env_file.format: raw`。先将 `examples/dsh-models.anthropic.patch.yml` 或
+`examples/dsh-models.openai-compatible.patch.yml` 复制到部署目录并按供应商修改，再准备
+权限为 `0600` 的凭据文件。文件只含所需的 `KEY=value`；raw 模式保留 `$`、引号和反斜线，
+不要额外给值加引号，也不要 `source` 此文件。patch 中不得写入密钥。
+
+```sh
+# 两个文件必须已经存在，路径必须为绝对路径。
+export DSH_MODELS_PATCH_FILE=/etc/lumo/cordis.patch.yml
+export DSH_MODEL_CREDENTIALS_FILE=/etc/lumo/model-credentials.env
+
+# 服务器单例
+LUMO_COMPOSE_EXTRA_FILES=platform/deploy/compose.models.standalone.yml \
+  ./platform/deploy/up.sh standalone -d
+
+# 集群 compact（默认）：Web 和两个 bundle 内的所有 DSH 进程
+LUMO_COMPOSE_EXTRA_FILES=platform/deploy/compose.models.cluster.compact.yml \
+  ./platform/deploy/up.sh cluster -d
+
+# 集群 full：Web 和四个独立 DSH 容器
+LUMO_CLUSTER_TOPOLOGY=full \
+  LUMO_COMPOSE_EXTRA_FILES=platform/deploy/compose.models.cluster.yml \
+  ./platform/deploy/up.sh cluster -d
+```
+
+上述命令从仓库根目录执行；已有 `LUMO_COMPOSE_EXTRA_FILES` 时，用冒号追加对应模型
+overlay。overlay 将 patch 只读挂到 Harness home 的 `cordis.patch.yml`，并将凭据
+环境文件传给 DSH 容器。Compact 的凭据边界是 bundle 容器，内部的 Scheduler 也继承
+容器环境；需要进程级凭据隔离时使用 full 拓扑。不同节点使用不同供应商/权限时，复制
+overlay 后按 service 指向各自文件，不要给所有节点分发权限更大的统一密钥。
+
+每个 DSH 进程均使用独立持久化卷：普通容器是 `/root/.dsh`，compact 子进程是
+`/var/lib/lumo/dsh/<node-id>`；compact 生成的平台 `lumo.patch.yml` 也写入各自 home，
+避免两个角色覆盖或删除同一路径。从旧 compact 版本升级前，备份原 bundle 容器内
+`/root/.dsh`，只将各进程所需的 profile/凭据迁入对应新卷；新卷不会自动导入旧共享
+home。切换 full/compact 也使用不同命名卷，应迁移各进程对应 home，避免误以为设置丢失。
+
+Helm 使用已有 ConfigMap 与 Secret，下面的命令从本机文件建立对象，不将密钥正文写进
+values 或 Helm release：
+
+```sh
+kubectl -n lumo create configmap lumo-dsh-models \
+  --from-file=cordis.patch.yml=/etc/lumo/cordis.patch.yml
+kubectl -n lumo create secret generic lumo-dsh-model-credentials \
+  --from-env-file=/etc/lumo/model-credentials.env
+```
+
+在自己的 values 文件中加入：
+
+```yaml
+dshNode:
+  workloadKind: StatefulSet
+  harness:
+    patchConfigMap: lumo-dsh-models
+    patchKey: cordis.patch.yml
+    credentialsSecret: lumo-dsh-model-credentials
+    persistence: { enabled: true, size: 1Gi }
+dshWeb:
+  workloadKind: StatefulSet
+  harness:
+    patchConfigMap: lumo-dsh-models
+    patchKey: cordis.patch.yml
+    credentialsSecret: lumo-dsh-model-credentials
+    persistence: { enabled: true, size: 1Gi }
+```
+
+两个 workload 可分别指定不同配置和凭据，也可只注入 Secret、由 Settings 管理模型。
+未开启 home 持久化时使用每 Pod 独立的 `emptyDir`，重建 Pod 会丢失页面设置及原生
+credential store；需要保留时启用 `harness.persistence`，Chart 会要求 `StatefulSet`
+并为每个 Pod 创建独立 PVC。home PVC 与 session spool PVC 各自独立。
+
+管理员 home patch 覆盖的字段优先于原生 Settings 保存值。更新 ConfigMap/Secret 后，
+对相应 DSH workload 执行滚动重启；ConfigMap 的单文件 `subPath` 挂载和环境变量不会
+自动更新。Compose 更新文件后，对相应 DSH 容器执行 `up -d --force-recreate`。
+这些 overlay 不会自动修改 Thread、Worker 或审核策略中显式声明的 provider/model；
+这些身份配置必须引用已存在且已授权的原生路由。
+
+本地可运行 `python3 platform/deploy/tests/test_native_model_deployment.py -v` 检查三种
+Compose 形态的实际渲染结果，使用临时假凭据且不启动容器。Helm 配置组合、持久卷和
+非法配置拒绝已纳入 `platform/deploy/helm-combinations-verify.sh`；CI 同时运行
+Kubernetes schema 校验。
+
 ### 构建镜像（发布路径）
 
 ```sh
 ./platform/build.sh --targets images      # 1 个控制面镜像（装 12 个服务二进制）+ provisioner + dsh-node + console
 ```
+
+DSH 镜像用 Node 24 完成上游全部串行构建检查，再从共享系统工具层复制完整
+`/workspace` 和 PPT Python 环境作为运行时。运行时保留安装后的 `node_modules`、
+工作区链接、OCR/Python 和动态插件所需 pnpm；下载用的 pnpm store 与编译中间层只留在
+构建缓存中，避免每个节点重复拉取、解压数 GB 的下载缓存。
 
 **构建失败的两种形态，先分清再查**（2026-09-17 实测，两者都真出现过）：
 
@@ -710,3 +817,132 @@ Scheduler 的两个开关：
   standalone 解析到的服务 14→22）各踩到一次。四处已统一成 `(?:#.*)?$`；`edge-cors-check.py`
   另有一条「看到像服务却解析不了就喊」的兜底。
 - 每个 compose 的 CI 冒烟：起得来 → 跑一个 headless 任务 → 正常退出。
+
+## 集群可靠性与生产配置（2026-11-05）
+
+Helm 的 Pod、Service、PDB 与 mesh policy selector 现在同时使用服务名和
+`app.kubernetes.io/instance`，同 namespace 中的两个 release 不会互选 Pod。
+这次改变了 Deployment 的不可变 selector，旧部署不能直接原地覆盖：先停止新任务、
+排空运行任务并确认持久日志/备份，再移除旧 Deployment，由新 chart 重建。
+迁移窗口内应先保存 `helm get values --all`、旧 workload/Service/PVC 清单和数据库备份；
+对照新 release 的 instance label 确认 Service 路由后再恢复入口。不要使用 `helm upgrade
+--force` 或删除整个 namespace 来绕过 selector 不可变限制。
+Cluster overlay 将 DSH node 和 Web 改为 StatefulSet，每个稳定 Pod 独享一块
+`session-spool` PVC；基础 values 继续使用 Deployment，开启持久 spool 时必须选择
+StatefulSet。Deployment → StatefulSet 不是滚动升级：旧 Deployment 必须先缩至 0 并确认
+进程退出，才可启动新 StatefulSet。新 `volumeClaimTemplates` 会创建按 ordinal 命名的
+PVC，不会自动迁移旧 emptyDir、共享卷或手工 PVC 的数据；旧 spool 必须先提交到 PG，
+或按原 node ID 显式恢复到目标卷。缩容保留 PVC，扩容复用原身份的卷；更改 release 名、
+StatefulSet 名、存储类或 claim 模板需单独的存储迁移方案。回滚时先排空并停止 StatefulSet，
+保留所有 PVC，再验证旧版本兼容数据库迁移后启动旧 Deployment；不能让两种 workload
+同时认领同一身份。不要删除 PVC，也不要把一块 spool 同时挂到两个不同 node ID。
+跨节点恢复依赖共享 PostgreSQL 日志；PVC 保存数据库暂时不可用时尚未提交的尾部。
+容器或节点永久丢失时的恢复范围取决于存储后端，卷存在不等于跨可用区复制或 RPO 0。
+
+Compose 的各 DSH 进程也已有独立命名卷；compact 同容器内的 agent/worker 使用不同
+node ID 子目录。备份/恢复会携带这些 spool；含节点 spool 的备份不允许静默恢复到缺少
+相应节点的拓扑。迁移到不同身份/拓扑前应先将 spool 全部提交，不能把它随意归给新节点。
+完整拓扑的 api-bundle 只运行 API 服务，Scheduler/Collaborator 为独立容器；compact
+仍合并进程以便开发，不能据此证明独立故障域的 HA。共享镜像各保留一个构建入口：
+`api-bundle`、`dsh-web`、`provisioner`、`cluster-a-bundle`，其余副本复用镜像，避免
+BuildKit 对同 tag 的并发导出冲突。单独启动副本前应先构建对应入口，或提供发布镜像。
+TEI 官方 CPU 镜像只提供 amd64，`LUMO_TEI_PLATFORM` 默认 `linux/amd64`；ARM 主机
+依赖 Docker 模拟器，性能与原生 amd64 集群分别验收，不据此推断生产吞吐。
+TEI 与 rerank 通过实际 `/health` 检查模型加载完成；首次模型下载可能很久，nightly 的
+`LUMO_SMOKE_TIMEOUT_SECONDS=1200` 为它留出 20 分钟。只有进程 running 不算模型就绪。
+Nightly 使用真实 `BAAI/bge-small-en-v1.5`（384 维）和
+`cross-encoder/ms-marco-MiniLM-L-6-v2`，使普通 CI runner 能容纳完整故障域；通过
+`LUMO_EMBEDDING_MODEL`、`LUMO_EMBEDDING_DIMENSION`、`LUMO_RERANK_MODEL` 配置。
+CI 将 `LUMO_TEI_MAX_BATCH_TOKENS=512`、`LUMO_TEI_MAX_BATCH_REQUESTS=1`、
+`LUMO_TEI_MAX_CONCURRENT_REQUESTS=4`，并将 `LUMO_TEI_TOKENIZATION_WORKERS` 和
+`LUMO_TEI_CPU_THREADS` 设为 1，限制模型预热和并发内存。默认批次仍为 16384 tokens，
+生产额度需要按模型长度和实测内存调优；`running` 后反复出现 exit 137/OOM 不算验收成功。
+集群默认大模型不变；这套验收证明运行时正确性，不证明默认 BGE 的资源容量和吞吐。
+
+共享 Compose 的单机 Nacos 使用 `NACOS_SERVER_IP=127.0.0.1` 固定内部 Raft 身份，
+避免容器重建换 IP 后，持久 peer 仍指向旧地址而只读查询正常、元数据写入报无 leader。
+已有卷不能仅改环境变量视作迁移完成：应停止写入并先备份，按 Nacos 恢复流程迁移原
+Raft peer，确认实例元数据更新成功后再恢复服务；不要删除生产 Raft 数据绕过恢复。
+本次隔离验收卷将旧 Raft 目录另名保留后重建元数据，生产多节点使用外部 HA Nacos，
+不能复用单机回环配置。节点注册写者在新进程启动及 readiness 变化时同步 PUT eligibility，
+覆盖上一代排空留下的禁用元数据；撤销等待在途 POST/PUT 完成后再禁用，防止迟到注册。
+
+DSH node 的 readiness 使用 `/readyz`，liveness 使用 `/healthz`。Kubernetes preStop
+以 realm token 调用 `/drain`，停止准入并等待在途执行与持久化排空；默认 drain 150 秒，
+termination grace 180 秒。超时应在运行事件和日志中调查，不能把被强制终止视作已排空。
+Compose DSH 容器及备份静默窗口也使用 180 秒停止期限，避免 Docker 默认 10 秒提前强杀。
+PDB 与 topology spread 在 cluster overlay 开启。DSH HPA 默认仍使用 CPU；远端模型等待
+占主要时长时，应通过 Metrics Adapter 提供发布与集群维度的排队/占用槽位指标：
+
+```yaml
+dshNode:
+  hpa:
+    targetCPUUtilizationPercentage: 0
+    externalMetrics:
+      - name: lumo_pending_tasks
+        averageValue: "4"
+```
+
+指标名是运维 Adapter 的映射契约，示例不代表该序列已自动发布。chart 自动限定
+`release` 和 `cluster_id`，禁止自定义标签覆盖这两个作用域；生产使用前必须确认
+`external.metrics.k8s.io` 能返回本 release 的真实数据。缺 Adapter 时 HPA 会报告
+`FailedGetExternalMetric`，不会假设队列为空。
+
+`values.production.yaml` 是有意不完整的生产 overlay。它不安装 HA PostgreSQL、Redis、
+RocketMQ、Nacos、Vault 或对象存储；必须由运维填写外部端点、现有 Secret、HA/恢复证据
+引用、SLO/留存策略和网络规则。缺少这些输入时渲染失败，不能以测试 fixture 的
+`.invalid` 地址替代实际环境。Redis 仍须提供应用所支持的单主访问端点，不能将 Cluster
+seed 列表直接填进单地址配置。协作权威 WAL 使用 PostgreSQL，Redis 热层可重建；
+不能将 Redis 默认 AOF everysec 的成功响应表述成机器故障 RPO 0。
+
+生产数据库凭据通过 `production.databaseSecret` 的 `LUMO_PG_DSN` 和
+`REGISTRY_PG_DSN` 读取，`postgres.dsn` 必须清空；数据源不再进入 Helm values 或
+ConfigMap。DSN 应启用 `sslmode=verify-full` 或 `verify-ca`。外部对象存储通过
+`objectStore.endpoint/port/useSSL` 指定，凭据 Secret 含 `accessKey`、`secretKey`；
+DSH object store 与 Registry 使用同一配置，并分别使用 `bucket`、`registryBucket`。
+
+生产 NetworkPolicy 默认拒绝 release 外入站与出站；运维必须显式填写 Ingress/监控来源、
+外部依赖和 Istio 控制面的 `networkPolicy.ingress`、`externalEgress` 原生规则。
+这些规则依赖实际 CNI 和拓扑，不能复制宽泛的 `0.0.0.0/0` 当作已隔离。
+生产要求 Istio STRICT mTLS、PDB、Pod 分散和至少两个控制面副本，但这些配置本身仍不等于
+已经完成可用区故障验收。
+
+```sh
+# operator-values.yaml 由目标环境维护，不提交凭据。
+python3 -m pip install PyYAML==6.0.2
+./platform/deploy/production-preflight.py lumo lumo operator-values.yaml
+helm upgrade --install lumo platform/deploy/helm/lumo-platform -n lumo \
+  -f platform/deploy/helm/lumo-platform/values.cluster.yaml \
+  -f platform/deploy/helm/lumo-platform/values.production.yaml \
+  -f operator-values.yaml
+```
+
+preflight 只读检查真实 Secret 所需键、开发默认值、Registry 信任根，并让目标 API
+执行 `kubectl apply --dry-run=server`。它不打印 Secret 内容；证据引用是否有效、HA
+切换和恢复是否真的成功仍需运维验收。
+
+## 自动集群验收与故障证据
+
+`helm-combinations-verify.sh` 对基础、集群、设备网关、mesh、制品节点、生产契约与
+外部 HPA 组合解析真实 YAML，拒绝重复键和跨 release selector，并验证每 Pod PVC
+与 HPA target。CI 额外强制 kubeconform v0.6.7 校验 Kubernetes 内建 API schema。
+Istio CRD 由所安装 mesh 的目标 API 在 production preflight 校验。
+
+`.github/workflows/cluster-acceptance.yml` 每晚执行，也被正式 tag 发布流程作为依赖调用。
+它构建完整独立容器拓扑，运行现有真实依赖验收，再运行
+`fault-injection-cluster.py`：杀掉当前 leader 并检查 fencing token 增长、重放放置与
+重复终态报告收敛、杀掉真实 Nacos 执行节点并等待目录失联/重注册，以及验证 drain 的
+健康、就绪和准入语义。每次保存测试报告、故障断言 JSON、容器状态/尾部日志、平台和上游
+提交哈希。它不把控制面 placement 测试声称为一次真实 LLM Agent 执行；Agent 的日志、
+回调和恢复由 acceptance 的对应事务测试证明。
+
+```sh
+# 仅在隔离测试环境执行；脚本会真的杀容器。
+COMPOSE_PROJECT_NAME=lumo-fault-test \
+  LUMO_CLUSTER_TOPOLOGY=full LUMO_ALLOW_FAULT_INJECTION=1 \
+  LUMO_ACCEPTANCE_REPORT_DIR=/tmp/lumo-acceptance-report \
+  python3 platform/deploy/fault-injection-cluster.py
+```
+
+正式 Release 需桌面构建和集群验收均成功才发布；changelog 快速流程只预建草稿。
+本地未跑过或外部依赖未提供的验收不能记为通过，CI 工作流文件存在也不代表该次运行已绿。

@@ -99,26 +99,31 @@ export class MailboxCourier implements TeamCourier {
     private readonly realm: string,
   ) {}
 
+  private scoped(id: string): string {
+    // mailbox 的 futureId 是全局主键；realm 字段本身不会参与键的唯一性。
+    return `lumo-agent-teams:${encodeURIComponent(this.realm)}:${id}`
+  }
+
   open(channelId: string, ttlMs: number): Promise<void> {
-    return this.mailbox.create(channelId, this.realm, ttlMs).then(() => undefined)
+    return this.mailbox.create(this.scoped(channelId), this.realm, ttlMs).then(() => undefined)
   }
 
   async settle(channelId: string, value: unknown): Promise<CourierSettle> {
-    const outcome = await this.mailbox.resolve(channelId, value)
+    const outcome = await this.mailbox.resolve(this.scoped(channelId), value)
     return normalizeSettle(outcome.status)
   }
 
   async fail(channelId: string, error: string): Promise<CourierSettle> {
-    const outcome = await this.mailbox.reject(channelId, error)
+    const outcome = await this.mailbox.reject(this.scoped(channelId), error)
     return normalizeSettle(outcome.status)
   }
 
   await(channelId: string, timeoutMs?: number): Promise<CourierWait> {
-    return this.mailbox.wait(channelId, timeoutMs)
+    return this.mailbox.wait(this.scoped(channelId), timeoutMs)
   }
 
   async state(channelId: string): Promise<ChannelState> {
-    const record = await this.mailbox.poll(channelId)
+    const record = await this.mailbox.poll(this.scoped(channelId))
     if (record === undefined) return 'unknown'
     const raw = record.state
     return raw === 'pending' || raw === 'resolved' || raw === 'rejected' || raw === 'expired'

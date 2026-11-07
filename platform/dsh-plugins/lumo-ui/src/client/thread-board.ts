@@ -67,7 +67,7 @@ export const DEFAULT_STALLED_AFTER_MS = 10 * 60_000
 export const DEFAULT_WAIT_TTL_MS = 30 * 60_000
 
 /**
- * 看板读的那一面：`/lumo/api/delegations` 的行（与协作图是同一批行，只是另一个切片）。
+ * 看板读取 `/lumo/api/collaboration/threads` 的聚合行；降级时使用治理任务行。
  *
  * 字段名照抄读面，**不做驼峰转换**：这一层的唯一用途是与服务端的行对齐，改名的收益只是
  * 好看，代价是每次对照响应体都要在脑子里翻译一遍——而这类翻译错误会静默生效。
@@ -86,6 +86,8 @@ export interface ThreadFacts {
   updated_at?: string
   /** §8.4 控制态（`awaiting-approval` 等）。`undefined` = 这一行没带，不是「没有控制态」。 */
   control_state?: string | null
+  /** 控制态自己的变更时间；审批等待不得使用业务任务的更新时间代替。 */
+  control_updated_at?: string
 }
 
 export interface ThreadBoardOptions {
@@ -96,10 +98,8 @@ export interface ThreadBoardOptions {
   /**
    * 控制态读面是否接线。
    *
-   * - `false`（缺省）：「待轻量答」这一格**读不到**。今天就是这一档——
-   *   `/lumo/api/sessions/{ref}/control` 只按会话逐个读，没有列表读面，
-   *   所以整片舰队里谁是「等一次点击」无从知道。这一格会说明缺什么，而不是空着。
-   * - `true`：每一行都带 `control_state`。个别行没带时，该行会被单独标出来
+   * - `false`（缺省）：聚合端点没有装配控制态批量读面，「待轻量答」说明读不到。
+   * - `true`：聚合端点已配置批量读面。个别行没带 `control_state` 时会被单独标出来
    *   （一行读不到，这一格就不能声称「没有人在等」）。
    */
   controlState?: boolean
@@ -128,7 +128,7 @@ export interface ThreadBoardColumn {
   attention: string
   rule: string
   entries: ThreadBoardEntry[]
-  /** 这一格读不到时的理由。**有它时 entries 必为空，且面板不得写「0 条」。** */
+  /** 这一格全部或部分读不到时的理由；已知条目仍显示，不能把局部失败说成 0 条。 */
   unreadable?: string
 }
 
@@ -271,8 +271,9 @@ export function deriveThreadBoard(threads: readonly ThreadFacts[], options: Thre
     const state = normalise(thread.state)
     const control = normalise(thread.control_state)
     if (options.controlState === true && thread.control_state === undefined) controlMissingRows += 1
-    const ageMs = elapsed(options.now, thread.updated_at)
     const base = baseCell(business, state, control)
+    const ageMs = elapsed(options.now, base.cell === 'light-answer'
+      ? thread.control_updated_at : thread.updated_at)
     if (base.cell === null) {
       outside.push({ id: thread.id, title: thread.title?.trim() || thread.id, reason: base.reason })
       continue
@@ -311,7 +312,7 @@ export function deriveThreadBoard(threads: readonly ThreadFacts[], options: Thre
     }
     if (cell.id === 'light-answer') {
       if (options.controlState !== true) {
-        column.unreadable = '控制态读面未接线：会话的 awaiting-approval 只在 /lumo/api/sessions/{ref}/control 上按会话逐个读，没有列表读面。这一格读不到——「读不到」不等于「没有人在等」。'
+        column.unreadable = '控制态读面未接线或暂时不可用，读不到 awaiting-approval，无法确定有哪些会话正在等待批准。'
       } else if (controlMissingRows > 0) {
         column.unreadable = `有 ${controlMissingRows} 行没有带控制态，这一格读不到——「读不到」不等于「没有人在等」。`
       }

@@ -334,6 +334,8 @@ CREATE TABLE IF NOT EXISTS governance_delegation_tasks (
 );
 CREATE INDEX IF NOT EXISTS governance_delegation_tasks_realm_updated_idx
   ON governance_delegation_tasks (realm, updated_at DESC);
+CREATE INDEX IF NOT EXISTS governance_delegation_tasks_created_page_idx
+  ON governance_delegation_tasks (realm, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS governance_delegation_tasks_assignee_idx
   ON governance_delegation_tasks (realm, assignee_user_id, state, updated_at DESC);
 
@@ -516,14 +518,23 @@ func (s *Store) Init(ctx context.Context) error {
 	if _, err := tx.Exec(ctx, DDL); err != nil {
 		return fmt.Errorf("initialize governance schema: %w", err)
 	}
+	if _, err := tx.Exec(ctx, runReviewDDL); err != nil {
+		return fmt.Errorf("initialize run review: %w", err)
+	}
 	if _, err := tx.Exec(ctx, taskResultsDDL); err != nil {
 		return fmt.Errorf("initialize task results: %w", err)
 	}
 	if _, err := tx.Exec(ctx, taskSchedulingDDL); err != nil {
 		return fmt.Errorf("initialize task scheduling: %w", err)
 	}
+	if _, err := tx.Exec(ctx, delegationReceiptsDDL); err != nil {
+		return fmt.Errorf("initialize delegation receipts: %w", err)
+	}
 	if _, err := tx.Exec(ctx, deviceDDL); err != nil {
 		return fmt.Errorf("initialize device schema: %w", err)
+	}
+	if _, err := tx.Exec(ctx, botAuthorizationDDL); err != nil {
+		return fmt.Errorf("initialize Bot authorization: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit governance schema initialization: %w", err)
@@ -1519,6 +1530,9 @@ func (s *Store) EffectiveSkillsForWorker(ctx context.Context, realm, workerID, p
 
 func splitWorkerID(workerID string) (string, string) {
 	if kind, ref, ok := strings.Cut(strings.TrimSpace(workerID), ":"); ok {
+		if kind == "user" {
+			return domain.WorkerHuman, ref
+		}
 		return kind, ref
 	}
 	return domain.WorkerHuman, strings.TrimSpace(workerID)
@@ -1706,8 +1720,8 @@ func (s *Store) CreateDelegatedTask(ctx context.Context, task domain.DelegatedTa
 // CreateDelegatedTaskWithRun commits task snapshots and attempt=1 in one
 // transaction. A task without its first Run is not a dispatch; keeping the
 // write atomic also makes the old scheduler_task_id migration auditable.
-func (s *Store) CreateDelegatedTaskWithRun(ctx context.Context, task domain.DelegatedTask, run domain.TaskRun) (domain.DelegatedTask, domain.TaskRun, error) {
-	created, err := s.createDelegatedTask(ctx, task, &run)
+func (s *Store) CreateDelegatedTaskWithRun(ctx context.Context, task domain.DelegatedTask, run domain.TaskRun, receipt ...DelegationReceipt) (domain.DelegatedTask, domain.TaskRun, error) {
+	created, err := s.createDelegatedTask(ctx, task, &run, receipt...)
 	if err != nil {
 		return domain.DelegatedTask{}, domain.TaskRun{}, err
 	}
@@ -1718,7 +1732,14 @@ func (s *Store) CreateDelegatedTaskWithRun(ctx context.Context, task domain.Dele
 	return created, storedRun, nil
 }
 
-func (s *Store) createDelegatedTask(ctx context.Context, task domain.DelegatedTask, run *domain.TaskRun) (domain.DelegatedTask, error) {
+func (s *Store) createDelegatedTask(ctx context.Context, task domain.DelegatedTask, run *domain.TaskRun, receipts ...DelegationReceipt) (domain.DelegatedTask, error) {
+	return s.createDelegatedTaskWithHook(ctx, task, run, nil, receipts...)
+}
+
+func (s *Store) createDelegatedTaskWithHook(ctx context.Context, task domain.DelegatedTask, run *domain.TaskRun, beforeCommit func(context.Context, pgx.Tx, domain.DelegatedTask, domain.TaskRun) error, receipts ...DelegationReceipt) (domain.DelegatedTask, error) {
+	if len(receipts) > 1 || (len(receipts) > 0 && run == nil) {
+		return domain.DelegatedTask{}, fmt.Errorf("%w: invalid delegation receipt", ErrBadRequest)
+	}
 	if task.ID == "" || task.Realm == "" || task.Title == "" || task.Intent == "" || task.RequesterUserID == "" || !domain.ValidDelegationState(task.State) {
 		return domain.DelegatedTask{}, fmt.Errorf("%w: invalid delegation task", ErrBadRequest)
 	}
@@ -1779,6 +1800,19 @@ func (s *Store) createDelegatedTask(ctx context.Context, task domain.DelegatedTa
 		return domain.DelegatedTask{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if len(receipts) > 0 {
+		if err := lockDelegationReceipt(ctx, tx, task.Realm, task.RequesterUserID, receipts[0]); err != nil {
+			return domain.DelegatedTask{}, err
+		}
+		previous, previousRun, err := lookupDelegationReceipt(ctx, tx, task.Realm, task.RequesterUserID, receipts[0])
+		if err == nil {
+			*run = previousRun
+			return previous, tx.Commit(ctx)
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return domain.DelegatedTask{}, err
+		}
+	}
 	if err := prepareTaskIntent(ctx, tx, &task); err != nil {
 		return domain.DelegatedTask{}, err
 	}
@@ -1817,6 +1851,20 @@ func (s *Store) createDelegatedTask(ctx context.Context, task domain.DelegatedTa
 			run.State = domain.DelegationAssigned
 		}
 		if err := insertTaskRun(ctx, tx, *run); err != nil {
+			return domain.DelegatedTask{}, err
+		}
+	}
+	if beforeCommit != nil {
+		if run == nil {
+			return domain.DelegatedTask{}, ErrBadRequest
+		}
+		if err := beforeCommit(ctx, tx, task, *run); err != nil {
+			return domain.DelegatedTask{}, err
+		}
+	}
+	if len(receipts) > 0 {
+		if _, err := tx.Exec(ctx, `INSERT INTO governance_delegation_receipts(realm,requester_user_id,request_key,request_hash,task_id,run_id)
+ VALUES($1,$2,$3,$4,$5,$6)`, task.Realm, task.RequesterUserID, receipts[0].Key, receipts[0].Hash, task.ID, run.ID); err != nil {
 			return domain.DelegatedTask{}, err
 		}
 	}
@@ -1936,44 +1984,8 @@ func (s *Store) GetDelegationTask(ctx context.Context, realm, taskID string) (do
 // assignee belongs to an active department subtree they manage; it is never a
 // realm-wide grant.
 func (s *Store) ListDelegationTasks(ctx context.Context, realm, userID string, all, departmentScope bool) ([]domain.DelegatedTask, error) {
-	query := delegationSelect + ` WHERE t.realm=$1`
-	args := []any{realm}
-	if !all {
-		query += ` AND (t.requester_user_id=$2 OR t.assignee_user_id=$2`
-		query += ` OR EXISTS (
-			WITH RECURSIVE ancestors(id,parent_task_id,visited) AS (
-				SELECT t.id,t.parent_task_id,ARRAY[t.id]::text[]
-				UNION ALL
-				SELECT parent.id,parent.parent_task_id,a.visited || parent.id
-				FROM governance_delegation_tasks parent JOIN ancestors a ON parent.realm=t.realm AND parent.id=a.parent_task_id
-				WHERE NOT parent.id=ANY(a.visited)
-			)
-			SELECT 1 FROM ancestors a JOIN governance_task_collaborators g ON g.realm=t.realm AND g.task_id=a.id
-			WHERE (g.subject_type='user' AND g.subject_id=$2)
-			   OR (g.subject_type='department' AND EXISTS (
-					SELECT 1 FROM governance_users u
-					JOIN governance_departments ud ON ud.realm=u.realm AND ud.id=u.primary_dept_id AND ud.status='active'
-				JOIN governance_departments gd ON gd.realm=g.realm AND gd.id=g.subject_id AND gd.status='active'
-					WHERE u.realm=t.realm AND u.id=$2 AND u.status='active'
-					  AND (ud.id=gd.id OR (g.include_children AND ud.path LIKE gd.path || '%'))
-				))
-		)`
-		if departmentScope {
-			query += ` OR EXISTS (
-				SELECT 1
-				FROM governance_departments managed
-				LEFT JOIN governance_users requester ON requester.realm=t.realm AND requester.id=t.requester_user_id
-				LEFT JOIN governance_departments requester_dept ON requester_dept.realm=t.realm AND requester_dept.id=requester.primary_dept_id
-				LEFT JOIN governance_users assignee ON assignee.realm=t.realm AND assignee.id=t.assignee_user_id
-				LEFT JOIN governance_departments assignee_dept ON assignee_dept.realm=t.realm AND assignee_dept.id=assignee.primary_dept_id
-				WHERE managed.realm=t.realm AND managed.manager_user_id=$2 AND managed.status='active'
-				  AND (requester_dept.path LIKE managed.path || '%' OR assignee_dept.path LIKE managed.path || '%')
-			)`
-		}
-		query += `)`
-		args = append(args, userID)
-	}
-	query += ` ORDER BY t.updated_at DESC LIMIT 200`
+	query, args := delegationVisibilityQuery(realm, userID, all, departmentScope)
+	query += ` ORDER BY t.updated_at DESC, t.id DESC LIMIT 200`
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -2346,11 +2358,9 @@ func (s *Store) TransitionBusinessTask(ctx context.Context, realm, taskID, event
 			return domain.DelegatedTask{}, fmt.Errorf("%w: stop active executions before closing a task", ErrConflict)
 		}
 	}
-	// 本批的协作摘要只算一次：`complete` 既用它做结构前置条件（子任务未验收即拒绝），
-	// 又用它的 `Total` 当可证的影响面代理写进同一条审计（见下方 `review_impact`）。
-	// 两处各算一次会让「拒绝时看到的孩子数」与「记录时看到的孩子数」来自不同快照，
-	// 而这条审计的全部价值就在于它记的是**当时**的事实。
+	// Child acceptance and independent execution review are separate facts.
 	var summary domain.CollaborationSummary
+	var enforcedReview map[string]any
 	if event == "complete" {
 		// 结构前置条件先于闸门：子任务未验收、当前 Run 没有完成结果，这些都是 ErrConflict
 		// （不改状态），与「本批组合验证没过」（改状态、回 ROUTING）是两件事，不能互相掩护。
@@ -2371,6 +2381,12 @@ func (s *Store) TransitionBusinessTask(ctx context.Context, realm, taskID, event
 		if !completed {
 			return domain.DelegatedTask{}, fmt.Errorf("%w: the current run has no completed execution result", ErrConflict)
 		}
+		// Acceptance consumes the exact immutable producer and reviewer receipts
+		// under this task lock. Unknown impact never becomes a small count.
+		enforcedReview, err = requireRunReviewTx(ctx, tx, realm, taskID)
+		if err != nil {
+			return domain.DelegatedTask{}, err
+		}
 	}
 	if event == "reroute" {
 		if domain.DelegationStateActive(task.State) {
@@ -2388,52 +2404,10 @@ func (s *Store) TransitionBusinessTask(ctx context.Context, realm, taskID, event
 		// 闸门结论进审计链：一次「整批打回」必须能在事后被解释成「契约测试/冒烟没过」，
 		// 而不是一条没有理由的 ROUTING。
 		fields["integration_verdict"] = string(verdict)
+		fields["independent_review"] = enforcedReview
 
-		// §24.8 规则 1（派发者不验收自己的活）在治理面的落点：**记录，不阻断**。
-		//
-		// 两个身份都是既有事实，**不需要调用方声明**——这正是它不可绕过的原因：
-		//   - dispatcher = 任务的承接人（`assignee_worker_id`，回退 `assignee_user_id`）
-		//   - reviewer   = 本次 `complete` 的操作者（`actor`，签名里本来就有）
-		//
-		// **只记 `self-review`，不记 `homogeneous`。** 后者要求 model / preset / node
-		// 三组事实才能证「不同源」，而治理面没有这三组数据 —— 于是它会在**每一次正常完成**
-		// 上触发，记下来是噪音而不是发现。等那三组事实接进来（见 §14.5），这里再一并记。
-		//
-		// **为什么不阻断**：小团队里同一个人既承接又验收是常态，无条件拒绝会让任务永远完不成。
-		// 设计的处置是「只在影响面 ≥3 时强制」（§14.5 末），而那个阈值的数据源**仍然不存在**
-		// （排除过程见下方 `impact`）。所以这次仍然只记录，但把记录做扎实：不合格理由按闭集
-		// 记、可证的影响面事实一并记、判不出来的那一项如实记为判不出来。
-		dispatcher := task.AssigneeWorkerID
-		if dispatcher == "" {
-			dispatcher = task.AssigneeUserID
-		}
+		fields["batch_tasks"] = summary.Total + 1
 
-		// 影响面事实：**治理面没有它的生产者**。逐条排除过，不留一条没查过的路：
-		//   * `project_artifacts` / `registry_artifacts` 是项目级、仓库级的注册表，
-		//     没有 task / run 归属——它们答的是「这个项目有哪些制品」，不是「这次改动动了几个」；
-		//   * `governance_task_results.payload.output` 是执行方自报的自由 JSON（受治理执行里
-		//     它就是模型那段文字），自报不是证据：改动少报一个就什么都不剩；
-		//   * 唯一非自报的痕迹是数据面的 `session_log`（append-only、节点侧写入）：它不在本服务
-		//     的库里——读它等于让控制面去读数据面的表；而且它的单位是**文件**，§24.8 刻意把
-		//     单位从「文件」换成了「产出物」。
-		// 于是这里传零值（= 无从证明）。**不发明一个请求参数让调用方声明影响面**：那会让
-		// 调用方永远可以填 0 绕过审查，正是 §14.5 拒绝的形状。
-		impact := domain.ReviewImpact{}
-		facts := domain.ReviewerFacts{Dispatcher: dispatcher, Reviewer: actor}
-		if impact.Proven {
-			// 影响面一旦可证就喂进判据（第 4 条要真的能触发）。判不出来时不喂 0——
-			// 0 在判据里读作「影响面小」，而这里的事实是「没有这个数」。
-			facts.AffectedArtifacts = impact.Artifacts
-		}
-		if v := domain.ReviewerEligibility(facts); !v.Eligible && v.Reason == domain.ReviewerSelfReview {
-			fields["reviewer_self_review"] = true
-			// 闭集里的理由：留着布尔值（§14.5 记的落点就是它）之外再记一份，是为了让
-			// 「本月有多少次审查因为同源被拒」是一次 GROUP BY。将来 model / preset / node
-			// 三组事实进来、理由不再只有 self-review 时，聚合面不必再改一次键名。
-			fields["reviewer_ineligibility"] = string(v.Reason)
-			fields["review_disposition"] = string(domain.ReviewDispositionFor(impact))
-			fields["review_impact"] = reviewImpactRecord(impact, summary)
-		}
 	}
 	detail, _ := json.Marshal(fields)
 	if err := insertTaskAudit(ctx, tx, taskID, event, actor, detail); err != nil {
@@ -2446,25 +2420,6 @@ func (s *Store) TransitionBusinessTask(ctx context.Context, realm, taskID, event
 		return domain.DelegatedTask{}, err
 	}
 	return s.GetDelegationTask(ctx, realm, taskID)
-}
-
-// reviewImpactRecord 是影响面事实在审计里的形状：阈值入参 + 可证的代理指标。
-//
-// 两个键的来历不同，别读成一回事：
-//   - `artifacts` / `artifacts_proven` 是**阈值入参**（§24.8 规则 3）。`artifacts` 只在
-//     可证时出现：缺键是「没有这个数」，而 0 会被读成「0 个产出物」——这两者的区别正是
-//     这条记录存在的理由。
-//   - `batch_tasks` 是**可证的代理指标**：本批进入 DONE 的任务数（含本任务）。每个进入
-//     DONE 的任务都走过了 `complete` 的结构前置条件（当前 Run 有一条 COMPLETED 的执行
-//     结果），所以它是本批产出物数的**下界**。下界可以记，不能拿来当阈值入参：要么必须
-//     把「只有一个任务」读成影响面小（无证据的假设），要么把每一次单线程完成都判成影响面
-//     未知而强制阻断——后者是 §14.5 已经否掉的那条路（小团队里同一个人既派发又验收）。
-func reviewImpactRecord(impact domain.ReviewImpact, summary domain.CollaborationSummary) map[string]any {
-	record := map[string]any{"artifacts_proven": impact.Proven, "batch_tasks": summary.Total + 1}
-	if impact.Proven {
-		record["artifacts"] = impact.Artifacts
-	}
-	return record
 }
 
 func (s *Store) RecordDispatchOutcome(ctx context.Context, outcome domain.DispatchOutcome) error {
@@ -2701,4 +2656,50 @@ func NormalizeRoles(header string) map[string]bool {
 		}
 	}
 	return out
+}
+
+// All list variants apply authorization before pagination.
+func delegationVisibilityQuery(realm, userID string, all, departmentScope bool) (string, []any) {
+	query := delegationSelect + ` WHERE t.realm=$1`
+	args := []any{realm}
+	if !all {
+		query += ` AND (t.requester_user_id=$2 OR t.assignee_user_id=$2`
+		query += ` OR EXISTS (
+			WITH RECURSIVE ancestors(id,parent_task_id,requester_user_id,assignee_user_id,visited) AS (
+				SELECT t.id,t.intent_contract->>'parent_task_id',t.requester_user_id,t.assignee_user_id,ARRAY[t.id]::text[]
+				UNION ALL
+				SELECT parent.id,parent.intent_contract->>'parent_task_id',parent.requester_user_id,parent.assignee_user_id,a.visited || parent.id
+				FROM governance_delegation_tasks parent JOIN ancestors a ON parent.realm=t.realm AND parent.id=a.parent_task_id
+				WHERE NOT parent.id=ANY(a.visited)
+			)
+			SELECT 1 FROM ancestors a
+			WHERE a.requester_user_id=$2 OR a.assignee_user_id=$2 OR EXISTS (
+				SELECT 1 FROM governance_task_collaborators g WHERE g.realm=t.realm AND g.task_id=a.id AND (
+				(g.subject_type='user' AND g.subject_id=$2)
+				OR (g.subject_type='department' AND EXISTS (
+					SELECT 1 FROM governance_users u
+					JOIN governance_departments ud ON ud.realm=u.realm AND ud.id=u.primary_dept_id AND ud.status='active'
+				JOIN governance_departments gd ON gd.realm=g.realm AND gd.id=g.subject_id AND gd.status='active'
+					WHERE u.realm=t.realm AND u.id=$2 AND u.status='active'
+					  AND (ud.id=gd.id OR (g.include_children AND ud.path LIKE gd.path || '%'))
+				))
+				)
+			)
+		)`
+		if departmentScope {
+			query += ` OR EXISTS (
+				SELECT 1
+				FROM governance_departments managed
+				LEFT JOIN governance_users requester ON requester.realm=t.realm AND requester.id=t.requester_user_id
+				LEFT JOIN governance_departments requester_dept ON requester_dept.realm=t.realm AND requester_dept.id=requester.primary_dept_id
+				LEFT JOIN governance_users assignee ON assignee.realm=t.realm AND assignee.id=t.assignee_user_id
+				LEFT JOIN governance_departments assignee_dept ON assignee_dept.realm=t.realm AND assignee_dept.id=assignee.primary_dept_id
+				WHERE managed.realm=t.realm AND managed.manager_user_id=$2 AND managed.status='active'
+				  AND (requester_dept.path LIKE managed.path || '%' OR assignee_dept.path LIKE managed.path || '%')
+			)`
+		}
+		query += `)`
+		args = append(args, userID)
+	}
+	return query, args
 }

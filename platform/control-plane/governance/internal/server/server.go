@@ -39,6 +39,7 @@ type Config struct {
 	SchedulerURL      string
 	ClusterID         string
 	ControlPlaneToken string
+	BotTeamsURL       string
 	AuthMaxAttempts   int
 	AuthLockFor       time.Duration
 	AuthSessionTTL    time.Duration
@@ -101,6 +102,7 @@ func New(st *store.Store, cfg Config, log *slog.Logger) (*Server, error) {
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
+	s.registerRunReviewRoutes(mux)
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /metrics", metrics)
 	mux.HandleFunc("POST /v1/auth/captcha", s.authCaptcha)
@@ -143,6 +145,10 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/workers/{workerID}/profile", s.workerProfile)
 	mux.Handle("PUT /v1/workers/{workerID}/runtime", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.reportWorkerRuntime)))
 	mux.Handle("GET /v1/runtime/agent-presets/{presetID}", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.runtimeAgentPreset)))
+	mux.Handle("POST /v1/runtime/tasks/{taskID}/thread-authorization", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.runtimeThreadAuthorization)))
+	mux.Handle("POST /v1/runtime/bot-authorization", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.runtimeBotAuthorization)))
+	mux.HandleFunc("PUT /v1/bot/channels/{channel}/subjects/{subject}", s.manageBotSubject)
+	mux.HandleFunc("PUT /v1/bot/channels/{channel}/subjects/{subject}/grants", s.manageBotGrant)
 	mux.Handle("PUT /v1/runtime/task-runs/{runID}/result", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.runtimeTaskResult)))
 	mux.Handle("GET /v1/runtime/workers/{workerID}/nodes", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.workerNodes)))
 	mux.HandleFunc("GET /v1/users", s.listUsers)
@@ -938,6 +944,22 @@ func (s *Server) createDelegation(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(r.Context(), w, c, actionDelegate, domain.PermissionResource{ProjectID: req.ProjectID, Kind: "delegation"}) {
 		return
 	}
+	receipts, err := delegationReceipt(r, req)
+	if err != nil {
+		s.respondStoreError(w, err)
+		return
+	}
+	if len(receipts) > 0 {
+		task, run, lookupErr := s.store.LookupDelegationReceipt(r.Context(), c.realm, c.userID, receipts[0])
+		if lookupErr == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"task": task, "run": run})
+			return
+		}
+		if !errors.Is(lookupErr, store.ErrNotFound) {
+			s.respondStoreError(w, lookupErr)
+			return
+		}
+	}
 	if err := s.prepareDelegationIntent(r.Context(), c, &req.DelegationSpec, &req.Schedule); err != nil {
 		s.respondStoreError(w, err)
 		return
@@ -999,7 +1021,7 @@ func (s *Server) createDelegation(w http.ResponseWriter, r *http.Request) {
 		run.State, run.SchedulerTaskID = domain.DelegationQueued, run.ID
 		task.State, task.SchedulerTaskID = domain.DelegationQueued, run.ID
 	}
-	createdTask, createdRun, err := s.store.CreateDelegatedTaskWithRun(r.Context(), task, run)
+	createdTask, createdRun, err := s.store.CreateDelegatedTaskWithRun(r.Context(), task, run, receipts...)
 	if err != nil {
 		s.respondStoreError(w, err)
 		return
@@ -1023,7 +1045,26 @@ func (s *Server) listDelegations(w http.ResponseWriter, r *http.Request) {
 		all = false
 		departmentScope = false
 	}
-	tasks, err := s.store.ListDelegationTasks(r.Context(), c.realm, c.userID, all, departmentScope)
+	query := r.URL.Query()
+	limit := 200
+	if raw := query.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 200 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be between 1 and 200"})
+			return
+		}
+		limit = parsed
+	}
+	// Opt in to immutable creation ordering; the existing default retains its
+	// recent-update order. Every page re-evaluates current visibility.
+	var tasks []domain.DelegatedTask
+	var nextCursor string
+	var err error
+	if query.Has("cursor") || query.Has("limit") {
+		tasks, nextCursor, err = s.store.ListDelegationTasksPage(r.Context(), c.realm, c.userID, all, departmentScope, query.Get("cursor"), limit)
+	} else {
+		tasks, err = s.store.ListDelegationTasks(r.Context(), c.realm, c.userID, all, departmentScope)
+	}
 	if err != nil {
 		s.respondStoreError(w, err)
 		return
@@ -1031,7 +1072,11 @@ func (s *Server) listDelegations(w http.ResponseWriter, r *http.Request) {
 	for i := range tasks {
 		tasks[i] = s.reconcileCancelling(r.Context(), c.realm, tasks[i])
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks})
+	result := map[string]any{"tasks": tasks}
+	if query.Has("cursor") || query.Has("limit") {
+		result["next_cursor"] = nextCursor
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) getDelegation(w http.ResponseWriter, r *http.Request) {
@@ -1047,8 +1092,20 @@ func (s *Server) getDelegation(w http.ResponseWriter, r *http.Request) {
 		s.respondStoreError(w, err)
 		return
 	}
-	if !isRealmAdmin(c) && task.RequesterUserID != c.userID && task.AssigneeUserID != c.userID {
-		writeError(w, http.StatusNotFound, "not_found", "task not found")
+	if !isRealmAdmin(c) {
+		access, err := s.store.TaskAccess(r.Context(), c.realm, task.ID, c.userID)
+		if err != nil {
+			s.respondStoreError(w, err)
+			return
+		}
+		if access == "" {
+			writeError(w, http.StatusNotFound, "not_found", "task not found")
+			return
+		}
+	}
+	if !s.requirePermission(r.Context(), w, c, actionDelegate, domain.PermissionResource{
+		Kind: "task", ID: task.ID, ProjectID: task.ProjectID,
+	}) {
 		return
 	}
 	task = s.reconcileCancelling(r.Context(), c.realm, task)

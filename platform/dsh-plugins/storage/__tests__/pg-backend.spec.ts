@@ -60,6 +60,34 @@ describe('pg kv backend specifics', () => {
     return backend
   }
 
+  t(title('八个独立后端同时首次启动并打开同名单元'), async () => {
+    const dsn = await freshDsn('concurrent_boot')
+    const units = await Promise.all(Array.from({ length: 8 }, async () => {
+      const backend = await backendAt(dsn)
+      return backend.kv.open(DESCRIPTOR)
+    }))
+    await Promise.all(units.map((unit, index) => unit.putRecord('records', `node-${index}`, index)))
+    expect(Object.keys((await units[0]!.loadAll()).tables['records']!)).toHaveLength(8)
+  })
+
+  t(title('条件写入支持插入、JSON 语义比较、条件删除与点读'), async () => {
+    const backend = await backendAt(await freshDsn('cas'))
+    const unit = await backend.kv.open(DESCRIPTOR) as StoragePg.PgKvUnit
+    const created = await Promise.all([
+      unit.compareAndSetRecord('records', 'k', undefined, { a: 1, b: 2 }),
+      unit.compareAndSetRecord('records', 'k', undefined, { a: 1, b: 2 }),
+    ])
+    expect(created.sort()).toEqual([false, true])
+    expect(await unit.compareAndSetRecord('records', 'k', { b: 2, a: 1 }, null)).toBe(true)
+    expect(await unit.getRecord('records', 'k')).toBeNull()
+    expect(await unit.compareAndSetRecord('records', 'k', { a: 1 }, 3)).toBe(false)
+    expect(await unit.compareAndSetRecord('records', 'k', null, undefined)).toBe(true)
+    expect(await unit.getRecord('records', 'k')).toBeUndefined()
+    await expect(unit.getRecord('unknown', 'k')).rejects.toThrow(/declared no table/)
+    await unit.close()
+    await expect(unit.compareAndSetRecord('records', 'k', undefined, 1)).rejects.toMatchObject({ code: 'closed' })
+  })
+
   t(title('打开缺失单元立即为空，loadAll 无需预写'), async () => {
     const backend = await backendAt(await freshDsn('empty'))
     const unit = await backend.kv.open(DESCRIPTOR)

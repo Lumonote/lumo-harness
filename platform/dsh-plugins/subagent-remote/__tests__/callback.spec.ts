@@ -38,46 +38,55 @@ function post(server: Server, value: ChildResultBody, token = secret): Promise<{
 }
 
 describe('durable child result acknowledgment', () => {
+  it('settles a recovered parent consumer using only the persisted capability hash', async () => {
+    const receipts = inbox()
+    await receipts.register('realm', 'child', { secretHash, attempt: 4, nodeId: 'N1' })
+    const settler = vi.fn()
+    const server = createCallbackServer({ realm: 'realm', receipts,
+      pending: new Map([['child', { secretHash, attempt: 4, nodeId: 'N1', settler }]]), reportTerminal: vi.fn() })
+    expect((await post(server, body)).status).toBe(200)
+    expect(settler).toHaveBeenCalledExactlyOnceWith(body)
+  })
   it('keeps the result pending until Scheduler confirms, then accepts identical replays', async () => {
     const receipts = inbox()
     const settler = vi.fn()
-    const pending = new Map<string, PendingEntry>([['child', { secret, attempt: 3, settler }]])
+    const pending = new Map<string, PendingEntry>([['child', { secret, attempt: 3, nodeId: 'N1', settler }]])
     const reportTerminal = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(undefined)
     const server = createCallbackServer({ realm: 'realm', receipts, pending, reportTerminal })
 
     expect((await post(server, body)).status).toBe(503)
     expect(settler).not.toHaveBeenCalled()
     expect(pending.has('child')).toBe(true)
-    expect(await receipts.get('realm', 'child')).toEqual({ secretHash, body, attempt: 3 })
+    expect(await receipts.get('realm', 'child')).toEqual({ secretHash, body, attempt: 3, nodeId: 'N1' })
 
     expect((await post(server, body)).status).toBe(200)
     expect((await post(server, JSON.parse(JSON.stringify(body)))).status).toBe(200)
     expect(settler).toHaveBeenCalledExactlyOnceWith(body)
-    expect(reportTerminal).toHaveBeenLastCalledWith(body, 3)
+    expect(reportTerminal).toHaveBeenLastCalledWith(body, 3, 'N1')
     expect(pending.size).toBe(0)
   })
 
   it('recovers a registration after parent restart before the first callback', async () => {
     const receipts = inbox()
-    await receipts.register('realm', 'child', { secretHash, attempt: 4 })
+    await receipts.register('realm', 'child', { secretHash, attempt: 4, nodeId: 'N1' })
     const reportTerminal = vi.fn()
     const restarted = createCallbackServer({ realm: 'realm', receipts, pending: new Map(), reportTerminal })
     expect((await post(restarted, body)).status).toBe(200)
-    expect(reportTerminal).toHaveBeenCalledExactlyOnceWith(body, 4)
+    expect(reportTerminal).toHaveBeenCalledExactlyOnceWith(body, 4, 'N1')
     expect(await receipts.get('realm', 'child')).toMatchObject({ body })
   })
 
   it('survives restart after receipt storage but before Scheduler confirmation', async () => {
     const receipts = inbox()
     const first = createCallbackServer({ realm: 'realm', receipts,
-      pending: new Map([['child', { secret, attempt: 5, settler: vi.fn() }]]),
+      pending: new Map([['child', { secret, attempt: 5, nodeId: 'N1', settler: vi.fn() }]]),
       reportTerminal: vi.fn().mockRejectedValue(new Error('offline')),
     })
     expect((await post(first, body)).status).toBe(503)
     const reportTerminal = vi.fn()
     const restarted = createCallbackServer({ realm: 'realm', receipts, pending: new Map(), reportTerminal })
     expect((await post(restarted, body)).status).toBe(200)
-    expect(reportTerminal).toHaveBeenCalledExactlyOnceWith(body, 5)
+    expect(reportTerminal).toHaveBeenCalledExactlyOnceWith(body, 5, 'N1')
   })
 
   it('rejects changed results, wrong capabilities and other realms without settling', async () => {

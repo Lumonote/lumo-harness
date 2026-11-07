@@ -113,6 +113,29 @@ describe('内存存储', () => {
 })
 
 describe('storage hub 存储', () => {
+  it('租户键互不覆盖，历史无归属记录不会被自动认领', async () => {
+    const { storage, records } = fakeStorage()
+    records.set('legacy', sampleTeam('legacy'))
+    const a = new StorageHubTeamStore(storage, { realm: 'a' })
+    const b = new StorageHubTeamStore(storage, { realm: 'b' })
+    await a.save({ ...sampleTeam(), realm: 'a', ownerUserId: 'owner-a', revision: 'rev-a' })
+    await b.save({ ...sampleTeam(), realm: 'b', ownerUserId: 'owner-b', revision: 'rev-b' })
+    expect((await a.list()).map(team => team.ownerUserId)).toEqual(['owner-a'])
+    expect((await b.load('demo'))?.revision).toBe('rev-b')
+    expect(await a.load('legacy')).toBeUndefined()
+    await expect(a.save({ ...sampleTeam(), realm: 'b' })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    expect(records.has('legacy')).toBe(true)
+  })
+
+  it('条件写比较介质原值，旧记录未知字段不会导致永久冲突', async () => {
+    const { storage, records } = fakeStorage()
+    records.set('demo', { ...sampleTeam(), futureField: 'keep-readable' })
+    const store = new StorageHubTeamStore(storage)
+    const current = (await store.load('demo'))!
+    expect(await store.compareAndSet('demo', current, { ...current, name: 'updated' })).toBe(true)
+    expect((await store.load('demo'))?.name).toBe('updated')
+    expect(await store.compareAndSet('demo', current, current)).toBe(false)
+  })
   it('用 per-record 布局打开约定单元，并原样往返', async () => {
     const { storage, records } = fakeStorage()
     const store = new StorageHubTeamStore(storage)

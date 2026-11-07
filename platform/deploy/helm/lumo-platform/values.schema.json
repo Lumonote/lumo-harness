@@ -1,0 +1,323 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "dshNode": {
+      "type": "object",
+      "properties": {
+        "workloadKind": {
+          "enum": [
+            "Deployment",
+            "StatefulSet"
+          ]
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 10
+        },
+        "drainTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "spool": {
+          "type": "object",
+          "properties": {
+            "persistence": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "size": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "storageClass": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "hpa": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "minReplicas": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxReplicas": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "targetCPUUtilizationPercentage": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "externalMetrics": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "averageValue"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "averageValue": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(\\.[0-9]+)?(m|k|M|G)?$"
+                  },
+                  "matchLabels": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "threadExecution": {
+          "$ref": "#/definitions/threadExecution"
+        },
+        "harness": {
+          "$ref": "#/definitions/harness"
+        }
+      }
+    },
+    "dshWeb": {
+      "type": "object",
+      "properties": {
+        "workloadKind": {
+          "enum": [
+            "Deployment",
+            "StatefulSet"
+          ]
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 10
+        },
+        "drainTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "spool": {
+          "type": "object",
+          "properties": {
+            "persistence": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "size": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "storageClass": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "threadExecution": {
+          "$ref": "#/definitions/threadExecution"
+        },
+        "userSessionExecution": {
+          "$ref": "#/definitions/userSessionExecution"
+        },
+        "harness": {
+          "$ref": "#/definitions/harness"
+        }
+      }
+    },
+    "availability": {
+      "type": "object",
+      "properties": {
+        "topologySpread": {
+          "type": "object",
+          "properties": {
+            "whenUnsatisfiable": {
+              "enum": [
+                "DoNotSchedule",
+                "ScheduleAnyway"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "ingress": {
+          "type": "array"
+        },
+        "externalEgress": {
+          "type": "array"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "threadExecution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "distributed": {
+          "const": true
+        },
+        "sessionControlUrl": {
+          "type": "string",
+          "pattern": "^https?://[^\\s]+$"
+        },
+        "governanceUrl": {
+          "type": "string",
+          "pattern": "^https?://[^\\s]+$"
+        },
+        "projectId": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "agentId": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "presetRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "provider": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "model": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1800000
+        }
+      },
+      "anyOf": [
+        {
+          "maxProperties": 0
+        },
+        {
+          "required": [
+            "distributed",
+            "sessionControlUrl",
+            "governanceUrl",
+            "projectId",
+            "agentId",
+            "presetRevision",
+            "provider",
+            "model"
+          ]
+        }
+      ]
+    },
+    "userSessionExecution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "authorityUrl": {
+          "type": "string",
+          "pattern": "^https?://[^\\s]+$"
+        },
+        "nodeId": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "projectId": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "workspaceRoot": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "provider": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "model": {
+          "type": "string",
+          "pattern": "\\S"
+        }
+      },
+      "anyOf": [
+        {
+          "maxProperties": 0
+        },
+        {
+          "required": [
+            "authorityUrl",
+            "nodeId",
+            "projectId",
+            "workspaceRoot",
+            "provider",
+            "model"
+          ]
+        }
+      ]
+    },
+    "harness": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "patchConfigMap": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "maxLength": 253
+        },
+        "patchKey": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9._-]+$",
+          "maxLength": 253
+        },
+        "credentialsSecret": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "maxLength": 253
+        },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "size": {
+              "type": "string",
+              "minLength": 1
+            },
+            "storageClass": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

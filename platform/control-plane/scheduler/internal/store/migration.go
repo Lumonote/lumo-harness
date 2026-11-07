@@ -53,9 +53,9 @@ func (s *Store) MigratableActiveTasks(ctx context.Context, clusterIDs []string) 
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT task_id, realm, cluster_id, COALESCE(node_id, ''), attempt, state, avoid_nodes
-		FROM scheduler_tasks
-		WHERE state = ANY($1) AND cluster_id = ANY($2)
+		SELECT t.task_id, t.realm, COALESCE(NULLIF(t.assigned_cluster_id,''),NULLIF(n.cluster_id,''),t.cluster_id), COALESCE(t.node_id, ''), t.attempt, t.state, t.avoid_nodes
+		FROM scheduler_tasks t LEFT JOIN scheduler_nodes n ON n.node_id=t.node_id AND n.realm=t.realm
+		WHERE t.state = ANY($1) AND COALESCE(NULLIF(t.assigned_cluster_id,''),NULLIF(n.cluster_id,''),t.cluster_id) = ANY($2)
 		ORDER BY task_id`, MigratableStates(), clusterIDs)
 	if err != nil {
 		return nil, fmt.Errorf("scheduler: 查询可漂移任务失败: %w", err)
@@ -169,8 +169,9 @@ func (s *Store) MigrateTask(ctx context.Context, rec MigrationRecord) (Migration
 		avoidNodes string
 	)
 	err = tx.QueryRow(ctx, `
-		SELECT state, attempt, cluster_id, avoid_nodes FROM scheduler_tasks
-		WHERE task_id = $1 FOR UPDATE`, rec.TaskID).
+		SELECT state, attempt, COALESCE(NULLIF(assigned_cluster_id,''),
+		 (SELECT NULLIF(n.cluster_id,'') FROM scheduler_nodes n WHERE n.node_id=t.node_id AND n.realm=t.realm),cluster_id), avoid_nodes
+		FROM scheduler_tasks t WHERE task_id = $1 FOR UPDATE OF t`, rec.TaskID).
 		Scan(&state, &attempt, &fromClus, &avoidNodes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MigrationResult{}, nil
@@ -205,7 +206,8 @@ func (s *Store) MigrateTask(ctx context.Context, rec MigrationRecord) (Migration
 
 	tag, err := tx.Exec(ctx, `
 		UPDATE scheduler_tasks
-		SET state = 'PENDING', node_id = NULL, cluster_id = '', avoid_nodes = $3,
+		SET state = 'PENDING', node_id = NULL, cluster_id = '', assigned_cluster_id='', avoid_nodes = $3,
+		    next_check_at=0,schedule_checks=0,pending_reason='cluster-failover',
 		    updated_at = `+nowMS+`
 		WHERE task_id = $1 AND attempt = $2 AND state = ANY($4)`,
 		rec.TaskID, rec.Attempt, updated, MigratableStates())

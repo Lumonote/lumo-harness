@@ -105,7 +105,8 @@ wait_http() {
   for attempt in $(seq 1 30); do
     if [[ "$auth" == "yes" ]]; then
       if curl --noproxy '*' --fail --silent --show-error --max-time 3 \
-        -H "Authorization: Bearer $control_plane_token" "$url" >/dev/null; then
+        -H "Authorization: Bearer $control_plane_token" \
+        -H "X-Lumo-Realm: ${LUMO_REALM:-dev}" "$url" >/dev/null; then
         echo "smoke: $name ok"
         return
       fi
@@ -165,7 +166,39 @@ echo "smoke: $cluster_topology 拓扑控制面存活探针 ${probe_count} 条（
 # 紧跟着就手写，正是这条注释要反对的那种事。
 wait_http "scheduler leader" "http://127.0.0.1:${LUMO_SCHEDULER_PROBE_PORT:-18083}/v1/leader" yes
 wait_http "scheduler nodes" "http://127.0.0.1:${LUMO_SCHEDULER_PROBE_PORT:-18083}/v1/nodes" yes
-wait_http "DSH web" "http://127.0.0.1:${LUMO_CONSOLE_PORT:-4173}/"
+# Full topology has no container-level healthcheck for the DSH hosts. Their
+# process being alive does not prove the execution graph or PG lease is ready.
+if [[ "$cluster_topology" == "full" ]]; then
+  for runtime in cluster-a-dsh-1 cluster-b-dsh-1; do
+    ready=false
+    # First boot may build source-pinned plugins through the official manager.
+    # Honor the same configured budget used for model/container startup.
+    runtime_deadline=$((SECONDS + timeout_seconds))
+    while (( SECONDS < runtime_deadline )); do
+      if "${compose[@]}" exec -T "$runtime" node --input-type=module -e \
+        'const r = await fetch("http://127.0.0.1:8091/readyz", {signal: AbortSignal.timeout(5000)}); if (r.status !== 200) process.exit(1)' \
+        >/dev/null 2>&1; then
+        ready=true
+        break
+      fi
+      sleep 3
+    done
+    if [[ "$ready" != true ]]; then
+      echo "smoke: execution host not ready: $runtime" >&2
+      dump_failure "$runtime"
+      exit 1
+    fi
+    echo "smoke: $runtime execution host ready"
+  done
+fi
+wait_http "DSH web login" "http://127.0.0.1:${LUMO_CONSOLE_PORT:-4173}/auth/login"
+web_status="$(curl --noproxy '*' --silent --show-error --max-time 5 -o /dev/null -w '%{http_code}' \
+  "http://127.0.0.1:${LUMO_CONSOLE_PORT:-4173}/")"
+if [[ "$web_status" != 401 ]]; then
+  echo "smoke: unauthenticated DSH app must reject access, got HTTP $web_status" >&2
+  exit 1
+fi
+echo "smoke: DSH web authentication boundary ok"
 wait_http "Prometheus ready" "http://127.0.0.1:${LUMO_PROMETHEUS_PORT:-9090}/-/ready"
 
 echo "smoke: cluster acceptance passed"

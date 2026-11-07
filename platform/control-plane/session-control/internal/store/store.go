@@ -40,6 +40,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -332,6 +333,9 @@ func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 // 因此 `init()` 跑两次不报错——这几张表可能同时被多个实例启动时建，而「谁先启动谁建」
 // 是正常路径不是竞态。
 func (s *Store) Init(ctx context.Context) error {
+	if _, err := s.pool.Exec(ctx, sessionOwnerDDL); err != nil {
+		return fmt.Errorf("建 session_owners 表失败: %w", err)
+	}
 	if _, err := s.pool.Exec(ctx, DDL); err != nil {
 		return fmt.Errorf("建 session_control 表失败: %w", err)
 	}
@@ -540,19 +544,38 @@ func insertAudit(ctx context.Context, tx pgx.Tx, a auditRow) (int64, error) {
 //
 // `afterID` 为 0 表示从头读。limit 由调用方夹紧（服务端上限见 internal/server）。
 func (s *Store) Timeline(ctx context.Context, sessionRef string, afterID int64, limit int) ([]AuditRow, error) {
+	return s.timeline(ctx, "", sessionRef, afterID, limit)
+}
+
+// TimelineForRealm filters before pagination so foreign audit rows cannot hide
+// a later page of authorized events. Session ownership is checked by the caller.
+func (s *Store) TimelineForRealm(ctx context.Context, realm, sessionRef string, afterID int64, limit int) ([]AuditRow, error) {
+	if strings.TrimSpace(realm) == "" {
+		return nil, fmt.Errorf("realm 不能为空")
+	}
+	return s.timeline(ctx, realm, sessionRef, afterID, limit)
+}
+
+func (s *Store) timeline(ctx context.Context, realm, sessionRef string, afterID int64, limit int) ([]AuditRow, error) {
 	if sessionRef == "" {
 		return nil, fmt.Errorf("sessionRef 不能为空")
 	}
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.pool.Query(ctx, `
+	query := `
 		SELECT id, session_ref, realm, command, outcome, from_state, to_state,
 		       actor, actor_role, reason, correlation_id, revision, created_at, projected_at
 		FROM session_control_audit
 		WHERE session_ref = $1 AND id > $2
 		ORDER BY id
-		LIMIT $3`, sessionRef, afterID, limit)
+		LIMIT $3`
+	args := []any{sessionRef, afterID, limit}
+	if realm != "" {
+		query = strings.Replace(query, "WHERE session_ref = $1", "WHERE realm = $4 AND session_ref = $1", 1)
+		args = append(args, realm)
+	}
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

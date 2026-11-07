@@ -133,6 +133,12 @@ export interface TeamTask {
 export interface TeamState {
   /** 稳定团队 id（同时是存储键）。 */
   id: string
+  /** 所属租户；旧记录缺省时只允许迁移读取，不得跨租户展示。 */
+  realm?: string
+  /** 创建团队的可信用户身份。 */
+  ownerUserId?: string
+  /** 每次提交产生新值，避免状态回到相同内容时接受旧快照。 */
+  revision?: string
   name: string
   description?: string
   topology: Topology
@@ -155,6 +161,8 @@ export class TeamError extends Error {
 }
 
 export type TeamErrorCode =
+  | 'CONFLICT'
+  | 'FORBIDDEN'
   /** 引用了不存在的任务 / 成员。 */
   | 'NOT_FOUND'
   /** 依赖图有环，或引用了不存在的依赖。 */

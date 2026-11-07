@@ -78,14 +78,25 @@ jobs:
       - name: Unit tests
         run: pnpm run test
 
-      - name: Governed dispatch and durable callback transactions
+      - name: Governed dispatch, team migration, metering and recovery
         env:
           LUMO_TEST_PG_DSN: postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable
-        run: pnpm exec vitest run dsh-plugins/subagent-host/__tests__/governed-dispatch.pg.spec.ts dsh-plugins/subagent-remote/__tests__/receipts.pg.spec.ts
+        run: >-
+          pnpm exec vitest run
+          dsh-plugins/subagent-host/__tests__/governed-dispatch.pg.spec.ts
+          dsh-plugins/subagent-remote/__tests__/receipts.pg.spec.ts
+          dsh-plugins/subagent-host/__tests__/durable-start-guard.pg.spec.ts
+          dsh-plugins/subagent-host/__tests__/boot-recovery.pg.spec.ts
+          dsh-plugins/subagent-remote/__tests__/placement-recovery.pg.spec.ts
+          dsh-plugins/session-log/__tests__/spool-recovery.pg.spec.ts
+          dsh-plugins/subagent-host/__tests__/listener-fence.spec.ts
+          dsh-plugins/agent-teams/__tests__/concurrency.pg.spec.ts
+          dsh-plugins/agent-teams/__tests__/migration.pg.spec.ts
+          dsh-plugins/subagent-host/__tests__/metering.pg.spec.ts
 
       - name: Verify upstream dsh tree is pristine (第一铁律)
         run: |
-          describe="$(git -C ../deepseek-harness describe --tags --dirty)"
+          describe="$(git -C ../deepseek-harness describe --always --tags --dirty)"
           echo "$describe"
           test "${describe%-dirty}" = "$describe"
           test -z "$(git -C ../deepseek-harness status --porcelain -uno)"
@@ -218,20 +229,9 @@ jobs:
           fi
           echo "gofmt: clean"
 
-  deploy-smoke:
-    runs-on: ubuntu-latest
-    needs: platform
-    # compose 冒烟需要 Docker：镜像由阶段 1+ 产出后启用。
-    # 2026-09-15 复核确认：仍然是 `false`（不是过期记录）。本仓库没有可用的
-    # CI Docker runner，所以 compose 拓扑只有 acceptance-cluster.sh 那条人工路径；
-    # 想启用这一 job 必须先解决镜像产出与 runner 权限两件事，不要只删这行 `if`。
-    if: ${{ false }}
-
-    steps:
-      - uses: actions/checkout@v5
-      - name: Start minimal Local-lite
-        run: docker compose -f platform/deploy/compose.local.yml up -d && docker compose -f platform/deploy/compose.local.yml down
-
+  # Full topology, crash/drain assertions and live dependency acceptance run in
+  # cluster-acceptance.yml on a nightly schedule, release and manual dispatch.
+  # Every PR still runs parsed chart/schema and static deployment gates below.
   alert-rules-gate:
     runs-on: ubuntu-latest
     steps:
@@ -266,6 +266,16 @@ jobs:
       # 所以下面这几条 helm template 不能替代它。
       - name: Chart render gate
         run: platform/deploy/helm-verify.sh
+      - name: Install chart schema validators
+        run: |
+          python3 -m pip install PyYAML==6.0.2
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
+      - name: Validate feature combinations, Kubernetes schemas and release isolation
+        env:
+          LUMO_REQUIRE_KUBECONFORM: '1'
+        run: platform/deploy/helm-combinations-verify.sh
+      - name: Native model mounts, credentials and compact/full service isolation
+        run: python3 platform/deploy/tests/test_native_model_deployment.py -v
       # 联邦注册表的静态门禁：开了集群失联判定，就必须真的有上报方。判定开关在
       # scheduler 服务上、上报方在 dsh-node 服务上，**跨文件**的错法谁都不管——2026-09-16
       # 发现该开关在 compose 与 Helm 里一个都没有，判定在整个可部署拓扑里是关的，

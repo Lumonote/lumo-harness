@@ -54,6 +54,15 @@ export interface SubagentHostOptions {
   governedOnly?: boolean
   /** Authenticated cancellation of a governed execution (same realm). */
   stopGoverned?: (realm: string, runId: string) => void
+  lifecycle?: {
+    ready(): Promise<boolean>
+    admitting(): boolean
+    beginAdmission(): () => void
+    status(): unknown
+    drain(timeoutMS: number): Promise<boolean>
+  }
+  admit?: (request: StartChildRequest) => Promise<void>
+  persistStop?: (realm: string, childId: string, attempt?: number, nodeId?: string) => Promise<{ neverStarted: boolean; applied?: boolean }>
   /** 承载侧运行表:`key = runKeyOf(realm, childId)`。host 读,run.ts 写。 */
   runs: RunRegistry
   /**
@@ -68,8 +77,9 @@ export interface SubagentHostOptions {
 }
 
 export function createSubagentHost(options: SubagentHostOptions): Server {
+  const admitting = new Set<string>()
   const server = createServer((req, res) => {
-    void handle(req, res, options).catch((e: unknown) => {
+    void handle(req, res, options, admitting).catch((e: unknown) => {
       // 兜底:handle 内部已把所有可预期错误转成响应,走到这里说明是写响应本身失败
       options.logger.error('subagent-host: 请求处理异常: %s', e)
       if (!res.headersSent) respond(res, 500, { ok: false, code: 'internal', message: '内部错误' })
@@ -79,8 +89,39 @@ export function createSubagentHost(options: SubagentHostOptions): Server {
   return server
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse, options: SubagentHostOptions): Promise<void> {
+async function handle(req: IncomingMessage, res: ServerResponse, options: SubagentHostOptions, admitting: Set<string>): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://subagent-host.invalid')
+  if (req.method === 'GET' && url.pathname === '/healthz') { respond(res, 200, { ok: true }); return }
+  if (req.method === 'GET' && url.pathname === '/readyz') {
+    try {
+      const ready = options.lifecycle ? await options.lifecycle.ready() : true
+      respond(res, ready ? 200 : 503, options.lifecycle?.status() ?? { ready })
+    } catch (error: unknown) {
+      // Readiness is a fail-closed diagnostic endpoint. A dependency probe or
+      // health provider must never turn into an opaque 500: operators need the
+      // concrete reason while the node remains out of admission.
+      respond(res, 503, {
+        ready: false,
+        code: 'dependency_unavailable',
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+    return
+  }
+  if (req.method === 'POST' && url.pathname === '/drain') {
+    try {
+      authenticate(req, options)
+      const text = await readBody(req, 1024)
+      const body = text ? parseObject(text) : {}
+      const timeout = body['timeout_ms'] ?? 150_000
+      if (!Number.isSafeInteger(timeout) || Number(timeout) < 0 || Number(timeout) > 300_000) throw invalid('timeout_ms must be between 0 and 300000')
+      const drained = options.lifecycle ? await options.lifecycle.drain(Number(timeout)) : options.runs.size === 0
+      respond(res, drained ? 200 : 503, { ok: drained, ...(options.lifecycle?.status() as object ?? {}) })
+    } catch (error) {
+      respond(res, statusForCode(seamErrorCode(error)), { ok: false, message: error instanceof Error ? error.message : String(error) })
+    }
+    return
+  }
   const parts = url.pathname.split('/').filter(Boolean)
   if (req.method !== 'POST' || parts.length !== 2 || parts[0] !== 'subagent'
     || (parts[1] !== 'start' && parts[1] !== 'stop')) {
@@ -97,6 +138,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: Subage
     const payload = parseObject(body)
 
     if (endpoint === 'start') {
+      if (options.lifecycle && !options.lifecycle.admitting()) {
+        respond(res, 503, { ok: false, code: 'unavailable', message: 'execution node is not ready or is draining' }); return
+      }
       assertStartChildRequest(payload)
       if (payload.realm !== caller.realm) {
         throw forbidden(`调用方 realm=${caller.realm} 不得启动 realm=${payload.realm} 的子代理`)
@@ -111,10 +155,17 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: Subage
         throw invalid(`subagent-host: StartChildRequest.childId 会话已存在,禁止重放: ${payload.childId}`)
       }
       const key = runKeyOf(payload.realm, payload.childId)
-      if (options.runs.has(key)) {
+      if (options.runs.has(key) || admitting.has(key)) {
         throw invalid(`subagent-host: childId ${payload.childId} 已在运行(幂等键冲突)`)
       }
-      options.start(payload as StartChildRequest)
+      const finishAdmission = options.lifecycle?.beginAdmission()
+      admitting.add(key)
+      try {
+        await options.admit?.(payload as StartChildRequest)
+        // This request entered before drain. Count it until its execution has
+        // been synchronously registered, so drain cannot return prematurely.
+        options.start(payload as StartChildRequest)
+      } finally { admitting.delete(key); finishAdmission?.() }
       respondOk(res, { ok: true, childId: payload.childId })
       return
     }
@@ -123,12 +174,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: Subage
     if (typeof childId !== 'string' || childId === '') {
       throw invalid('subagent-host: stop 需要非空字符串 childId')
     }
-    // stop 幂等:未知/已结集 run 也是 200 no-op(行 6 kill 同款,取消不是查询)
-    // 发布前窗口:child 还在一次本地 create 内,stop 是 no-op——child 照常跑完并
-    // 回执 completed;该窗口的取消语义随行 6 控制信号通道(JobControlSeam),本切片不做。
-    options.runs.get(runKeyOf(caller.realm, childId))?.cancel()
-    options.stopGoverned?.(caller.realm, childId)
-    respondOk(res, { ok: true })
+    const attempt = payload['attempt']
+    const nodeId = payload['nodeId']
+    if (attempt !== undefined && (!Number.isSafeInteger(attempt) || Number(attempt) < 1)) throw invalid('attempt must be a positive integer')
+    if (nodeId !== undefined && (typeof nodeId !== 'string' || !nodeId)) throw invalid('nodeId must be a nonempty string')
+    const stopped = await options.persistStop?.(caller.realm,childId,attempt as number | undefined,nodeId as string | undefined)
+    if (stopped?.applied !== false) {
+      options.runs.get(runKeyOf(caller.realm, childId))?.cancel()
+      options.stopGoverned?.(caller.realm, childId)
+    }
+    respondOk(res, { ok: true, ...(stopped ? { never_started: stopped.neverStarted } : {}) })
   } catch (e) {
     const code = seamErrorCode(e)
     const message = e instanceof Error ? e.message : String(e)

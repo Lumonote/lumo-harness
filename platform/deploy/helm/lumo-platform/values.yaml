@@ -3,9 +3,40 @@ image:
   tag: "0.1.0"
   pullPolicy: IfNotPresent
 replicaCount: 1
+availability:
+  podDisruptionBudget: { enabled: false, maxUnavailable: 1 }
+  topologySpread:
+    enabled: false
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+networkPolicy:
+  enabled: false
+  # Additional ingress peers (Ingress, Prometheus, other releases) and external
+  # dependency egress rules. These are native NetworkPolicy rule objects.
+  ingress: []
+  externalEgress: []
+production:
+  enabled: false
+  # Existing Secret: LUMO_PG_DSN and REGISTRY_PG_DSN. Never put DSNs in values.
+  databaseSecret: ""
+  postgresEndpoint: ""
+  # Evidence references are declarations, not proof of live HA. The separate
+  # production preflight verifies Secrets and server-side manifests.
+  dependencyEvidence: {}
+  restoreDrillRef: ""
+  durabilityPolicyRef: ""
 service:
   type: ClusterIP
   port: 8080
+objectStore:
+  enabled: false
+  endpoint: ""
+  port: 9000
+  useSSL: true
+  bucket: lumo-objects
+  registryBucket: lumo-registry
+  # Existing Secret with accessKey and secretKey. No values contain credentials.
+  credentialsSecret: ""
 postgres:
   dsn: postgres://lumo:lumo@postgres:5432/lumo
 redis:
@@ -48,6 +79,7 @@ connectorOAuth:
   vaultPrefix: lumo/connector-oauth
   adminRoles: admin,realm_admin,platform_admin
 governance:
+  botTeamsUrl: ""
   # Existing Secret containing LUMO_AUTH_* environment entries, including
   # bootstrap credentials and optional MFA, Passkey, and OIDC configuration.
   authSecret: ""
@@ -127,6 +159,22 @@ productionControls:
 dshNode:
   # 承载 subagent 的可水平扩展节点池；生产必须替换为已发布的 DSH 镜像。
   enabled: false
+  workloadKind: Deployment
+  # Native Harness home config only; no Lumo provider translation. The ConfigMap
+  # must contain an official cordis.patch.yml (no secrets). Leave blank to keep
+  # native Settings as the only configuration writer. Managed fields in a home
+  # patch outrank per-profile Settings; restart Pods after ConfigMap/Secret changes.
+  harness:
+    patchConfigMap: ""
+    patchKey: cordis.patch.yml
+    credentialsSecret: ""
+    # One writable home per Pod. Persistence requires StatefulSet; never share
+    # a home between replicas (credentials, profiles and local state live here).
+    persistence: { enabled: false, size: 1Gi, storageClass: "" }
+  spool:
+    persistence: { enabled: false, size: 10Gi, storageClass: "" }
+  terminationGracePeriodSeconds: 180
+  drainTimeoutSeconds: 150
   image: ghcr.io/lumonote/dsh-node:0.1.0
   replicas: 2
   port: 8091
@@ -159,6 +207,10 @@ dshNode:
   residency: ""
   hostTokenSecret: lumo-subagent-host-token
   hostTokenKey: token
+  # Optional fixed Thread binding, serialized as LUMO_THREAD_EXECUTION.
+  # Configure distributed:true, sessionControlUrl, governanceUrl, projectId,
+  # agentId, presetRevision, provider and model explicitly; no default identity.
+  threadExecution: {}
   # Opt-in, one-preset-per-pod Worker identity. All fields are required when
   # enabled; the runtime verifies them against Governance before advertising.
   governedWorker:
@@ -178,9 +230,29 @@ dshNode:
     minReplicas: 2
     maxReplicas: 20
     targetCPUUtilizationPercentage: 70
+    # Native autoscaling/v2 External metrics. A metrics adapter must publish
+    # these series scoped by release+cluster; averageValue is backlog per pod
+    # or desired occupied slots per pod. CPU may be disabled by setting 0.
+    externalMetrics: []
 dshWeb:
   # 官方 DeepSeek Harness Web shell；Lumo UI 以外置 dsh.client 包挂载。
   enabled: false
+  workloadKind: Deployment
+  # Native Harness home config only; no Lumo provider translation. The ConfigMap
+  # must contain an official cordis.patch.yml (no secrets). Leave blank to keep
+  # native Settings as the only configuration writer. Managed fields in a home
+  # patch outrank per-profile Settings; restart Pods after ConfigMap/Secret changes.
+  harness:
+    patchConfigMap: ""
+    patchKey: cordis.patch.yml
+    credentialsSecret: ""
+    # One writable home per Pod. Persistence requires StatefulSet; never share
+    # a home between replicas (credentials, profiles and local state live here).
+    persistence: { enabled: false, size: 1Gi, storageClass: "" }
+  spool:
+    persistence: { enabled: false, size: 10Gi, storageClass: "" }
+  terminationGracePeriodSeconds: 180
+  drainTimeoutSeconds: 150
   image: ghcr.io/lumonote/dsh-node:0.1.0
   replicas: 1
   port: 3080
@@ -208,6 +280,12 @@ dshWeb:
   sessionControlUrl: http://lumo-platform-session-control:8092
   publicUrl: ""
   secureCookie: true
+  # Optional fixed Thread binding; uses the same explicit contract as dshNode.
+  threadExecution: {}
+  # Optional authenticated text Sessions. Configure authorityUrl, stable nodeId,
+  # matching projectId, absolute workspaceRoot, provider and model explicitly.
+  # This node-local entry currently requires exactly one Web replica.
+  userSessionExecution: {}
   registryUrl: http://lumo-platform-registry:8084
   llmGatewayUrl: http://lumo-platform-llm-gateway:8088
   usageLedgerUrl: http://lumo-platform-usage-ledger:8085

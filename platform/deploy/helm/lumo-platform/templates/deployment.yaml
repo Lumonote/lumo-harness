@@ -40,6 +40,7 @@ metadata:
   name: {{ include "lumo-platform.name" $ }}-{{ $name }}
   labels:
     lumo.dev/service: {{ $name }}
+    app.kubernetes.io/instance: {{ $.Release.Name | quote }}
 spec:
   {{- /* Per-service override, because the cluster shape is not uniform: the
          cluster topology runs scheduler and collaborator in pairs and the
@@ -48,11 +49,12 @@ spec:
          (the thing cluster acceptance exists to exercise) untested. */}}
   replicas: {{ default $.Values.replicaCount $cfg.replicas }}
   selector:
-    matchLabels: { lumo.dev/service: {{ $name }} }
+    matchLabels: { lumo.dev/service: {{ $name }}, app.kubernetes.io/instance: {{ $.Release.Name | quote }} }
   template:
     metadata:
       labels:
         lumo.dev/service: {{ $name }}
+        app.kubernetes.io/instance: {{ $.Release.Name | quote }}
         {{- if $.Values.serviceMesh.istio.enabled }}
         lumo.dev/mesh-mtls: "enabled"
         {{- if $.Values.serviceMesh.istio.revision }}
@@ -67,6 +69,7 @@ spec:
         {{- end }}
       {{- end }}
     spec:
+      {{- include "lumo-platform.topology" (dict "root" $ "service" $name) | nindent 6 }}
       {{- if and (eq $name "governance") $.Values.deviceGateway.enabled }}
       securityContext:
         fsGroup: 10001
@@ -92,6 +95,35 @@ spec:
             - secretRef: { name: {{ $.Values.governance.authSecret | quote }}, optional: false }
             {{- end }}
           env:
+            {{- if and (eq $name "registry") $.Values.objectStore.enabled }}
+            - name: REGISTRY_S3_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ required "objectStore.credentialsSecret is required" $.Values.objectStore.credentialsSecret | quote }}, key: accessKey, optional: false } }
+            - name: REGISTRY_S3_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: {{ $.Values.objectStore.credentialsSecret | quote }}, key: secretKey, optional: false } }
+            {{- end }}
+            {{- if $.Values.production.enabled }}
+            - name: LUMO_PG_DSN
+              valueFrom: { secretKeyRef: { name: {{ $.Values.production.databaseSecret | quote }}, key: LUMO_PG_DSN, optional: false } }
+            - name: REGISTRY_PG_DSN
+              valueFrom: { secretKeyRef: { name: {{ $.Values.production.databaseSecret | quote }}, key: REGISTRY_PG_DSN, optional: false } }
+            {{- end }}
+            {{- if eq $name "flows" }}
+            {{- range $env, $service := dict "LUMO_LLM_GATEWAY_URL" "llm-gateway" "LUMO_CONNECTOR_GATEWAY_URL" "connector-gateway" "LUMO_PROJECTS_URL" "projects" "LUMO_GOVERNANCE_URL" "governance" }}
+            {{- $target := index $.Values.services $service }}
+            {{- if $target.enabled }}
+            - name: {{ $env }}
+              value: {{ printf "http://%s-%s:%v" (include "lumo-platform.name" $) $service $target.port | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if $.Values.dshNode.enabled }}
+            - name: LUMO_KNOWLEDGE_SEAM_URL
+              value: {{ printf "http://%s-dsh-node:%v" (include "lumo-platform.name" $) $.Values.dshNode.seamPort | quote }}
+            {{- end }}
+            {{- if $.Values.dshNode.identityAssertion.secretName }}
+            - name: LUMO_IDENTITY_ASSERTION_SECRET
+              valueFrom: { secretKeyRef: { name: {{ $.Values.dshNode.identityAssertion.secretName }}, key: {{ $.Values.dshNode.identityAssertion.secretKey }}, optional: false } }
+            {{- end }}
+            {{- end }}
             {{- if eq $name "scheduler" }}
             - name: LUMO_GOVERNANCE_URL
               value: {{ printf "http://%s-governance:%v" (include "lumo-platform.name" $) $.Values.services.governance.port | quote }}
@@ -158,6 +190,8 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $.Values.vault.tokenSecret }}, key: {{ $.Values.vault.tokenKey }}, optional: true } }
             {{- end }}
             {{- if eq $name "governance" }}
+            - name: LUMO_BOT_TEAMS_URL
+              value: {{ default (printf "http://%s-dsh-web:%v" (include "lumo-platform.name" $) $.Values.dshWeb.port) $.Values.governance.botTeamsUrl | quote }}
             - name: LUMO_DESKTOP_GATEWAY_ENABLED
               value: {{ $.Values.deviceGateway.enabled | quote }}
             {{- if $.Values.deviceGateway.enabled }}
@@ -321,16 +355,16 @@ spec:
                 path: server.crt
               - key: {{ required "deviceGateway.tlsKeyKey is required" $.Values.deviceGateway.tlsKeyKey | quote }}
                 path: server.key
-            - name: device-issuer
-              secret:
-                secretName: {{ required "deviceGateway.issuerSecret is required" $.Values.deviceGateway.issuerSecret | quote }}
-                optional: false
-                defaultMode: 0440
-                items:
-                  - key: {{ required "deviceGateway.issuerCertKey is required" $.Values.deviceGateway.issuerCertKey | quote }}
-                    path: issuer.crt
-                  - key: {{ required "deviceGateway.issuerKeyKey is required" $.Values.deviceGateway.issuerKeyKey | quote }}
-                    path: issuer.key
+        - name: device-issuer
+          secret:
+            secretName: {{ required "deviceGateway.issuerSecret is required" $.Values.deviceGateway.issuerSecret | quote }}
+            optional: false
+            defaultMode: 0440
+            items:
+              - key: {{ required "deviceGateway.issuerCertKey is required" $.Values.deviceGateway.issuerCertKey | quote }}
+                path: issuer.crt
+              - key: {{ required "deviceGateway.issuerKeyKey is required" $.Values.deviceGateway.issuerKeyKey | quote }}
+                path: issuer.key
       {{- end }}
       {{- if eq $name "edge-gateway" }}
       volumes:

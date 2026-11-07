@@ -19,8 +19,19 @@ data:
   # would change on every render, show up as spurious drift in GitOps, and make
   # the "not ready" reason string order unstable across restarts.
   LUMO_REQUIRED_SERVICES: {{ join "," (sortAlpha (keys $enabled)) | quote }}
+  {{- if not .Values.production.enabled }}
   LUMO_PG_DSN: {{ .Values.postgres.dsn | quote }}
   REGISTRY_PG_DSN: {{ .Values.postgres.dsn | quote }}
+  {{- end }}
+  {{- if .Values.objectStore.enabled }}
+  LUMO_MINIO_ENDPOINT: {{ required "objectStore.endpoint is required" .Values.objectStore.endpoint | quote }}
+  LUMO_MINIO_PORT: {{ .Values.objectStore.port | quote }}
+  LUMO_MINIO_SSL: {{ .Values.objectStore.useSSL | quote }}
+  LUMO_MINIO_BUCKET: {{ .Values.objectStore.bucket | quote }}
+  REGISTRY_S3_ENDPOINT: {{ printf "%s:%v" .Values.objectStore.endpoint .Values.objectStore.port | quote }}
+  REGISTRY_S3_SSL: {{ .Values.objectStore.useSSL | quote }}
+  REGISTRY_S3_BUCKET: {{ .Values.objectStore.registryBucket | quote }}
+  {{- end }}
   LUMO_REDIS_ADDR: {{ .Values.redis.address | quote }}
   LUMO_RMQ_ENDPOINT: {{ .Values.rocketmq.endpoint | quote }}
   LUMO_NACOS_ADDR: {{ .Values.nacos.address | quote }}

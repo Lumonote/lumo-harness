@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -108,7 +109,6 @@ func (s *Server) degradedPlacement(targetCluster string) *domain.Lease {
 	if lease == nil {
 		return nil
 	}
-	s.degraded.Add(1)
 	return lease
 }
 
@@ -289,6 +289,7 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 	// 日志——否则「被拦 → 恢复 → 又被拦」只有第一条会被说出来。
 	clearVersionBlock()
 	if degraded {
+		s.degraded.Add(1)
 		// 调用方要能区分「正常放置」与「降级放置」：两者的可用性含义不同，而响应体
 		// 长得一样时，只有指标在动，读响应的人看不出这一次是降级——而「这次放置是在
 		// 全局决策者缺席时做的」正是他需要知道的事。
@@ -372,9 +373,20 @@ func (s *Server) requestPreemption(r *http.Request, waiting domain.Task, nodes [
 		_ = s.store.MarkPreemptionDeliveryFailed(r.Context(), victim.TaskID, err.Error())
 		return "", err
 	}
-	if err := s.requestStop(r, node, waiting.Realm, victim.TaskID); err != nil {
+	neverStarted, err := s.requestStop(r, node, waiting.Realm, victim.TaskID, victim.Attempt)
+	if err != nil {
 		_ = s.store.MarkPreemptionDeliveryFailed(r.Context(), victim.TaskID, err.Error())
 		return "", err
+	}
+	if neverStarted {
+		p, err := s.store.CompleteAssignedTask(r.Context(), victim.TaskID, waiting.Realm, victim.NodeID, victim.Attempt, domain.StateAborted)
+		if err != nil {
+			return "", err
+		}
+		if p.Attempt == victim.Attempt && p.State == domain.StateAborted {
+			return victim.TaskID, nil
+		}
+		return "", nil
 	}
 	p, err := s.store.ConfirmPreemption(r.Context(), victim.TaskID, victim.Attempt)
 	if err != nil {
@@ -421,11 +433,32 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := r.PathValue("taskId")
+	var expected struct {
+		Attempt int    `json:"attempt"`
+		NodeID  string `json:"node_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&expected); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "bad-request", "取消请求体非法")
+		return
+	}
+	if expected.Attempt < 0 || (expected.NodeID != "" && expected.Attempt <= 0) {
+		writeError(w, http.StatusBadRequest, "bad-request", "按节点取消必须提供正 attempt")
+		return
+	}
 	current, err := s.store.GetPlacement(r.Context(), taskID)
 	var nf *domain.TaskNotFoundError
 	if errors.As(err, &nf) {
-		writeError(w, http.StatusNotFound, "task-not-found", nf.Error())
-		return
+		if expected.Attempt == 0 {
+			current, err = s.store.CancelUnseen(r.Context(), taskID, realm)
+			if err == nil && current.State == domain.StateAborted {
+				writeJSON(w, http.StatusOK, current)
+				return
+			}
+		}
+		if errors.As(err, &nf) {
+			writeError(w, http.StatusNotFound, "task-not-found", nf.Error())
+			return
+		}
 	}
 	if err != nil {
 		s.log.Error("读取待取消任务失败", "task_id", taskID, "err", err)
@@ -436,9 +469,35 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "task-not-found", "任务不存在")
 		return
 	}
-	if err := s.store.RecordCancelIntent(r.Context(), taskID); err != nil {
+	if expected.Attempt > 0 && (current.Attempt != expected.Attempt || (expected.NodeID != "" && current.NodeID != expected.NodeID)) {
+		writeJSON(w, http.StatusOK, current)
+		return
+	}
+	if current.State == domain.StatePending {
+		var err error
+		current, err = s.store.CancelPending(r.Context(), taskID, realm, expected.Attempt)
+		if err != nil {
+			s.respondStoreError(w, err)
+			return
+		}
+		if current.State == domain.StateAborted {
+			writeJSON(w, http.StatusOK, current)
+			return
+		}
+	}
+	accepted, err := s.store.RecordCancelIntentAttempt(r.Context(), taskID, current.Attempt)
+	if err != nil {
 		s.log.Error("持久化取消命令失败", "task_id", taskID, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "无法持久化取消命令")
+		return
+	}
+	if !accepted {
+		current, err = s.store.GetPlacement(r.Context(), taskID)
+		if err != nil {
+			s.respondStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, current)
 		return
 	}
 
@@ -452,7 +511,8 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "cancel-unavailable", "执行节点不可用，未记录取消状态")
 			return
 		}
-		if err := s.requestStop(r, node, realm, taskID); err != nil {
+		neverStarted, err := s.requestStop(r, node, realm, taskID, current.Attempt)
+		if err != nil {
 			if markErr := s.store.MarkCancelDeliveryFailed(r.Context(), taskID, err.Error()); markErr != nil {
 				s.log.Warn("记录取消命令失败状态失败", "task_id", taskID, "err", markErr)
 			}
@@ -460,9 +520,18 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "cancel-failed", "执行节点未确认停止，未记录取消状态")
 			return
 		}
+		if neverStarted {
+			p, err := s.store.CompleteAssignedTask(r.Context(), taskID, realm, current.NodeID, current.Attempt, domain.StateAborted)
+			if err != nil {
+				s.respondStoreError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, p)
+			return
+		}
 	}
 
-	p, err := s.store.RequestCancel(r.Context(), taskID)
+	p, err := s.store.RequestCancelAttempt(r.Context(), taskID, current.Attempt)
 	if err != nil {
 		s.respondStoreError(w, err)
 		return
@@ -487,17 +556,21 @@ func (s *Server) controlNode(ctx context.Context, realm, nodeID string) (domain.
 	return domain.Node{}, errors.New("node is absent from the control catalog")
 }
 
-func (s *Server) requestStop(r *http.Request, node domain.Node, realm, taskID string) error {
-	payload, err := json.Marshal(map[string]string{"childId": taskID})
+func (s *Server) requestStop(r *http.Request, node domain.Node, realm, taskID string, attempts ...int) (bool, error) {
+	var attempt int
+	if len(attempts) > 0 {
+		attempt = attempts[0]
+	}
+	payload, err := json.Marshal(map[string]any{"childId": taskID, "attempt": attempt, "nodeId": node.NodeID})
 	if err != nil {
-		return err
+		return false, err
 	}
 	endpoint := strings.TrimRight(node.ControlURL, "/") + "/subagent/stop"
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Lumo-Realm", realm)
@@ -506,19 +579,26 @@ func (s *Server) requestStop(r *http.Request, node domain.Node, realm, taskID st
 	}
 	res, err := observability.ConfiguredHTTPClient(10 * time.Second).Do(req)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
-		return errors.New("execution node returned HTTP " + res.Status)
+		return false, errors.New("execution node returned HTTP " + res.Status)
 	}
-	return nil
+	var receipt struct {
+		NeverStarted bool `json:"never_started"`
+	}
+	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&receipt); err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	return receipt.NeverStarted, nil
 }
 
 // resultRequest 终态回报体。
 type resultRequest struct {
 	State   domain.TaskState `json:"state"`
 	Attempt int              `json:"attempt"`
+	NodeID  string           `json:"node_id"`
 }
 
 func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
@@ -527,8 +607,8 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req resultRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !req.State.Terminal() {
-		writeError(w, http.StatusBadRequest, "bad-request", "state 必须是 COMPLETED/FAILED/ABORTED")
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !req.State.Terminal() || req.Attempt <= 0 || strings.TrimSpace(req.NodeID) == "" {
+		writeError(w, http.StatusBadRequest, "bad-request", "state 必须是终态，并提供正 attempt 与 node_id")
 		return
 	}
 	current, err := s.store.GetPlacement(r.Context(), r.PathValue("taskId"))
@@ -546,13 +626,17 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "task-not-found", "任务不存在")
 		return
 	}
-	p, err := s.store.CompleteTaskAttempt(r.Context(), r.PathValue("taskId"), req.Attempt, req.State)
+	p, err := s.store.CompleteAssignedTask(r.Context(), r.PathValue("taskId"), realm, req.NodeID, req.Attempt, req.State)
 	var nf *domain.TaskNotFoundError
 	if errors.As(err, &nf) {
 		writeError(w, http.StatusNotFound, "task-not-found", nf.Error())
 		return
 	}
 	if err != nil {
+		if errors.Is(err, domain.ErrAssignmentMismatch) {
+			writeError(w, http.StatusConflict, "assignment-mismatch", "回报与执行节点分配不匹配")
+			return
+		}
 		s.log.Error("回报终态失败", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "回报终态失败")
 		return
@@ -624,6 +708,10 @@ func requestRealm(w http.ResponseWriter, r *http.Request) (string, bool) {
 
 // respondStoreError 领域错误 → HTTP 状态映射（spec §6 表）。
 func (s *Server) respondStoreError(w http.ResponseWriter, err error) {
+	if errors.Is(err, domain.ErrGlobalLeaderActive) {
+		writeError(w, http.StatusServiceUnavailable, "global-leader-active", "全局 leader 仍在，请向全局调度提交")
+		return
+	}
 	if errors.Is(err, store.ErrTaskIdentityConflict) {
 		writeError(w, http.StatusConflict, "task-identity-conflict", "任务标识已绑定到其他执行身份")
 		return

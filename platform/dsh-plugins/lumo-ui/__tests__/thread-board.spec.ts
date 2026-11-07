@@ -106,6 +106,19 @@ describe('deriveThreadBoard', () => {
     expect(column(board, 'stopped').entries).toEqual([])
   })
 
+  it('批准等待只按控制态时间计时，不用旧任务时间误判过期', () => {
+    const board = deriveThreadBoard([
+      thread('fresh-control', { business_state: 'EXECUTING', control_state: 'awaiting-approval',
+        updated_at: ago(DEFAULT_WAIT_TTL_MS * 2), control_updated_at: ago(60_000) }),
+      thread('unknown-control-time', { business_state: 'EXECUTING', control_state: 'awaiting-approval',
+        updated_at: ago(DEFAULT_WAIT_TTL_MS * 2) }),
+    ], { now: NOW, controlState: true })
+    expect(column(board, 'stopped').entries).toEqual([])
+    const entries = column(board, 'light-answer').entries
+    expect(entries.find(entry => entry.id === 'fresh-control')?.ageMs).toBe(60_000)
+    expect(entries.find(entry => entry.id === 'unknown-control-time')?.ageMs).toBeUndefined()
+  })
+
   it('已停与已完成各归各格，且已停带得出处置理由', () => {
     const board = deriveThreadBoard([
       thread('t-failed', { business_state: 'EXECUTING', state: 'FAILED', last_error: '节点失联' }),

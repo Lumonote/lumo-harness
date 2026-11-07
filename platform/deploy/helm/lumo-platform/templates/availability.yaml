@@ -1,0 +1,68 @@
+{{- if .Values.availability.podDisruptionBudget.enabled }}
+{{- range $name, $cfg := .Values.services }}
+{{- if and $cfg.enabled (ge (int (default $.Values.replicaCount $cfg.replicas)) 2) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "lumo-platform.name" $ }}-{{ $name }}
+spec:
+  maxUnavailable: {{ $.Values.availability.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      lumo.dev/service: {{ $name }}
+      app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+{{- end }}
+{{- end }}
+{{- range $name, $cfg := dict "dsh-node" .Values.dshNode "dsh-web" .Values.dshWeb }}
+{{- if $cfg.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "lumo-platform.name" $ }}-{{ $name }}
+spec:
+  maxUnavailable: {{ $.Values.availability.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      lumo.dev/service: {{ $name }}
+      app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "lumo-platform.name" . }}-isolation
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name | quote }}
+    {{- with .Values.networkPolicy.ingress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name | quote }}
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    {{- with .Values.networkPolicy.externalEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

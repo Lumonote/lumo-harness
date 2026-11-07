@@ -1,0 +1,8 @@
+[
+  {
+    "id": "alerts",
+    "realm": "dev",
+    "event": "bot.message",
+    "secret_env": "LUMO_BOT_ALERTS_KEY"
+  }
+]

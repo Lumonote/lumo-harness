@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -63,6 +64,7 @@ func New(h *hub.Hub, st *store.Store, ring *ownership.Ring, auth Authenticator, 
 // Routes 注册 HTTP 路由。
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
+	s.registerThreadCommandRoutes(mux)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /metrics", handleMetrics)
 	mux.HandleFunc("GET /docs/{docID}/ws", s.handleWS)
@@ -80,6 +82,9 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /threads/{threadID}", s.handleGetThread)
 	mux.HandleFunc("POST /threads/{threadID}/state", s.handleThreadState)
 	mux.HandleFunc("POST /threads/{threadID}/node-loss", s.handleThreadNodeLoss)
+	mux.HandleFunc("POST /threads/{threadID}/rounds", s.handleAdmitThreadRound)
+	mux.HandleFunc("GET /threads/{threadID}/rounds/{runID}", s.handleGetThreadRound)
+	mux.HandleFunc("POST /threads/{threadID}/rounds/{runID}/finish", s.handleFinishThreadRound)
 	// 按节点上报失联 + 通知的读面（§24.2.3(4) 的信号链：心跳侧上报 → 标记 failed →
 	// 通知协调者）。注意与上面那条的路径形状不同：本条的 `node-loss` 是**集合**上的动作
 	// （该节点上的全部线程），上面那条是单条线程上的动作。
@@ -149,11 +154,20 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = conn.Close() }()
+	// Gorilla permits one writer at a time. Broadcasts and ACKs share the socket.
+	var writeMu sync.Mutex
+	writeMessage := func(message wsMessage) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		return conn.WriteJSON(message)
+	}
 
 	// 非阻塞发送：慢消费者直接断开，不拖垮广播
 	out := make(chan domain.Update, 64)
 	unsubscribe, err := s.hub.Subscribe(docID, &hub.Subscriber{
 		UserID: ident.UserID,
+		Close:  func() { _ = conn.Close() },
 		Send: func(u domain.Update) error {
 			select {
 			case out <- u:
@@ -164,7 +178,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
-		_ = conn.WriteJSON(wsMessage{Type: "error", Detail: err.Error()})
+		_ = writeMessage(wsMessage{Type: "error", Detail: err.Error()})
 		return
 	}
 	defer unsubscribe()
@@ -178,8 +192,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			case <-ctx.Done():
 				return
 			case u := <-out:
-				_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				if err := conn.WriteJSON(wsMessage{
+				if err := writeMessage(wsMessage{
 					Type: "update", Seq: u.Seq, Actor: u.Actor, Payload: u.Payload,
 				}); err != nil {
 					cancel()
@@ -197,17 +210,25 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		if msg.Type != "update" {
 			continue
 		}
+		if !s.ring.IsMine(docID) {
+			return
+		}
 		if !canEdit {
-			_ = conn.WriteJSON(wsMessage{Type: "error", Detail: "无编辑权限"})
+			_ = writeMessage(wsMessage{Type: "error", Detail: "无编辑权限"})
 			continue
 		}
 		seq, err := s.hub.Apply(ctx, docID, ident.UserID, msg.Payload)
 		if err != nil {
-			_ = conn.WriteJSON(wsMessage{Type: "error", Detail: err.Error()})
+			if errors.Is(err, store.ErrDocumentFenced) {
+				return
+			}
+			_ = writeMessage(wsMessage{Type: "error", Detail: err.Error()})
 			continue
 		}
-		// ack 在 WAL 落盘之后 —— 客户端据此认定"已保存"（RPO 0）
-		_ = conn.WriteJSON(wsMessage{Type: "ack", Seq: seq})
+		// ACK 在 PG WAL 同步提交后发送；远端容灾强度由 PG 复制配置决定。
+		if err := writeMessage(wsMessage{Type: "ack", Seq: seq}); err != nil {
+			return
+		}
 	}
 }
 

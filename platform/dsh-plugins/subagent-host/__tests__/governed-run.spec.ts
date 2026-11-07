@@ -11,6 +11,7 @@ import { KNOWLEDGE_TOOL_NAMES } from '../../../shared/seam-contracts/knowledge.t
 const contexts: Context[] = []
 afterEach(async () => {
   for (const ctx of contexts.splice(0)) await ctx.fiber.dispose()
+  vi.unstubAllGlobals()
   vi.useRealTimers()
 })
 
@@ -65,6 +66,10 @@ it('fails a completed turn without a deliverable', async () => {
 })
 
 function fakeStore() {
+  vi.stubGlobal('fetch', vi.fn(async () => Response.json({snapshot: {realm: config.realm, task_id: 'task-run-1',
+    run_id: 'run-1', worker_id: `agent:${binding.agentId}`, node_id: config.nodeId, session_ref: 'session-run-1',
+    preset_id: binding.agentId, preset_revision: binding.presetRevision, provider: binding.provider, model: binding.model,
+    output_profile: 'platform-closed-text-v1'}})))
   return { config, take: vi.fn<() => Promise<GovernedExecution | undefined>>().mockResolvedValue(undefined),
     recover: vi.fn().mockResolvedValue(0), deliver: vi.fn().mockResolvedValue(undefined),
     shouldStop: vi.fn().mockResolvedValue(false),
@@ -270,4 +275,18 @@ it('does not touch the knowledge scope when the preset lists no spaces', async (
   await runGovernedTask(ctx, execution(), binding, config.nodeId, new AbortController().signal)
   // 留空 = 不授予知识（授权层），而不是「不限制空间」（契约层）。两者方向相反是刻意的。
   expect(calls).toHaveLength(0)
+})
+
+it('enforces an execution snapshot and injects independent review evidence with all tools denied',async()=>{
+ const {ctx,requests}=await context('{"verdict":"approve","manifest_digest":"'+'a'.repeat(64)+'"}')
+ const e=execution()
+ const result=await runGovernedTask(ctx,e,binding,config.nodeId,new AbortController().signal,undefined,async()=>({snapshot:{realm:config.realm,task_id:e.task.id,run_id:e.runId,worker_id:`agent:${binding.agentId}`,node_id:config.nodeId,session_ref:e.sessionRef,preset_id:binding.agentId,preset_revision:binding.presetRevision,provider:binding.provider,model:binding.model,output_profile:'platform-closed-text-v1'},review:{producer_task_id:'producer',producer_run_id:'run-p',producer_intent:'Verify the original producer acceptance criteria',manifest_digest:'a'.repeat(64),manifest:{scope:'platform-closed-text-v1',task_id:'producer',run_id:'run-p',summary:'check summary',entries:[{id:'out-1',sha256:'b'.repeat(64),text:'complete producer deliverable'}]},expires_at:new Date(Date.now()+3600000).toISOString()}}))
+ expect(result.state).toBe('COMPLETED');expect(requests).toHaveLength(1)
+ expect(JSON.stringify(requests[0])).toContain('complete producer deliverable')
+ expect(requests[0]?.tools??[]).toHaveLength(0)
+})
+it('does not create an Agent if authoritative preparation fails',async()=>{
+ const {ctx,requests}=await context('must not execute')
+ const result=await runGovernedTask(ctx,execution(),binding,config.nodeId,new AbortController().signal,undefined,async()=>{throw Error('revoked before execution')})
+ expect(result.state).toBe('FAILED');expect(requests).toHaveLength(0)
 })

@@ -74,10 +74,11 @@ func TestDegradedPlacementCountsOnlyDegraded(t *testing.T) {
 	if srv.DegradedPlacements() != 0 {
 		t.Fatalf("未放行不该计数: %d", srv.DegradedPlacements())
 	}
-	// 两次真的降级 → 2。
+	// Candidate leases are not successful placements. Transactional admission
+	// may still reject a live global leader, so it must not increment this metric.
 	_ = srv.degradedPlacement("cluster-a")
 	_ = srv.degradedPlacement("cluster-a")
-	if srv.DegradedPlacements() != 2 {
-		t.Fatalf("降级计数 = %d，期望 2", srv.DegradedPlacements())
+	if srv.DegradedPlacements() != 0 {
+		t.Fatalf("未提交放置不应计数，实际 %d", srv.DegradedPlacements())
 	}
 }

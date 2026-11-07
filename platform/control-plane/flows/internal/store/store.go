@@ -103,6 +103,7 @@ ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS replay_automation_id TE
 ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS replay_flow_id TEXT;
 ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS replay_flow_version INT;
 ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS replay_of_run_id BIGINT;
+ALTER TABLE flow_trigger_outbox ADD COLUMN IF NOT EXISTS bot_scope JSONB;
 DO $$ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
@@ -236,6 +237,7 @@ type TriggerRecord struct {
 	ReplayFlowID       string          `json:"replay_flow_id,omitempty"`
 	ReplayFlowVersion  int             `json:"replay_flow_version,omitempty"`
 	ReplayOfRunID      int64           `json:"replay_of_run_id,omitempty"`
+	BotScope           json.RawMessage `json:"bot_scope,omitempty"`
 }
 
 func (r TriggerRecord) IsReplay() bool { return r.ReplayOfRunID > 0 }
@@ -265,6 +267,22 @@ type ReplayEnqueue struct {
 	AlreadyQueued bool   `json:"already_queued"`
 }
 
+// Existing v1 deliveries and their explicit replay descendants must retain the
+// Bot execution boundary after upgrading. This runs after receipt tables exist.
+const botScopeUpgradeDDL = `
+DO $bot_scope_upgrade$ BEGIN
+WITH RECURSIVE bot_scopes(id,scope) AS (
+ SELECT o.id,COALESCE(o.bot_scope,jsonb_build_object('channel',b.channel,'message_id',b.message_id))
+ FROM flow_trigger_outbox o JOIN flow_bot_receipts b ON b.trigger_id=o.id
+ UNION
+ SELECT child.id,COALESCE(child.bot_scope,parent.scope)
+ FROM bot_scopes parent JOIN flow_runs r ON r.trigger_id=parent.id
+ JOIN flow_trigger_outbox child ON child.replay_of_run_id=r.id
+)
+UPDATE flow_trigger_outbox o SET bot_scope=b.scope FROM bot_scopes b WHERE o.id=b.id AND o.bot_scope IS NULL;
+END $bot_scope_upgrade$;
+`
+
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 func (s *Store) Init(ctx context.Context) error {
@@ -273,6 +291,12 @@ func (s *Store) Init(ctx context.Context) error {
 	}
 	if _, err := s.pool.Exec(ctx, managementDDL); err != nil {
 		return fmt.Errorf("initialize flow change drafts: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, botDDL); err != nil {
+		return fmt.Errorf("initialize bot receipts: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, botScopeUpgradeDDL); err != nil {
+		return fmt.Errorf("upgrade legacy bot execution scope: %w", err)
 	}
 	return nil
 }
@@ -311,10 +335,10 @@ func (s *Store) ClaimTriggers(ctx context.Context, worker string, limit int) ([]
 			COALESCE(o.replay_automation_id, '') AS replay_automation_id,
 			COALESCE(o.replay_flow_id, '')       AS replay_flow_id,
 			COALESCE(o.replay_flow_version, 0)   AS replay_flow_version,
-			COALESCE(o.replay_of_run_id, 0)      AS replay_of_run_id
+			COALESCE(o.replay_of_run_id, 0)      AS replay_of_run_id, o.bot_scope
 	)
 		SELECT id, claim_token, realm, event_name, payload, replay_automation_id, replay_flow_id,
-		replay_flow_version, replay_of_run_id FROM claimed ORDER BY id`, worker, limit)
+		replay_flow_version, replay_of_run_id, bot_scope FROM claimed ORDER BY id`, worker, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +347,7 @@ func (s *Store) ClaimTriggers(ctx context.Context, worker string, limit int) ([]
 	for rows.Next() {
 		var record TriggerRecord
 		if err := rows.Scan(&record.ID, &record.ClaimToken, &record.Realm, &record.Name, &record.Payload,
-			&record.ReplayAutomationID, &record.ReplayFlowID, &record.ReplayFlowVersion, &record.ReplayOfRunID); err != nil {
+			&record.ReplayAutomationID, &record.ReplayFlowID, &record.ReplayFlowVersion, &record.ReplayOfRunID, &record.BotScope); err != nil {
 			return nil, err
 		}
 		out = append(out, record)
@@ -348,16 +372,16 @@ func (s *Store) EnqueueReplay(ctx context.Context, flowID, realm string, runID i
 
 	var (
 		status, eventName, automationID, pinnedFlowID string
-		payload                                       json.RawMessage
+		payload, botScope                             json.RawMessage
 		version                                       int
 	)
 	err = tx.QueryRow(ctx, `
-		SELECT r.status, t.event_name, t.payload, r.automation_id, r.flow_id, r.flow_version
+		SELECT r.status, t.event_name, t.payload, r.automation_id, r.flow_id, r.flow_version, t.bot_scope
 		FROM flow_runs r
 		JOIN flow_trigger_outbox t ON t.id = r.trigger_id
 		WHERE r.id = $1 AND r.flow_id = $2 AND t.realm = $3
 		FOR UPDATE OF r, t`, runID, flowID, realm).Scan(
-		&status, &eventName, &payload, &automationID, &pinnedFlowID, &version,
+		&status, &eventName, &payload, &automationID, &pinnedFlowID, &version, &botScope,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ReplayEnqueue{}, ErrNotFound
@@ -372,10 +396,10 @@ func (s *Store) EnqueueReplay(ctx context.Context, flowID, realm string, runID i
 	var queued ReplayEnqueue
 	err = tx.QueryRow(ctx, `
 		INSERT INTO flow_trigger_outbox
-		  (realm, event_name, payload, replay_automation_id, replay_flow_id, replay_flow_version, replay_of_run_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		  (realm, event_name, payload, replay_automation_id, replay_flow_id, replay_flow_version, replay_of_run_id, bot_scope)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 		ON CONFLICT (replay_of_run_id) WHERE replay_of_run_id IS NOT NULL DO NOTHING
-		RETURNING id`, realm, eventName, payload, automationID, pinnedFlowID, version, runID).Scan(&queued.TriggerID)
+		RETURNING id`, realm, eventName, payload, automationID, pinnedFlowID, version, runID, botScope).Scan(&queued.TriggerID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.QueryRow(ctx,
 			`SELECT id FROM flow_trigger_outbox WHERE replay_of_run_id = $1`, runID).Scan(&queued.TriggerID); err != nil {

@@ -144,6 +144,9 @@ def handler_for(service):
                 }[service]
                 if SCENARIO == "lineage-absent" and service == "flows":
                     text = "lumo_unrelated_metric 1"
+                # Real exporters prepend TYPE/HELP and unrelated samples. A
+                # body helper that strips newlines must fail this fixture.
+                text = '# HELP lumo_http_requests_total HTTP requests\n# TYPE lumo_http_requests_total counter\nlumo_http_requests_total 12\n' + text
                 return send(self, 200, (text + "\n").encode(), "text/plain; version=0.0.4")
             return send(self, 404, {"error": "not found"})
 

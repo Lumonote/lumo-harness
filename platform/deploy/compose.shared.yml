@@ -20,7 +20,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lumo -d lumo"]
+      test: ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
       interval: 5s
       timeout: 3s
       retries: 12
@@ -73,6 +73,10 @@ services:
     image: nacos/nacos-server:v2.4.0
     environment:
       MODE: standalone
+      # 单机 Raft 身份必须跨容器重建稳定。默认容器 IP 变化后，持久卷中的
+      # peer 仍指向旧 IP：readiness/查询正常，但更新实例元数据会找不到 leader。
+      # 仅 standalone 使用回环；生产多节点 Nacos 由外部 HA 集群提供。
+      NACOS_SERVER_IP: 127.0.0.1
       JVM_XMS: 512m
       JVM_XMX: 512m
       JVM_XMN: 256m

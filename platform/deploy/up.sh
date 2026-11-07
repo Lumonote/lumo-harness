@@ -86,6 +86,12 @@ case "${COMPOSE_PROJECT_NAME:-}" in
 esac
 
 ensure_dsh_source "$dsh_root"
+for option in "$@"; do
+  if [[ "$option" == --build ]]; then
+    bash "$repo_root/platform/upstream/install-components.sh" --snapshots-only
+    break
+  fi
+done
 guard_legacy_compose_projects
 warn_legacy_cluster_storage
 

@@ -90,7 +90,7 @@ func (s *Server) runtimeTaskResult(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "execution_mismatch", "result does not match its durable execution identity")
 		return
 	}
-	stored, err := s.store.RecordTaskResult(r.Context(), realm, result, run.WorkerID)
+	stored, err := s.store.RecordTrustedTaskResult(r.Context(), realm, result, run.WorkerID)
 	if err != nil {
 		s.respondStoreError(w, err)
 		return

@@ -15,24 +15,34 @@
  *
  * ## 写序
  *
- * `KvUnit` 契约明说「the unit does NOT serialize concurrent writes — write ordering
- * is the caller's responsibility」。所以本模块**刻意不做**写序：串行化是调用方
- * （`AgentTeamsService.mutate`）的职责，它按团队 id 挂写链。
- *
- * 这一点曾经搞错过 —— 链条一度长在 `StorageHubTeamStore` 里，于是只有走 storage hub
- * 的装配受保护，内存兜底存储退化成无保护的读-改-写，两个成员并行写回会丢结果。
- * 存储适配器只管介质，不替调用方排写序。
+ * `AgentTeamsService` 的团队写链负责同实例排序；存储 CAS 负责跨实例原子提交。
+ * PG 必须提供 `compareAndSetRecord`，防止多个节点用旧快照相互覆盖。
+ * SQLite 在共享的单元对象上串行比较与写入，只承诺单进程语义。
+ * 删除写入墓碑，阻止迟到快照复活团队，也阻止重用已删除的团队 id。
  */
 
+import { createHash, randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import type { TeamState } from './model.ts'
 import { TeamError } from './model.ts'
 
 /** 存储单元名。须匹配 dsh 的 `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/`。 */
 export const TEAM_UNIT_NAME = 'lumo_agent_teams'
-/** 存储单元格式版本。改 `TeamState` 结构时递增。 */
+/** 物理布局版本；可选 JSON 字段不改变布局，旧记录不会被自动认领。 */
 export const TEAM_UNIT_VERSION = 1
 /** 团队记录所在的表名。 */
 export const TEAM_TABLE = 'teams'
+
+/** Shared by the runtime and explicit legacy migration. */
+export function teamStorageKey(realm: string, id: string): string {
+  assertTeamId(id)
+  return teamStoragePrefix(realm) + id
+}
+
+function teamStoragePrefix(realm: string): string {
+  if (realm.trim() === '') throw new TeamError('团队租户不能为空', 'BAD_STATE')
+  return `r_${createHash('sha256').update(realm).digest('hex')}_`
+}
 
 /**
  * 团队 id 的合法形态。
@@ -54,12 +64,16 @@ export interface AgentTeamStore {
   save(team: TeamState): Promise<void>
   /** 删除一个团队。幂等。 */
   remove(id: string): Promise<void>
+  /** 原子条件提交；expected 缺省为仅创建，next 缺省为删除并保留墓碑。 */
+  compareAndSet(id: string, expected: TeamState | undefined, next: TeamState | undefined): Promise<boolean>
   /** 释放底层介质。幂等。 */
   close(): Promise<void>
 }
 
 /** 存储单元的最小门面（dsh `KvUnit` 的结构等价子集）。 */
 export interface KvUnitLike {
+  getRecord?(table: string, key: string): Promise<unknown>
+  compareAndSetRecord?(table: string, key: string, expected: unknown, next: unknown): Promise<boolean>
   loadAll(): Promise<{ tables: Record<string, Record<string, unknown>>; global: unknown }>
   putRecord(table: string, key: string, value: unknown): Promise<void>
   deleteRecord(table: string, key: string): Promise<void>
@@ -180,6 +194,9 @@ export function parseTeamState(value: unknown, teamId: string): TeamState {
   })
   return {
     id: requireString(raw['id'], 'id', teamId),
+    ...raw['realm'] === undefined ? {} : { realm: requireString(raw['realm'], 'realm', teamId) },
+    ...raw['ownerUserId'] === undefined ? {} : { ownerUserId: requireString(raw['ownerUserId'], 'ownerUserId', teamId) },
+    ...raw['revision'] === undefined ? {} : { revision: requireString(raw['revision'], 'revision', teamId) },
     name: requireString(raw['name'], 'name', teamId),
     ...typeof raw['description'] === 'string' ? { description: raw['description'] } : {},
     topology: topology as TeamState['topology'],
@@ -204,31 +221,48 @@ export function assertTeamId(id: string): void {
 /** 进程内存储。测试用，也是 storage 未挂载时的兜底（能力降级，不是静默丢失）。 */
 export class MemoryTeamStore implements AgentTeamStore {
   private readonly teams = new Map<string, TeamState>()
+  private readonly deleted = new Set<string>()
 
   init(): Promise<void> {
     return Promise.resolve()
   }
 
   list(): Promise<TeamState[]> {
-    return Promise.resolve([...this.teams.values()])
+    return Promise.resolve(structuredClone([...this.teams.values()]))
   }
 
   load(id: string): Promise<TeamState | undefined> {
-    return Promise.resolve(this.teams.get(id))
+    return Promise.resolve(structuredClone(this.teams.get(id)))
   }
 
   async save(team: TeamState): Promise<void> {
     assertTeamId(team.id)
-    this.teams.set(team.id, team)
+    if (this.deleted.has(team.id)) throw new TeamError('已删除的团队 id 不可复用', 'DUPLICATE_TEAM')
+    this.teams.set(team.id, structuredClone(team))
   }
 
   remove(id: string): Promise<void> {
     this.teams.delete(id)
+    this.deleted.add(id)
     return Promise.resolve()
+  }
+
+  async compareAndSet(id: string, expected: TeamState | undefined, next: TeamState | undefined): Promise<boolean> {
+    assertTeamId(id)
+    if (this.deleted.has(id) || !isDeepStrictEqual(this.teams.get(id), expected)) return false
+    if (next === undefined) {
+      this.teams.delete(id)
+      this.deleted.add(id)
+    } else {
+      if (next.id !== id) throw new TeamError('团队 id 不可变更', 'BAD_STATE')
+      this.teams.set(id, structuredClone(next))
+    }
+    return true
   }
 
   close(): Promise<void> {
     this.teams.clear()
+    this.deleted.clear()
     return Promise.resolve()
   }
 }
@@ -237,14 +271,39 @@ export class MemoryTeamStore implements AgentTeamStore {
  * 走 dsh storage hub 的存储。
  *
  * 单机形态后端是 sqlite，集群形态后端是 PG —— 这里看不到区别，这正是目的。
- * 本类只做介质适配（读/写/列/删），**不负责写序**：并发读-改-写的串行化由
- * `AgentTeamsService` 按团队 id 统一保证，好让内存兜底存储享有同一份保证。
+ * 本类提供带租户命名空间的读写和原子 CAS。PG 使用后端条件语句；SQLite
+ * 在单元对象上串行比较与写入。服务层写链只承担同实例排序。
  */
 export class StorageHubTeamStore implements AgentTeamStore {
   private unit: KvUnitLike | undefined
   private opening: Promise<KvUnitLike> | undefined
+  private readonly originals = new WeakMap<TeamState, unknown>()
+  private readonly prefix: string
 
-  constructor(private readonly storage: StorageFacetLike) {}
+  constructor(private readonly storage: StorageFacetLike, private readonly scope?: { realm: string; requireAtomic?: boolean }) {
+    this.prefix = scope === undefined ? '' : teamStoragePrefix(scope.realm)
+  }
+
+  private key(id: string): string {
+    assertTeamId(id)
+    return this.prefix + id
+  }
+
+  private decode(raw: unknown, id: string): TeamState | undefined {
+    if (raw === undefined || isTombstone(raw)) return undefined
+    const team = parseTeamState(raw, id)
+    if (team.id !== id || (this.scope !== undefined && team.realm !== this.scope.realm)) {
+      throw new TeamRecordError(`团队 ${id} 的存储键或租户不匹配`, id)
+    }
+    this.originals.set(team, structuredClone(raw))
+    return team
+  }
+
+  private assertScope(team: TeamState): void {
+    if (this.scope !== undefined && team.realm !== this.scope.realm) {
+      throw new TeamError('团队不属于当前租户', 'FORBIDDEN')
+    }
+  }
 
   private async open(): Promise<KvUnitLike> {
     if (this.unit !== undefined) return this.unit
@@ -255,6 +314,10 @@ export class StorageHubTeamStore implements AgentTeamStore {
       hasGlobal: false,
       layout: 'per-record',
     }).then((unit) => {
+      if (this.scope?.requireAtomic && unit.compareAndSetRecord === undefined) {
+        void unit.close()
+        throw new TeamError('集群团队存储必须支持原子条件写入', 'BAD_STATE')
+      }
       this.unit = unit
       return unit
     })
@@ -273,24 +336,49 @@ export class StorageHubTeamStore implements AgentTeamStore {
 
   async list(): Promise<TeamState[]> {
     const records = await this.table()
-    return Object.entries(records).map(([id, value]) => parseTeamState(value, id))
+    return Object.entries(records)
+      .filter(([key]) => key.startsWith(this.prefix))
+      .map(([key, value]) => this.decode(value, key.slice(this.prefix.length)))
+      .filter((team): team is TeamState => team !== undefined)
   }
 
   async load(id: string): Promise<TeamState | undefined> {
-    const records = await this.table()
-    const value = records[id]
-    return value === undefined ? undefined : parseTeamState(value, id)
+    const unit = await this.open()
+    const key = this.key(id)
+    const value = unit.getRecord === undefined ? (await this.table())[key] : await unit.getRecord(TEAM_TABLE, key)
+    return this.decode(value, id)
   }
 
   async save(team: TeamState): Promise<void> {
     assertTeamId(team.id)
+    this.assertScope(team)
     const unit = await this.open()
-    await unit.putRecord(TEAM_TABLE, team.id, team)
+    await unit.putRecord(TEAM_TABLE, this.key(team.id), team)
   }
 
   async remove(id: string): Promise<void> {
     const unit = await this.open()
-    await unit.deleteRecord(TEAM_TABLE, id)
+    await unit.putRecord(TEAM_TABLE, this.key(id), tombstone(id, this.scope?.realm))
+  }
+
+  async compareAndSet(id: string, expected: TeamState | undefined, next: TeamState | undefined): Promise<boolean> {
+    const unit = await this.open()
+    const key = this.key(id)
+    if (next !== undefined) {
+      if (next.id !== id) throw new TeamError('团队 id 不可变更', 'BAD_STATE')
+      this.assertScope(next)
+    }
+    // 比较介质原值，不能拿白名单解析后的状态比较；否则旧记录的扩展字段会造成永久冲突。
+    const before = expected === undefined ? undefined : this.originals.get(expected) ?? expected
+    const after = next ?? tombstone(id, this.scope?.realm)
+    if (unit.compareAndSetRecord !== undefined) return unit.compareAndSetRecord(TEAM_TABLE, key, before, after)
+    // SQLite 只用于单进程装配；所有适配器共享同一打开单元的写链。
+    return localCompare(unit, async () => {
+      const raw = (await unit.loadAll()).tables[TEAM_TABLE]?.[key]
+      if (!isDeepStrictEqual(raw, before)) return false
+      await unit.putRecord(TEAM_TABLE, key, after)
+      return true
+    })
   }
 
   async close(): Promise<void> {
@@ -311,11 +399,29 @@ export class StorageHubTeamStore implements AgentTeamStore {
  * 字段名用 `durable` 而不是 `persistent`：与 `TeamCourier.durable`、
  * `AgentTeamsCapabilities.durableStore` 同一套词汇，免得两个近义词在装配层来回翻译。
  */
-export function createTeamStore(storage: StorageFacetLike | undefined): {
+export function createTeamStore(storage: StorageFacetLike | undefined, scope?: { realm: string; requireAtomic?: boolean }): {
   store: AgentTeamStore
   durable: boolean
 } {
   return storage === undefined
     ? { store: new MemoryTeamStore(), durable: false }
-    : { store: new StorageHubTeamStore(storage), durable: true }
+    : { store: new StorageHubTeamStore(storage, scope), durable: true }
+}
+
+function tombstone(id: string, realm?: string): unknown {
+  return { kind: 'lumo-team-deleted', id, realm, revision: randomUUID(), deletedAt: Date.now() }
+}
+
+function isTombstone(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && (value as { kind?: unknown }).kind === 'lumo-team-deleted'
+}
+
+const localWrites = new WeakMap<KvUnitLike, Promise<unknown>>()
+function localCompare<T>(unit: KvUnitLike, run: () => Promise<T>): Promise<T> {
+  const previous = localWrites.get(unit) ?? Promise.resolve()
+  const next = previous.then(run, run)
+  const settled = next.then(() => undefined, () => undefined)
+  localWrites.set(unit, settled)
+  void settled.then(() => { if (localWrites.get(unit) === settled) localWrites.delete(unit) })
+  return next
 }

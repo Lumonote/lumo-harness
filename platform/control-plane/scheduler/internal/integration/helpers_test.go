@@ -26,7 +26,7 @@ func newStore(t *testing.T) *store.Store {
 		         scheduler_control_commands, scheduler_dead_letters,
 		         scheduler_task_migrations,
 		         scheduler_clusters, scheduler_leader_lease,
-		         scheduler_cluster_lease`); err != nil {
+		         scheduler_cluster_lease, scheduler_queue_fairness`); err != nil {
 		t.Fatalf("清表失败: %v", err)
 	}
 	// TRUNCATE 删掉了预插租约行，重跑 DDL 恢复

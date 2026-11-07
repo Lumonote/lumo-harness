@@ -148,17 +148,12 @@ export class SeamProxyClient {
 
     const retryable = isIdempotent(seam, method)
     const attempts = retryable ? this.maxAttempts : 1
-    const targets = this.balancer.candidates(attempts)
-
-    if (targets.length === 0) {
-      throw new RemoteSeamError('unavailable',
-        `seam ${seam}: 所有远端端点均已熔断`)
-    }
-
     let last: RemoteSeamError | undefined
     for (let i = 0; i < attempts; i++) {
-      // 端点数少于尝试次数时循环复用（单副本部署下退化为原地重试）
-      const endpoint = targets[i % targets.length]!
+      // Reserve only the endpoint we are about to call. Preselecting a retry
+      // list would reserve half-open probes that might never be sent.
+      const endpoint = this.balancer.next()
+      if (!endpoint) throw last ?? new RemoteSeamError('unavailable', `seam ${seam}: 所有远端端点均已熔断或正在探测`)
       try {
         const value = await this.send(endpoint, seam, method, args)
         this.balancer.succeed(endpoint)
@@ -172,7 +167,7 @@ export class SeamProxyClient {
         if (!err.retryable || !retryable) throw err
         last = err
         // 指数退避，避免故障期把远端打得更死
-        if (i < attempts - 1) await sleep(50 * 2 ** i)
+        if (i < attempts - 1) await sleep(Math.floor(50 * 2 ** i * (0.5 + Math.random())))
       }
     }
     throw last ?? new RemoteSeamError('internal', `seam ${seam}.${method}: 重试耗尽`)

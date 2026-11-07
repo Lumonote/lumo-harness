@@ -4,18 +4,20 @@ package trigger
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 )
 
 type Event struct {
-	ID                 uint64 `json:"id,omitempty"`
-	Realm              string `json:"realm"`
-	Name               string `json:"name"`
-	Payload            any    `json:"payload"`
-	ReplayAutomationID string `json:"replay_automation_id,omitempty"`
-	ReplayFlowID       string `json:"replay_flow_id,omitempty"`
-	ReplayFlowVersion  int    `json:"replay_flow_version,omitempty"`
-	ReplayOfRunID      int64  `json:"replay_of_run_id,omitempty"`
+	ID                 uint64          `json:"id,omitempty"`
+	Realm              string          `json:"realm"`
+	Name               string          `json:"name"`
+	Payload            any             `json:"payload"`
+	ReplayAutomationID string          `json:"replay_automation_id,omitempty"`
+	ReplayFlowID       string          `json:"replay_flow_id,omitempty"`
+	ReplayFlowVersion  int             `json:"replay_flow_version,omitempty"`
+	ReplayOfRunID      int64           `json:"replay_of_run_id,omitempty"`
+	BotScope           json.RawMessage `json:"bot_scope,omitempty"`
 }
 
 func (e Event) IsReplay() bool { return e.ReplayOfRunID > 0 }

@@ -42,7 +42,7 @@ export interface ThreadRegistryLike {
   create(input: CreateThreadInput): Promise<ThreadRow>
   /** 不存在返回 `undefined`（跨 realm 读在服务端就是「不存在」，两者在这里同形）。 */
   get(threadId: string): Promise<ThreadRow | undefined>
-  list(query?: { project_id?: string; state?: ThreadState; limit?: number }): Promise<ThreadRow[]>
+  list(query?: { project_id?: string; state?: ThreadState; limit?: number; after?: string; task_ids?: string[] }): Promise<ThreadRow[]>
   transition(threadId: string, to: ThreadState): Promise<ThreadRow>
   /** 上报承载节点丢失（服务端按 node_id 拦：拿别的节点名关不掉这条线程）。 */
   nodeLoss(threadId: string, nodeId: string): Promise<ThreadRow>
@@ -167,6 +167,8 @@ export function createHttpThreadRegistry(options: HttpThreadRegistryOptions): Th
     async list(query): Promise<ThreadRow[]> {
       const params = new URLSearchParams()
       if (query?.project_id !== undefined) params.set('project_id', query.project_id)
+      if (query?.after !== undefined) params.set('after', query.after)
+      for (const id of query?.task_ids ?? []) params.append('task_id', id)
       if (query?.state !== undefined) params.set('state', query.state)
       if (query?.limit !== undefined) params.set('limit', String(query.limit))
       const suffix = params.size === 0 ? '' : `?${params.toString()}`

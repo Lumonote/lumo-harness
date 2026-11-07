@@ -18,16 +18,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	rmq "github.com/apache/rocketmq-clients/golang/v5"
 	"github.com/apache/rocketmq-clients/golang/v5/credentials"
+	v2 "github.com/apache/rocketmq-clients/golang/v5/protocol/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/lumo-harness/platform/usage-ledger/internal/ledger"
 	"github.com/lumo-harness/platform/usage-ledger/internal/rmqconsume"
@@ -40,13 +46,27 @@ import (
 // exec mqadmin（容器由 resolveBrokerContainer 解析：显式变量 > compose 服务标签反查，
 // 见其注释）；不可用则警告降级（套件变慢但语义不变）。LUMO_TEST_RMQ_RESET=0 可显式关闭。
 func TestMain(m *testing.M) {
-	if os.Getenv("LUMO_TEST_RMQ_ENDPOINT") != "" && os.Getenv("LUMO_TEST_RMQ_RESET") != "0" {
-		if container := resolveBrokerContainer(); container == "" {
-			fmt.Fprintln(os.Stderr, "警告: 无法确定 rocketmq broker 容器，跳过 topic 重置"+
-				"（新消费组会重放全部保留历史，套件可能因此超时）；"+
-				"设置 LUMO_TEST_RMQ_CONTAINER 可显式指定")
-		} else {
-			resetTopics(container)
+	if endpoint := os.Getenv("LUMO_TEST_RMQ_ENDPOINT"); endpoint != "" {
+		topics, err := rmqpublish.Topics(rmqpublish.TopicPrefixDefault)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "构造 RocketMQ topics:", err)
+			os.Exit(1)
+		}
+		if os.Getenv("LUMO_TEST_RMQ_RESET") != "0" {
+			if container := resolveBrokerContainer(); container == "" {
+				fmt.Fprintln(os.Stderr, "警告: 无法确定 rocketmq broker 容器，跳过 topic 重置"+
+					"（新消费组会重放全部保留历史，套件可能因此超时）；"+
+					"设置 LUMO_TEST_RMQ_CONTAINER 可显式指定")
+			} else {
+				resetTopics(container, topics)
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		err = waitForTopicRoutes(ctx, endpoint, topics)
+		cancel()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "RocketMQ topic 路由未就绪:", err)
+			os.Exit(1)
 		}
 	}
 	os.Exit(m.Run())
@@ -90,11 +110,8 @@ func resolveBrokerContainer() string {
 }
 
 // resetTopics 删除并重建闭集 topic。mqadmin 不可用则警告降级（套件变慢但语义不变）。
-func resetTopics(container string) {
-	for _, topic := range []string{
-		"usage-events-llm-tokens", "usage-events-connector-call", "usage-events-seam-query",
-		"usage-events-job-compute", "usage-events-storage-bytes", "usage-events-inference-gpu",
-	} {
+func resetTopics(container string, topics []string) {
+	for _, topic := range topics {
 		for _, args := range [][]string{
 			{"deleteTopic", "-n", "localhost:9876", "-c", "DefaultCluster", "-t", topic},
 			{"updateTopic", "-n", "localhost:9876", "-c", "DefaultCluster", "-t", topic},
@@ -104,6 +121,73 @@ func resetTopics(container string) {
 				fmt.Fprintf(os.Stderr, "警告: topic 重置失败（%s %s，容器 %s）: %v\n%s",
 					topic, args[0], container, err, out)
 			}
+		}
+	}
+}
+
+// mqadmin 成功只证明 broker 配置写入成功。proxy 的 topic config 缓存可能在删除窗口
+// 读到不存在的 topic，并在重建后继续返回 UNSPECIFIED（5.3.1 默认 20s 后异步刷新）。
+// producer.Start 会接受这份路由，第一次 Send 才报消息类型不匹配。因此在启动 producer
+// 之前，通过它实际使用的 gRPC 端点等待所有队列恢复 NORMAL；不发送探针消息污染断言。
+func waitForTopicRoutes(ctx context.Context, endpoint string, topics []string) error {
+	host, portText, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return fmt.Errorf("解析 endpoint %q: %w", endpoint, err)
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || port == 0 {
+		return fmt.Errorf("endpoint %q 的端口无效", endpoint)
+	}
+	scheme := v2.AddressScheme_DOMAIN_NAME
+	if ip := net.ParseIP(host); ip != nil {
+		scheme = v2.AddressScheme_IPv6
+		if ip.To4() != nil {
+			scheme = v2.AddressScheme_IPv4
+		}
+	}
+	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	client := v2.NewMessagingServiceClient(conn)
+	endpoints := &v2.Endpoints{Scheme: scheme, Addresses: []*v2.Address{{Host: host, Port: int32(port)}}}
+	ctx = metadata.AppendToOutgoingContext(ctx, "x-mq-client-id", fmt.Sprintf("lumo-rmq-readiness-%d", time.Now().UnixNano()))
+	var pending []string
+	for {
+		pending = nil
+		for _, topic := range topics {
+			queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			response, queryErr := client.QueryRoute(queryCtx, &v2.QueryRouteRequest{
+				Topic: &v2.Resource{Name: topic}, Endpoints: endpoints,
+			})
+			cancel()
+			if queryErr != nil {
+				pending = append(pending, fmt.Sprintf("%s: %v", topic, queryErr))
+				continue
+			}
+			if response.GetStatus().GetCode() != v2.Code_OK || len(response.GetMessageQueues()) == 0 {
+				pending = append(pending, fmt.Sprintf("%s: %v, queues=%d", topic, response.GetStatus(), len(response.GetMessageQueues())))
+				continue
+			}
+			for _, queue := range response.GetMessageQueues() {
+				normal := false
+				for _, messageType := range queue.GetAcceptMessageTypes() {
+					normal = normal || messageType == v2.MessageType_NORMAL
+				}
+				if !normal {
+					pending = append(pending, fmt.Sprintf("%s: queue=%d accept=%v", topic, queue.GetId(), queue.GetAcceptMessageTypes()))
+					break
+				}
+			}
+		}
+		if len(pending) == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w: %s", ctx.Err(), strings.Join(pending, "; "))
+		case <-time.After(time.Second):
 		}
 	}
 }

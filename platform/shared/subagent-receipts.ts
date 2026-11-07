@@ -4,6 +4,9 @@ import type { ChildResultBody } from './seam-contracts/subagent-host.ts'
 export interface CallbackRegistration {
   secretHash: string
   attempt?: number
+  nodeId?: string
+  parentSessionId?: string
+  ownerUserId?: string
   body?: ChildResultBody
 }
 
@@ -61,7 +64,10 @@ CREATE TABLE IF NOT EXISTS subagent_callback_inbox (
   received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY(realm,run_id)
 );
-ALTER TABLE subagent_callback_inbox ALTER COLUMN payload DROP NOT NULL;`
+ALTER TABLE subagent_callback_inbox ALTER COLUMN payload DROP NOT NULL;
+ALTER TABLE subagent_callback_inbox ADD COLUMN IF NOT EXISTS scheduler_node_id TEXT;
+ALTER TABLE subagent_callback_inbox ADD COLUMN IF NOT EXISTS parent_session_id TEXT;
+ALTER TABLE subagent_callback_inbox ADD COLUMN IF NOT EXISTS owner_user_id TEXT;`
 
 /** Transport receipts are durable independently of the in-memory Agent handles. */
 export class PgSubagentReceipts implements CallbackInbox, CallbackOutboxStore {
@@ -113,30 +119,41 @@ export class PgSubagentReceipts implements CallbackInbox, CallbackOutboxStore {
   }
 
   async register(realm: string, runId: string, registration: CallbackRegistration): Promise<void> {
-    const result = await this.pool.query(`INSERT INTO subagent_callback_inbox(realm,run_id,secret_hash,scheduler_attempt)
-      VALUES($1,$2,$3,$4) ON CONFLICT(realm,run_id) DO UPDATE SET run_id=EXCLUDED.run_id
+    const result = await this.pool.query(`INSERT INTO subagent_callback_inbox(realm,run_id,secret_hash,scheduler_attempt,scheduler_node_id,parent_session_id,owner_user_id)
+      VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(realm,run_id) DO UPDATE SET run_id=EXCLUDED.run_id
       WHERE subagent_callback_inbox.secret_hash=EXCLUDED.secret_hash
-        AND subagent_callback_inbox.scheduler_attempt IS NOT DISTINCT FROM EXCLUDED.scheduler_attempt RETURNING run_id`,
-    [realm, runId, registration.secretHash, registration.attempt ?? null])
+        AND subagent_callback_inbox.scheduler_attempt IS NOT DISTINCT FROM EXCLUDED.scheduler_attempt
+        AND subagent_callback_inbox.scheduler_node_id IS NOT DISTINCT FROM EXCLUDED.scheduler_node_id
+        AND subagent_callback_inbox.parent_session_id IS NOT DISTINCT FROM EXCLUDED.parent_session_id
+        AND subagent_callback_inbox.owner_user_id IS NOT DISTINCT FROM EXCLUDED.owner_user_id RETURNING run_id`,
+    [realm, runId, registration.secretHash, registration.attempt ?? null, registration.nodeId ?? null,
+      registration.parentSessionId ?? null, registration.ownerUserId ?? null])
     if (result.rowCount !== 1) throw new ReceiptConflictError()
   }
 
   async get(realm: string, runId: string): Promise<CallbackRegistration | undefined> {
-    const result = await this.pool.query<{ secret_hash: string; payload: ChildResultBody | null; scheduler_attempt: number | null }>(
-      'SELECT secret_hash,payload,scheduler_attempt FROM subagent_callback_inbox WHERE realm=$1 AND run_id=$2', [realm, runId])
+    const result = await this.pool.query<{ secret_hash: string; payload: ChildResultBody | null; scheduler_attempt: number | null; scheduler_node_id: string | null; parent_session_id: string | null; owner_user_id: string | null }>(
+      'SELECT secret_hash,payload,scheduler_attempt,scheduler_node_id,parent_session_id,owner_user_id FROM subagent_callback_inbox WHERE realm=$1 AND run_id=$2', [realm, runId])
     const row = result.rows[0]
     return row ? { secretHash: row.secret_hash, ...(row.payload == null ? {} : { body: row.payload }),
-      ...(row.scheduler_attempt == null ? {} : { attempt: row.scheduler_attempt }) } : undefined
+      ...(row.scheduler_attempt == null ? {} : { attempt: row.scheduler_attempt }),
+      ...(row.scheduler_node_id == null ? {} : { nodeId: row.scheduler_node_id }),
+      ...(row.parent_session_id == null ? {} : { parentSessionId: row.parent_session_id }),
+      ...(row.owner_user_id == null ? {} : { ownerUserId: row.owner_user_id }) } : undefined
   }
 
   async put(realm: string, receipt: CallbackReceipt): Promise<void> {
-    const result = await this.pool.query(`INSERT INTO subagent_callback_inbox(realm,run_id,secret_hash,payload,scheduler_attempt)
-      VALUES($1,$2,$3,$4::jsonb,$5) ON CONFLICT(realm,run_id) DO UPDATE SET payload=EXCLUDED.payload,
+    const result = await this.pool.query(`INSERT INTO subagent_callback_inbox(realm,run_id,secret_hash,payload,scheduler_attempt,scheduler_node_id,parent_session_id,owner_user_id)
+      VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8) ON CONFLICT(realm,run_id) DO UPDATE SET payload=EXCLUDED.payload,
         received_at=CASE WHEN subagent_callback_inbox.payload IS NULL THEN now() ELSE subagent_callback_inbox.received_at END
       WHERE subagent_callback_inbox.secret_hash=EXCLUDED.secret_hash
         AND (subagent_callback_inbox.payload IS NULL OR subagent_callback_inbox.payload=EXCLUDED.payload)
         AND subagent_callback_inbox.scheduler_attempt IS NOT DISTINCT FROM EXCLUDED.scheduler_attempt
-      RETURNING run_id`, [realm, receipt.body.runId, receipt.secretHash, JSON.stringify(receipt.body), receipt.attempt ?? null])
+        AND subagent_callback_inbox.scheduler_node_id IS NOT DISTINCT FROM EXCLUDED.scheduler_node_id
+        AND subagent_callback_inbox.parent_session_id IS NOT DISTINCT FROM EXCLUDED.parent_session_id
+        AND subagent_callback_inbox.owner_user_id IS NOT DISTINCT FROM EXCLUDED.owner_user_id
+      RETURNING run_id`, [realm, receipt.body.runId, receipt.secretHash, JSON.stringify(receipt.body), receipt.attempt ?? null,
+      receipt.nodeId ?? null, receipt.parentSessionId ?? null, receipt.ownerUserId ?? null])
     if (result.rowCount !== 1) throw new ReceiptConflictError()
   }
 }

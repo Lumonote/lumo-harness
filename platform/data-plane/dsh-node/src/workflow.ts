@@ -1,5 +1,5 @@
 /**
- * The stock dsh profile mounts one worker-thread workflow engine whose default
+ * The stock dsh profile mounts one PTC workflow engine whose default
  * child route is `spawn`. A parent (agent-role) Lumo node must override that
  * existing row instead of inserting a second engine: `workflowEngine` is a
  * unary service and duplicate engines would make route selection timing-based.
@@ -7,7 +7,7 @@
 import { dirname, join } from 'node:path'
 export function workflowEngineOverlay(role: 'node' | 'agent'): string {
   if (role !== 'agent') return ''
-  return `- id: workflow-worker-thread
+  return `- id: workflow-ptc
   config:
     provider: lumo-remote
 `
@@ -25,19 +25,20 @@ export function profileLifetimeOverlay(profile: string, hasAppArgs: boolean): st
   disabled: true
 - id: headless-runner
   disabled: true
+- id: sandbox-policy
+  inject: []
+  config:
+    mode: !!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'
+    workspaceRoot: !!js process.cwd()
 `
 }
 
 /**
- * Unlike the Web bundle, the stock headless bundle does not mount the storage
- * hub. Lumo's PostgreSQL backend injects that hub, so persistent headless nodes
- * must add it before the backend row. The Web profile already owns the same id.
+ * The current shared base owns the storage hub in every profile. Re-inserting
+ * that id would reject the whole Loader composition.
  */
-export function profileStorageRows(profile: string): string {
-  if (profile !== 'headless') return ''
-  return `    - id: storage
-      name: '@deepseek-ai/dsh-storage'
-`
+export function profileStorageRows(_profile: string): string {
+  return ''
 }
 
 /** Assemble the local desktop storage hub with the official SQLite backend. */
@@ -54,18 +55,8 @@ export function localVaultRows(sqlitePath: string, realm: string): string {
 }
 
 export function localStorageRows(profile: string, sqlitePath: string): string {
-  if (profile === 'web') {
-    return `    - id: lumo-storage-sqlite
-      name: '@deepseek-ai/dsh-storage-sqlite'
-      inject: [storage]
-      config:
-        path: ${JSON.stringify(sqlitePath)}
-`
-  }
-  if (profile !== 'headless') return ''
-  return `    - id: storage
-      name: '@deepseek-ai/dsh-storage'
-    - id: lumo-storage-sqlite
+  if (profile !== 'web' && profile !== 'headless') return ''
+  return `    - id: lumo-storage-sqlite
       name: '@deepseek-ai/dsh-storage-sqlite'
       inject: [storage]
       config:

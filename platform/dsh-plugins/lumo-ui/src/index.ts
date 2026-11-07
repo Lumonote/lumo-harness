@@ -12,6 +12,7 @@ import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
 import { assertIdentityConfiguration, IdentityAssertionError, resolveRequestIdentity, type RequestIdentity } from './identity.ts'
+import { collaborationThreads, type AgentThreadReader, type FleetControl } from './collaboration-threads.ts'
 import { lumoBootThemeInjection } from './boot-theme.ts'
 import { registerDesktopHandoff } from './desktop-handoff.ts'
 import { discoverSkillDemos, resolveSkillDemoAsset, type SkillDemo } from './skill-demos.ts'
@@ -239,10 +240,19 @@ async function upstream(config: Config, identity: RequestIdentity, service: Serv
     ...identityHeaders(config, identity),
     ...(body === undefined ? {} : { 'content-type': contentType ?? req.headers['content-type']?.toString() ?? 'application/json' }),
   }
+  if (method === 'POST' && ((service === 'governance' && (path === '/v1/delegations' || /^\/v1\/tasks\/[^/]+\/runs\/[^/]+\/review-tasks$/u.test(path))) || (service === 'flows' && /^\/v1\/flows\/[^/]+\/run$/u.test(path)))) {
+    const key = req.headers['idempotency-key']
+    if (key !== undefined) {
+      if (typeof key !== 'string' || !/^[A-Za-z0-9_.:-]{1,200}$/u.test(key)) {
+        return { ok: false, status: 400, data: { error: 'invalid Idempotency-Key' } }
+      }
+      headers['Idempotency-Key'] = key
+    }
+  }
   try {
     const serviceBase = base(config, service)
     if (serviceBase === '') return { ok: false, status: 503, data: { error: `${service} 服务未配置` }, error: 'upstream_not_configured' }
-    const init: RequestInit = { method, headers, signal: AbortSignal.timeout(config.timeoutMs) }
+    const init: RequestInit = { method, headers, redirect: 'error', signal: AbortSignal.timeout(config.timeoutMs) }
     // The browser-facing routes accept JSON only. Converting the bounded Buffer
     // to text avoids coupling Node's Buffer type to the DOM fetch BodyInit.
     if (body !== undefined) init.body = body.toString('utf8')
@@ -363,8 +373,8 @@ async function readBody(req: IncomingMessage, maxBytes = 1 << 20): Promise<Buffe
   return Buffer.concat(chunks)
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const body = await readBody(req)
+async function readJson(req: IncomingMessage, maxBytes = 1 << 20): Promise<Record<string, unknown>> {
+  const body = await readBody(req, maxBytes)
   try {
     const value: unknown = JSON.parse(body.toString('utf8'))
     if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new TypeError('JSON object required')
@@ -794,10 +804,11 @@ function upstreamDemos(): UpstreamDemoService {
  * 而不是「dsh 会不会按契约把它注进来」。
  */
 interface AgentTeamsService {
-  list(): Promise<Array<{ id: string; name: string; topology: string; captainSessionId: string }>>
+  capabilitiesOrNull?(): { provider: { provider: string; kind: string; reason: string }; durableStore: boolean; durableCourier: boolean } | null
+  list(): Promise<Array<{ id: string; name: string; topology: string; captainSessionId: string; realm?: string; ownerUserId?: string }>>
   status(teamId: string): Promise<{
     team: {
-      id: string; name: string; topology: string; captainSessionId: string
+      id: string; name: string; topology: string; captainSessionId: string; realm?: string; ownerUserId?: string
       members: Array<{ name: string; role?: string; model?: string; provider: string; status: string; ownerUserId?: string }>
       tasks: Array<{ id: string; subject: string; status: string; assignee?: string; dependencies: string[] }>
     }
@@ -806,7 +817,7 @@ interface AgentTeamsService {
   }>
 }
 
-export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, vault: VaultService | undefined, req: IncomingMessage, res: ServerResponse, skillhubRuntime?: SkillHubRuntime, agentTeams?: AgentTeamsService, objectStore?: ObjectStoreService, officeToPdf?: OfficeToPdfService): Promise<void> {
+export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, vault: VaultService | undefined, req: IncomingMessage, res: ServerResponse, skillhubRuntime?: SkillHubRuntime, agentTeams?: AgentTeamsService, objectStore?: ObjectStoreService, officeToPdf?: OfficeToPdfService, agentThreads?: AgentThreadReader): Promise<void> {
   const pathname = new URL(req.url ?? '/', 'http://lumo.local').pathname
   // 单机版（Local Desktop）：vault 知识源 + fallback 身份,知识管理路由不套 realm 管理员角色门。
   const singleMachine = config.deploymentMode === 'local'
@@ -1498,12 +1509,38 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     return
   }
 
-  // 协作空间：把 dsh 的团队名册交给客户端，**这里不做拼接**。
-  //
-  // 员工、注册节点、任务上下游都已经各有各的面（`/lumo/api/users`、`/desktop-nodes`、
-  // `/delegations`），本路由只补 `agentTeams` 这一块。拼接——按成员上的 `ownerUserId`
-  // 把它挂到对应员工下面——是一个纯函数，放在客户端，于是它能被单测直接断言；
-  // 在服务端造一个聚合端点只会多出一处「两边字段一起改」的地方。
+  // 线程聚合先取得当前用户可见任务，再关联同租户注册表和控制态。
+  // 浏览器不提供待查会话集合；团队名册另按已验证的 realm/owner 过滤。
+  if (req.method === 'GET' && pathname === '/lumo/api/collaboration/threads') {
+    if (!requireClusterReady(config, res)) return
+    const page = new URL(req.url ?? '/', 'http://lumo.local').searchParams
+    const cursor = page.get('task_cursor') ?? ''
+    const threadAfter = page.get('thread_after') ?? ''
+    if (cursor.length > 4096 || threadAfter.length > 200 || /[\u0000-\u001f]/u.test(threadAfter)) {
+      writeJson(res, 400, { error: 'invalid fleet cursor' }); return
+    }
+    const query = new URLSearchParams({ limit: '200', cursor })
+    const tasks = await upstream(config, identity, 'governance', `/v1/delegations?${query}`, req)
+    if (!tasks.ok) { writeUpstream(res, tasks); return }
+    try {
+      const result = await collaborationThreads({
+        realm: identity.realm, tasks: tasks.data, threadAfter,
+        ...agentThreads === undefined ? {} : { registry: agentThreads },
+        ...!config.sessionControlUrl ? {} : { controls: async (refs: string[]) => {
+          const query = new URLSearchParams()
+          for (const ref of refs) query.append('session_ref', ref)
+          const response = await upstream(config, identity, 'session-control', `/v1/session-controls?${query}`, req)
+          if (!response.ok) throw new Error('会话控制态读取失败')
+          return response.data as { realm: string; controls: FleetControl[] }
+        } },
+      })
+      writeJson(res, 200, result)
+    } catch (error) {
+      writeJson(res, 502, { error: 'thread_fleet_read_failed', detail: error instanceof Error ? error.message : '线程读取失败' })
+    }
+    return
+  }
+
   if (req.method === 'GET' && pathname === '/lumo/api/collaboration/teams') {
     if (agentTeams === undefined) {
       // 缺席要说成缺席。回一个空列表读起来是「没有团队」——那是一个结论，
@@ -1512,9 +1549,12 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       return
     }
     try {
-      const listed = await agentTeams.list()
+      const visible = (team: { realm?: string; ownerUserId?: string }) => team.realm === identity.realm
+        && (isRealmAdmin(identity) || team.ownerUserId === identity.userId)
+      const listed = (await agentTeams.list()).filter(visible)
       const teams = await Promise.all(listed.map(async entry => {
         const projected = await agentTeams.status(entry.id)
+        if (!visible(projected.team)) return undefined
         return {
           id: projected.team.id,
           name: projected.team.name,
@@ -1528,7 +1568,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
           settled: projected.settled,
         }
       }))
-      writeJson(res, 200, { teams })
+      writeJson(res, 200, { teams: teams.filter(team => team !== undefined), capabilities: agentTeams.capabilitiesOrNull?.() ?? null })
     } catch (error) {
       writeJson(res, 502, { error: 'agent_teams_read_failed', detail: error instanceof Error ? error.message : '读取团队失败' })
     }
@@ -1675,6 +1715,23 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     const taskID = safeID(taskRuns[1])
     if (taskID === undefined) { writeJson(res, 400, { error: 'invalid task id' }); return }
     writeUpstream(res, await upstream(config, identity, 'governance', `/v1/tasks/${encodeURIComponent(taskID)}/runs`, req))
+    return
+  }
+
+  const taskRunReview = pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/runs\/([^/]+)\/review-tasks$/u)
+  if (taskRunReview !== null) {
+    if (req.method !== 'POST') { writeJson(res, 405, { error: 'method not allowed' }); return }
+    const taskID = safeID(taskRunReview[1]); const runID = safeRunID(taskRunReview[2])
+    if (taskID === undefined || runID === undefined) { writeJson(res, 400, { error: 'invalid task or run id' }); return }
+    const key = req.headers['idempotency-key']
+    if (typeof key !== 'string' || !/^[A-Za-z0-9_.:-]{1,200}$/u.test(key)) { writeJson(res, 400, { error: 'valid Idempotency-Key required' }); return }
+    try {
+      const payload = await readJson(req, 16 << 10)
+      if (Object.keys(payload).length !== 1 || typeof payload.reviewer_worker_id !== 'string' || !/^agent:[A-Za-z0-9._-]{1,128}$/u.test(payload.reviewer_worker_id)) {
+        writeJson(res, 400, { error: 'only an Agent reviewer_worker_id is accepted' }); return
+      }
+      writeUpstream(res, await upstream(config, identity, 'governance', `/v1/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/review-tasks`, req, 'POST', Buffer.from(JSON.stringify(payload)), 'application/json'))
+    } catch (error) { writeJson(res, error instanceof RangeError ? 413 : 400, { error: error instanceof Error ? error.message : 'invalid request body' }) }
     return
   }
 
@@ -2265,6 +2322,7 @@ export function apply(ctx: Context, config: Config): void {
           runtimeCtx.get('lumoAgentTeams') as AgentTeamsService | undefined,
           runtimeCtx.get('objectStore') as ObjectStoreService | undefined,
           runtimeCtx.get('officeToPdf') as OfficeToPdfService | undefined,
+          runtimeCtx.get('agentThreads') as AgentThreadReader | undefined,
         ),
       })
       const disposeOps = runtimeCtx.webServer.register({ kind: 'exact', path: '/lumo/ops', handler: ops })

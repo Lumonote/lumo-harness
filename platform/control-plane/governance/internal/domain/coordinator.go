@@ -1,6 +1,9 @@
 package domain
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // §24 集群模式多智能体协同的判据源（Go 侧）。
 //
@@ -45,13 +48,8 @@ import "fmt"
 // 在治理面的档位——TS 侧没有「治理面证明不了影响面」这件事（插件的入参里这个数总是有值），
 // 所以它只在这一侧存在，且是 `HighImpactArtifacts` 唯一的比较处。
 //
-// # 与 TS 的两处**有意**的表面差异（行为等价，写在这里免得被当成漂移）
-//
-//  1. TS 用 `undefined` 表示缺省，Go 用空串。于是「显式传空串」在 TS 侧算**已给值**
-//     （`'' !== 'x'` 成立 → 算异构），在 Go 侧算**缺省**（不算异构）。Go 这一侧更严，
-//     方向是对的：判不出差别时按没差别处理，而「没差别」在 §24.8 里是拒绝侧。
-//  2. TS 的 `!Number.isSafeInteger` 里有「非整数」这一半，Go 的 `int` 从类型上就构造
-//     不出小数，故只保留 `< 0`。JS 侧的小数输入在 Go 侧根本进不来，不构成能力缺失。
+// 空白维度在两侧都视为缺省；空白主体及超出 JS 安全整数范围的计数均拒绝。
+// 同一份 coordinator-review-matrix.json 由 TS 生成、Go 消费，防止行为漂移。
 //
 // # 为什么全是不抛异常的纯判定函数
 //
@@ -225,7 +223,8 @@ type ReviewerVerdict struct {
 func ReviewerEligibility(facts ReviewerFacts) ReviewerVerdict {
 	// 1. 输入先校验。排在最前是照抄 TS 的顺序：`invalid-input` 描述的是「这条输入不成立」，
 	//    比任何业务判据都更靠前——它不该被「恰好 dispatcher == reviewer」掩盖掉。
-	if facts.AffectedArtifacts < 0 {
+	if facts.AffectedArtifacts < 0 || uint64(facts.AffectedArtifacts) > 9007199254740991 ||
+		strings.TrimSpace(facts.Dispatcher) == "" || strings.TrimSpace(facts.Reviewer) == "" {
 		return ReviewerVerdict{Reason: ReviewerInvalidInput}
 	}
 
@@ -260,7 +259,7 @@ func ReviewerEligibility(facts ReviewerFacts) ReviewerVerdict {
 // bothGivenAndDifferent 与 TS 的 `differs()` 同义：两侧都给值且不相等才算「可证不同」。
 // 空串即缺省，缺省一律不算不同——这是「缺省即同源」唯一的一处实现。
 func bothGivenAndDifferent(a, b string) bool {
-	return a != "" && b != "" && a != b
+	return strings.TrimSpace(a) != "" && strings.TrimSpace(b) != "" && a != b
 }
 
 // businessEventComplete 是 `TransitionBusinessTask` 的 targets 表里那个

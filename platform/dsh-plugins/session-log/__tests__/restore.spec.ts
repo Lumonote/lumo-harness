@@ -85,7 +85,7 @@ async function bootNode(schema: string, holder: string) {
   const ctx = new Context()
   ctx.provide('tools', new ToolsStub(ctx))
   await ctx.plugin(SessionStore)
-  apply(ctx, { connectionString: dsn, holder, leaseTtlMs: 30_000 })
+  await apply(ctx, { connectionString: dsn, holder, leaseTtlMs: 30_000 })
   await waitReady(() => ctx.sessionLog.lease('restore-probe'), 'session_log 表')
   return {
     ctx,

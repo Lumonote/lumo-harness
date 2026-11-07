@@ -1,0 +1,3 @@
+# Host and browser package; dsh-node's deployment patch mounts its configured
+# host row. Declaring the bundle prevents client-only market auto-mounting.
+[]

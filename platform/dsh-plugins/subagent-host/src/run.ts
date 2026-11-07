@@ -57,7 +57,7 @@ export type RunRegistry = Map<string, RunCanceller>
 /** 运行一个校验通过的远端子代理(childId 由父侧 mint,是幂等键)。 */
 export type ResultDelivery = (request: StartChildRequest, body: ChildResultBody) => Promise<void>
 
-export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunRegistry, delivery?: ResultDelivery): Promise<void> {
+export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunRegistry, delivery?: ResultDelivery, beforeRun?: () => Promise<void>): Promise<void> {
   const key = runKeyOf(req.realm, req.childId)
   let cancelRequested = false
   const entry: RunCanceller = {
@@ -116,6 +116,7 @@ export async function runChild(ctx: Context, req: StartChildRequest, runs?: RunR
     // registration records intent; apply it as soon as an actual local handle
     // exists instead of silently losing the creation-window cancellation.
     if (cancelRequested) entry.cancel()
+    await beforeRun?.()
 
     // 驱动单 turn(与 in-process driver 同公开模式:followup + whenIdle)。
     child.followup(createUserMessage({ content: req.prompt as ContentBlock[], source: { kind: 'user' } }))

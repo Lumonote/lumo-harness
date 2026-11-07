@@ -26,6 +26,7 @@ services:
 
   embedding:            # TEI 文本嵌入（bge-m3, 1024 维；LLM embedding 的独立 Provider，§5.4.4 版本化）
     # CPU 变体：默认 1.6 是 CUDA 构建，本机（Local-lite 开发机）无 GPU 会缺 libcuda.so.1
+    platform: "${LUMO_TEI_PLATFORM:-linux/amd64}"
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.6
     container_name: lumo-platform-tei
     environment:
@@ -39,6 +40,7 @@ services:
   rerank:               # TEI 交叉编码器重排（§5.4.5）。可选组件：不配置 knowledge.rerank 时
                         # 两个 Consumer 完全不重排，本服务可以不起。
     # 与 embedding 同镜像不同模型 —— 换模型即换实例，不复用同一地址。
+    platform: "${LUMO_TEI_PLATFORM:-linux/amd64}"
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.6
     container_name: lumo-platform-tei-rerank
     environment:

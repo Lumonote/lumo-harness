@@ -38,8 +38,8 @@ workspace 链接把编译产物写回 `deepseek-harness/packages`——仓库里
 | `packages/client/ui-theme/src/client/settings-store.ts` | `lumo-ui/src/theme-catalog.ts` `LUMO_DEFAULT_THEME` | 默认主题 |
 | `packages/client/ui-theme/src/boot-theme.ts` | `lumo-ui/src/boot-theme.ts` | 在 `webserver/index-inject` 事件上再推一条 body 脚本。body 行按 table 顺序拼接，本插件晚于 ui-theme 注册，后写的 DOM 字段赢 |
 | `packages/client/ui-theme/tests/*.spec`（5 个） | —— | 上述上游改动的配套用例，随之还原 |
-| `packages/client/web/src/boot.ts`、`boot-client.ts` | `apply.mjs` | 单个插件导入、激活失败或缺少服务时，按 Loader 最终状态生成 `ClientActivationError`，启动壳记录诊断并挂载可用界面。一直处于 `pending` 且未发出状态变化事件的插件同样可跳过；引导失败和渲染服务缺失仍报告错误 |
-| `packages/client/modules/src/client/entries.ts` | `apply.mjs` | 初次创建插件条目时逐个隔离错误，等待其他条目完成，保留失败条目的诊断和重试身份 |
+| `packages/client/web/src/boot.ts`、`boot-client.ts` | `apply.mjs` | `fcc0ad46` 起复用上游原生启动审计，源码保持原样：可选插件失败记录警告，关键插件失败阻断启动。旧版仍兼容原有 `ClientActivationError` 降级；未知启动布局由锚点检查拒绝 |
+| `packages/client/modules/src/client/entries.ts` | `apply.mjs` | `fcc0ad46` 起保留上游原生逐条创建错误隔离和重试身份；旧版由覆盖层补齐。两种布局都等待其余插件完成，避免单个可选插件创建失败提前终止启动审计 |
 
 主题 id、标签、配色模式的唯一真相源是 `lumo-ui/src/theme-catalog.ts`：宿主侧的引导脚本
 和浏览器侧的注册都读它。将来加一套浅色主题，引导脚本会自动跟着变，而不是继续硬编码

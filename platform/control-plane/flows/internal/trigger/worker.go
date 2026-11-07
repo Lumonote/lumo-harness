@@ -113,6 +113,7 @@ func (w *Worker) deliver(ctx context.Context, record store.TriggerRecord) error 
 		ID: record.ID, Realm: record.Realm, Name: record.Name, Payload: record.Payload,
 		ReplayAutomationID: record.ReplayAutomationID, ReplayFlowID: record.ReplayFlowID,
 		ReplayFlowVersion: record.ReplayFlowVersion, ReplayOfRunID: record.ReplayOfRunID,
+		BotScope: record.BotScope,
 	})
 	close(stop)
 	if renewErr := <-done; renewErr != nil {

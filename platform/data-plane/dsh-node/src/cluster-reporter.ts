@@ -165,7 +165,7 @@ export function planClusterReporter(env: Environment, mode: string, role: string
 
   const notes: string[] = []
   const declaredClusterId = (env['LUMO_CLUSTER_ID'] ?? '').trim()
-  // 与 Nacos 注册（`index.ts` 的 startNacosRegistration）**同源**：闸门是按节点在
+  // 与执行 host 的 Nacos 注册**同源**：闸门是按节点在
   // 目录里的 cluster_id 匹配的，自报用 A 值、注册用 B 值，注册表里就会多出一行
   // 永远匹配不到任何节点的集群，而真正被拦的那个反而显示 unregistered。
   const clusterId = declaredClusterId === '' ? 'default' : declaredClusterId

@@ -32,7 +32,9 @@
  */
 
 import { lstat, mkdir } from 'node:fs/promises'
+import { join, relative, sep } from 'node:path'
 
+import type { createThreadDispatch } from './thread-dispatch.ts'
 import type { CourierSettle, CourierWait, TeamCourier } from './courier.ts'
 import {
   nodeLossPayload, planThreadReplacement, resolveThreadWorkspacePath, threadActionDecision,
@@ -70,11 +72,13 @@ export class ThreadReassignConflictError extends Error {
  * 一轮 Run 的执行面（§24.2.2：一轮 = 一个 Run）。
  *
  * 抽成接口是为了让「重派」这一动作在**不启 dsh 运行时**的前提下可测：判据（该不该重派、
- * 新一轮是什么形状）全在纯函数里，本接口只负责把那一轮真的跑起来。生产装配是
- * `roster.dispatchMember`（集群形态下 provider 是 `lumo-remote` → Scheduler 放置到承载节点），
- * 单机形态是进程内 `spawn`——**同一份代码，形态差异只在装配层**。
+ * 新一轮是什么形状）全在纯函数里，本接口只负责把那一轮真的跑起来。
+ * 显式生产装配使用公开 agents.create/resume，只接受登记的本节点；
+ * Worker one-shot providers 不再被当作固定节点与稳定 Session 的执行保证。
  */
 export interface ThreadRoundRunner {
+  /** Refuse unsupported placement before creating a replacement row. */
+  canStart?(nodeId: string): boolean
   start(input: {
     /** 新一轮承载的线程行（**新建的**那条，不是失败的那条）。 */
     thread: ThreadRow
@@ -83,7 +87,7 @@ export interface ThreadRoundRunner {
     prompt: string
     parent: unknown
     signal: AbortSignal
-  }): Promise<{ runId: string }>
+  }): Promise<{ runId: string; summary?: string }>
 }
 
 /** 一次重派的结果。 */
@@ -129,6 +133,7 @@ export interface ThreadsRuntimeOptions {
    * 会合面**解析器**（唤醒）。集群形态是 `@lumo/mailbox`（PG），单机是进程内兜底；
    * 用解析器而不是实例的理由见 `thread-wake.ts` 的 `resolveCourier`。
    */
+  allocateSession?(input: {projectId: string; nodeId: string; coordinatorSessionRef: string}): Promise<string>
   resolveCourier: () => TeamCourier
   /**
    * 注册表**解析器**（线程行的唯一写入方 = 协作服务）。
@@ -146,7 +151,7 @@ export interface ThreadsRuntimeOptions {
   /**
    * 一轮 Run 的执行面**解析器**（重派用）。缺省/解析不到 = 重派拒绝。
    *
-   * 同样是解析器而不是实例：执行面来自 `subagents`（挂载顺序不由本插件决定），
+   * 同样是解析器而不是实例：执行面依赖持久日志和计量服务（挂载顺序不由本插件决定），
    * 快照一个「有/没有」的布尔会把「晚一步挂上」固化成一个永远为假的**能力画像**——
    * 而能力画像是运维判断「重派为什么不可用」的唯一入口。
    */
@@ -174,7 +179,23 @@ export class ThreadsRuntime {
   private readonly noticePollMs: number
   private readonly warn: (message: string) => void
 
+  private allocateSession: ThreadsRuntimeOptions['allocateSession']
+  private dispatch: ReturnType<typeof createThreadDispatch> | undefined
+  setDispatch(dispatch: ReturnType<typeof createThreadDispatch> | undefined): void { this.dispatch = dispatch }
+  async scheduleRound(input: {threadId: string; attempt: number; prompt: string; parent: unknown; signal: AbortSignal; wakeKey: string; deadline: string}) {
+    if (!this.dispatch) throw new ThreadsUnavailableError('Durable Thread dispatch is unavailable')
+    const thread = await this.getThread(input.threadId)
+    if (!thread) throw new ThreadsUnavailableError('Thread not found')
+    return this.dispatch.schedule({thread, round: {task_id: thread.task_id, attempt: input.attempt}, prompt: input.prompt,
+      parent: input.parent, signal: input.signal}, {key: input.wakeKey, deadline: input.deadline})
+  }
+  async wakeScheduled(id: string, key: string, eventId: string) {
+    if (!this.dispatch) throw new ThreadsUnavailableError('Durable Thread dispatch is unavailable')
+    return this.dispatch.wake(id, key, eventId)
+  }
+
   constructor(options: ThreadsRuntimeOptions) {
+    this.allocateSession = options.allocateSession
     this.waker = new ThreadWaker({
       resolveCourier: options.resolveCourier,
       ...options.defaultWakeTtlMs === undefined ? {} : { defaultTtlMs: options.defaultWakeTtlMs },
@@ -219,10 +240,26 @@ export class ThreadsRuntime {
     const runner = this.resolveRunner()
     if (runner === undefined) {
       throw new ThreadsUnavailableError(
-        '本节点没有一轮 Run 的执行面（成员 provider 未装配）：重派需要真的把新一轮跑起来，否则只是造出一行永远不动的记录',
+        '本节点没有稳定会话轮次执行面（需显式配置 threadExecution、持久日志、计量及治理授权）',
       )
     }
     return runner
+  }
+
+  /** Executes one durable round on its registered node and stable session.
+   * The runner owns admission and final state, so this method never invents
+   * success from a local status transition or a Worker label. */
+  async runRound(input: { threadId: string; attempt: number; prompt: string; parent: unknown; signal: AbortSignal }): Promise<{ thread: ThreadRow; runId: string; summary?: string }> {
+    const runner = this.requireRunner()
+    const registry = this.requireRegistry()
+    const thread = await registry.get(input.threadId)
+    if (!thread) throw new ThreadsUnavailableError(`线程 ${input.threadId} 不存在（或不在本 realm）`)
+    if (runner.canStart && !runner.canStart(thread.node_id)) throw new ThreadsUnavailableError('Thread 执行必须在登记的承载节点发起；当前不支持远程固定节点路由')
+    const result = await runner.start({ thread, round: { task_id: thread.task_id, attempt: input.attempt },
+      prompt: input.prompt, parent: input.parent, signal: input.signal })
+    const current = await registry.get(thread.id)
+    if (!current) throw new ThreadsUnavailableError('Thread 完成后注册表不可读；请按同一轮次查询回执')
+    return { thread: current, runId: result.runId, ...result.summary === undefined ? {} : { summary: result.summary } }
   }
 
   /**
@@ -241,20 +278,22 @@ export class ThreadsRuntime {
    * 状态不接受调用方给：新建必须是 `idle`（一个一出生就 `running` 的行会让看板把「还没放
    * 上去」显示成「在执行」），这条判据在协作服务侧（唯一写入方），这里只搬参数。
    */
-  createThread(input: {
+  async createThread(input: {
     id: string
     projectId: string
     taskId: string
-    sessionRef: string
+    sessionRef?: string
     nodeId: string
     coordinatorSessionRef: string
     workspace?: string
   }): Promise<ThreadRow> {
+    const sessionRef = this.allocateSession ? await this.allocateSession(input) : input.sessionRef
+    if (!sessionRef) throw new ThreadsUnavailableError('Thread requires a stable session or trusted owner allocator')
     return this.requireRegistry().create({
       id: input.id,
       project_id: input.projectId,
       task_id: input.taskId,
-      session_ref: input.sessionRef,
+      session_ref: sessionRef,
       node_id: input.nodeId,
       coordinator_session_ref: input.coordinatorSessionRef,
       ...input.workspace === undefined ? {} : { workspace: input.workspace },
@@ -262,8 +301,10 @@ export class ThreadsRuntime {
   }
 
   /** 列本 realm 的线程行（有界；`state` 闭集外由服务端拒，不返回空集）。 */
-  listThreads(query?: { projectId?: string; state?: ThreadState; limit?: number }): Promise<ThreadRow[]> {
+  listThreads(query?: { projectId?: string; state?: ThreadState; limit?: number; after?: string; taskIds?: string[] }): Promise<ThreadRow[]> {
     return this.requireRegistry().list({
+      ...query?.after === undefined ? {} : { after: query.after },
+      ...query?.taskIds === undefined ? {} : { task_ids: query.taskIds },
       ...query?.projectId === undefined ? {} : { project_id: query.projectId },
       ...query?.state === undefined ? {} : { state: query.state },
       ...query?.limit === undefined ? {} : { limit: query.limit },
@@ -416,23 +457,25 @@ export class ThreadsRuntime {
    */
   async materializeWorkspace(thread: ThreadRow): Promise<{ path: string; created: boolean }> {
     const path = this.workspacePath(thread)
-    const existing = await lstatOrUndefined(path)
-    if (existing !== undefined) {
-      if (existing.isSymbolicLink()) {
-        throw new ThreadWorkspaceError(
-          `线程 ${thread.id} 的工作目录 ${path} 是符号链接：它会指向根之外（或指向另一个线程的目录），`
-          + '而两边的记录都自洽——这正是路径归属要挡的形状',
-        )
+    // The configured root is trusted. Check each descendant before creating
+    // the next one: recursive mkdir would follow an existing thread/ symlink
+    // and materialize a workspace outside the configured root.
+    await mkdir(this.workspaceRoot!, { recursive: true, mode: 0o700 })
+    let current = this.workspaceRoot!
+    let created = false
+    for (const segment of relative(this.workspaceRoot!, path).split(sep)) {
+      current = join(current, segment)
+      let entry = await lstatOrUndefined(current)
+      if (!entry) {
+        try { await mkdir(current, { mode: 0o700 }); if (current === path) created = true } catch (error) {
+          if ((error as { code?: unknown }).code !== 'EEXIST') throw error
+        }
+        entry = await lstat(current)
       }
-      if (!existing.isDirectory()) {
-        throw new ThreadWorkspaceError(
-          `线程 ${thread.id} 的工作目录 ${path} 已存在但不是目录：它被别的东西占了，继续用会互相破坏`,
-        )
-      }
-      return { path, created: false }
+      if (entry.isSymbolicLink()) throw new ThreadWorkspaceError(`线程 ${thread.id} 的工作目录祖先 ${current} 是符号链接`)
+      if (!entry.isDirectory()) throw new ThreadWorkspaceError(`线程 ${thread.id} 的工作目录 ${current} 已存在但不是目录`)
     }
-    await mkdir(path, { recursive: true, mode: 0o700 })
-    return { path, created: true }
+    return { path, created }
   }
 
   // ─────────── 节点失联通知的消费（§24.2.3(4) 的「通知协调者」腿） ───────────
@@ -592,8 +635,8 @@ export class ThreadsRuntime {
    *    的那个、新会话不能复用旧 ref。判据不通过就抛，**不落任何副作用**。
    * 2. **建行**（注册表 = `threads` 的唯一写入方）：新线程是 `idle`，`session_ref` / `node_id` /
    *    `workspace` 全新。旧的那条 `failed` 行**一个字节都不改**——终态不可复活（§24.2.1）。
-   * 3. **开跑**（执行面）：把新一轮交给 `runner`（生产是 `roster.dispatchMember`，集群形态下
-   *    provider 为 `lumo-remote` → Scheduler 放置到承载节点）。
+   * 3. **开跑**（执行面）：把新一轮交给 `runner`。本节点执行器先在协作服务持久准入，
+   *    再创建新的稳定 Session；未接远程路由时在建行前拒绝非本节点。
    *
    * 为什么不把 2、3 合成一步（先跑起来再登记）：**没有登记的执行者是不可见的**——它占着
    * 一台机器、烧着配额，而注册表里没有任何一行提到它，于是没有任何一处（看板、对账、预算）
@@ -634,6 +677,9 @@ export class ThreadsRuntime {
     const runner = this.requireRunner()
     const registry = this.requireRegistry()
     const { thread: plan, round } = decision.plan
+    if (runner.canStart && !runner.canStart(plan.node_id)) {
+      throw new ThreadsUnavailableError('重派需由新承载节点执行；当前未接线远程固定节点路由，未创建新线程')
+    }
     let created: ThreadRow
     try {
       created = await registry.create({

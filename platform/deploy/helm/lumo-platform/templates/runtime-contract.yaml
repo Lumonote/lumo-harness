@@ -1,0 +1,55 @@
+{{- range $name, $cfg := dict "dshNode" .Values.dshNode "dshWeb" .Values.dshWeb }}
+{{- if $cfg.enabled }}
+{{- if not (has $cfg.workloadKind (list "Deployment" "StatefulSet")) }}{{ fail (printf "%s.workloadKind must be Deployment or StatefulSet" $name) }}{{- end }}
+{{- if and $cfg.spool.persistence.enabled (ne $cfg.workloadKind "StatefulSet") }}{{ fail (printf "%s persistent session spool requires StatefulSet with one PVC per stable Pod" $name) }}{{- end }}
+{{- if and $cfg.harness.persistence.enabled (ne $cfg.workloadKind "StatefulSet") }}{{ fail (printf "%s persistent Harness home requires StatefulSet with one PVC per stable Pod" $name) }}{{- end }}
+{{- if le (int $cfg.terminationGracePeriodSeconds) (add (int $cfg.drainTimeoutSeconds) 5) }}{{ fail (printf "%s termination grace must exceed drain timeout by more than 5 seconds" $name) }}{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.dshNode.enabled .Values.dshNode.hpa.enabled }}
+{{- if lt (int .Values.dshNode.hpa.maxReplicas) (int .Values.dshNode.hpa.minReplicas) }}{{ fail "HPA maxReplicas must be >= minReplicas" }}{{- end }}
+{{- if and (le (int .Values.dshNode.hpa.targetCPUUtilizationPercentage) 0) (not .Values.dshNode.hpa.externalMetrics) }}{{ fail "HPA needs CPU or at least one external backlog/slot metric" }}{{- end }}
+{{- range .Values.dshNode.hpa.externalMetrics }}
+{{- if or (hasKey (.matchLabels | default dict) "release") (hasKey (.matchLabels | default dict) "cluster_id") }}{{ fail "external HPA matchLabels cannot override release or cluster_id" }}{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.production.enabled }}
+{{- if not (and .Values.objectStore.enabled .Values.objectStore.useSSL .Values.objectStore.credentialsSecret) }}{{ fail "production requires an external TLS objectStore and credentialsSecret" }}{{- end }}
+{{- if .Values.secrets.create }}{{ fail "production forbids secrets.create; provide existing Secrets" }}{{- end }}
+{{- if .Values.postgres.dsn }}{{ fail "production forbids postgres.dsn in Helm values; use production.databaseSecret" }}{{- end }}
+{{- $_ := required "production.databaseSecret is required" .Values.production.databaseSecret }}
+{{- $_ := required "production.postgresEndpoint is required (non-secret host:port)" .Values.production.postgresEndpoint }}
+{{- $_ := required "production.restoreDrillRef is required" .Values.production.restoreDrillRef }}
+{{- $_ := required "production.durabilityPolicyRef is required" .Values.production.durabilityPolicyRef }}
+{{- $_ := required "production requires governance.authSecret" .Values.governance.authSecret }}
+{{- $_ := required "production requires vault.tokenSecret" .Values.vault.tokenSecret }}
+{{- if not (and .Values.productionControls.enforced .Values.serviceMesh.istio.enabled .Values.networkPolicy.enabled .Values.availability.podDisruptionBudget.enabled .Values.availability.topologySpread.enabled) }}{{ fail "production requires enforced controls, Istio mTLS, NetworkPolicy, PDB and topology spread" }}{{- end }}
+{{- if not .Values.networkPolicy.externalEgress }}{{ fail "production requires explicit networkPolicy.externalEgress for external dependencies and mesh control plane" }}{{- end }}
+{{- if not .Values.networkPolicy.ingress }}{{ fail "production requires explicit networkPolicy.ingress for ingress and monitoring" }}{{- end }}
+{{- if lt (int .Values.replicaCount) 2 }}{{ fail "production replicaCount must be >= 2" }}{{- end }}
+{{- range $name, $cfg := .Values.services }}
+{{- if and $cfg.enabled (lt (int (default $.Values.replicaCount $cfg.replicas)) 2) }}{{ fail (printf "production service %s needs >= 2 replicas" $name) }}{{- end }}
+{{- end }}
+{{- range $name, $endpoint := dict "postgres" .Values.production.postgresEndpoint "redis" .Values.redis.address "rocketmq" .Values.rocketmq.endpoint "nacos" .Values.nacos.address "vault" .Values.vault.address "objectStore" .Values.objectStore.endpoint }}
+{{- if or (not $endpoint) (regexMatch "(?i)(localhost|127\\.0\\.0\\.1|example\\.|@|^postgres:|^redis:|^rocketmq:|^http://nacos:|^http://vault:|^http://minio:)" $endpoint) }}{{ fail (printf "production dependency %s requires an explicit external endpoint without credentials or development defaults" $name) }}{{- end }}
+{{- $_ := required (printf "production.dependencyEvidence.%s is required (HA and recovery evidence reference, not an HA assertion)" $name) (index $.Values.production.dependencyEvidence $name) }}
+{{- end }}
+{{- range $name, $cfg := dict "dshNode" .Values.dshNode "dshWeb" .Values.dshWeb }}
+{{- if and $cfg.enabled (not $cfg.spool.persistence.enabled) }}{{ fail (printf "production %s requires persistent session spool" $name) }}{{- end }}
+{{- end }}
+{{- if and .Values.dshWeb.enabled .Values.dshWeb.identityAssertion.allowStaticIdentity }}{{ fail "production forbids static web identity" }}{{- end }}
+{{- if regexMatch "(?i)(^dev$|latest|snapshot)" .Values.image.tag }}{{ fail "production requires an immutable release image tag" }}{{- end }}
+{{- end }}
+{{- if .Values.production.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lumo-platform.name" . }}-durability-contract
+data:
+  restore-drill-ref: {{ .Values.production.restoreDrillRef | quote }}
+  durability-policy-ref: {{ .Values.production.durabilityPolicyRef | quote }}
+  dependency-evidence.json: {{ toJson .Values.production.dependencyEvidence | quote }}
+  # Config references do not prove successful failover or zero data loss.
+  assurance: "operator evidence required; no implicit HA or RPO0 claim"
+{{- end }}

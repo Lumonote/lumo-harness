@@ -442,7 +442,10 @@ export function defineAgentTeamsTools(
     create, addMember, removeMember, createTask, reassign, cancelTask,
     run, status, awaitTask, reconcile, remove,
   ]
-  const disposers = definitions.map(definition => ctx.tools.register(definition))
+  const disposers = definitions.map(definition => ctx.tools.register({
+    ...definition,
+    execute: (args, exec) => service.asCaptain(captainOf(exec), () => definition.execute(args, exec)),
+  }))
   return () => {
     for (const dispose of disposers) dispose()
   }
@@ -485,10 +488,10 @@ export function defineAgentThreadTools(
   const create: ToolDefinition = {
     name: 'agent_threads_create',
     description:
-      '建一条**线程**——一个稳定的完整会话（跨多轮 Run），用于「改代码 → 跑测试 → 修 CI → 再跑」'
-      + '这类需要接着上一轮现场继续的工作。与成员（one-shot，跑完即收）是两档：'
+      '建一条**线程**——保存多轮文本上下文的稳定会话。当前执行档位默认拒绝全部工具。'
+      + '与成员（one-shot，跑完即收）是两档：'
       + '成员适合一次能说完的子任务，线程适合要连着干几轮的活。'
-      + '建完是 idle（还没放上承载节点），用 agent_threads_advance 推进。'
+      + '建完是 idle，用 agent_threads_run 在登记的本节点执行一轮；需已配置稳定会话执行面。'
       + '线程**亲和到承载节点、绝不迁移**：节点丢了这条线程就终止，要续跑必须新建一条。',
     parameters: {
       type: 'object',
@@ -499,7 +502,7 @@ export function defineAgentThreadTools(
         sessionRef: { type: 'string', description: '线程的稳定会话引用（dsh 会话层给出）' },
         nodeId: { type: 'string', description: '承载节点（线程的现场就在这台机器上，不可迁移）' },
       },
-      required: ['threadId', 'projectId', 'taskId', 'sessionRef', 'nodeId'],
+      required: ['threadId', 'projectId', 'taskId', 'nodeId'],
       additionalProperties: false,
     },
     output: { schema: THREAD_SCHEMA, render: renderJson },
@@ -509,7 +512,7 @@ export function defineAgentThreadTools(
         id: requireString(a['threadId'], 'threadId', 'agent_threads_create'),
         projectId: requireString(a['projectId'], 'projectId', 'agent_threads_create'),
         taskId: requireString(a['taskId'], 'taskId', 'agent_threads_create'),
-        sessionRef: requireString(a['sessionRef'], 'sessionRef', 'agent_threads_create'),
+        ...(a['sessionRef'] === undefined ? {} : {sessionRef: requireString(a['sessionRef'], 'sessionRef', 'agent_threads_create')}),
         nodeId: requireString(a['nodeId'], 'nodeId', 'agent_threads_create'),
         // 协调者是**本次调用所在的会话**：让模型自报「谁在协调」，重派时通知就会送到别人手里。
         coordinatorSessionRef: captainOf(exec),
@@ -557,7 +560,7 @@ export function defineAgentThreadTools(
     description:
       '推进一条线程。action=suspend：挂起一轮（`running → awaiting`），先在持久会合面上挂好'
       + '带 TTL 的等待项再推状态——顺序反了会出现「事件到了却没有等待项」的窗口，那条线程'
-      + '会永远停在等待上。action=wake：兑现等待项并开**新一轮 Run**（`awaiting → running`）。'
+      + '会永远停在等待上。action=wake：兑现等待项并更新状态（`awaiting → running`），不调用模型。'
       + '两个动作都只允许**承载节点自己**做（跨节点推进会绕过「绝不迁移」）。',
     parameters: {
       type: 'object',
@@ -601,7 +604,8 @@ export function defineAgentThreadTools(
     description:
       '停下一条线程（`→ stopped`，终态）。**现场还在**（工作目录与会话日志都留在承载节点上），'
       + '处置是等人/等指令——这一点与 `failed`（现场已经没了，必须重派新 Run）恰好相反，'
-      + '所以不要用它去「救」一条承载节点已经丢失的线程：那种线程该走 agent_threads_reassign。',
+      + '所以不要用它去「救」一条承载节点已经丢失的线程：那种线程该走 agent_threads_reassign。'
+      + '持久轮次执行中会拒绝此状态写入；取消本轮调用或撤销当前治理授权后由执行器结算。',
     parameters: {
       type: 'object',
       properties: { threadId: { type: 'string', description: '线程标识' } },
@@ -670,7 +674,12 @@ export function defineAgentThreadTools(
       required: ['threadId', 'previousAttempt', 'newNodeId', 'newSessionRef', 'prompt'],
       additionalProperties: false,
     },
-    output: { schema: THREAD_REASSIGN_SCHEMA, render: renderJson },
+    output: { schema: {
+      type: 'object', required: ['threadId', 'runId', 'thread'], properties: {
+        threadId: { type: 'string' }, runId: { type: 'string' }, thread: THREAD_SCHEMA,
+        summary: { type: 'string' },
+      }, additionalProperties: false,
+    }, render: renderJson },
     async execute(args: unknown, exec: ToolRunContext): Promise<unknown> {
       const a = args as Record<string, unknown>
       const threadId = requireString(a['threadId'], 'threadId', 'agent_threads_reassign')
@@ -700,7 +709,35 @@ export function defineAgentThreadTools(
     },
   }
 
-  const definitions = [create, status, advance, pause, waitThread, reassign]
+  const run: ToolDefinition = {
+    name: 'agent_threads_run',
+    description: '在登记的本节点和稳定会话上执行一轮文本任务。轮次、输入和执行身份持久去重；完成后回到 idle。'
+      + '同轮同输入重试读取回执；结果不确定时拒绝重复执行。工具默认全拒；配置 distributed 后经持久邮箱路由到登记节点。',
+    parameters: { type: 'object', properties: {
+      threadId: { type: 'string' }, attempt: { type: 'number', description: '首次 >=1，后续必须上一轮+1' },
+      prompt: { type: 'string', description: '本轮文本任务' },
+    }, required: ['threadId', 'attempt', 'prompt'], additionalProperties: false },
+    output: { schema: THREAD_REASSIGN_SCHEMA, render: renderJson },
+    async execute(args: unknown, exec: ToolRunContext): Promise<unknown> {
+      const a = args as Record<string, unknown>
+      const result = await threads.runRound({ threadId: requireString(a.threadId, 'threadId', 'agent_threads_run'),
+        attempt: requireAttempt(a.attempt, 'agent_threads_run'), prompt: requireString(a.prompt, 'prompt', 'agent_threads_run'),
+        parent: exec.agent, signal: exec.signal })
+      return { threadId: result.thread.id, runId: result.runId, thread: threadView(result.thread),
+        ...result.summary === undefined ? {} : { summary: result.summary } }
+    },
+  }
+  const schedule: ToolDefinition = {
+    name: 'agent_threads_schedule', output: {schema: {type:'object'}, render: renderJson}, description: '登记下一轮文本任务并等待事件；事件到达后登记节点自动执行。等待项持久化，过期拒绝。',
+    parameters: {type: 'object', properties: {threadId: {type:'string'}, attempt:{type:'number'}, prompt:{type:'string'}, wakeKey:{type:'string'}, deadline:{type:'string'}}, required:['threadId','attempt','prompt','wakeKey','deadline'], additionalProperties:false},
+    async execute(args: unknown, exec: ToolRunContext) {const a = args as Record<string, unknown>;return threads.scheduleRound({threadId:requireString(a.threadId,'threadId','schedule'), attempt:requireAttempt(a.attempt,'schedule'), prompt:requireString(a.prompt,'prompt','schedule'), wakeKey:requireString(a.wakeKey,'wakeKey','schedule'), deadline:requireString(a.deadline,'deadline','schedule'),parent:exec.agent,signal:exec.signal})},
+  }
+  const wake: ToolDefinition = {
+    name: 'agent_threads_signal', output: {schema: {type:'object'}, render: renderJson}, description: '向持久等待项发送唯一事件，重复事件幂等；承载节点自动执行已冻结输入。',
+    parameters:{type:'object',properties:{commandId:{type:'string'},wakeKey:{type:'string'},eventId:{type:'string'}},required:['commandId','wakeKey','eventId'],additionalProperties:false},
+    async execute(args:unknown){const a=args as Record<string,unknown>;return threads.wakeScheduled(requireString(a.commandId,'commandId','signal'),requireString(a.wakeKey,'wakeKey','signal'),requireString(a.eventId,'eventId','signal'))},
+  }
+  const definitions = [create, status, advance, pause, waitThread, reassign, run, schedule, wake]
   const disposers = definitions.map(definition => ctx.tools.register(definition))
   return () => {
     for (const dispose of disposers) dispose()
@@ -1032,9 +1069,12 @@ function requireTopology(value: unknown, tool: string): Topology {
  *
  * 结构化读 `agent.id`（dsh `Agent` 的会话身份）而不 import dsh 的 agent 类型：
  * 这一层只需要一个审计字段，不值得为它把工具面耦合到 agent 类型上（与 `roster.ts`
- * 的 `MemberSeam` 同训）。拿不到时给一个**显式**占位，而不是编一个像真的 id。
+ * 的 `MemberSeam` 同训）。拿不到时拒绝，不能让所有匿名调用共享同一个占位身份。
  */
 function captainOf(exec: ToolRunContext): string {
   const id = (exec.agent as { id?: unknown } | undefined)?.id
-  return typeof id === 'string' && id !== '' ? id : 'unknown-captain'
+  if (typeof id !== 'string' || id.trim() === '') {
+    throw new Error('本次调用没有产生它的 agent，会话身份不可用')
+  }
+  return id
 }

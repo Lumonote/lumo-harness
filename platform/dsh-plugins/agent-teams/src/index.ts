@@ -26,20 +26,24 @@
  * ## 两档成员（§24.2）
  *
  * 成员分两档：**Worker** 是本插件既有的 one-shot 派发（不变），**Thread** 是可续跑的
- * 完整会话（跨 Run、可被事件唤醒）。Thread 档位另提供 `ctx.agentThreads`：
+ * 完整会话。Thread 档位另提供 `ctx.agentThreads`：
  * 判据在 `thread.ts`（纯函数）、唤醒接线在 `thread-wake.ts`（走既有 `@lumo/mailbox`）、
  * 行本身由 `control-plane/collaborator` 持有（它是 `threads` 的唯一写入方）。
- * Thread 的三件事各有既有落点——续跑是日志、唤醒是 mailbox、配额是预算树——
- * 本插件**不新建执行机制**，也不引入 continuable 句柄（理由见 `roster.ts`）。
+ * 显式 `threadExecution` 使用公开 agents.create/resume 在登记本节点上执行连续文本轮次，
+ * 协作服务持有幂等回执与并发准入，公开 sessionPersistence 保留上下文。
+ * mailbox 的 suspend/wake 仍是独立状态/通知能力，尚不自动触发模型执行。
  */
 
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-tools'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { createThreadDispatch } from './thread-dispatch.ts'
+import { SessionOwnerClient } from '../../../shared/session-owners.ts'
+import { teamAuthorityHandler } from './team-authority.ts'
 
 import { createCourier, type MailboxSeamLike, type TeamCourier } from './courier.ts'
 import {
-  dispatchMember,
   selectMemberProvider,
   type MemberRun,
   type MemberSeam,
@@ -49,6 +53,10 @@ import { AgentTeamsService, DEFAULT_MAX_MEMBERS, type MemberSurface } from './se
 import { createTeamStore, type StorageFacetLike } from './store.ts'
 import { createHttpThreadRegistry, type ThreadRegistryLike } from './thread-registry.ts'
 import { ThreadsRuntime } from './threads.ts'
+import { createLocalThreadRunner } from './thread-runner.ts'
+import { assertThreadExecutionBinding, createThreadControl, type ThreadExecutionBinding } from './thread-control.ts'
+import type { ThreadRoundRunner } from './threads.ts'
+import type { SessionMeterScope } from '../../../shared/seam-contracts/meter-attribution.ts'
 import {
   DEFAULT_TOOL_MAX_ROUNDS,
   DEFAULT_TOOL_MAX_WAIT_MS,
@@ -80,7 +88,7 @@ export interface AgentTeamsConfig {
   /** 协作服务基址（`control-plane/collaborator`，线程注册表）。缺省 = 线程面读不到行。 */
   collaboratorUrl?: string
   controlPlaneToken?: string
-  /** 调用协作服务时使用的身份（生产由边缘网关注入，直连时用配置）。 */
+  /** 可信节点配置的团队 owner 与协作调用身份；尚无多用户会话动态映射。 */
   actingUserId?: string
   /** 本节点身份（线程亲和判据的输入）。缺省 = 线程面拒绝一切唤醒。 */
   nodeId?: string
@@ -88,6 +96,8 @@ export interface AgentTeamsConfig {
   workspaceRoot?: string
   /** 线程唤醒等待项的默认有效期（毫秒；仍受 `MAX_WAKE_TTL_MS` 约束）。 */
   wakeTtlMs?: number
+  /** Explicit opt-in: fixed-node, fixed-owner text rounds with durable receipts. */
+  threadExecution?: ThreadExecutionBinding & { distributed?: boolean; sessionControlUrl?: string }
 }
 
 /** Schemastery validation for {@link AgentTeamsConfig} */
@@ -104,13 +114,18 @@ export const Config: z<AgentTeamsConfig> = z.object({
   nodeId: z.string(),
   workspaceRoot: z.string(),
   wakeTtlMs: z.number(),
+  // union has no object default: an omitted opt-in stays undefined.
+  threadExecution: z.union([z.object({
+    distributed: z.boolean(), sessionControlUrl: z.string(), governanceUrl: z.string(), projectId: z.string(), agentId: z.string(),
+    presetRevision: z.number(), provider: z.string(), model: z.string(), timeoutMs: z.number(),
+  })]),
 })
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** Platform team API; native DSH reserves agentTeams for its TeamService. */
     lumoAgentTeams: AgentTeamsService
-    /** 线程档位（§24.2）：注册表 + 唤醒 + 工作目录解析。 */
+    /** 线程档位：注册表、唤醒与显式配置的本节点稳定文本轮次。 */
     agentThreads: ThreadsRuntime
   }
 }
@@ -122,26 +137,24 @@ export const inject = ['tools']
  * `ctx.subagents` 的结构等价子集。
  *
  * 与 `roster.ts` 的 `MemberSeam` 同训：装配层也只用结构类型，不 import dsh 的
- * `SubagentRuntime`。`list()` 返回的是**provider 名**（dsh 侧按注册顺序返回），
- * 正是探测优先级需要的那个列表。
+ * `SubagentRuntime`。通过公开 getProvider 查询候选名；上游不暴露私有注册表枚举。
  */
 interface SubagentsFacetLike {
-  list(): string[]
-  startActivation(spec: {
+  getProvider(name: string): unknown | undefined
+  startActivation(spec: Omit<MemberStartRequest, 'label' | 'signal'> & {
     provider: string
     label: string
-    request: Omit<MemberStartRequest, 'label' | 'signal'>
     signal: AbortSignal
     delivery: 'parent' | 'caller'
   }): Promise<Omit<MemberRun, 'id'> & { childId: string }>
 }
 
 /** 将上游托管 activation 接到团队内部的 one-shot 执行面。 */
-export function createMemberSeam(subagents: SubagentsFacetLike): MemberSeam {
+export function createMemberSeam(subagents: SubagentsFacetLike, configured?: string): MemberSeam {
   return {
-    list: () => subagents.list(),
+    list: () => availableMemberProviders(subagents, configured),
     async start(provider, { label, signal, ...request }) {
-      const activation = await subagents.startActivation({ provider, label, request, signal, delivery: 'caller' })
+      const activation = await subagents.startActivation({ provider, label, ...request, signal, delivery: 'caller' })
       return {
         id: activation.childId,
         result: activation.result,
@@ -149,6 +162,11 @@ export function createMemberSeam(subagents: SubagentsFacetLike): MemberSeam {
       }
     },
   }
+}
+
+function availableMemberProviders(subagents: Pick<SubagentsFacetLike, 'getProvider'>, configured?: string): string[] {
+  return [...new Set(['lumo-remote', 'spawn', 'fork', ...(configured ? [configured] : [])])]
+    .filter(name => subagents.getProvider(name) !== undefined)
 }
 
 /** 校验一个正整数配置项。 */
@@ -196,64 +214,31 @@ function createThreadRegistry(
   }
 }
 
-/**
- * 开一轮线程的 Run：走与成员派发**同一条**执行面（`roster.dispatchMember`）。
- *
- * 复用而不是另起一条执行路径，是因为「provider 逐次选择」的三条守卫（§24.3.1 / §24.3.2）
- * 只在那一处：进程外 provider 一律不动（换 provider 不得改变执行位置）、正交原样、
- * fork 不可用则回落不抛。线程的一轮与团队的一轮在这三件事上要求完全一致——都是「把一段
- * 工作放到承载节点上跑」。差别只在**归因**：`label` 带线程 id 与代数，好让这一轮在会话
- * 列表与成本归因（§14 判据 10）里认得出是哪条线程的第几轮。
- *
- * 执行面缺失时**抛**（不是回落）：重派没有第二条路（`requireRunner` 的同一条理由）。
- */
-async function startThreadRound(
-  surfaceRef: () => MemberSurface | undefined,
-  input: {
-    thread: { id: string; session_ref: string; node_id: string }
-    round: { task_id: string; attempt: number }
-    prompt: string
-    parent: unknown
-    signal: AbortSignal
-  },
-): Promise<{ runId: string }> {
-  const surface = surfaceRef()
-  if (surface === undefined) {
-    throw new Error(
-      'agent-teams: 本节点没有成员执行面（subagents 未挂载/探测失败），线程的这一轮无处执行',
-    )
-  }
-  const outcome = await dispatchMember(surface.seam, surface.provider, {
-    label: `${input.thread.id}#${input.round.attempt}`,
-    prompt: [input.prompt],
-    parent: input.parent,
-    signal: input.signal,
-  })
-  if (!outcome.ok) {
-    // 执行面本身跑起来了但这一轮没跑完（模型/传输失败）：照实抛，让协调者看见「重派也失败了」
-    // ——静默返回一个 runId 会把一次失败的执行记成一次成功的重派。
-    throw new Error(
-      `agent-teams: 线程 ${input.thread.id} 第 ${input.round.attempt} 轮未完成（${outcome.stopReason}）：${outcome.text.slice(0, 300)}`,
-    )
-  }
-  return { runId: outcome.runId }
-}
-
 export function apply(ctx: Context, config: AgentTeamsConfig): void {
   const realm = config.realm ?? DEFAULT_REALM
   const maxMembers = positive('maxMembers', config.maxMembers ?? DEFAULT_MAX_MEMBERS)
 
-  // 三个协作者都先给**兜底**，再由 ctx.inject 在真正的服务挂上来时升级。
+  // 协作者按需接线；PG 形态在持久存储就绪前拒绝团队写入。
   //
   // 不能在这里快照一次：storage / mailbox / subagents 的挂载顺序不由本插件决定，
   // 快照会把「晚一步挂上」永久固化成内存兜底 —— 团队看起来一切正常，重启即丢。
   let store = createTeamStore(undefined)
   let courier: TeamCourier = createCourier(undefined, realm)
   let surface: MemberSurface | undefined
-  /** 执行面的**按需解析**（`subagents` 的挂载顺序不由本插件决定，见下）。 */
-  const surfaceRef = (): MemberSurface | undefined => surface
+  let threadRunner: ThreadRoundRunner | undefined
+  if (config.threadExecution) {
+    assertThreadExecutionBinding(config.threadExecution)
+    if (config.threadExecution.distributed && !config.threadExecution.sessionControlUrl?.trim()) throw new Error('agent-teams: distributed Thread execution requires its session owner authority')
+    if (![config.collaboratorUrl, config.controlPlaneToken, config.actingUserId, config.nodeId, config.workspaceRoot]
+      .every(value => typeof value === 'string' && value.trim())) {
+      throw new Error('agent-teams: threadExecution requires collaborator, service credentials, fixed owner, node and workspace')
+    }
+  }
 
   const service = new AgentTeamsService({
+    realm,
+    requireDurableStore: config.storageBackend === 'pg',
+    ...config.actingUserId === undefined ? {} : { ownerUserId: config.actingUserId },
     resolveStore: () => store,
     resolveCourier: () => courier,
     resolveSeam: () => surface,
@@ -262,6 +247,11 @@ export function apply(ctx: Context, config: AgentTeamsConfig): void {
   })
 
   ctx.provide('lumoAgentTeams', service)
+  if (config.controlPlaneToken) ctx.inject(['webServer'], webCtx => {
+    webCtx.effect(() => (webCtx.get('webServer') as {register(input: {kind: 'prefix'; path: string; handler: ReturnType<typeof teamAuthorityHandler>}): () => void}).register({kind: 'prefix', path: '/lumo/runtime/teams/',
+      handler: teamAuthorityHandler({realm, token: config.controlPlaneToken!, service,
+        durable: () => config.storageBackend === 'pg' && store.durable})}))
+  })
 
   // 线程档位（§24.2）：注册表（协作服务）+ 唤醒（会合面）+ 本节点事实（身份、工作区根）+ 执行面。
   //
@@ -273,21 +263,60 @@ export function apply(ctx: Context, config: AgentTeamsConfig): void {
   // 注册表按**解析器**传给运行时（而不是快照一个客户端）：地址的来源不由本插件决定
   // （显式配置 / 将来的服务发现），快照会把「晚一步可用」固化成一个一直报
   // `registry: false` 的能力画像，现场会先去怀疑协作服务挂了。
+  const ownerClient = config.threadExecution?.sessionControlUrl ? new SessionOwnerClient(config.threadExecution.sessionControlUrl, config.controlPlaneToken!) : undefined
   const threads = new ThreadsRuntime({
+    ...(ownerClient ? { allocateSession: async (input: {projectId: string; nodeId: string; coordinatorSessionRef: string}) => {
+      const parent = await ownerClient.get(realm, input.coordinatorSessionRef)
+      if (parent.state !== 'active' || parent.owner_user_id !== config.actingUserId || parent.project_id !== input.projectId) throw new Error('Thread requires its trusted coordinator owner')
+      const reserved = await ownerClient.reserve({realm, owner_user_id: parent.owner_user_id, project_id: parent.project_id, node_id: input.nodeId, parent_session_ref: ''})
+      await ownerClient.activate(realm, reserved.owner.session_ref, reserved.creation_token)
+      return reserved.owner.session_ref
+    }} : {}),
     resolveCourier: () => courier,
     resolveRegistry: () => createThreadRegistry(ctx, config, realm),
     nodeId: config.nodeId ?? '',
     ...config.workspaceRoot === undefined ? {} : { workspaceRoot: config.workspaceRoot },
-    // 重派的一轮 Run 走**同一个成员执行面**（集群里 provider 是 lumo-remote → Scheduler 放置）：
-    // 按需解析（`surface` 在 subagents 挂上之后才有值），缺了就在动作那一刻响亮拒绝——
-    // 同时也让 `capabilities().roundRunner` 如实反映「这台机器现在能不能重派」。
-    resolveRunner: () => (surfaceRef() === undefined ? undefined : {
-      start: input => startThreadRound(surfaceRef, input),
-    }),
+    // Worker providers do not guarantee Thread node/session affinity.
+    resolveRunner: () => threadRunner,
     ...config.wakeTtlMs === undefined ? {} : { defaultWakeTtlMs: config.wakeTtlMs },
     warn: message => ctx.logger.warn('%s', message),
   })
   ctx.provide('agentThreads', threads)
+
+  if (config.threadExecution) {
+    const binding = config.threadExecution
+    ctx.inject(['agents', 'sessionPersistence', 'meteringScope'], runtimeCtx => {
+      const registry = createThreadRegistry(ctx, config, realm)
+      if (!registry) throw new Error('agent-teams: Thread execution requires its durable registry')
+      let dispatch: ReturnType<typeof createThreadDispatch> | undefined
+      const liveParent = (input: Parameters<ThreadRoundRunner['start']>[0]) => {
+        const parent = input.parent as {id?: string} | undefined
+        return !!parent?.id && parent.id === input.thread.coordinator_session_ref && runtimeCtx.agents.get(SessionId(parent.id)) === input.parent
+      }
+      const control = createThreadControl({ baseUrl: config.collaboratorUrl!, token: config.controlPlaneToken!,
+        realm, userId: config.actingUserId!, binding, registry, ...(ownerClient ? { owner: ownerClient } : {}), verifyParent: input => liveParent(input) || !!dispatch?.authorizeClaim(input) })
+      const runner = createLocalThreadRunner({ ctx: runtimeCtx, realm, nodeId: config.nodeId!, workspaceRoot: config.workspaceRoot!,
+        workspace: async thread => (await threads.materializeWorkspace(thread)).path,
+        authorize: control.authorize, roundStore: control.store, persistence: runtimeCtx.sessionPersistence,
+        meterScope: runtimeCtx.get('meteringScope') as SessionMeterScope, timeoutMs: binding.timeoutMs })
+      if (config.threadExecution!.distributed) {
+        const source = createThreadControl({baseUrl: config.collaboratorUrl!, token: config.controlPlaneToken!, realm,
+          userId: config.actingUserId!, binding, registry, ...(ownerClient ? { owner: ownerClient } : {}), verifyParent: liveParent})
+        dispatch = createThreadDispatch({baseUrl: config.collaboratorUrl!, token: config.controlPlaneToken!, realm,
+          userId: config.actingUserId!, nodeId: config.nodeId!, registry, local: runner,
+          authorize: source.authorize, warn: error => ctx.logger.warn('Thread mailbox: %s', describe(error))})
+        threadRunner = dispatch.runner
+        threads.setDispatch(dispatch)
+        runtimeCtx.effect(() => {
+          const stopPoll = dispatch!.start()
+          return async () => { threadRunner = undefined; threads.setDispatch(undefined); stopPoll(); await dispatch!.close() }
+        })
+      } else {
+        threadRunner = runner
+        runtimeCtx.effect(() => () => { if (threadRunner === runner) threadRunner = undefined })
+      }
+    })
+  }
 
   const unregisterTools = defineAgentTeamsTools(ctx, service, {
     ...config.maxRounds === undefined ? {} : { maxRounds: positive('maxRounds', config.maxRounds) },
@@ -305,15 +334,15 @@ export function apply(ctx: Context, config: AgentTeamsConfig): void {
       const hub = storageCtx.get('storage') as { backend: { get(name: string): StorageFacetLike } } | undefined
       const facet = hub?.backend.get(backendName)
       if (facet?.kv === undefined) {
-        ctx.logger.error('agent-teams: %s 存储后端缺少 kv 能力，团队状态仍在内存里', backendName)
+        ctx.logger.error('agent-teams: %s 存储后端缺少 kv 能力，团队持久存储不可用', backendName)
         return
       }
-      const upgraded = createTeamStore(facet)
+      const upgraded = createTeamStore(facet, { realm, requireAtomic: backendName === 'pg' })
       store = upgraded
       void upgraded.store.init().catch((error: unknown) => {
-        // 打开失败后回到原来的内存兜底，避免列表接口永久返回 502。
-        if (store === upgraded) store = createTeamStore(undefined)
-        ctx.logger.error('agent-teams: 团队状态存储初始化失败，团队会随进程消失：%s', describe(error))
+        // 集群不能写进节点各自的内存：保留失败的后端，让读写明确拒绝。
+        if (backendName !== 'pg' && store === upgraded) store = createTeamStore(undefined)
+        ctx.logger.error('agent-teams: 团队状态存储初始化失败：%s', describe(error))
       })
     })
   }
@@ -329,12 +358,12 @@ export function apply(ctx: Context, config: AgentTeamsConfig): void {
     try {
       if (subagents === undefined) throw new Error('subagents runtime is unavailable')
       const provider = selectMemberProvider({
-        available: subagents.list(),
+        available: availableMemberProviders(subagents, config.memberProvider),
         ...config.memberProvider === undefined ? {} : { configured: config.memberProvider },
       })
       surface = {
         provider,
-        seam: createMemberSeam(subagents),
+        seam: createMemberSeam(subagents, config.memberProvider),
       }
       // 只报 provider：存储与会合面的形态由 `agent_teams_status` 的能力画像给出
       // （那是按需读的，不会因为这里的挂载顺序而报一个过时的值）。
@@ -403,3 +432,6 @@ export type {
 } from './threads.ts'
 export { defineAgentThreadTools } from './tools.ts'
 export type { AgentThreadToolConfig } from './tools.ts'
+export { createLocalThreadRunner, ThreadRoundExecutionError, threadRoundRunId } from './thread-runner.ts'
+export { createThreadControl } from './thread-control.ts'
+export type { ThreadExecutionBinding } from './thread-control.ts'

@@ -1,7 +1,7 @@
 import {
   useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore,
   type ButtonHTMLAttributes, type CSSProperties, type FormEvent, type KeyboardEvent as ReactKeyboardEvent,
-  type PointerEvent as ReactPointerEvent, type ReactNode,
+  type ReactNode,
 } from 'react'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -31,6 +31,8 @@ import { layoutTaskBoard, type BoardTaskInput, type BoardTaskState, type TeamPro
 import { resolveSidebarIdentity, type SidebarIdentity } from './sidebar-identity.ts'
 import { ClusterNodesPanel, SchedulerClustersPanel, SkillAccessPanel, ProjectMembersPanel, ConnectorManifestPanel, ConnectorAccountPanel, AgentPresetEditor, FlowManagementPanel, TaskIntentContractPanel, TaskCollaboratorsPanel, TaskCollaborationPanel, TaskEvidencePanel, SessionControlPanel, ThreadBoardPanel, type AgentPreset, type ProjectMember, type TaskIntentFacts, type TaskIntentContract, type TaskScoreBreakdown, type TaskResultFacts, type TaskCollaborationFacts } from './cluster-panels.tsx'
 import { TokenUsagePanel } from './token-usage-panel.tsx'
+import { TeamLauncher, type TeamCapabilities } from './team-launcher.tsx'
+import { RunReviewPanel, type ReviewActor } from './run-review-panel.tsx'
 import type { ThreadFacts } from './thread-board.ts'
 
 // A desktop WebView can evaluate more than one copy of this bundle while the
@@ -1124,12 +1126,7 @@ function ConfirmButton({ children, confirmLabel = '确认', className = 'lumo-da
 }
 
 function SpotlightCard({ className = '', index = 0, children, onClick }: { className?: string; index?: number; children: ReactNode; onClick?: () => void }) {
-  const move = (event: ReactPointerEvent<HTMLElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect()
-    event.currentTarget.style.setProperty('--spot-x', `${event.clientX - rect.left}px`)
-    event.currentTarget.style.setProperty('--spot-y', `${event.clientY - rect.top}px`)
-  }
-  return <article className={`lumo-spotlight ${className}`} onPointerMove={move} onClick={onClick} style={{ '--lumo-order': String(index) } as CSSProperties}>{children}</article>
+  return <article className={`lumo-spotlight ${className}`} onClick={onClick} style={{ '--lumo-order': String(index) } as CSSProperties}>{children}</article>
 }
 
 // 点击火花：早期装饰性粒子动效。已按「克制、不廉价」的视觉方向移除，仅保留定位用
@@ -1224,7 +1221,7 @@ function WorkspaceHero({
 
 function DomainTabs<T extends string>({ label, value, items, onChange }: { label: string; value: T; items: ReadonlyArray<{ id: T; title: string; description: string }>; onChange: (next: T) => void }) {
   return <nav className="lumo-domain-tabs" aria-label={label}>
-    {items.map(item => <button type="button" key={item.id} className={value === item.id ? 'active' : ''} aria-current={value === item.id ? 'page' : undefined} onClick={() => onChange(item.id)}>
+    {items.map(item => <button type="button" key={item.id} title={item.description} className={value === item.id ? 'active' : ''} aria-current={value === item.id ? 'page' : undefined} onClick={() => onChange(item.id)}>
       <b>{item.title}</b><span>{item.description}</span>
     </button>)}
   </nav>
@@ -2498,6 +2495,12 @@ interface CollabTeam {
  * 对方已经读过自己要的字段——而「看板把没有时间戳的行当成刚有动静」这类错不会报错。
  */
 type DelegationRow = FlowTaskInput & ThreadFacts
+interface ThreadFleet {
+  threads: ThreadFacts[]
+  capabilities: { threadRegistry: boolean; controlState: boolean }
+  errors: string[]
+  pagination?: { nextTaskCursor: string; nextThreadCursor: string; taskCount: number }
+}
 
 /**
  * 渲染坐标系：`renderY(y) = -y`。
@@ -2571,9 +2574,12 @@ function collaborationReadError(reason: unknown): string {
 }
 
 function CollaborationSurface({ onClose }: { onClose: () => void }) {
+  const bridge = useNativeConversationBridge()
+  const [teamCapabilities, setTeamCapabilities] = useState<TeamCapabilities | null>(null)
   const [users, setUsers] = useState<CollabUser[] | null>(null)
   const [nodes, setNodes] = useState<CollabNode[] | null>(null)
   const [delegations, setDelegations] = useState<DelegationRow[] | null>(null)
+  const [threadFleet, setThreadFleet] = useState<ThreadFleet | null>(null)
   const [teams, setTeams] = useState<CollabTeam[] | null>(null)
   const [runtimeNodes, setRuntimeNodes] = useState<NodeState[] | null>(null)
   const [deploymentMode, setDeploymentMode] = useState<DeploymentState['mode'] | null>(null)
@@ -2593,15 +2599,23 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
   const [view, setView] = useState<'people' | 'board' | 'threads'>('people')
   const [teamId, setTeamId] = useState<string | null>(null)
   const [goal, setGoal] = useState('')
+  const [fleetPages, setFleetPages] = useState([{ task: '', thread: '' }])
+  const fleetPagesRef = useRef(fleetPages)
+  const loadGeneration = useRef(0)
+  const fleetPage = fleetPages[fleetPages.length - 1]!
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (requestedPages?: { task: string; thread: string }[]) => {
+    const generation = ++loadGeneration.current
+    const targetPages = requestedPages ?? fleetPagesRef.current
+    const targetPage = targetPages[targetPages.length - 1]!
     setLoading(true)
     // 先读部署形态。Standalone/Local 的三个治理面有明确的 Cluster 门禁；
     // 在那两种形态里请求它们只会得到永久的 403，不能当成暂时故障提示重试。
     const [overviewFace, teamFace] = await Promise.allSettled([
       api<Overview>('/lumo/api/overview'),
-      api<{ teams?: CollabTeam[] }>('/lumo/api/collaboration/teams'),
+      api<{ teams?: CollabTeam[]; capabilities?: TeamCapabilities | null }>('/lumo/api/collaboration/teams'),
     ])
+    if (generation !== loadGeneration.current) return
     const missing: string[] = []
     const details: Record<string, string> = {}
     const failed = (label: string, reason: unknown): null => {
@@ -2612,6 +2626,7 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
     const mode = overviewFace.status === 'fulfilled' ? overviewFace.value.deployment.mode : null
     const clusterOnly = mode === 'local' || mode === 'standalone'
     setDeploymentMode(mode)
+    setTeamCapabilities(teamFace.status === 'fulfilled' ? teamFace.value.capabilities ?? null : null)
     setTeams(teamFace.status === 'fulfilled' ? teamFace.value?.teams ?? [] : failed('智能体名册', teamFace.reason))
     // Scheduler 的 `/v1/nodes` 在 Standalone / Cluster 形态背后读 Nacos Naming。
     setRuntimeNodes(overviewFace.status === 'fulfilled' ? overviewFace.value.cluster.nodes ?? [] : failed('Nacos 节点目录', overviewFace.reason))
@@ -2619,18 +2634,49 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
       setUsers(null)
       setNodes(null)
       setDelegations(null)
+      setThreadFleet(null)
       setSelected(null)
       setView('board')
     } else {
       // Cluster 三个治理面各自降级；overview 失败时也尝试读取，避免丢掉可用数据。
-      const [userFace, nodeFace, delegationFace] = await Promise.allSettled([
+      const [userFace, nodeFace, delegationFace, threadFace] = await Promise.allSettled([
         api<{ users?: CollabUser[] }>('/lumo/api/users'),
         api<{ nodes?: CollabNode[] }>('/lumo/api/desktop-nodes'),
-        api<DelegationRow[]>('/lumo/api/delegations'),
+        api<DelegationRow[] | { tasks: DelegationRow[] }>('/lumo/api/delegations'),
+        api<ThreadFleet>(`/lumo/api/collaboration/threads?${new URLSearchParams({ task_cursor: targetPage.task, thread_after: targetPage.thread })}`),
       ])
+      if (generation !== loadGeneration.current) return
       setUsers(userFace.status === 'fulfilled' ? userFace.value?.users ?? [] : failed('员工目录', userFace.reason))
       setNodes(nodeFace.status === 'fulfilled' ? nodeFace.value?.nodes ?? [] : failed('注册节点', nodeFace.reason))
-      setDelegations(delegationFace.status === 'fulfilled' && Array.isArray(delegationFace.value) ? delegationFace.value : failed('委派任务', delegationFace.status === 'rejected' ? delegationFace.reason : '响应不是任务列表'))
+      const taskRows = delegationFace.status === 'fulfilled'
+        ? Array.isArray(delegationFace.value) ? delegationFace.value : delegationFace.value?.tasks : undefined
+      setDelegations(Array.isArray(taskRows) ? taskRows : failed('委派任务', delegationFace.status === 'rejected' ? delegationFace.reason : '响应不是任务列表'))
+      if (threadFace.status === 'fulfilled' && Array.isArray(threadFace.value?.threads)
+        && typeof threadFace.value?.capabilities?.controlState === 'boolean'
+        && typeof threadFace.value?.capabilities?.threadRegistry === 'boolean' && Array.isArray(threadFace.value.errors)
+        && (targetPage.thread === '' || threadFace.value.capabilities.threadRegistry)
+        && (threadFace.value.pagination === undefined || (
+          threadFace.value.pagination !== null && typeof threadFace.value.pagination === 'object'
+          && typeof threadFace.value.pagination.nextTaskCursor === 'string'
+          && typeof threadFace.value.pagination.nextThreadCursor === 'string'
+          && Number.isInteger(threadFace.value.pagination.taskCount)
+          && threadFace.value.pagination.taskCount >= 0 && threadFace.value.pagination.taskCount <= 200))) {
+        setThreadFleet(threadFace.value)
+        fleetPagesRef.current = targetPages
+        setFleetPages(targetPages)
+        if (threadFace.value.errors.length > 0) failed('线程聚合', threadFace.value.errors.join('；'))
+      } else {
+        // Keep the last successful page and its cursor together. A failed page
+        // read must never relabel the default delegation list as the next page.
+        if (threadFace.status === 'rejected' && threadFace.reason instanceof ApiError
+          && (threadFace.reason.status === 401 || threadFace.reason.status === 403)) {
+          setThreadFleet(null)
+          setDelegations(null)
+          fleetPagesRef.current = [{ task: '', thread: '' }]
+          setFleetPages(fleetPagesRef.current)
+          failed('线程聚合', threadFace.reason)
+        } else failed('线程聚合', `读取失败，仍显示上次成功读取的页面；${collaborationReadError(threadFace.status === 'rejected' ? threadFace.reason : '响应不是可读的线程页')}`)
+      }
       if (userFace.status === 'fulfilled') {
         const first = (userFace.value?.users ?? [])[0]
         if (first !== undefined) setSelected(current => current ?? first.id)
@@ -2642,7 +2688,10 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
     setLoading(false)
   }, [])
 
-  useEffect(() => { void load() }, [load])  // 只在进入时读一次；刷新按钮走 load
+  useEffect(() => {
+    void load()
+    return () => { loadGeneration.current++ }
+  }, [load])
 
   const employees = useMemo<EmployeeInput[]>(() => (users ?? []).map(user => ({
     id: user.id,
@@ -2722,17 +2771,13 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
         返回对话
       </button>
       <div className="lumo-collaboration-hero-copy">
-        <span className="lumo-collaboration-kicker"><i aria-hidden="true" /> live orchestration</span>
-        <h1>让工作沿着<br /><em>清晰的路径</em>流动</h1>
+        <span className="lumo-collaboration-kicker"><i aria-hidden="true" /> 团队与任务</span>
+        <h1>团队协作</h1>
         <p>把团队、任务和需要你做的决定放在同一张图里。先看阻塞，再推进下一步。</p>
       </div>
       <div className={`lumo-collaboration-sync ${absent.length > 0 ? 'degraded' : ''}`}>
         <div className="lumo-collaboration-sync-head"><span>数据链路</span><b><i aria-hidden="true" />{statusLabel}</b></div>
-        <svg className="lumo-collaboration-orbit" viewBox="0 0 340 118" role="img" aria-label="协作关系数据链路示意图">
-          <path d="M40 58h70c22 0 22-31 44-31h32c22 0 22 64 44 64h70" />
-          <path d="M110 58c22 0 22 33 44 33h32c22 0 22-64 44-64h70" />
-          <circle cx="40" cy="58" r="7" /><circle cx="110" cy="58" r="7" /><circle cx="170" cy="27" r="7" /><circle cx="170" cy="91" r="7" /><circle cx="230" cy="27" r="7" /><circle cx="230" cy="91" r="7" /><circle cx="300" cy="27" r="7" /><circle cx="300" cy="91" r="7" />
-        </svg>
+
         <div className="lumo-collaboration-sync-foot"><span>{absent.length > 0 ? `缺少 ${absent.length} 个读面` : `${readableFaces} 个适用读面连接正常`}</span><time>{updatedAt === null ? '等待首次同步' : `更新于 ${updatedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`}</time></div>
         <button type="button" className="lumo-collaboration-refresh" onClick={() => void load()} disabled={loading}>
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 7a6.5 6.5 0 1 0 .2 5.4" /><path d="M16 3v4h-4" /></svg>
@@ -2791,7 +2836,7 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
         <p className="lumo-collaboration-caption">{view === 'people'
           ? `${graph.placed.length} 名员工 · ${graph.edges.length} 条上下游 · ${graph.unbound.length} 个未绑定智能体`
           : view === 'threads'
-            ? `${delegations?.length ?? 0} 条线程 · 按注意力分五格`
+            ? `${threadFleet?.threads.length ?? delegations?.length ?? 0} 条线程与任务（当前页） · 按注意力分五格`
             : board === null
               ? '还没有可显示的团队'
               : `${board.placed.length} 条任务 · ${board.edges.length} 条依赖 · 阻塞 ${board.placed.filter(node => node.state === 'blocked').length} · 可认领 ${board.placed.filter(node => node.state === 'ready').length}`}</p>
@@ -2804,17 +2849,20 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 18 17H2z" /><path d="M10 7v4M10 14v.1" /></svg>
         <span><b>部分信息暂时不可用</b>{absent.map(label => `${label}：${errorDetails[label] ?? '读取失败'}`).join('；')}。画布中的空白不代表没有数据。</span>
       </div> : null}
+      {view === 'threads' ? <nav className="lumo-fleet-pages" aria-label="线程与任务分页">
+        <span>{loading ? '正在读取 · ' : ''}第 {fleetPages.length} 次读取 · 本页 {threadFleet?.pagination?.taskCount ?? delegations?.length ?? 0} 个任务{threadFleet === null ? '（仅治理任务首批）' : ''}</span>
+        <button type="button" disabled={loading || fleetPages.length === 1} onClick={() => void load(fleetPages.slice(0, -1))}>返回上一页</button>
+        <button type="button" disabled={loading || fleetPages.length === 1} onClick={() => void load([{ task: '', thread: '' }])}>回到首页</button>
+        <button type="button" disabled={loading || !threadFleet?.pagination?.nextThreadCursor} onClick={() => void load([...fleetPages, { task: fleetPage.task, thread: threadFleet!.pagination!.nextThreadCursor }])}>下一批线程</button>
+        <button type="button" disabled={loading || !threadFleet?.pagination?.nextTaskCursor} onClick={() => void load([...fleetPages, { task: threadFleet!.pagination!.nextTaskCursor, thread: '' }])}>下一页任务</button>
+      </nav> : null}
       {view === 'threads'
-        // 看板吃的是**同一个** `/lumo/api/delegations` 读面（`load` 里那次 allSettled 的
-        // 「委派任务」那一面），所以它不需要单独的请求，也不会与协作图说出两个版本的事实。
-        // `controlState` 显式传 false：控制态没有列表读面，所以「待轻量答」这一格
-        // 目前读不到——看板会照实说明缺什么，而不是把那格画成空的（见 thread-board.ts）。
         ? <ThreadBoardPanel
-          threads={delegations ?? []}
-          loading={delegations === null && !absent.includes('委派任务')}
-          error={absent.includes('委派任务') ? '委派任务这一面这次没读到：看板为空只说明这一面没拿到，不说明没有线程。' : ''}
+          threads={threadFleet?.threads ?? delegations ?? []}
+          loading={loading && threadFleet === null && delegations === null}
+          error={threadFleet === null && absent.includes('委派任务') ? '线程与任务这次没读到；空白不表示没有线程。' : ''}
           label={localizedTaskState}
-          controlState={false}
+          controlState={threadFleet?.capabilities.controlState ?? false}
         />
         : view === 'board'
         ? (board === null || board.placed.length === 0
@@ -2933,6 +2981,8 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
     </aside>}
     </div>
 
+    <TeamLauncher capabilities={teamCapabilities} bridge={bridge} onPrepared={onClose} />
+
     {/* 目标入口。它只把文字交给「项目」里唯一的委派流程，不在这里复制创建契约。 */}
     <form className="lumo-collaboration-goal" onSubmit={event => {
       event.preventDefault()
@@ -2953,6 +3003,7 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
   const [data, setData] = useState<Overview>(emptyOverview)
   const [organizationAllowed, setOrganizationAllowed] = useState(false)
   const [platformAdmin, setPlatformAdmin] = useState(false)
+  const [reviewActor, setReviewActor] = useState<ReviewActor | null>(null)
   const [governance, setGovernance] = useState<GovernanceSnapshot | null>(null)
   const [delegations, setDelegations] = useState<DelegatedTask[]>([])
   const [directory, setDirectory] = useState<DirectoryUser[]>([])
@@ -2987,6 +3038,17 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null)
   const [busy, setBusy] = useState('')
   const delegationFormRef = useRef<HTMLFormElement>(null)
+  const pendingRequestKeys = useRef(new Map<string, string>())
+  const createOnce = async <T,>(path: string, body: string): Promise<T> => {
+    const scope = JSON.stringify([path, body])
+    let key = pendingRequestKeys.current.get(scope)
+    if (key === undefined) { key = crypto.randomUUID(); pendingRequestKeys.current.set(scope, key) }
+    const result = await api<T>(path, { method: 'POST', body, headers: { 'Idempotency-Key': key } })
+    // Retain the key after a lost response. Retrying the unchanged action then
+    // reads its receipt; a confirmed success allows a deliberate new action.
+    if (pendingRequestKeys.current.get(scope) === key) pendingRequestKeys.current.delete(scope)
+    return result
+  }
   // 从协作空间跳过来时，把那边输入的目标填进工作意图。表单是非受控的（提交时读 FormData），
   // 所以这里直接写 DOM 值——把它改成受控组件会牵动整个表单的取值路径，而收益只是这一处。
   // 取用即清空（见 takeDelegationGoal），所以手动进「项目」不会被上一次的目标污染。
@@ -2999,9 +3061,13 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     let active = true
+    const accountRead = api<AuthAccount>('/auth/account', { headers: { 'X-Lumo-Auth-Request': '1' } }).then(account => {
+      if (active) setReviewActor(account.realm && account.userId ? { realm: account.realm, userId: account.userId } : null)
+      return account
+    })
     void Promise.all([
       api<{ organization: boolean }>('/lumo/api/capabilities'),
-      api<AuthAccount>('/auth/account', { headers: { 'X-Lumo-Auth-Request': '1' } }),
+      accountRead,
     ]).then(([capabilities, account]) => {
       if (active) {
         setOrganizationAllowed(capabilities.organization === true && account.roles.some(role => ['platform_admin', 'realm_admin', 'admin'].includes(role)))
@@ -3048,7 +3114,8 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
     const flowID = flow.id; if (!flowID) return
     const body = action === 'review' ? { approve: true, comment: '运营端审核通过' } : action === 'run' ? { input: { source: 'lumo-operations' } } : action === 'rollback' ? { version: Math.max(1, (flow.version ?? 1) - 1) } : {}
     const message = action === 'submit' ? `流程「${flow.name ?? flowID}」已提交审核。` : action === 'review' ? `流程「${flow.name ?? flowID}」已通过审核。` : action === 'deprecate' ? `流程「${flow.name ?? flowID}」已停用。` : action === 'rollback' ? `流程「${flow.name ?? flowID}」已回滚。` : `流程「${flow.name ?? flowID}」试运行完成。`
-    await run(flowID, message, () => api(`/lumo/api/flows/${encodeURIComponent(flowID)}/${action}`, { method: 'POST', body: JSON.stringify(body) }))
+    const path = `/lumo/api/flows/${encodeURIComponent(flowID)}/${action}`
+    await run(flowID, message, () => action === 'run' ? createOnce(path, JSON.stringify(body)) : api(path, { method: 'POST', body: JSON.stringify(body) }))
   }
   const compareFlowVersions = async (flow: Row) => {
     const flowID = flow.id; const currentVersion = flow.version ?? 0
@@ -3084,7 +3151,7 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
     const selected = delegationPreview.candidates.find(candidate => candidate.worker_id === selectedAssignee || candidate.user_id === selectedAssignee)
     const assignee = selected?.display_name ?? selectedAssignee
     const result = await run<DelegatedTask>('delegation', assignmentMode === 'auto' ? `任务「${title}」已按意图、标签、技能和负载自动分发。` : `任务「${title}」已分发给 ${assignee}。`, async () => {
-      const created = await api<DelegationCreated>('/lumo/api/delegations', { method: 'POST', body: JSON.stringify({ title, intent, project_id: String(fields.get('project_id') ?? '').trim(), required_tags: splitCSV(String(fields.get('required_tags') ?? '')), required_skills: splitCSV(String(fields.get('required_skills') ?? '')), assignee_user_id: assignmentMode === 'auto' || selected?.worker_kind === 'agent' ? '' : selected?.user_id ?? '', assignee_worker_id: assignmentMode === 'auto' ? '' : selected?.worker_id ?? selectedAssignee, auto_assign: assignmentMode === 'auto', schedule: { cluster_id: String(fields.get('cluster_id') ?? '').trim(), requires: parseSchedulerRequirements(String(fields.get('requires') ?? '')), priority: Number(fields.get('priority') ?? 0) || 0, residency: String(fields.get('residency') ?? '').trim(), queue: 'delegated', weight: 1, avoid_nodes: [] } }) })
+      const created = await createOnce<DelegationCreated>('/lumo/api/delegations', JSON.stringify({ title, intent, project_id: String(fields.get('project_id') ?? '').trim(), required_tags: splitCSV(String(fields.get('required_tags') ?? '')), required_skills: splitCSV(String(fields.get('required_skills') ?? '')), assignee_user_id: assignmentMode === 'auto' || selected?.worker_kind === 'agent' ? '' : selected?.user_id ?? '', assignee_worker_id: assignmentMode === 'auto' ? '' : selected?.worker_id ?? selectedAssignee, auto_assign: assignmentMode === 'auto', schedule: { cluster_id: String(fields.get('cluster_id') ?? '').trim(), requires: parseSchedulerRequirements(String(fields.get('requires') ?? '')), priority: Number(fields.get('priority') ?? 0) || 0, residency: String(fields.get('residency') ?? '').trim(), queue: 'delegated', weight: 1, avoid_nodes: [] } }))
       return created.task ?? created as DelegatedTask
     })
     if (result) { setDelegationPreview(null); setSelectedAssignee(''); form.reset() }
@@ -3165,9 +3232,9 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
 	}
   const configured = data.plugins
   if (data.deployment.mode === 'local') {
-    return <div className="lumo-surface lumo-project-surface"><WorkspaceHero surface="operations" onClose={onClose} statement="让每个项目都有清楚的边界与下一步。" description="从项目资产到流程执行，在一个工作区里确认状态、推进任务并追踪结果。"><div className="lumo-workspace-status"><span>local workspace</span><b><i aria-hidden="true" />{loading ? '正在同步' : '本地运行'}</b><dl><div><dt>项目</dt><dd>{data.projects.length}</dd></div><div><dt>插件</dt><dd>{configured.length}</dd></div><div><dt>存储</dt><dd>本机</dd></div></dl><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>刷新状态</BusyButton></div></WorkspaceHero><DeploymentBanner deployment={data.deployment} /><LocalModePanel plugins={configured} /></div>
+    return <div className="lumo-surface lumo-workspace-page lumo-project-surface"><WorkspaceHero surface="operations" onClose={onClose} statement="让每个项目都有清楚的边界与下一步。" description="从项目资产到流程执行，在一个工作区里确认状态、推进任务并追踪结果。"><div className="lumo-workspace-status"><span>local workspace</span><b><i aria-hidden="true" />{loading ? '正在同步' : '本地运行'}</b><dl><div><dt>项目</dt><dd>{data.projects.length}</dd></div><div><dt>插件</dt><dd>{configured.length}</dd></div><div><dt>存储</dt><dd>本机</dd></div></dl><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>刷新状态</BusyButton></div></WorkspaceHero><DeploymentBanner deployment={data.deployment} /><LocalModePanel plugins={configured} /></div>
   }
-  return <div className="lumo-surface lumo-project-surface">
+  return <div className="lumo-surface lumo-workspace-page lumo-project-surface">
     <WorkspaceHero surface="operations" onClose={onClose} statement="让每个项目都有清楚的边界与下一步。" description="从项目资产到流程执行，在一个工作区里确认状态、推进任务并追踪结果。">
       <div className={`lumo-workspace-status ${online === 0 && !loading ? 'degraded' : ''}`}><span>project control</span><b><i aria-hidden="true" />{loading ? '正在同步' : online > 0 ? '控制面已连接' : '等待控制服务'}</b><dl><div><dt>项目</dt><dd>{data.projects.length}</dd></div><div><dt>流程</dt><dd>{data.flows.length}</dd></div><div><dt>执行节点</dt><dd>{data.cluster.nodes.length}</dd></div></dl><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>重新读取</BusyButton></div>
     </WorkspaceHero>
@@ -3213,6 +3280,7 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
       <TaskCollaboratorsPanel request={api} taskID={runsTask.id} />
       <TaskCollaborationPanel progress={taskCollaboration} error={collaborationError} label={localizedTaskState} open={openChildTask} />
       <div className="lumo-compact-list">{taskRuns.length ? taskRuns.map(run => <div key={run.id}><span><b>尝试 {run.attempt} · {localizedTaskState(run.state)}</b><small>{run.worker_id} · {run.assigned_node_id ?? '等待节点'}{run.last_error ? ` · ${run.last_error}` : ''}</small></span><em>{run.ended_at ? `结束 ${formatSync(run.ended_at)}` : run.started_at ? `开始 ${formatSync(run.started_at)}` : formatSync(run.created_at)}</em>{run.session_ref ? <BusyButton className="lumo-secondary lumo-small" onClick={() => setControlSession(current => current === run.session_ref ? '' : (run.session_ref ?? ''))}>会话控制</BusyButton> : null}<BusyButton className="lumo-secondary lumo-small" busy={evidenceBusy === run.id} onClick={() => void loadRunEvidence(runsTask, run.id)}>查看证据</BusyButton></div>) : <Empty>该任务尚未生成 Run；创建新尝试时会保留旧调度记录。</Empty>}</div>
+      {taskRuns.filter(run => run.state === 'COMPLETED' && !taskRuns.some(other => other.attempt > run.attempt)).map(run => <RunReviewPanel<DelegatedTask> key={`${reviewActor?.realm}:${reviewActor?.userId}:${runsTask.id}:${run.id}`} request={api} actor={reviewActor} taskID={runsTask.id} projectID={runsTask.project_id} run={run} workers={agentWorkers} workersError={agentRuntimeError} onOpen={task => void showTaskRuns(task)} />)}
       {runEvidence ? <TaskEvidencePanel taskID={runsTask.id} request={api} runID={runEvidence.runID} result={runEvidence.result} error={evidenceError} busy={evidenceBusy !== ''} label={localizedTaskState} close={closeEvidence} /> : null}
       {controlSession ? <SessionControlPanel request={api} sessionRef={controlSession} close={() => setControlSession('')} /> : null}
       <div className="lumo-compact-list"><header><b>操作审计</b><span>{taskAudit.length} 条</span></header>{taskAudit.length ? taskAudit.map(event => <div key={event.id}><span><b>{event.event}</b><small>{event.actor} · {Object.entries(event.detail).map(([key, value]) => `${key}=${String(value)}`).join(' · ') || '无额外详情'}</small></span><em>{formatSync(event.created_at)}</em></div>) : <Empty>尚无可显示的控制操作。</Empty>}</div>
@@ -3299,7 +3367,7 @@ function AccountSurface({ onClose }: { onClose: () => void }) {
     setBusy(true)
     try { await api(`/auth/account/passkeys/${encodeURIComponent(passkey.id)}`, { method: 'DELETE', headers: authHeaders }); setNotice('Passkey 已移除。'); await load() } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy(false) }
   }
-  return <div className="lumo-surface lumo-account-surface">
+  return <div className="lumo-surface lumo-workspace-page lumo-account-surface">
     <WorkspaceHero surface="account" onClose={onClose} statement="当前身份、安全方式与设备，一处看清。" description="检查正在使用的账户，管理登录保护和已授权会话。账户操作会影响当前或其他设备的登录状态。">
       <div className="lumo-account-profile">
         <span className="lumo-account-profile-label">当前登录身份</span>
@@ -3758,7 +3826,7 @@ function Workbench({ surface, close, select, commandOpen, toggleCommand }: { sur
   }, [surface])
   return <div className="lumo-backdrop"><section ref={ref} tabIndex={-1} className="lumo-workbench" data-lumo-surface={identity.surface} data-lumo-emphasis={identity.emphasis} data-lumo-effects={identity.effects} data-lumo-view={surface} role="dialog" aria-modal="true" aria-label={`${meta.label}工作台`}>
     <WorkbenchRail surface={surface} available={primaryNavigation} select={select} />
-    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>Lumo 工作台</span><i>›</i><b>{meta.label}</b><small>{meta.eyebrow}</small></div></header><main>{surface === 'collaboration' ? <CollaborationSurface onClose={close} /> : surface === 'knowledge' ? <KnowledgeSurface onClose={close} /> : surface === 'skills' ? <SkillsSurface onClose={close} /> : surface === 'connectors' ? <ConnectorsSurface onClose={close} /> : surface === 'operations' ? <OperationsSurface onClose={close} /> : surface === 'design' ? <OpenDesignSurface onConversationStart={close} /> : surface === 'presentation' ? <PresentationSurface onConversationStart={close} /> : surface === 'market' ? <MarketSurface onClose={close} /> : surface === 'skillhub' ? <SkillHubSurface onClose={close} /> : <AccountSurface onClose={close} />}</main><footer className="lumo-workbench-footer"><span>在对话框输入 /design 或 /ppt 可随时打开；产物仍由 /open-design 与 /ppt-master 原生技能生成</span><span>按 Esc 返回原生 DSH</span></footer></div>
+    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>Lumo 工作台</span><i>›</i><b>{meta.label}</b><small>{meta.eyebrow}</small></div></header><main>{surface === 'collaboration' ? <CollaborationSurface onClose={close} /> : surface === 'knowledge' ? <KnowledgeSurface onClose={close} /> : surface === 'skills' ? <SkillsSurface onClose={close} /> : surface === 'connectors' ? <ConnectorsSurface onClose={close} /> : surface === 'operations' ? <OperationsSurface onClose={close} /> : surface === 'design' ? <OpenDesignSurface onConversationStart={close} /> : surface === 'presentation' ? <PresentationSurface onConversationStart={close} /> : surface === 'market' ? <MarketSurface onClose={close} /> : surface === 'skillhub' ? <SkillHubSurface onClose={close} /> : <AccountSurface onClose={close} />}</main><footer className="lumo-workbench-footer"><span>在对话中输入 /design 或 /ppt，开始创作</span><span>Esc 返回对话</span></footer></div>
     <CommandPalette open={commandOpen} surface={surface} available={available} select={select} close={toggleCommand} />
   </section></div>
 }

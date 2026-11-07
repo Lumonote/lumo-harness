@@ -20,7 +20,6 @@ import { homedir, hostname } from 'node:os'
 import { spawn } from 'node:child_process'
 import { localStorageRows, localVaultRows, profileLifetimeOverlay, profileStorageRows, workflowEngineOverlay } from './workflow.ts'
 import { localSkillSnapshotAssembly, skillSnapshotSource, waitForSkillSnapshotFile } from './skills.ts'
-import { startNacosRegistration } from './nacos.ts'
 import { planClusterReporter, startClusterReporter } from './cluster-reporter.ts'
 import { clusterWiring, workerBindingFromEnv } from './cluster.ts'
 import {
@@ -89,8 +88,7 @@ if (localMode) mkdirSync(dirname(sqlitePath), { recursive: true })
 
 // 节点标识：必须能区分同机重启，否则重启后的进程会被租约当成「本人续租」，
 // 白捡走上一代进程的写权（§A1 fencing 的前提是持有者身份唯一）。
-const nodeHolder = process.env['LUMO_NODE_ID']
-  ?? `${hostname()}:${process.pid}:${Date.now().toString(36)}`
+const nodeHolder = `${process.env['LUMO_NODE_ID'] ?? hostname()}:${process.pid}:${Date.now().toString(36)}`
 // Job control addresses the Scheduler's stable node id, not the session-log
 // lease holder (which intentionally changes on every restart).
 const jobControlNodeId = process.env['LUMO_NODE_ID'] ?? hostname()
@@ -159,6 +157,20 @@ const identityAssertionSecret = process.env['LUMO_IDENTITY_ASSERTION_SECRET'] ||
 const cluster = clusterWiring(process.env, deployment.mode, role)
 const workerBinding = deployment.mode === 'cluster' && role === 'node'
   ? workerBindingFromEnv(process.env, { agentId: agentID, userId: userID, projectId: projectID }) : undefined
+const userSessionExecution: unknown = process.env['LUMO_USER_SESSION_EXECUTION'] ? JSON.parse(process.env['LUMO_USER_SESSION_EXECUTION']) : undefined
+if (userSessionExecution !== undefined) {
+  if (!userSessionExecution || typeof userSessionExecution !== 'object' || Array.isArray(userSessionExecution)
+    || ['authorityUrl', 'nodeId', 'projectId', 'workspaceRoot', 'provider', 'model'].some(key => typeof (userSessionExecution as Record<string, unknown>)[key] !== 'string' || !(userSessionExecution as Record<string, string>)[key].trim())
+    || (userSessionExecution as { projectId: string }).projectId !== projectID) throw new Error('LUMO_USER_SESSION_EXECUTION requires a fixed authority/node/project/workspace/provider/model and the deployment project')
+  if (deployment.mode === 'local' || !isWebProfile) throw new Error('Dynamic user Sessions require an authenticated server Web profile')
+}
+const threadExecution: unknown = process.env['LUMO_THREAD_EXECUTION'] ? JSON.parse(process.env['LUMO_THREAD_EXECUTION']) : undefined
+if (threadExecution !== undefined && (typeof threadExecution !== 'object' || threadExecution === null || Array.isArray(threadExecution))) {
+  throw new Error('LUMO_THREAD_EXECUTION must be a fixed Thread execution configuration object')
+}
+if (workerBinding && (threadExecution as { agentId?: unknown } | undefined)?.agentId === workerBinding.agentId) {
+  throw new Error('Thread text execution requires a dedicated Agent; it cannot share the governed Worker concurrency budget')
+}
 const seamToken = process.env['LUMO_SEAM_TOKEN'] || controlPlaneToken
 const seamRows = cluster.seamMode === 'disabled' ? '' : `    - id: lumo-seam-${cluster.seamMode}
       name: ${JSON.stringify(cluster.seamMode === 'proxy' ? seamProxyEntry : seamHostEntry)}
@@ -289,7 +301,7 @@ if (isWebProfile) {
 const roleRows = localMode ? '' : role === 'node'
   ? `    - id: lumo-subagent-host
       name: ${JSON.stringify(subagentHostEntry)}
-      inject: [agents, jobControl]
+      inject: [agents, jobControl, workingDirectory, subagents, sessionLogReplication]
       config:
         host: ${JSON.stringify(hostBind)}
         port: ${hostPort}
@@ -297,6 +309,17 @@ const roleRows = localMode ? '' : role === 'node'
           ${JSON.stringify(subagentRealm)}: ${JSON.stringify(hostToken)}
         callbackOrigins: ${JSON.stringify(callbackOrigins)}
         connectionString: ${JSON.stringify(pgDSN)}
+        nodeId: ${JSON.stringify(jobControlNodeId)}
+        requireSessionLog: true
+${process.env['LUMO_NACOS_ADDR'] ? `        discovery: ${JSON.stringify({
+  baseUrl: process.env['LUMO_NACOS_ADDR'], serviceName: process.env['LUMO_NACOS_SERVICE'] ?? 'lumo-dsh-node',
+  groupName: process.env['LUMO_NACOS_GROUP'] ?? 'DEFAULT_GROUP', nodeId: jobControlNodeId,
+  realm: platformRealm, clusterId: process.env['LUMO_CLUSTER_ID'] ?? 'default',
+  host: process.env['LUMO_NODE_ADVERTISE_HOST'] ?? hostname(), port: hostPort,
+  capacity: integerEnv('LUMO_NODE_CAPACITY', 1),
+  capabilities: (process.env['LUMO_NODE_CAPABILITIES'] ?? 'subagent').split(',').map(value => value.trim()).filter(Boolean),
+  residency: process.env['LUMO_NODE_RESIDENCY'] ?? '',
+})}\n` : ''}
 ${workerBinding ? `        runtimeReport: ${JSON.stringify({
   governanceUrl: governanceURL, token: controlPlaneToken, realm: platformRealm, nodeId: jobControlNodeId,
   binding: workerBinding,
@@ -324,6 +347,7 @@ ${workerBinding ? `        runtimeReport: ${JSON.stringify({
         nacosGroup: ${JSON.stringify(process.env['LUMO_NACOS_GROUP'] ?? 'DEFAULT_GROUP')}
         defaultHostToken: ${JSON.stringify(process.env['LUMO_SUBAGENT_HOST_TOKEN'] ?? 'dev-subagent-token')}
         realm: ${JSON.stringify(subagentRealm)}
+        ownerUserId: ${JSON.stringify(userID)}
         callbackPort: ${callbackPort}
         callbackHost: ${JSON.stringify(process.env['LUMO_SUBAGENT_CALLBACK_HOST'] ?? '127.0.0.1')}
         callbackBindHost: ${JSON.stringify(callbackBind)}
@@ -376,6 +400,7 @@ const agentTeamsRows = `    - id: lumo-agent-teams
         actingUserId: ${JSON.stringify(userID)}
         nodeId: ${JSON.stringify(process.env['LUMO_NODE_ID'] ?? nodeHolder)}
         workspaceRoot: ${JSON.stringify(resolve(process.env['LUMO_THREAD_WORKSPACE_ROOT'] ?? join(process.env['DSH_HOME'] ?? join(homedir(), '.dsh'), 'workspaces')))}
+${threadExecution ? `        threadExecution: ${JSON.stringify(threadExecution)}\n` : ''}
 `
 
 // 平台插件 patch（官方 patch 语法：insert 数组 = 追加条目）
@@ -413,7 +438,7 @@ ${localMode ? localStorageRows(dshProfile, sqlitePath) + localVaultRows(sqlitePa
       config:
         endPoint: ${JSON.stringify(minioEndpoint)}
         port: ${minioPort}
-        useSSL: false
+        useSSL: ${process.env['LUMO_MINIO_SSL'] === 'true'}
         accessKey: ${JSON.stringify(minioAccessKey)}
         secretKey: ${JSON.stringify(minioSecretKey)}
         bucket: ${JSON.stringify(minioBucket)}
@@ -498,6 +523,8 @@ ${cluster.knowledge.rerank ? `        rerank: ${JSON.stringify(cluster.knowledge
       config:
         connectionString: ${JSON.stringify(pgDSN)}
         holder: ${JSON.stringify(nodeHolder)}
+        spoolDirectory: ${JSON.stringify(process.env['LUMO_SESSION_LOG_SPOOL_DIR'] ?? join(process.env['DSH_HOME'] ?? join(homedir(), '.dsh'), 'session-spool', jobControlNodeId.replace(/[^a-zA-Z0-9_.-]/g, '_')))}
+        maxPendingEvents: ${integerEnv('LUMO_SESSION_LOG_MAX_PENDING', 10000)}
         leaseTtlMs: 30000
         # 热层（§4.2 只读热缓存）：本机 Redis；realm 与身份一致（键身份段）
         hotCache:
@@ -567,7 +594,7 @@ ${roleRows}
 ${skillLocalRows}
 ${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
       name: ${JSON.stringify(userAuthEntry)}
-      inject: [webServer]
+      inject: ${userSessionExecution ? '[webServer, connection, remoteAccess, typertGateway, agents, sessionQuery, sessionPersistence, meteringScope]' : '[webServer]'}
       config:
         host: ${JSON.stringify(process.env['LUMO_AUTH_HOST'] ?? '0.0.0.0')}
         port: ${authPort}
@@ -581,7 +608,7 @@ ${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
         realm: ${JSON.stringify(platformRealm)}
         projectId: ${JSON.stringify(projectID)}
         identityAssertionSecret: ${JSON.stringify(identityAssertionSecret)}
-        timeoutMs: ${integerEnv('LUMO_AUTH_TIMEOUT_MS', 5000)}
+${userSessionExecution ? `        sessionTransport: ${JSON.stringify(userSessionExecution)}\n` : ''}        timeoutMs: ${integerEnv('LUMO_AUTH_TIMEOUT_MS', 5000)}
 `}
     - id: lumo-platform-ui
       name: ${JSON.stringify(platformUiEntry)}
@@ -640,22 +667,6 @@ const dshArgs = [
 // Packaged desktop builds carry their own Node and official dsh CLI. Repository
 // previews keep the pnpm path so HMR and local workspace development remain
 // unchanged.
-const nacosRegistration = !localMode && role === 'node' && process.env['LUMO_NACOS_ADDR']
-  ? startNacosRegistration({
-    baseUrl: process.env['LUMO_NACOS_ADDR'],
-    serviceName: process.env['LUMO_NACOS_SERVICE'] ?? 'lumo-dsh-node',
-    groupName: process.env['LUMO_NACOS_GROUP'] ?? 'DEFAULT_GROUP',
-    nodeId: process.env['LUMO_NODE_ID'] ?? nodeHolder,
-    realm: platformRealm,
-    clusterId: process.env['LUMO_CLUSTER_ID'] ?? 'default',
-    host: process.env['LUMO_NODE_ADVERTISE_HOST'] ?? hostname(),
-    port: hostPort,
-    capacity: integerEnv('LUMO_NODE_CAPACITY', 1),
-    capabilities: (process.env['LUMO_NODE_CAPABILITIES'] ?? 'subagent').split(',').map((value) => value.trim()).filter(Boolean),
-    residency: process.env['LUMO_NODE_RESIDENCY'] ?? '',
-  })
-  : { close: async (): Promise<void> => {} }
-
 // 集群存活自报（联邦注册表的客户端侧，见 cluster-reporter.ts）。与 Nacos 注册是
 // **两件不同的事**：Nacos 报的是「本机这个**节点**在服务发现里还活着」，这里报的是
 // 「本集群还活着」，后者是跨集群放置闸门的输入。多集群拓扑里一个调度实例只能替一个
@@ -708,7 +719,20 @@ const maxRecoveryAttempts = 32
 const forwardSignal = (signal: NodeJS.Signals): void => {
   if (stopping) return
   stopping = true
-  child?.kill(signal)
+  void (async () => {
+    if (!localMode && role === 'node') {
+      const timeoutMS=integerEnv('LUMO_DRAIN_TIMEOUT_MS',150000)
+      try {
+        const response=await fetch(`http://127.0.0.1:${hostPort}/drain`,{
+          method:'POST',headers:{'content-type':'application/json','x-lumo-realm':subagentRealm,'x-lumo-seam-token':hostToken},
+          body:JSON.stringify({timeout_ms:timeoutMS}),signal:AbortSignal.timeout(timeoutMS+5000),
+        })
+        await response.body?.cancel()
+        if (!response.ok) console.warn(`dsh-node: graceful drain incomplete: HTTP ${response.status}`)
+      } catch(error) {console.warn('dsh-node: graceful drain failed',error)}
+    }
+    child?.kill(signal)
+  })()
 }
 process.once('SIGTERM', () => forwardSignal('SIGTERM'))
 process.once('SIGINT', () => forwardSignal('SIGINT'))
@@ -717,7 +741,6 @@ const finish = (code: number): void => {
   // 两个上报循环都要停掉再退出：自报定时器已 unref，单靠它不会拖住进程，但在退出
   // 前取消在途请求可以避免一个必然失败的 PUT 把错误日志留在最后一行。
   void Promise.allSettled([
-    nacosRegistration.close(),
     clusterReporter.close(),
   ]).finally(() => {
     rmSync(patchPath, { force: true })

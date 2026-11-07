@@ -284,7 +284,66 @@ function tablesIn(ddl: string): string[] {
  * 共表对：两份 DDL 各建一遍，比较**实际结构**。
  * 比较的表 = 两份 DDL 都建的表的交集（不手抄清单：手抄的那份会与 DDL 脱节）。
  */
-const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource }> = [
+const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequisites?: DdlSource | DdlSource[] }> = [
+  {
+    label: 'Thread 异步命令（Go collaborator ↔ 迁移 016）',
+    a: {files: [`${MIGRATION_DIR}/016_collaborator_thread_commands.sql`]},
+    b: {files: ['control-plane/collaborator/internal/store/thread_commands.go'], constName: 'threadCommandsDDL'},
+    prerequisites: {files: ['control-plane/collaborator/internal/store/store.go'], constName: 'DDL'},
+  },
+  {
+    label: '动态 Session owner（Go session-control ↔ 迁移 017）',
+    a: {files: [`${MIGRATION_DIR}/017_session_owners.sql`]},
+    b: {files: ['control-plane/session-control/internal/store/session_owners.go'], constName: 'sessionOwnerDDL'},
+  },
+  {
+    label: '异构审核证据（Go governance ↔ 迁移 018）',
+    a: {files: [`${MIGRATION_DIR}/018_governance_run_reviews.sql`]},
+    b: {files: ['control-plane/governance/internal/store/run_review.go'], constName: 'runReviewDDL'},
+    prerequisites: {files: ['control-plane/governance/internal/store/store.go'], constName: 'DDL'},
+  },
+  {
+    label: 'Bot 团队授权（Go governance ↔ 迁移 019）',
+    a: {files: [`${MIGRATION_DIR}/019_bot_team_authorization.sql`]},
+    b: {files: ['control-plane/governance/internal/store/bot_authorization.go'], constName: 'botAuthorizationDDL'},
+    prerequisites: [
+      {files: ['control-plane/flows/internal/store/store.go'], constName: 'DDL'},
+      {files: ['control-plane/flows/internal/store/bot.go'], constName: 'botDDL'},
+    ],
+  },
+  {
+    label: 'Thread 持久轮次（Go collaborator ↔ 迁移 015）',
+    a: { files: [`${MIGRATION_DIR}/015_collaborator_thread_rounds.sql`] },
+    b: { files: ['control-plane/collaborator/internal/store/store.go'], constName: 'DDL' },
+    prerequisites: { files: ['control-plane/collaborator/internal/store/store.go'], constName: 'DDL' },
+  },
+  {
+    label: '委派持久回执（Go governance ↔ 迁移 012）',
+    a: { files: [`${MIGRATION_DIR}/012_governance_delegation_receipts.sql`] },
+    b: { files: ['control-plane/governance/internal/store/delegation_receipts.go'], constName: 'delegationReceiptsDDL' },
+    prerequisites: { files: ['control-plane/governance/internal/store/store.go'], constName: 'DDL' },
+  },
+  {
+    label: 'Bot 持久回执（Go flows ↔ 迁移 011）',
+    a: { files: [`${MIGRATION_DIR}/011_flow_bot_receipts.sql`] },
+    b: { files: ['control-plane/flows/internal/store/bot.go'], constName: 'botDDL' },
+    prerequisites: { files: ['control-plane/flows/internal/store/store.go'], constName: 'DDL' },
+  },
+  {
+    label: 'subagent 生命周期（shared/subagent-receipts.ts ↔ 迁移 010）',
+    a: { files: [`${MIGRATION_DIR}/010_subagent_durable_lifecycle.sql`] },
+    b: { files: ['shared/subagent-receipts.ts'], constName: 'DDL' },
+  },
+  {
+    label: 'subagent 生命周期（dsh-plugins/subagent-host/src/durable-start-guard.ts ↔ 迁移 010）',
+    a: { files: [`${MIGRATION_DIR}/010_subagent_durable_lifecycle.sql`] },
+    b: { files: ['dsh-plugins/subagent-host/src/durable-start-guard.ts'], constName: 'START_GUARD_DDL' },
+  },
+  {
+    label: 'subagent 生命周期（dsh-plugins/subagent-remote/src/placement-recovery.ts ↔ 迁移 010）',
+    a: { files: [`${MIGRATION_DIR}/010_subagent_durable_lifecycle.sql`] },
+    b: { files: ['dsh-plugins/subagent-remote/src/placement-recovery.ts'], constName: 'PLACEMENT_RECOVERY_DDL' },
+  },
   {
     label: 'projects 一族（TS @lumo/project ↔ Go control-plane/projects）',
     a: { files: ['dsh-plugins/project/src/service.ts'], constName: 'PROJECT_DDL' },
@@ -299,6 +358,18 @@ const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource }> = [
     label: 'session-control（Go 服务 ↔ 迁移 006）',
     a: { files: [`${MIGRATION_DIR}/006_session_control_single_owner.sql`] },
     b: { files: ['control-plane/session-control/internal/store/store.go'], constName: 'DDL' },
+  },
+  {
+    label: 'scheduler_queue_fairness（Go 服务 ↔ 迁移 008）',
+    a: { files: [`${MIGRATION_DIR}/008_scheduler_assignment_queue.sql`] },
+    b: { files: ['control-plane/scheduler/internal/store/store.go'], constName: 'DDL' },
+    prerequisites: { files: ['control-plane/scheduler/internal/store/store.go'], constName: 'DDL' },
+  },
+  {
+    label: 'collaborator 写者租约与 WAL（Go 服务 ↔ 迁移 009）',
+    a: { files: [`${MIGRATION_DIR}/009_collaborator_document_runtime.sql`] },
+    b: { files: ['control-plane/collaborator/internal/store/store.go'], constName: 'DDL' },
+    prerequisites: { files: ['control-plane/collaborator/internal/store/store.go'], constName: 'DDL' },
   },
 ]
 
@@ -438,8 +509,8 @@ function targetTables(stmt: string): string[] {
   if (/^DO\s+\$/iu.test(stmt)) {
     return [...new Set([...stmt.matchAll(/\b(?:ALTER\s+TABLE|UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+([A-Za-z_][A-Za-z0-9_]*)/giu)].map((m) => m[1]!))]
   }
-  const alter = /^ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)/iu.exec(stmt)
-  if (alter) return [alter[1]!]
+  const mutation = /^(?:ALTER\s+TABLE|UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+([A-Za-z_][A-Za-z0-9_]*)/iu.exec(stmt)
+  if (mutation) return [mutation[1]!]
   const on = /\bON\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/iu.exec(stmt)
   return on ? [on[1]!] : []
 }
@@ -462,6 +533,7 @@ describe('迁移 ↔ 服务 DDL 收敛（常跑，不依赖 DSN）', () => {
       block, 'ALTER TABLE audit DROP COLUMN IF EXISTS legacy',
     ])
     expect(targetTables(block)).toEqual(['state', 'audit'])
+    expect(targetTables('UPDATE scheduler_tasks t SET assigned_cluster_id=n.cluster_id FROM scheduler_nodes n')).toEqual(['scheduler_tasks'])
   })
 
   /**
@@ -559,12 +631,18 @@ async function shapeOf(client: PgClient, table: string): Promise<Shape> {
   return { columns: columns.rows, unique: unique.rows, foreignKeys: foreignKeys.rows }
 }
 
-async function shapeUnderDdl(ddl: string, tables: string[], schema: string): Promise<Record<string, Shape>> {
+async function shapeUnderDdl(ddl: string, tables: string[], schema: string, prerequisites?: string): Promise<Record<string, Shape>> {
   const client = new pg.Client({ connectionString: await schemaDsn(DSN!, schema) })
   await client.connect()
   try {
     // 上一次运行留下的表要先清掉：schemaDsn 按设计不 DROP schema。
     await client.query(`DROP TABLE IF EXISTS ${tables.map((t) => `"${t}"`).join(', ')} CASCADE`)
+    if (prerequisites) {
+      // Foreign-key/ALTER prerequisites are created first, then the tables being
+      // compared are removed. They must actually be recreated by the tested DDL.
+      await client.query(prerequisites)
+      await client.query(`DROP TABLE IF EXISTS ${tables.map((t) => `"${t}"`).join(', ')} CASCADE`)
+    }
     await client.query(ddl)
     const out: Record<string, Shape> = {}
     for (const table of tables) out[table] = await shapeOf(client, table)
@@ -578,8 +656,9 @@ describe(`共表结构一致（需 LUMO_TEST_PG_DSN，当前${dsnState}）`, () 
   for (const [index, check] of SHAPE_CHECKS.entries()) {
     live(`${check.label}：两份 DDL 建出的结构逐项相同`, async () => {
       const tables = await sharedTablesOf(check)
-      const a = await shapeUnderDdl(await ddlOf(check.a), tables, `ddlshape_a_${index}`)
-      const b = await shapeUnderDdl(await ddlOf(check.b), tables, `ddlshape_b_${index}`)
+      const prerequisites = check.prerequisites ? (await Promise.all((Array.isArray(check.prerequisites) ? check.prerequisites : [check.prerequisites]).map(ddlOf))).join(';\n') : undefined
+      const a = await shapeUnderDdl(await ddlOf(check.a), tables, `ddlshape_a_${index}`, prerequisites)
+      const b = await shapeUnderDdl(await ddlOf(check.b), tables, `ddlshape_b_${index}`, prerequisites)
       for (const table of tables) {
         expect(
           a[table],

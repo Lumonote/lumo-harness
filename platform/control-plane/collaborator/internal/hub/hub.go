@@ -6,6 +6,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -18,14 +19,17 @@ import (
 type Subscriber struct {
 	UserID string
 	// Send 向该订阅者推送增量；实现须非阻塞（满则丢弃并断开，防慢消费者拖垮广播）。
-	Send func(domain.Update) error
+	Send  func(domain.Update) error
+	Close func()
 }
 
 // Doc 一篇活跃文档的内存态。
 type Doc struct {
 	mu sync.RWMutex
 
-	meta domain.Document
+	meta   domain.Document
+	lease  store.DocumentLease
+	fenced bool
 	// state 最近落库的 CRDT 状态（y-crdt 合并内核的输入；本服务不解释其语义）
 	state    []byte
 	stateSeq int64
@@ -33,7 +37,7 @@ type Doc struct {
 	dirty    bool
 	lastUse  time.Time
 
-	subs map[string]*Subscriber
+	subs map[*Subscriber]struct{}
 }
 
 // Hub 本实例持有的文档集合。
@@ -45,6 +49,8 @@ type Hub struct {
 
 	// draining 优雅排空标记：置位后拒绝接管新文档（缩容前必须先迁移归属）
 	draining bool
+	holder   string
+	isOwner  func(domain.DocumentID) bool
 }
 
 func New(st *store.Store, limits domain.Limits) *Hub {
@@ -55,11 +61,28 @@ func New(st *store.Store, limits domain.Limits) *Hub {
 	}
 }
 
-// Open 惰性加载文档到内存：PG 状态快照 + Redis WAL 尾部重建（RTO < 10s 的路径）。
+// ConfigureOwnership is called before serving; holder identifies this process,
+// not a reusable pod name. All actual writes still validate the durable lease.
+func (h *Hub) ConfigureOwnership(holder string, owner func(domain.DocumentID) bool) {
+	h.holder, h.isOwner = holder, owner
+}
+
+func (h *Hub) mine(id domain.DocumentID) bool { return h.isOwner == nil || h.isOwner(id) }
+
+// Open 取得写者租约后加载 PG 快照，并校验 PG WAL 尾部的连续性。
 func (h *Hub) Open(ctx context.Context, meta domain.Document) (*Doc, error) {
+	if !h.mine(meta.ID) {
+		return nil, store.ErrDocumentFenced
+	}
 	h.mu.RLock()
 	if d, ok := h.docs[meta.ID]; ok {
 		h.mu.RUnlock()
+		d.mu.RLock()
+		fenced := d.fenced
+		d.mu.RUnlock()
+		if fenced {
+			return nil, store.ErrDocumentFenced
+		}
 		d.touch()
 		return d, nil
 	}
@@ -79,28 +102,33 @@ func (h *Hub) Open(ctx context.Context, meta domain.Document) (*Doc, error) {
 	if err := h.store.EnsureDocument(ctx, meta); err != nil {
 		return nil, err
 	}
+	lease, err := h.store.AcquireDocumentLease(ctx, meta.ID, h.holder)
+	if err != nil {
+		return nil, err
+	}
 
 	state, seq, err := h.store.LoadState(ctx, meta.ID)
 	if err != nil {
 		return nil, err
 	}
 	// WAL 尾部：快照之后的增量（崩溃恢复的补差）
-	tail, err := h.store.ReadWALFrom(ctx, meta.ID, seq)
+	walSeq, err := h.store.DocumentHead(ctx, meta.ID)
 	if err != nil {
 		return nil, err
 	}
-	walSeq := maxWALSeq(seq, tail)
-	if err := h.store.EnsureWALSeq(ctx, meta.ID, walSeq); err != nil {
+	if _, err := h.store.ReadDocumentWAL(ctx, meta.ID, seq, walSeq); err != nil {
 		return nil, err
 	}
 
 	d := &Doc{
 		meta:     meta,
+		lease:    lease,
 		state:    state,
 		stateSeq: seq,
 		walSeq:   walSeq,
+		dirty:    walSeq > seq,
 		lastUse:  time.Now(),
-		subs:     make(map[string]*Subscriber),
+		subs:     make(map[*Subscriber]struct{}),
 	}
 
 	h.mu.Lock()
@@ -108,6 +136,9 @@ func (h *Hub) Open(ctx context.Context, meta domain.Document) (*Doc, error) {
 	// 双检：并发 Open 时复用先到者
 	if existing, ok := h.docs[meta.ID]; ok {
 		return existing, nil
+	}
+	if h.draining || len(h.docs) >= h.limits.MaxDocsPerInstance {
+		return nil, &domain.ErrCapacity{Detail: "instance is draining or at document capacity"}
 	}
 	h.docs[meta.ID] = d
 	return d, nil
@@ -129,17 +160,20 @@ func (h *Hub) Subscribe(id domain.DocumentID, sub *Subscriber) (func(), error) {
 			Detail: fmt.Sprintf("文档并发编辑者已达上限 %d", h.limits.MaxEditorsPerDoc),
 		}
 	}
-	d.subs[sub.UserID] = sub
+	if d.fenced {
+		return nil, store.ErrDocumentFenced
+	}
+	d.subs[sub] = struct{}{}
 	d.lastUse = time.Now()
 
 	return func() {
 		d.mu.Lock()
-		delete(d.subs, sub.UserID)
+		delete(d.subs, sub)
 		d.mu.Unlock()
 	}, nil
 }
 
-// Apply 接收一条 CRDT 增量：**先落 WAL 再广播**（RPO 0 的实现点）。
+// Apply 接收一条 CRDT 增量：先同步提交 PG WAL，再广播与确认。
 //
 // 返回的 seq 是给客户端的 ack 依据——本函数返回即代表已持久化。
 func (h *Hub) Apply(ctx context.Context, id domain.DocumentID, actor string, payload []byte) (int64, error) {
@@ -164,7 +198,13 @@ func (h *Hub) Apply(ctx context.Context, id domain.DocumentID, actor string, pay
 	}
 
 	// 1) WAL 先行：失败即拒绝，绝不向客户端确认
-	seq, err := h.store.AppendWAL(ctx, u)
+	d.mu.RLock()
+	lease, fenced := d.lease, d.fenced
+	d.mu.RUnlock()
+	if fenced || !h.mine(id) {
+		return 0, store.ErrDocumentFenced
+	}
+	seq, err := h.store.AppendDocumentWAL(ctx, lease, u)
 	if err != nil {
 		return 0, err
 	}
@@ -172,20 +212,23 @@ func (h *Hub) Apply(ctx context.Context, id domain.DocumentID, actor string, pay
 
 	// 2) 更新内存态并广播给其它订阅者
 	d.mu.Lock()
-	d.walSeq = seq
+	if seq > d.walSeq {
+		d.walSeq = seq
+	}
 	d.dirty = true
 	d.lastUse = time.Now()
 	targets := make([]*Subscriber, 0, len(d.subs))
-	for uid, s := range d.subs {
-		if uid != actor {
+	for s := range d.subs {
+		if s.UserID != actor {
 			targets = append(targets, s)
 		}
 	}
 	d.mu.Unlock()
 
 	for _, s := range targets {
-		// 慢消费者不阻塞广播：Send 实现须非阻塞
-		_ = s.Send(u)
+		if err := s.Send(u); err != nil && s.Close != nil {
+			s.Close()
+		}
 	}
 	return seq, nil
 }
@@ -212,12 +255,17 @@ func (h *Hub) Snapshot(ctx context.Context, merge func(state []byte, updates []d
 
 		d.mu.RLock()
 		dirty, state, stateSeq, seq := d.dirty, d.state, d.stateSeq, d.walSeq
+		lease, fenced := d.lease, d.fenced
 		d.mu.RUnlock()
+		if fenced || !h.mine(id) {
+			h.fenceDoc(id, d)
+			continue
+		}
 		if !dirty {
 			continue
 		}
 
-		updates, err := h.store.ReadWALFrom(ctx, id, stateSeq)
+		updates, err := h.store.ReadDocumentWAL(ctx, id, stateSeq, seq)
 		if err != nil {
 			return err
 		}
@@ -225,10 +273,11 @@ func (h *Hub) Snapshot(ctx context.Context, merge func(state []byte, updates []d
 		if err != nil {
 			return fmt.Errorf("collaborator: 合并 CRDT 状态失败 (%s): %w", id, err)
 		}
-		if err := h.store.SaveState(ctx, id, merged, seq); err != nil {
-			return err
-		}
-		if err := h.store.TrimWAL(ctx, id, seq); err != nil {
+		if err := h.store.SaveDocumentSnapshot(ctx, lease, merged, stateSeq, seq); err != nil {
+			if errors.Is(err, store.ErrDocumentFenced) || errors.Is(err, store.ErrSnapshotConflict) {
+				h.fenceDoc(id, d)
+				continue
+			}
 			return err
 		}
 
@@ -244,20 +293,47 @@ func (h *Hub) Snapshot(ctx context.Context, merge func(state []byte, updates []d
 	return nil
 }
 
-func maxWALSeq(base int64, updates []domain.Update) int64 {
-	max := base
-	for _, update := range updates {
-		if update.Seq > max {
-			max = update.Seq
+func (h *Hub) fenceDoc(id domain.DocumentID, d *Doc) {
+	d.mu.Lock()
+	d.fenced = true
+	subs := make([]*Subscriber, 0, len(d.subs))
+	for sub := range d.subs {
+		subs = append(subs, sub)
+	}
+	d.mu.Unlock()
+	for _, sub := range subs {
+		if sub.Close != nil {
+			sub.Close()
 		}
 	}
-	// Legacy direct records did not persist seq. Their tail is still ordered,
-	// so retain the old length-based estimate as a conservative compatibility
-	// fallback while new records use their explicit global sequence.
-	if candidate := base + int64(len(updates)); candidate > max {
-		max = candidate
+	h.mu.Lock()
+	if h.docs[id] == d {
+		delete(h.docs, id)
 	}
-	return max
+	h.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = h.store.ReleaseDocumentLease(ctx, d.lease)
+}
+
+// ReconcileOwnership disconnects old subscribers and stops renewal when a ring
+// changes or discovery becomes stale. Existing leases never renew after expiry.
+func (h *Hub) ReconcileOwnership(ctx context.Context) {
+	h.mu.RLock()
+	docs := make(map[domain.DocumentID]*Doc, len(h.docs))
+	for id, d := range h.docs {
+		docs[id] = d
+	}
+	h.mu.RUnlock()
+	for id, d := range docs {
+		if !h.mine(id) {
+			h.fenceDoc(id, d)
+			continue
+		}
+		if err := h.store.RenewDocumentLease(ctx, d.lease); err != nil {
+			h.fenceDoc(id, d)
+		}
+	}
 }
 
 // EvictIdle 闲置回收：无订阅者且超时的文档落最终快照后卸载出内存。

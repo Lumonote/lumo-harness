@@ -22,10 +22,10 @@ func (s *Store) TaskAccess(ctx context.Context, realm, taskID, userID string) (s
 	var exists bool
 	err := s.pool.QueryRow(ctx, `
 WITH RECURSIVE ancestors AS (
-  SELECT id,parent_task_id,requester_user_id,assignee_user_id,ARRAY[id]::text[] AS visited
+  SELECT id,intent_contract->>'parent_task_id' AS parent_task_id,requester_user_id,assignee_user_id,ARRAY[id]::text[] AS visited
   FROM governance_delegation_tasks WHERE realm=$1 AND id=$2
   UNION ALL
-  SELECT parent.id,parent.parent_task_id,parent.requester_user_id,parent.assignee_user_id,a.visited || parent.id
+  SELECT parent.id,parent.intent_contract->>'parent_task_id',parent.requester_user_id,parent.assignee_user_id,a.visited || parent.id
   FROM governance_delegation_tasks parent
   JOIN ancestors a ON parent.realm=$1 AND parent.id=a.parent_task_id
   WHERE NOT parent.id=ANY(a.visited)
@@ -185,21 +185,44 @@ func (s *Store) ReserveTaskArtifact(ctx context.Context, artifact domain.TaskArt
 	if artifact.ID == "" || artifact.TaskID == "" || artifact.RunID == "" || artifact.CreatedBy == "" || artifact.Name == "" || len([]rune(artifact.Name)) > 240 || len(artifact.ContentType) > 160 {
 		return artifact, fmt.Errorf("%w: invalid task artifact metadata", ErrBadRequest)
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return artifact, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var taskID, businessState string
+	err = tx.QueryRow(ctx, `SELECT id,COALESCE(business_state,'') FROM governance_delegation_tasks WHERE realm=$1 AND id=$2 FOR UPDATE`, artifact.Realm, artifact.TaskID).Scan(&taskID, &businessState)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return artifact, ErrNotFound
+	}
+	if err != nil {
+		return artifact, err
+	}
+	if businessState == domain.BusinessDone || businessState == domain.BusinessRejected || businessState == domain.BusinessArchived {
+		return artifact, fmt.Errorf("%w: a closed task cannot acquire additional artifacts", ErrConflict)
+	}
 	var found bool
-	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM governance_task_runs WHERE realm=$1 AND task_id=$2 AND id=$3)`, artifact.Realm, artifact.TaskID, artifact.RunID).Scan(&found)
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM governance_task_runs WHERE realm=$1 AND task_id=$2 AND id=$3)`, artifact.Realm, artifact.TaskID, artifact.RunID).Scan(&found)
 	if err != nil {
 		return artifact, err
 	}
 	if !found {
 		return artifact, ErrNotFound
 	}
+	var closed bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM governance_run_execution_snapshots WHERE realm=$1 AND run_id=$2 AND snapshot->>'output_profile'=$3)`, artifact.Realm, artifact.RunID, domain.ClosedTextOutputProfile).Scan(&closed); err != nil {
+		return artifact, err
+	}
+	if closed {
+		return artifact, fmt.Errorf("%w: the closed text output set cannot acquire uploaded artifacts", ErrConflict)
+	}
 	artifact.Status = "pending"
-	err = scanTaskArtifact(s.pool.QueryRow(ctx, `INSERT INTO governance_task_artifacts(id,realm,task_id,run_id,name,content_type,created_by,status)
+	err = scanTaskArtifact(tx.QueryRow(ctx, `INSERT INTO governance_task_artifacts(id,realm,task_id,run_id,name,content_type,created_by,status)
 VALUES($1,$2,$3,$4,$5,$6,$7,'pending') RETURNING id,realm,task_id,run_id,name,content_type,size_bytes,sha256,storage_key,created_by,status,created_at,ready_at`, artifact.ID, artifact.Realm, artifact.TaskID, artifact.RunID, artifact.Name, artifact.ContentType, artifact.CreatedBy), &artifact)
 	if err != nil {
 		return artifact, err
 	}
-	return artifact, nil
+	return artifact, tx.Commit(ctx)
 }
 
 func (s *Store) CompleteTaskArtifact(ctx context.Context, realm, taskID, runID, artifactID, storageKey, sha256 string, size int64) (domain.TaskArtifact, error) {

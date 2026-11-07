@@ -1,18 +1,25 @@
 {{- if .Values.dshNode.enabled }}
 apiVersion: apps/v1
-kind: Deployment
+kind: {{ .Values.dshNode.workloadKind }}
 metadata:
   name: {{ include "lumo-platform.name" . }}-dsh-node
   labels:
     lumo.dev/service: dsh-node
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
 spec:
+  {{- if eq .Values.dshNode.workloadKind "StatefulSet" }}
+  serviceName: {{ include "lumo-platform.name" . }}-dsh-node
+  {{- end }}
+  {{- if not .Values.dshNode.hpa.enabled }}
   replicas: {{ .Values.dshNode.replicas }}
+  {{- end }}
   selector:
-    matchLabels: { lumo.dev/service: dsh-node }
+    matchLabels: { lumo.dev/service: dsh-node, app.kubernetes.io/instance: {{ .Release.Name | quote }} }
   template:
     metadata:
       labels:
         lumo.dev/service: dsh-node
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
         {{- if .Values.serviceMesh.istio.enabled }}
         lumo.dev/mesh-mtls: "enabled"
         {{- if .Values.serviceMesh.istio.revision }}
@@ -24,7 +31,8 @@ spec:
         sidecar.istio.io/inject: "true"
       {{- end }}
     spec:
-      terminationGracePeriodSeconds: 30
+      {{- include "lumo-platform.topology" (dict "root" . "service" "dsh-node") | nindent 6 }}
+      terminationGracePeriodSeconds: {{ .Values.dshNode.terminationGracePeriodSeconds }}
       {{- if .Values.provisioner.enabled }}
       initContainers:
         - name: provisioner-bootstrap
@@ -65,7 +73,12 @@ spec:
             - { name: seam, containerPort: {{ .Values.dshNode.seamPort }} }
           envFrom:
             - configMapRef: { name: {{ include "lumo-platform.name" . }}-config }
+            {{- if .Values.dshNode.harness.credentialsSecret }}
+            - secretRef: { name: {{ .Values.dshNode.harness.credentialsSecret | quote }}, optional: false }
+            {{- end }}
           env:
+            - name: DSH_HOME
+              value: /root/.dsh
             - name: LUMO_SEAM_MODE
               value: host
             - name: LUMO_SEAM_BIND
@@ -81,6 +94,10 @@ spec:
             {{- end }}
             - name: LUMO_NODE_ID
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            {{- if .Values.dshNode.threadExecution }}
+            - name: LUMO_THREAD_EXECUTION
+              value: {{ .Values.dshNode.threadExecution | toJson | quote }}
+            {{- end }}
             - name: LUMO_NODE_ADVERTISE_HOST
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
             - name: LUMO_NODE_CAPACITY
@@ -129,8 +146,22 @@ spec:
               value: {{ .Values.dshNode.port | quote }}
             - name: LUMO_SUBAGENT_CALLBACK_ALLOWED_ORIGINS
               value: {{ printf "http://%s-dsh-web:%v" (include "lumo-platform.name" .) .Values.dshWeb.callbackPort | quote }}
+            {{- if .Values.objectStore.enabled }}
+            - name: LUMO_MINIO_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ required "objectStore.credentialsSecret is required" .Values.objectStore.credentialsSecret | quote }}, key: accessKey, optional: false } }
+            - name: LUMO_MINIO_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: {{ .Values.objectStore.credentialsSecret | quote }}, key: secretKey, optional: false } }
+            {{- end }}
             - name: LUMO_PG_DSN
+              {{- if .Values.production.enabled }}
+              valueFrom: { secretKeyRef: { name: {{ .Values.production.databaseSecret | quote }}, key: LUMO_PG_DSN, optional: false } }
+              {{- else }}
               value: {{ .Values.postgres.dsn | quote }}
+              {{- end }}
+            {{- if .Values.dshNode.spool.persistence.enabled }}
+            - name: LUMO_SESSION_LOG_SPOOL_DIR
+              value: /var/lib/lumo/session-spool
+            {{- end }}
             - name: LUMO_REDIS_URL
               value: {{ printf "redis://%s" .Values.redis.address | quote }}
             {{- if .Values.services.collaborator.enabled }}
@@ -161,8 +192,19 @@ spec:
             - name: LUMO_SKILL_SNAPSHOT_FILE
               value: {{ printf "%s/skill-snapshot.json" .Values.provisioner.installDir | quote }}
             {{- end }}
-          {{- if or .Values.provisioner.enabled (and .Values.dshNode.governedWorker.enabled .Values.dshNode.governedWorker.promptRef) }}
           volumeMounts:
+            - name: harness-home
+              mountPath: /root/.dsh
+            {{- if .Values.dshNode.harness.patchConfigMap }}
+            - name: harness-config
+              mountPath: /root/.dsh/cordis.patch.yml
+              subPath: cordis.patch.yml
+              readOnly: true
+            {{- end }}
+          {{- if .Values.dshNode.spool.persistence.enabled }}
+            - name: session-spool
+              mountPath: /var/lib/lumo/session-spool
+          {{- end }}
           {{- if .Values.provisioner.enabled }}
             - name: artifacts
               mountPath: {{ .Values.provisioner.installDir | quote }}
@@ -174,9 +216,25 @@ spec:
               subPath: system-prompt.txt
               readOnly: true
           {{- end }}
-          {{- end }}
-          readinessProbe: { tcpSocket: { port: subagent }, initialDelaySeconds: 8, periodSeconds: 10 }
-          livenessProbe: { tcpSocket: { port: subagent }, initialDelaySeconds: 20, periodSeconds: 20 }
+          readinessProbe: { httpGet: { path: /readyz, port: subagent }, initialDelaySeconds: 8, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /healthz, port: subagent }, initialDelaySeconds: 20, periodSeconds: 20 }
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - node
+                  - --input-type=module
+                  - -e
+                  - |
+                    const timeout = {{ int .Values.dshNode.drainTimeoutSeconds }} * 1000;
+                    const response = await fetch('http://127.0.0.1:{{ .Values.dshNode.port }}/drain', {
+                      method: 'POST', signal: AbortSignal.timeout(timeout + 5000),
+                      headers: { 'content-type': 'application/json', 'X-Lumo-Realm': process.env.LUMO_REALM,
+                        'X-Lumo-Seam-Token': process.env.LUMO_SUBAGENT_HOST_TOKEN },
+                      body: JSON.stringify({ timeout_ms: timeout }),
+                    });
+                    if (!response.ok) throw new Error('node drain failed: ' + response.status);
+
           resources:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { cpu: 2, memory: 2Gi }
@@ -226,8 +284,20 @@ spec:
             limits: { cpu: 250m, memory: 256Mi }
       {{- end }}
       {{- end }}
-      {{- if or .Values.provisioner.enabled (and .Values.dshNode.governedWorker.enabled .Values.dshNode.governedWorker.promptRef) }}
+      {{- if or (not .Values.dshNode.harness.persistence.enabled) .Values.dshNode.harness.patchConfigMap .Values.provisioner.enabled (and .Values.dshNode.governedWorker.enabled .Values.dshNode.governedWorker.promptRef) }}
       volumes:
+      {{- if not .Values.dshNode.harness.persistence.enabled }}
+        - name: harness-home
+          emptyDir: {}
+      {{- end }}
+      {{- if .Values.dshNode.harness.patchConfigMap }}
+        - name: harness-config
+          configMap:
+            name: {{ .Values.dshNode.harness.patchConfigMap | quote }}
+            items:
+              - key: {{ required "dshNode.harness.patchKey is required" .Values.dshNode.harness.patchKey | quote }}
+                path: cordis.patch.yml
+      {{- end }}
       {{- if .Values.provisioner.enabled }}
         - name: artifacts
           emptyDir: {}
@@ -241,6 +311,29 @@ spec:
                 path: system-prompt.txt
       {{- end }}
       {{- end }}
+  {{- if or .Values.dshNode.spool.persistence.enabled .Values.dshNode.harness.persistence.enabled }}
+  volumeClaimTemplates:
+  {{- if .Values.dshNode.spool.persistence.enabled }}
+    - metadata: { name: session-spool }
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.dshNode.spool.persistence.storageClass }}
+        storageClassName: {{ .Values.dshNode.spool.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests: { storage: {{ .Values.dshNode.spool.persistence.size }} }
+  {{- end }}
+  {{- if .Values.dshNode.harness.persistence.enabled }}
+    - metadata: { name: harness-home }
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.dshNode.harness.persistence.storageClass }}
+        storageClassName: {{ .Values.dshNode.harness.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests: { storage: {{ .Values.dshNode.harness.persistence.size }} }
+  {{- end }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -248,9 +341,10 @@ metadata:
   name: {{ include "lumo-platform.name" . }}-dsh-node
   labels:
     lumo.dev/service: dsh-node
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
 spec:
   clusterIP: None
-  selector: { lumo.dev/service: dsh-node }
+  selector: { lumo.dev/service: dsh-node, app.kubernetes.io/instance: {{ .Release.Name | quote }} }
   ports:
     - { name: subagent, port: {{ .Values.dshNode.port }}, targetPort: subagent }
     - { name: seam, port: {{ .Values.dshNode.seamPort }}, targetPort: seam }
@@ -263,7 +357,7 @@ metadata:
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
-    kind: Deployment
+    kind: {{ .Values.dshNode.workloadKind }}
     name: {{ include "lumo-platform.name" . }}-dsh-node
   minReplicas: {{ .Values.dshNode.hpa.minReplicas }}
   maxReplicas: {{ .Values.dshNode.hpa.maxReplicas }}
@@ -271,31 +365,57 @@ spec:
     scaleUp: { stabilizationWindowSeconds: 0 }
     scaleDown: { stabilizationWindowSeconds: 300 }
   metrics:
+    {{- if gt (int .Values.dshNode.hpa.targetCPUUtilizationPercentage) 0 }}
     - type: Resource
       resource:
         name: cpu
         target: { type: Utilization, averageUtilization: {{ .Values.dshNode.hpa.targetCPUUtilizationPercentage }} }
+    {{- end }}
+    {{- range .Values.dshNode.hpa.externalMetrics }}
+    - type: External
+      external:
+        metric:
+          name: {{ required "external HPA metric name is required" .name | quote }}
+          selector:
+            matchLabels:
+              release: {{ $.Release.Name | quote }}
+              cluster_id: {{ $.Values.dshNode.clusterId | quote }}
+              {{- with .matchLabels }}
+              {{- toYaml . | nindent 14 }}
+              {{- end }}
+        target:
+          type: AverageValue
+          averageValue: {{ required "external HPA metric averageValue is required" .averageValue | quote }}
+    {{- end }}
 {{- end }}
 {{- end }}
 {{- if .Values.dshWeb.enabled }}
+{{- if and .Values.dshWeb.userSessionExecution (ne (int .Values.dshWeb.replicas) 1) }}
+{{- fail "dshWeb.userSessionExecution requires exactly one Web replica; node-local Sessions have no cross-replica execution routing" }}
+{{- end }}
 {{- if and (not .Values.dshWeb.identityAssertion.secretName) (not .Values.dshWeb.identityAssertion.allowStaticIdentity) }}
 {{- fail "dshWeb.identityAssertion.secretName is required when dshWeb is enabled; set allowStaticIdentity=true only for development" }}
 {{- end }}
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: {{ .Values.dshWeb.workloadKind }}
 metadata:
   name: {{ include "lumo-platform.name" . }}-dsh-web
   labels:
     lumo.dev/service: dsh-web
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
 spec:
+  {{- if eq .Values.dshWeb.workloadKind "StatefulSet" }}
+  serviceName: {{ include "lumo-platform.name" . }}-dsh-web-headless
+  {{- end }}
   replicas: {{ .Values.dshWeb.replicas }}
   selector:
-    matchLabels: { lumo.dev/service: dsh-web }
+    matchLabels: { lumo.dev/service: dsh-web, app.kubernetes.io/instance: {{ .Release.Name | quote }} }
   template:
     metadata:
       labels:
         lumo.dev/service: dsh-web
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
         {{- if .Values.serviceMesh.istio.enabled }}
         lumo.dev/mesh-mtls: "enabled"
         {{- if .Values.serviceMesh.istio.revision }}
@@ -307,17 +427,23 @@ spec:
         sidecar.istio.io/inject: "true"
       {{- end }}
     spec:
-      terminationGracePeriodSeconds: 30
+      {{- include "lumo-platform.topology" (dict "root" . "service" "dsh-web") | nindent 6 }}
+      terminationGracePeriodSeconds: {{ .Values.dshWeb.terminationGracePeriodSeconds }}
       containers:
         - name: dsh-web
           image: {{ .Values.dshWeb.image | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           envFrom:
             - configMapRef: { name: {{ include "lumo-platform.name" . }}-config }
+            {{- if .Values.dshWeb.harness.credentialsSecret }}
+            - secretRef: { name: {{ .Values.dshWeb.harness.credentialsSecret | quote }}, optional: false }
+            {{- end }}
           ports:
             - { name: web, containerPort: {{ .Values.dshWeb.port }} }
             - { name: subagent-callback, containerPort: {{ .Values.dshWeb.callbackPort }} }
           env:
+            - name: DSH_HOME
+              value: /root/.dsh
             - name: LUMO_SEAM_MODE
               value: host
             - name: LUMO_DSH_PROFILE
@@ -334,6 +460,14 @@ spec:
               value: {{ .Values.dshWeb.secureCookie | quote }}
             - name: LUMO_AUTH_PORT
               value: {{ .Values.dshWeb.port | quote }}
+            {{- if .Values.dshWeb.userSessionExecution }}
+            - name: LUMO_USER_SESSION_EXECUTION
+              value: {{ .Values.dshWeb.userSessionExecution | toJson | quote }}
+            {{- end }}
+            {{- if .Values.dshWeb.threadExecution }}
+            - name: LUMO_THREAD_EXECUTION
+              value: {{ .Values.dshWeb.threadExecution | toJson | quote }}
+            {{- end }}
             - name: LUMO_WEB_PORT
               value: {{ .Values.dshWeb.port | quote }}
             - name: LUMO_NODE_ID
@@ -358,8 +492,22 @@ spec:
             - name: LUMO_IDENTITY_ASSERTION_SECRET
               valueFrom: { secretKeyRef: { name: {{ .Values.dshWeb.identityAssertion.secretName }}, key: {{ .Values.dshWeb.identityAssertion.secretKey }}, optional: false } }
             {{- end }}
+            {{- if .Values.objectStore.enabled }}
+            - name: LUMO_MINIO_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ required "objectStore.credentialsSecret is required" .Values.objectStore.credentialsSecret | quote }}, key: accessKey, optional: false } }
+            - name: LUMO_MINIO_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: {{ .Values.objectStore.credentialsSecret | quote }}, key: secretKey, optional: false } }
+            {{- end }}
             - name: LUMO_PG_DSN
+              {{- if .Values.production.enabled }}
+              valueFrom: { secretKeyRef: { name: {{ .Values.production.databaseSecret | quote }}, key: LUMO_PG_DSN, optional: false } }
+              {{- else }}
               value: {{ .Values.postgres.dsn | quote }}
+              {{- end }}
+            {{- if .Values.dshWeb.spool.persistence.enabled }}
+            - name: LUMO_SESSION_LOG_SPOOL_DIR
+              value: /var/lib/lumo/session-spool
+            {{- end }}
             - name: LUMO_REDIS_URL
               value: {{ printf "redis://%s" .Values.redis.address | quote }}
             - name: LUMO_SCHEDULER_URL
@@ -405,11 +553,62 @@ spec:
               value: {{ .Values.dshWeb.callbackPort | quote }}
             - name: LUMO_SUBAGENT_HOST_TOKEN
               valueFrom: { secretKeyRef: { name: {{ .Values.dshNode.hostTokenSecret }}, key: {{ .Values.dshNode.hostTokenKey }}, optional: false } }
+          volumeMounts:
+            - name: harness-home
+              mountPath: /root/.dsh
+            {{- if .Values.dshWeb.harness.patchConfigMap }}
+            - name: harness-config
+              mountPath: /root/.dsh/cordis.patch.yml
+              subPath: cordis.patch.yml
+              readOnly: true
+            {{- end }}
+          {{- if .Values.dshWeb.spool.persistence.enabled }}
+            - name: session-spool
+              mountPath: /var/lib/lumo/session-spool
+          {{- end }}
           readinessProbe: { httpGet: { path: /, port: web }, initialDelaySeconds: 10, periodSeconds: 10 }
           livenessProbe: { httpGet: { path: /, port: web }, initialDelaySeconds: 30, periodSeconds: 20 }
           resources:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { cpu: 2, memory: 2Gi }
+      {{- if or (not .Values.dshWeb.harness.persistence.enabled) .Values.dshWeb.harness.patchConfigMap }}
+      volumes:
+      {{- if not .Values.dshWeb.harness.persistence.enabled }}
+        - name: harness-home
+          emptyDir: {}
+      {{- end }}
+      {{- if .Values.dshWeb.harness.patchConfigMap }}
+        - name: harness-config
+          configMap:
+            name: {{ .Values.dshWeb.harness.patchConfigMap | quote }}
+            items:
+              - key: {{ required "dshWeb.harness.patchKey is required" .Values.dshWeb.harness.patchKey | quote }}
+                path: cordis.patch.yml
+      {{- end }}
+      {{- end }}
+  {{- if or .Values.dshWeb.spool.persistence.enabled .Values.dshWeb.harness.persistence.enabled }}
+  volumeClaimTemplates:
+  {{- if .Values.dshWeb.spool.persistence.enabled }}
+    - metadata: { name: session-spool }
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.dshWeb.spool.persistence.storageClass }}
+        storageClassName: {{ .Values.dshWeb.spool.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests: { storage: {{ .Values.dshWeb.spool.persistence.size }} }
+  {{- end }}
+  {{- if .Values.dshWeb.harness.persistence.enabled }}
+    - metadata: { name: harness-home }
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.dshWeb.harness.persistence.storageClass }}
+        storageClassName: {{ .Values.dshWeb.harness.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests: { storage: {{ .Values.dshWeb.harness.persistence.size }} }
+  {{- end }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -417,10 +616,24 @@ metadata:
   name: {{ include "lumo-platform.name" . }}-dsh-web
   labels:
     lumo.dev/service: dsh-web
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
 spec:
   type: {{ .Values.service.type }}
-  selector: { lumo.dev/service: dsh-web }
+  selector: { lumo.dev/service: dsh-web, app.kubernetes.io/instance: {{ .Release.Name | quote }} }
   ports:
     - { name: web, port: {{ .Values.dshWeb.port }}, targetPort: web }
     - { name: subagent-callback, port: {{ .Values.dshWeb.callbackPort }}, targetPort: subagent-callback }
+{{- end }}
+
+{{- if and .Values.dshWeb.enabled (eq .Values.dshWeb.workloadKind "StatefulSet") }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lumo-platform.name" . }}-dsh-web-headless
+spec:
+  clusterIP: None
+  selector: { lumo.dev/service: dsh-web, app.kubernetes.io/instance: {{ .Release.Name | quote }} }
+  ports:
+    - { name: web, port: {{ .Values.dshWeb.port }}, targetPort: web }
 {{- end }}

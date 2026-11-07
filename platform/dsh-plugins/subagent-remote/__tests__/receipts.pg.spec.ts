@@ -36,6 +36,43 @@ describe.skipIf(!dsn)('PostgreSQL callback receipts', () => {
     expect(await store.get('other-realm', 'child')).toBeUndefined()
   })
 
+  it('preserves immutable parent, owner and scheduler identity across restart', async () => {
+    const registration = { secretHash: 'bound-hash', attempt: 3, nodeId: 'node-a',
+      parentSessionId: 'parent', ownerUserId: 'owner' }
+    const result = { ...body, runId: 'bound-child' }
+    await store.register('realm', 'bound-child', registration)
+    expect(await new PgSubagentReceipts(pool).get('realm', 'bound-child')).toEqual(registration)
+    await store.put('realm', { ...registration, body: result })
+    expect(await new PgSubagentReceipts(pool).get('realm', 'bound-child')).toEqual({ ...registration, body: result })
+    for (const patch of [{ attempt: 4 }, { nodeId: 'other' }, { parentSessionId: 'other' }, { ownerUserId: 'other' }]) {
+      await expect(store.register('realm', 'bound-child', { ...registration, ...patch })).rejects.toBeInstanceOf(ReceiptConflictError)
+      await expect(store.put('realm', { ...registration, ...patch, body: result })).rejects.toBeInstanceOf(ReceiptConflictError)
+    }
+    expect(await store.get('other-realm', 'bound-child')).toBeUndefined()
+  })
+
+  it('upgrades an old inbox concurrently without inventing legacy recovery ownership', async () => {
+    const legacySchema = schema + '_legacy'
+    await admin.query('CREATE SCHEMA ' + legacySchema)
+    const legacyPool = new pg.Pool({ connectionString: dsn, options: '-c search_path=' + legacySchema })
+    try {
+      await legacyPool.query(`CREATE TABLE subagent_callback_inbox (
+        realm TEXT NOT NULL,run_id TEXT NOT NULL,secret_hash TEXT NOT NULL,payload JSONB NOT NULL,
+        scheduler_attempt INTEGER,received_at TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(realm,run_id))`)
+      await legacyPool.query(`INSERT INTO subagent_callback_inbox(realm,run_id,secret_hash,payload,scheduler_attempt)
+        VALUES('realm','legacy','old',$1,1)`, [JSON.stringify({ ...body, runId: 'legacy' })])
+      const upgraded = new PgSubagentReceipts(legacyPool)
+      await Promise.all([upgraded.init(), new PgSubagentReceipts(legacyPool).init(), upgraded.init()])
+      expect(await upgraded.get('realm', 'legacy')).toEqual({ secretHash: 'old', attempt: 1, body: { ...body, runId: 'legacy' } })
+      const registration = { secretHash: 'new', attempt: 2, nodeId: 'node', parentSessionId: 'parent', ownerUserId: 'owner' }
+      await upgraded.register('realm', 'new', registration)
+      expect(await upgraded.get('realm', 'new')).toEqual(registration)
+    } finally {
+      await legacyPool.end()
+      await admin.query('DROP SCHEMA IF EXISTS ' + legacySchema + ' CASCADE')
+    }
+  })
+
   it('leases a receipt once, fences stale acknowledgments and retains delivered idempotency', async () => {
     await store.enqueue('realm', url, body)
     await store.enqueue('realm', url, { ...body, structured: { b: 2, a: 1 } })

@@ -127,24 +127,24 @@ function TrendChart({
   const current = values.reduce((sum, value) => sum + value, 0)
   const labelIndices = [...new Set(days.length <= 1 ? [0] : [0, Math.floor((days.length - 1) / 2), days.length - 1])]
   const labels = labelIndices.flatMap(index => days[index] === undefined ? [] : [{ day: days[index]!, index }])
-  const color = tone === 'tokens' ? '#4267d5' : '#16866b'
+  const color = tone === 'tokens' ? 'var(--tu-blue)' : 'var(--lumo-cyan, #16866b)'
   const areaPoints = points.length > 0 ? `24,174 ${points.join(' ')} 736,174` : ''
 
   return <article className="lumo-token-usage-chart-card">
     <div className="lumo-token-usage-chart-heading"><span>{title}</span><strong>{formatValue(current)}</strong></div>
     {days.length === 0 ? <div className="lumo-token-usage-chart-empty">暂无趋势数据</div> : <>
       <svg className="lumo-token-usage-chart" viewBox="0 0 760 210" role="img" aria-label={`${title}趋势`} preserveAspectRatio="none">
-        {[40, 82, 124, 166].map(y => <line key={y} x1="24" x2="736" y1={y} y2={y} stroke="#e9edf3" strokeWidth="1" />)}
+        {[40, 82, 124, 166].map(y => <line key={y} x1="24" x2="736" y1={y} y2={y} stroke="var(--tu-line)" strokeWidth="1" />)}
         <polygon points={areaPoints} fill={color} fillOpacity="0.09" />
         <polyline points={points.join(' ')} fill="none" stroke={color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
         {days.length <= 30 ? points.map((point, index) => {
           const [cx, cy] = point.split(',')
-          return <circle key={days[index]!.day} cx={cx} cy={cy} r="3" fill={color} stroke="white" strokeWidth="2" />
+          return <circle key={days[index]!.day} cx={cx} cy={cy} r="3" fill={color} stroke="var(--lumo-panel, #fff)" strokeWidth="2" />
         }) : null}
         {labels.map(({ day, index }) => {
           const x = days.length <= 1 ? 380 : 24 + (index / (days.length - 1)) * 712
           const anchor = index === 0 ? 'start' : index === days.length - 1 ? 'end' : 'middle'
-          return <text key={`${day.day}-${index}`} x={x} y="199" textAnchor={anchor} fill="#8993a3" fontSize="11">{day.day.slice(5)}</text>
+          return <text key={`${day.day}-${index}`} x={x} y="199" textAnchor={anchor} fill="var(--tu-muted)" fontSize="11">{day.day.slice(5)}</text>
         })}
       </svg>
       <div className="lumo-token-usage-chart-legend"><i style={{ background: color }} />每日合计 · UTC</div>
@@ -179,52 +179,52 @@ function TopList<T extends UsageMeasure>({
 }
 
 const styles = `
-.lumo-token-usage{--tu-ink:#202938;--tu-muted:#788395;--tu-line:#e8ecf2;--tu-blue:#4267d5;display:grid;gap:18px;color:var(--tu-ink);font:inherit}
+.lumo-token-usage{--tu-ink:var(--lumo-ink,#202938);--tu-muted:var(--lumo-muted,#788395);--tu-line:var(--lumo-line,#e8ecf2);--tu-blue:var(--lumo-mint,#4267d5);display:grid;gap:18px;color:var(--tu-ink);font:inherit}
 .lumo-token-usage *{box-sizing:border-box}
-.lumo-token-usage-shell{padding:22px;border:1px solid var(--tu-line);border-radius:18px;background:linear-gradient(145deg,#fff 0%,#fbfcff 100%);box-shadow:0 8px 28px #27344a0b}
+.lumo-token-usage-shell{padding:22px;border:1px solid var(--tu-line);border-radius:10px;background:var(--lumo-panel,#fff);box-shadow:none}
 .lumo-token-usage-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}
 .lumo-token-usage-head h2{margin:2px 0 5px;font-size:20px;letter-spacing:-.025em}
 .lumo-token-usage-head p{margin:0;color:var(--tu-muted);font-size:12px;line-height:1.55}
-.lumo-token-usage-kicker{color:#526fd0;font-size:10px;font-weight:750;letter-spacing:.12em;text-transform:uppercase}
-.lumo-token-usage-scope{display:inline-flex;align-items:center;gap:7px;margin-top:11px;color:#526174;font-size:11px}
-.lumo-token-usage-scope i{width:7px;height:7px;border-radius:50%;background:#219778;box-shadow:0 0 0 3px #21977818}
+.lumo-token-usage-kicker{color:var(--tu-muted);font-size:12px;font-weight:750;letter-spacing:.12em;text-transform:uppercase}
+.lumo-token-usage-scope{display:inline-flex;align-items:center;gap:7px;margin-top:11px;color:var(--tu-muted);font-size:12px}
+.lumo-token-usage-scope i{width:7px;height:7px;border-radius:50%;background:var(--lumo-cyan,#219778);corner-shape:round}
 .lumo-token-usage-controls{display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap}
-.lumo-token-usage-controls label{display:grid;gap:5px;color:var(--tu-muted);font-size:10px;font-weight:650}
-.lumo-token-usage-controls input{min-height:36px;padding:0 10px;border:1px solid #dfe5ed;border-radius:9px;background:#fff;color:var(--tu-ink);font:inherit;font-size:12px}
-.lumo-token-usage-controls button{min-height:36px;padding:0 14px;border:0;border-radius:9px;background:var(--tu-blue);color:white;font:inherit;font-size:12px;font-weight:700;cursor:pointer}
-.lumo-token-usage-controls button:hover{background:#3457bd}
+.lumo-token-usage-controls label{display:grid;gap:5px;color:var(--tu-muted);font-size:12px;font-weight:650}
+.lumo-token-usage-controls input{width:100%;min-height:36px;padding:0 10px;border:1px solid var(--tu-line);border-radius:9px;background:var(--lumo-bg,#fff);color:var(--tu-ink);font:inherit;font-size:12px}
+.lumo-token-usage-controls button{min-height:36px;padding:0 14px;border:0;border-radius:9px;background:var(--tu-blue);color:var(--lumo-bg,#fff);font:inherit;font-size:12px;font-weight:700;cursor:pointer}
+.lumo-token-usage-controls button:hover{background:var(--lumo-accent-hover,#3457bd)}
 .lumo-token-usage-controls button:disabled{opacity:.56;cursor:wait}
-.lumo-token-usage-alert{padding:11px 13px;border:1px solid #f0d4d1;border-radius:10px;background:#fff8f7;color:#9e3830;font-size:12px}
-.lumo-token-usage-alert.info{border-color:#dfe6f1;background:#f7f9fc;color:#657186}
+.lumo-token-usage-alert{padding:11px 13px;border:1px solid var(--lumo-danger,#f0d4d1);border-radius:10px;background:var(--lumo-bg,#fff);color:var(--tu-muted);font-size:12px}
+.lumo-token-usage-alert.info{border-color:var(--tu-line);background:var(--lumo-bg,#f7f9fc);color:var(--tu-muted)}
 .lumo-token-usage-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px}
-.lumo-token-usage-metric{min-width:0;padding:16px;border:1px solid var(--tu-line);border-radius:13px;background:#fff}
-.lumo-token-usage-metric span{display:block;color:var(--tu-muted);font-size:11px}
+.lumo-token-usage-metric{min-width:0;padding:16px;border:1px solid var(--tu-line);border-radius:8px;background:var(--lumo-bg,#fff)}
+.lumo-token-usage-metric span{display:block;color:var(--tu-muted);font-size:12px}
 .lumo-token-usage-metric strong{display:block;margin:8px 0 4px;font-size:clamp(20px,2.2vw,28px);line-height:1.1;letter-spacing:-.04em;font-variant-numeric:tabular-nums}
-.lumo-token-usage-metric small{color:#94a0b0;font-size:10px}
+.lumo-token-usage-metric small{color:var(--tu-muted);font-size:12px}
 .lumo-token-usage-charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}
-.lumo-token-usage-chart-card{min-width:0;padding:15px 16px 11px;border:1px solid var(--tu-line);border-radius:13px;background:#fff}
-.lumo-token-usage-chart-heading{display:flex;justify-content:space-between;gap:10px;align-items:center;font-size:11px;color:var(--tu-muted)}
+.lumo-token-usage-chart-card{min-width:0;padding:15px 16px 11px;border:1px solid var(--tu-line);border-radius:8px;background:var(--lumo-bg,#fff)}
+.lumo-token-usage-chart-heading{display:flex;justify-content:space-between;gap:10px;align-items:center;font-size:12px;color:var(--tu-muted)}
 .lumo-token-usage-chart-heading strong{color:var(--tu-ink);font-size:15px;font-variant-numeric:tabular-nums}
 .lumo-token-usage-chart{display:block;width:100%;height:145px;margin-top:8px;overflow:visible}
-.lumo-token-usage-chart-legend{display:flex;align-items:center;gap:6px;color:#8993a3;font-size:10px}
-.lumo-token-usage-chart-legend i{width:7px;height:7px;border-radius:50%}
-.lumo-token-usage-chart-empty{display:grid;place-items:center;height:145px;color:#a0a9b6;font-size:11px}
+.lumo-token-usage-chart-legend{display:flex;align-items:center;gap:6px;color:var(--tu-muted);font-size:12px}
+.lumo-token-usage-chart-legend i{width:7px;height:7px;border-radius:50%;corner-shape:round}
+.lumo-token-usage-chart-empty{display:grid;place-items:center;height:145px;color:var(--tu-muted);font-size:12px}
 .lumo-token-usage-rankings{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px}
-.lumo-token-usage-ranking{min-width:0;padding:15px 16px;border:1px solid var(--tu-line);border-radius:13px;background:#fff}
+.lumo-token-usage-ranking{min-width:0;padding:15px 16px;border:1px solid var(--tu-line);border-radius:8px;background:var(--lumo-bg,#fff)}
 .lumo-token-usage-ranking header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .lumo-token-usage-ranking h3{margin:0;font-size:12px}
-.lumo-token-usage-ranking header span{color:#98a2b0;font-size:10px}
+.lumo-token-usage-ranking header span{color:var(--tu-muted);font-size:12px}
 .lumo-token-usage-ranking ol{display:grid;gap:11px;margin:0;padding:0;list-style:none}
 .lumo-token-usage-rank-line{display:grid;grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:6px}
-.lumo-token-usage-rank{color:#9ba5b3;font-size:9px;font-variant-numeric:tabular-nums}
-.lumo-token-usage-rank-line b{overflow:hidden;color:#394456;font-size:11px;font-weight:650;text-overflow:ellipsis;white-space:nowrap}
-.lumo-token-usage-rank-line strong{font-size:11px;font-variant-numeric:tabular-nums}
-.lumo-token-usage-rank-track{height:3px;margin:6px 0 4px 30px;overflow:hidden;border-radius:9px;background:#eef1f6}
-.lumo-token-usage-rank-track i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#5576dc,#95a9ed)}
-.lumo-token-usage-ranking small{display:block;margin-left:30px;color:#8b95a4;font-size:9px;font-variant-numeric:tabular-nums}
-.lumo-token-usage-ranking small span{padding:0 3px;color:#c1c8d2}
-.lumo-token-usage-empty{margin:18px 0;color:#98a2b0;font-size:11px;text-align:center}
-.lumo-token-usage-foot{color:#929cab;font-size:10px;line-height:1.5}
+.lumo-token-usage-rank{color:var(--tu-muted);font-size:12px;font-variant-numeric:tabular-nums}
+.lumo-token-usage-rank-line b{overflow:hidden;color:var(--tu-ink);font-size:12px;font-weight:650;text-overflow:ellipsis;white-space:nowrap}
+.lumo-token-usage-rank-line strong{font-size:12px;font-variant-numeric:tabular-nums}
+.lumo-token-usage-rank-track{height:3px;margin:6px 0 4px 30px;overflow:hidden;border-radius:9px;background:var(--lumo-panel-raised,#eef1f6)}
+.lumo-token-usage-rank-track i{display:block;height:100%;border-radius:inherit;background:var(--tu-blue)}
+.lumo-token-usage-ranking small{display:block;margin-left:30px;color:var(--tu-muted);font-size:12px;font-variant-numeric:tabular-nums}
+.lumo-token-usage-ranking small span{padding:0 3px;color:var(--tu-muted)}
+.lumo-token-usage-empty{margin:18px 0;color:var(--tu-muted);font-size:12px;text-align:center}
+.lumo-token-usage-foot{color:var(--tu-muted);font-size:12px;line-height:1.5}
 @media(max-width:900px){.lumo-token-usage-head{flex-direction:column}.lumo-token-usage-controls{width:100%}.lumo-token-usage-rankings{grid-template-columns:1fr 1fr}}
 @media(max-width:620px){.lumo-token-usage-shell{padding:15px}.lumo-token-usage-metrics,.lumo-token-usage-charts,.lumo-token-usage-rankings{grid-template-columns:1fr}.lumo-token-usage-controls{display:grid;grid-template-columns:1fr 1fr}.lumo-token-usage-controls button{grid-column:1/-1}.lumo-token-usage-chart{height:125px}}
 `

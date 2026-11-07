@@ -15,8 +15,13 @@ timeout_seconds="${LUMO_ACCEPTANCE_TIMEOUT_SECONDS:-5}"
 # The acceptance gate exercises independent container failure domains. The
 # normal developer startup is compact; this suite defaults to the full shape.
 export LUMO_CLUSTER_TOPOLOGY="${LUMO_CLUSTER_TOPOLOGY:-full}"
-report_dir="$(mktemp -d "${TMPDIR:-/tmp}/lumo-acceptance.XXXXXX")"
-trap 'rm -rf "$report_dir"' EXIT
+if [[ -n "${LUMO_ACCEPTANCE_REPORT_DIR:-}" ]]; then
+  report_dir="$LUMO_ACCEPTANCE_REPORT_DIR"
+  mkdir -p "$report_dir"
+else
+  report_dir="$(mktemp -d "${TMPDIR:-/tmp}/lumo-acceptance.XXXXXX")"
+  trap 'rm -rf "$report_dir"' EXIT
+fi
 
 fail() { echo "cluster-acceptance: FAIL: $*" >&2; exit 1; }
 require_command() { command -v "$1" >/dev/null 2>&1 || fail "需要命令 $1"; }
@@ -131,6 +136,7 @@ run_vitest() {
   local report="$report_dir/vitest-$step.json"
   echo "cluster-acceptance: vitest $step"
   (cd "$root_dir/platform" && "${vitest_cmd[@]}" run "$@" \
+    --testTimeout=30000 --hookTimeout=30000 \
     --reporter=default --reporter=json --outputFile.json="$report")
   local executed
   executed="$(count_executed_tests "$report")"
@@ -177,6 +183,15 @@ run_go_integration llm-gateway ./internal/server
 run_go_integration usage-ledger ./internal/integration
 
 run_vitest session-log-resume dsh-plugins/session-log/__tests__/pg-log.spec.ts
+run_vitest durable-start-guard dsh-plugins/subagent-host/__tests__/durable-start-guard.pg.spec.ts
+run_vitest placement-recovery dsh-plugins/subagent-remote/__tests__/placement-recovery.pg.spec.ts
+run_vitest boot-recovery dsh-plugins/subagent-host/__tests__/boot-recovery.pg.spec.ts
+run_vitest spool-recovery dsh-plugins/session-log/__tests__/spool-recovery.pg.spec.ts
+run_vitest session-replication-queue dsh-plugins/session-log/__tests__/replication-queue.spec.ts
+run_vitest host-drain-lifecycle \
+  dsh-plugins/subagent-host/__tests__/lifecycle.spec.ts \
+  dsh-plugins/subagent-host/__tests__/lifecycle-http.spec.ts \
+  dsh-plugins/subagent-host/__tests__/listener-fence.spec.ts
 run_vitest governed-dispatch-receipts \
   dsh-plugins/subagent-host/__tests__/governed-dispatch.pg.spec.ts \
   dsh-plugins/subagent-remote/__tests__/receipts.pg.spec.ts

@@ -20,6 +20,7 @@ services:
       LUMO_REDIS_ADDR: redis:6379
       LUMO_NACOS_COLLABORATOR_SERVICE: lumo-collaborator
       LUMO_KNOWLEDGE_SEAM_URL: http://dsh-node:8090
+      LUMO_BUNDLE_FLOWS_LUMO_KNOWLEDGE_SEAM_URL: http://dsh-node:8090
       LUMO_KNOWLEDGE_EMBEDDING_MODEL: "${LUMO_EMBEDDING_MODEL:-BAAI/bge-m3}"
       LUMO_IDENTITY_ASSERTION_SECRET: "${LUMO_IDENTITY_ASSERTION_SECRET:-}"
       LUMO_BUNDLE_COLLABORATOR_0_LUMO_NODE_ADVERTISE_HOST: collaborator
@@ -67,6 +68,7 @@ services:
 
   # ---- DSH 数据平面 ----
   dsh-node:
+    stop_grace_period: 180s
     build:
       context: ../..
       dockerfile: platform/data-plane/dsh-node/Dockerfile
@@ -76,6 +78,7 @@ services:
     restart: unless-stopped
     environment:
       LUMO_DSH_PROFILE: web
+      DSH_HOME: /root/.dsh
       LUMO_DEPLOYMENT_MODE: standalone
       LUMO_CLUSTER_STATUS: not_ready
       LUMO_WEB_PORT: "3080"
@@ -83,7 +86,11 @@ services:
       LUMO_AUTH_HOST: 0.0.0.0
       LUMO_AUTH_PORT: "3080"
       LUMO_AUTH_PUBLIC_URL: "http://127.0.0.1:${LUMO_CONSOLE_PORT:-4173}"
+      # Explicit JSON opt-ins; no model, owner or Session is inferred.
+      LUMO_USER_SESSION_EXECUTION: "${LUMO_USER_SESSION_EXECUTION:-}"
+      LUMO_THREAD_EXECUTION: "${LUMO_THREAD_EXECUTION:-}"
       LUMO_NODE_ID: dsh-node-0
+      LUMO_SESSION_LOG_SPOOL_DIR: /var/lib/lumo/session-spool
       LUMO_CLUSTER_ID: standalone
       LUMO_ROLE: node
       LUMO_REALM: "${LUMO_REALM:-dev}"
@@ -125,6 +132,8 @@ services:
       LUMO_CORS_ORIGIN: "${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}"
       PROVISIONER_ARTIFACT_NAME: "${PROVISIONER_ARTIFACT_NAME:-}"
     volumes:
+      - dshnodespool:/var/lib/lumo/session-spool
+      - dshnodehome:/root/.dsh
       - provisionerdata:/var/lib/lumo/artifacts:ro
     # 与 cluster dsh-web 同款：仅回环发布；节点端口不出宿主机（走容器网络）。
     ports:
@@ -165,9 +174,7 @@ services:
   # 不发布宿主机端口；制品须由 Provisioner 先完成签名与 digest 校验。
   artifact-runtime:
     profiles: [provisioner]
-    build:
-      context: ../control-plane
-      dockerfile: registry/Dockerfile.provisioner
+    # 复用 provisioner 构建的镜像。
     image: lumo/provisioner:dev
     entrypoint: ["artifact-runtime"]
     command: ["serve", "-dir", "/var/lib/lumo/artifacts", "-socket", "/var/lib/lumo/artifacts/artifact-runtime.sock"]
@@ -180,4 +187,6 @@ services:
       retries: 12
 
 volumes:
+  dshnodespool:
+  dshnodehome:
   provisionerdata:

@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -79,13 +79,61 @@ describe('profile plugin installation', () => {
     expect(obsoleteProfilePluginNames('headless', { 'deepseek-harness-auth': '0.4.0' })).toEqual([])
   })
 
+  function installationFixture(packageManager: unknown) {
+    const root = mkdtempSync(join(tmpdir(), 'lumo-manager-pin-'))
+    const profileDir = join(root, 'dsh', 'profiles', 'headless')
+    mkdirSync(profileDir, { recursive: true })
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ packageManager }))
+    const desired = profilePluginSpecs('headless', root, 'local')
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+      dependencies: Object.fromEntries(desired.filter(plugin => plugin.name !== '@lumo/agent-teams').map(plugin => [plugin.name, plugin.spec])),
+    }))
+    return { root, options: { profile: 'headless', platformRoot: root, dshRoot: root,
+      deploymentMode: 'local' as const, env: { DSH_HOME: join(root, 'dsh'), COREPACK_ENABLE_PROJECT_SPEC: '0' } } }
+  }
+
+  it.each([
+    ['darwin', 'pnpm@11.28.5'],
+    ['linux', 'pnpm@10.9.0+sha512.abcdef'],
+    ['win32', 'pnpm@11.28.5'],
+  ])('uses the selected upstream pin on %s while keeping profile probing isolated', (platform, manager) => {
+    const { root, options } = installationFixture(manager)
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!
+    vi.mocked(spawnSync).mockReset().mockReturnValue({ status: 0 } as ReturnType<typeof spawnSync>)
+    try {
+      Object.defineProperty(process, 'platform', { value: platform })
+      ensureProfilePlugins(options)
+      expect(spawnSync).toHaveBeenCalledExactlyOnceWith(
+        platform === 'win32' ? 'cmd.exe' : 'corepack',
+        [...(platform === 'win32' ? ['/d', '/s', '/c', 'corepack.cmd'] : []), manager,
+          'run', 'dsh', 'plugin', '--profile', 'headless', 'add', `link:${root}/dsh-plugins/agent-teams`],
+        expect.objectContaining({ cwd: root, env: expect.objectContaining({ COREPACK_ENABLE_PROJECT_SPEC: '0' }) }),
+      )
+      expect(readFileSync(join(root, 'dsh', '.lumo-bin', 'pnpm'), 'utf8')).toContain('exec corepack pnpm "$@"')
+    } finally {
+      Object.defineProperty(process, 'platform', descriptor)
+      rmSync(root, { recursive: true, force: true })
+      vi.mocked(spawnSync).mockReset()
+    }
+  })
+
+  it.each([undefined, 'npm@11.28.5', 'pnpm@latest', 'pnpm@11.28.5 --ignore-version'])('refuses an unpinned upstream manager %s before starting a required installer', manager => {
+    const { root, options } = installationFixture(manager)
+    vi.mocked(spawnSync).mockReset()
+    try {
+      expect(() => ensureProfilePlugins(options)).toThrow('upstream packageManager must pin pnpm@<version>')
+      expect(spawnSync).not.toHaveBeenCalled()
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
   it('continues startup when an optional plugin installer fails or throws', () => {
     const root = mkdtempSync(join(tmpdir(), 'lumo-install-failure-'))
     const profileDir = join(root, 'dsh', 'profiles', 'web')
     mkdirSync(profileDir, { recursive: true })
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ packageManager: 'pnpm@11.28.5' }))
     const desired = profilePluginSpecs('web', root, 'local')
     writeFileSync(join(profileDir, 'package.json'), `${JSON.stringify({
-      dependencies: Object.fromEntries(desired.filter(plugin => plugin.name !== '@yejiming/dsh-data-agent').map(plugin => [plugin.name, plugin.spec])),
+      dependencies: Object.fromEntries(desired.filter(plugin => plugin.name !== 'dshmarket').map(plugin => [plugin.name, plugin.spec])),
       dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
     })}\n`)
     const options = {
@@ -93,10 +141,12 @@ describe('profile plugin installation', () => {
       env: { DSH_HOME: join(root, 'dsh') } as NodeJS.ProcessEnv,
     }
 
-    vi.mocked(spawnSync).mockReturnValueOnce({ status: 1 } as ReturnType<typeof spawnSync>)
+    vi.mocked(spawnSync).mockReset().mockReturnValueOnce({ status: 1 } as ReturnType<typeof spawnSync>)
     expect(() => ensureProfilePlugins(options)).not.toThrow()
+    expect(spawnSync).toHaveBeenCalledTimes(1)
     vi.mocked(spawnSync).mockImplementationOnce(() => { throw new Error('installer unavailable') })
     expect(() => ensureProfilePlugins(options)).not.toThrow()
+    expect(spawnSync).toHaveBeenCalledTimes(2)
     expect(profileBundleNames('web', options.env)).toEqual(['@deepseek-ai/dsh-base'])
   })
 })

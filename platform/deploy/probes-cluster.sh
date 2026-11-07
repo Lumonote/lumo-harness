@@ -318,7 +318,7 @@ probe_metric_present() {
   url="http://127.0.0.1:${host}/metrics"
 
   for attempt in $(seq 1 "$metric_attempts"); do
-    result="$(probe_once_body "$url")" || true
+    result="$(probe_once_body_raw "$url")" || true
     code="${result%%$'\t'*}"
     body="${result#*$'\t'}"
     case "$code" in

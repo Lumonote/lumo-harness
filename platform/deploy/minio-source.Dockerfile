@@ -11,8 +11,14 @@ RUN git clone --depth 1 --branch "$MINIO_TAG" https://github.com/minio/minio.git
 WORKDIR /src
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -tags kqueue -trimpath \
-      -ldflags="$(MINIO_RELEASE=RELEASE go run buildscripts/gen-ldflags.go)" -o /out/minio .
+    set -eu; \
+    retry() { attempt=0; until "$@"; do attempt=$((attempt + 1)); \
+      if [ "$attempt" -ge 3 ]; then echo "MinIO dependency/build failed after 3 attempts" >&2; return 1; fi; \
+      sleep 3; done; }; \
+    retry go mod download; \
+    flags="$(MINIO_RELEASE=RELEASE go run buildscripts/gen-ldflags.go)"; \
+    export CGO_ENABLED=0; \
+    retry go build -tags kqueue -trimpath -ldflags="$flags" -o /out/minio .
 
 FROM alpine:3.22
 COPY --from=build /out/minio /usr/local/bin/minio
