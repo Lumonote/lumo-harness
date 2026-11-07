@@ -43,3 +43,5 @@ RocketMQ 门禁已在运行 `41405260712` 远端通过；下一项集群探针�
 上游测试脚本在 Vitest 前执行 `build:native-system`，平台测试直接调用 Vitest，没有经过该步骤。共享的 `build-host.mjs` 现依次准备 Typert/host/lib、通过官方 `build.ts --host-addon-only` 补齐宿主 addon、构建 PTC worker；平台 CI 和集群验收均消费此入口。原有桌面准备入口也复用增强后的检查：从 `prebuilds.json` 选择当前平台与 libc 的 Node-API 文件，校验文件非空，并在编译后再次检查，避免已有 Landlock、另一种 libc 产物或空文件造成误判。Windows 保持原有非 flock 路径。
 
 回归证据：真实构建入口测试修复前 4 失败、2 通过，修复后 6 项全通过；本机完整平台单测 1819 通过、0 失败、313 跳过（未配置数据库等外部依赖的现有门控），类型检查与实际 host 构建通过。Docker Debian 12 / Node 24 的 Linux arm64 环境先复现缺件，再由官方脚本编译真实 addon，验证独占锁、第二 fd 的 EAGAIN，以及关闭首 fd 后重获锁。Linux x64 路径有入口回归覆盖；远端 x64 实际结果以修复提交对应的 Actions 为准。上游源码与锁文件保持干净。
+
+修复提交 `9008360` 的远端运行 [42376294108](https://github.com/Lumonote/lumo-harness/actions/runs/42376294108) 已真实编出 `linux-x64/bin/glibc/system.node`，Typecheck 与完整 Unit tests 通过（1819 通过、313 跳过）。随后独立的数据库门禁首次走到知识库配额用例，暴露平台 job 的服务仍是普通 `postgres:16-alpine`，缺少 `vector.control`，两项知识库测试报 `0A000: extension "vector" is not available`；共享 DDL 的 34 项通过。平台 job 现与 Compose 和恢复演练统一采用 `pgvector/pgvector:pg16`，提供知识库实际依赖的 vector/HNSW，不删除或跳过这些测试。

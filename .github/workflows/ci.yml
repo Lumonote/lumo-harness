@@ -20,7 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        # Knowledge integration tests need vector/HNSW, as in Compose deployments.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: lumo_test
           POSTGRES_PASSWORD: lumo_test
