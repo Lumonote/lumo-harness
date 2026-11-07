@@ -7,6 +7,8 @@
  * 树扣减原子性：本实现以 PG 事务完成；分布式的 RocketMQ 事务消息在 P2 接入（铁律 5）。
  */
 import pg from 'pg'
+import { configureProjectBudget, readProjectBudget, PROJECT_BUDGET_DDL } from './project-budget.ts'
+import type { ProjectBudgetChange, ProjectBudgetIdentity } from '../../../shared/seam-contracts/project-budget.ts'
 import ledgerSchema from '../../../shared/manifests/usage-ledger.schema.json' with { type: 'json' }
 import {
   COST_TYPES,
@@ -198,7 +200,11 @@ export class PgMeteringSeam implements MeteringSeam, ScopeCapSeam {
   async init(): Promise<void> {
     await this.pool.query(METERING_DDL)
     await this.pool.query(METERING_MIGRATIONS)
+    await this.pool.query(PROJECT_BUDGET_DDL)
   }
+
+  readProjectBudget(input: ProjectBudgetIdentity) { return readProjectBudget(this.pool, input) }
+  configureProjectBudget(input: ProjectBudgetChange) { return configureProjectBudget(this.pool, input) }
 
   /**
    * 测试专用逃生口（TRUNCATE / 断言用查询）。
@@ -490,7 +496,8 @@ export class PgMeteringSeam implements MeteringSeam, ScopeCapSeam {
          budget = EXCLUDED.budget,
          budget_total = EXCLUDED.budget_total,
          soft_limit = COALESCE(EXCLUDED.soft_limit, budget_trees.soft_limit),
-         overdraft = COALESCE(EXCLUDED.overdraft, budget_trees.overdraft)`,
+         overdraft = COALESCE(EXCLUDED.overdraft, budget_trees.overdraft),
+         config_revision = budget_trees.config_revision + 1`,
       [kind, id, total, total, opts?.softLimit ?? null, opts?.overdraft ?? null],
     )
   }
@@ -542,7 +549,7 @@ export class PgMeteringSeam implements MeteringSeam, ScopeCapSeam {
         `UPDATE budget_trees
            SET budget = $3, budget_total = $4,
                soft_limit = COALESCE($5, budget_trees.soft_limit),
-               overdraft = COALESCE($6, budget_trees.overdraft)
+               overdraft = COALESCE($6, budget_trees.overdraft), config_revision = config_revision + 1
            WHERE kind = $1 AND id = $2`,
         [kind, id, remaining, newTotal, opts?.softLimit ?? null, opts?.overdraft ?? null],
       )

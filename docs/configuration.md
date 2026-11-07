@@ -75,10 +75,11 @@ Compose 模型 overlay 和 Helm 的 `dshNode.harness` / `dshWeb.harness` 只负�
 | DSH Web | `LUMO_IDENTITY_ASSERTION_SECRET` | 身份代理 HMAC Secret（至少 32 字节）；`@lumo/user-auth` 登录成功后签发短期逐请求身份，`/lumo/api` 不回退浏览器自报身份 |
 | DSH Web | `LUMO_GOVERNANCE_URL`、`LUMO_AUTH_HOST`、`LUMO_AUTH_PORT`、`LUMO_AUTH_PUBLIC_URL` | Governance 用户认证地址，以及认证代理的公开监听和规范入口地址 |
 | DSH Web | `LUMO_AUTH_SECURE_COOKIE`、`LUMO_AUTH_TIMEOUT_MS` | HTTPS 部署必须启用 Secure Cookie；认证上游请求超时 |
-| DSH 动态文本会话 | `LUMO_USER_SESSION_EXECUTION` | 默认不设置。完整 JSON 对象固定 authorityUrl/nodeId/projectId/workspaceRoot/provider/model；project 必须匹配部署。启用后使用 `/lumo/chat`，关闭原生共享 owner HTTP/WS，采用持久用户归属和认证 Gateway 文本执行；配置与能力边界见 [动态会话归属](./dynamic-session-owner-2026-11-06.md)。 |
+| DSH 动态文本会话 | `LUMO_USER_SESSION_EXECUTION` | 默认不设置。完整 JSON 固定 authorityUrl/nodeId/projectId/workspaceRoot/provider/model；project 必须匹配部署。可选 `knowledge: {realm, defaultTopK?, spaces?}` 只开启当前用户在固定项目内的 published 检索，默认仍无工具。realm 必须匹配部署，不能配置 actingUserId/roles。入口 `/lumo/chat` 使用持久归属和认证 Gateway，关闭原生共享 owner HTTP/WS；配置与能力边界见 [动态会话归属](./dynamic-session-owner-2026-11-06.md)。 |
 | DSH Thread | `LUMO_THREAD_EXECUTION` | 默认不设置；显式 JSON 对象指定治理地址、固定 project/Agent/revision/provider/model/timeout。需持久 session、计量和当前治理权限，使用专用 Agent。`distributed: true` 配合必填 `sessionControlUrl` 启用持久异步邮箱，登记目标节点执行文本轮次并支持事件唤醒；原固定本节点档位仍兼容。配置与边界见 [五项交付说明](./thread-fleet-delivery-2026-11-07.md)。 |
 | DSH Thread | `LUMO_THREAD_WORKSPACE_ROOT` | 绝对节点工作区根，Thread 目录按 `thread/<id>/` 派生；持久保留并拒绝符号链接越界。 |
 | Governance 认证 | `LUMO_AUTH_BOOTSTRAP_USERNAME`、`LUMO_AUTH_BOOTSTRAP_PASSWORD`、`LUMO_AUTH_BOOTSTRAP_USER_ID` | 首次为 `governance_users` 用户创建本地凭据；已有凭据不会在重启时被覆盖 |
+| Space 授权 | `LUMO_COLLABORATOR_URL` | Governance 与 DSH Web 使用的 Collaborator 受信服务地址；内部 grant 读取和项目 owner 权限管理均携带服务凭据。Compose/Helm 已接线，手工启动留空时明确拒绝未知 Space 授权，见 [授权契约](authorization-contract.md)。 |
 | Governance 认证 | `LUMO_AUTH_BOOTSTRAP_DISPLAY_NAME`、`LUMO_AUTH_BOOTSTRAP_DEPARTMENT`、`LUMO_AUTH_BOOTSTRAP_ROLES` | 引导用户的显示名、主部门和角色（角色逗号分隔） |
 | Governance 认证 | `LUMO_AUTH_MAX_ATTEMPTS`、`LUMO_AUTH_LOCK_SECONDS`、`LUMO_AUTH_SESSION_TTL_SECONDS`、`LUMO_AUTH_CAPTCHA_TTL_SECONDS` | 连续失败锁定、会话有效期和一次性点选验证码有效期 |
 | Governance MFA | `LUMO_AUTH_MFA_KEY` | 可选的 Base64 编码 32 字节 AES-GCM 密钥，用于加密保存 TOTP 密钥；生产从 Secret 注入，缺失时 MFA API 明确返回不可用，绝不回退为明文存储 |
@@ -511,3 +512,9 @@ LUMO_SKILL_SNAPSHOT_ROOT="$PWD/.lumo/skills" \
 LUMO_SKILL_SNAPSHOT_FILE="$PWD/.lumo/skill-snapshot.json" \
 pnpm --filter @lumo/dsh-node start -- --profile headless
 ```
+
+### Governance 角色动作策略
+
+`LUMO_GOVERNANCE_POLICY_URL` 默认为空。需要额外 OPA 收窄时，显式设置完整布尔决策 URL，例如 `http://opa:8181/v1/data/lumo/governance/allow`，并把 `platform/deploy/policies/governance-permissions.rego` 加载到受信任 OPA；此配置不复用 `LUMO_OPA_URL`，避免既有部署未加载新策略时意外断流。URL 不接受凭据、query、fragment 或目录结尾；调用最多 3 秒、响应最多 64 KiB，禁止重定向。
+
+Helm 对应 `governance.permissionPolicyUrl`；Compose 控制面 bundle 对应 `LUMO_BUNDLE_GOVERNANCE_LUMO_GOVERNANCE_POLICY_URL`，从同名普通环境变量映射。未配置时所有规则仍由 Governance PostgreSQL 提供；启用后 OPA 接收同一份角色继承、显式 allow/deny 和 Realm/Project/Space 事实，只能收窄。迁移 `021_governance_role_policies.sql` 与服务启动 DDL 同步，现有角色无需批量改写。

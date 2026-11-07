@@ -12,7 +12,7 @@ func (s *Server) taskCollaborators(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	task, ok := s.taskViewer(w, r, c)
@@ -59,7 +59,7 @@ func (s *Server) taskArtifacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	var task domain.DelegatedTask
@@ -108,7 +108,7 @@ func (s *Server) completeTaskArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	if _, ok := s.taskParticipant(w, r, c); !ok {
@@ -137,7 +137,7 @@ func (s *Server) taskArtifactStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	if r.URL.Query().Get("access") == "contributor" {

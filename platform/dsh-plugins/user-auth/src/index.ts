@@ -4,6 +4,7 @@ import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
 import { createSessionTransport, type SessionTransportConfig } from './session-transport.ts'
+import { validateSessionKnowledge } from './session-knowledge.ts'
 import { CarrierSession } from './carrier-session.ts'
 import { GovernanceAuthClient } from './client.ts'
 import { ConnectorOAuthClient } from './connector-oauth.ts'
@@ -78,6 +79,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     logger: { warn: (format, ...args) => ctx.logger.warn(format, ...args) },
   })
   if (config.sessionTransport && config.sessionTransport.projectId !== config.projectId) throw new Error('Dynamic Session project must match the authenticated deployment project')
+  validateSessionKnowledge(config.sessionTransport?.knowledge, config.realm)
   const sessionTransport = config.sessionTransport ? createSessionTransport(ctx, config.sessionTransport, config.controlPlaneToken, principal => client.authorizeSessionProject(principal, config.sessionTransport!.projectId)) : undefined
   const server = createAuthProxy({
     ...(sessionTransport ? { sessionTransport } : {}),

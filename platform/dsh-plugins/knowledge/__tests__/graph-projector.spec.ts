@@ -182,4 +182,15 @@ describe('knowledge graph projector', () => {
     await expect(projector.drain()).resolves.toBe(1)
     expect(client.release).toHaveBeenCalledTimes(2)
   })
+
+  it('admits a retry after the database connection fails before a transaction starts', async () => {
+    const projector = new GraphProjector({ connectionString: 'postgres://unused' }, graphSeam())
+    const client = transactionClient([])
+    const connect = vi.fn().mockRejectedValueOnce(new Error('database unavailable')).mockResolvedValue(client)
+    ;(projector as unknown as { pool: { connect: typeof connect } }).pool = { connect }
+    await expect(projector.drain()).rejects.toThrow('database unavailable')
+    await expect(projector.drain()).resolves.toBe(0)
+    expect(connect).toHaveBeenCalledTimes(2)
+    expect(client.release).toHaveBeenCalledOnce()
+  })
 })

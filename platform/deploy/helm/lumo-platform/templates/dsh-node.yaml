@@ -393,6 +393,11 @@ spec:
 {{- if and .Values.dshWeb.userSessionExecution (ne (int .Values.dshWeb.replicas) 1) }}
 {{- fail "dshWeb.userSessionExecution requires exactly one Web replica; node-local Sessions have no cross-replica execution routing" }}
 {{- end }}
+{{- with .Values.dshWeb.userSessionExecution.knowledge }}
+{{- if ne .realm $.Values.dshWeb.realm }}
+{{- fail "dshWeb.userSessionExecution.knowledge.realm must match dshWeb.realm" }}
+{{- end }}
+{{- end }}
 {{- if and (not .Values.dshWeb.identityAssertion.secretName) (not .Values.dshWeb.identityAssertion.allowStaticIdentity) }}
 {{- fail "dshWeb.identityAssertion.secretName is required when dshWeb is enabled; set allowStaticIdentity=true only for development" }}
 {{- end }}

@@ -76,7 +76,7 @@ func TestDelegationHTTPDetailMatchesInheritedAndViewerAccess(t *testing.T) {
 	ctx := context.Background()
 	// Membership is owned by Projects; only its public table shape is needed
 	// here to prove task grants cannot bypass the project permission boundary.
-	if _, err := pool.Exec(ctx, `CREATE TABLE project_members (
+	if _, err := pool.Exec(ctx, `CREATE TABLE projects(id TEXT PRIMARY KEY,realm TEXT NOT NULL,status TEXT NOT NULL); INSERT INTO projects VALUES('p1','r1','active'),('p2','r1','active'); CREATE TABLE project_members (
 		project_id TEXT NOT NULL,user_id TEXT NOT NULL,role TEXT NOT NULL,
 		added_at TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(project_id,user_id));
 		INSERT INTO project_members(project_id,user_id,role) VALUES

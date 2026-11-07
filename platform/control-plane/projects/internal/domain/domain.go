@@ -78,6 +78,7 @@ type Automation struct {
 	TriggerSpec string `json:"triggerSpec"`
 	FlowRef     string `json:"flowRef"`
 	Enabled     bool   `json:"enabled"`
+	Revision    int64  `json:"revision"`
 }
 
 // UsageItem 项目用量聚合的一行（usage_ledger 按 cost_type 聚合，仪表板最小后端）。

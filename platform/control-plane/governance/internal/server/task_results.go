@@ -11,7 +11,7 @@ func (s *Server) collaborationProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	if _, ok := s.taskViewer(w, r, c); !ok {
@@ -45,7 +45,7 @@ func (s *Server) taskResult(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, result)
 		return
 	}
-	if !requireExecutionReporter(w, c) {
+	if !s.requireExecutionReporter(w, r, c) {
 		return
 	}
 	var result domain.TaskResult

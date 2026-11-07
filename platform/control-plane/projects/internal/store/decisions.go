@@ -52,6 +52,16 @@ const DecisionConsolidationScanCap = 1000
 //  3. `UPDATE ... SET superseded_by = $new ... AND superseded_by IS NULL`——只写这一列。
 //     0 行受影响 = 预读之后被抢走，报 ErrDecisionConflict。
 func (s *Store) AppendDecision(ctx context.Context, d domain.Decision) (domain.Decision, error) {
+	return s.appendDecision(ctx, d, false)
+}
+
+// AppendActiveDecision is the interactive project write path. Historical imports
+// can still use AppendDecision without requiring a surviving project entity.
+func (s *Store) AppendActiveDecision(ctx context.Context, d domain.Decision) (domain.Decision, error) {
+	return s.appendDecision(ctx, d, true)
+}
+
+func (s *Store) appendDecision(ctx context.Context, d domain.Decision, active bool) (domain.Decision, error) {
 	if err := domain.ValidateDecisionAppend(d); err != nil {
 		return domain.Decision{}, err
 	}
@@ -60,6 +70,15 @@ func (s *Store) AppendDecision(ctx context.Context, d domain.Decision) (domain.D
 		return domain.Decision{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if active {
+		p, err := lockProject(ctx, tx, d.ProjectID, true)
+		if err != nil {
+			return domain.Decision{}, err
+		}
+		if p.Realm != d.Realm {
+			return domain.Decision{}, ErrNotFound
+		}
+	}
 
 	var evidence any
 	if len(d.Evidence) > 0 {

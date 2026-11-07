@@ -18,7 +18,7 @@ import { SeamProxyClient } from './client.ts'
 import { assertSeamsRemotable } from './gate.ts'
 import { createRemoteGraph, createRemoteKnowledge } from './remote-seams.ts'
 import type { BudgetMode } from '../../../shared/seam-contracts/turn-budget.ts'
-import type { KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
+import type { AuthenticatedKnowledgeQuery, KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
 import type { GraphSeam } from '../../../shared/seam-contracts/graph.ts'
 import type { MutualTLSFileConfig } from '../../../shared/seam-contracts/mtls.ts'
 
@@ -66,6 +66,7 @@ export interface SeamProxyPluginConfig {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     seamProxy: SeamProxyClient
+    knowledgeAuthenticatedQuery: AuthenticatedKnowledgeQuery
   }
 }
 
@@ -144,6 +145,9 @@ export function apply(ctx: Context, config: SeamProxyPluginConfig): void {
 
   if (seams.includes('knowledge')) {
     ctx.provide('knowledge', createRemoteKnowledge(client))
+    if (config.identityAssertionSecret) ctx.provide('knowledgeAuthenticatedQuery', {
+      query: (principal, request, signal) => client.queryKnowledgeAs(principal, request, signal),
+    })
   }
   if (seams.includes('knowledgeGraph')) {
     ctx.provide('knowledgeGraph', createRemoteGraph(client))

@@ -6,6 +6,7 @@
  * 与本地 Provider 的判定完全一致 —— 换成远程不该改变安全边界。
  */
 import { Balancer, type EndpointHealth } from './balancer.ts'
+import { authenticatedKnowledgeRequest, type AuthenticatedKnowledgeRequest, type KnowledgeHit, type KnowledgeQueryPrincipal } from '../../../shared/seam-contracts/knowledge.ts'
 import { request as httpsRequest } from 'node:https'
 import {
   RemoteSeamError,
@@ -135,6 +136,19 @@ export class SeamProxyClient {
    * 业务错误的情况绝不重试 —— 那是重复副作用的来源。
    */
   async call(seam: string, method: string, args: unknown[]): Promise<unknown> {
+    return this.invoke(seam, method, args)
+  }
+
+  /** Separate signed read requests never mutate the deployment caller identity.
+   * This is intentionally limited to the authenticated published-query seam. */
+  async queryKnowledgeAs(principal: KnowledgeQueryPrincipal, request: AuthenticatedKnowledgeRequest, signal: AbortSignal): Promise<KnowledgeHit[]> {
+    if (!this.identityAssertionSecret || principal.realm !== this.realm) throw new RemoteSeamError('forbidden', 'knowledge: current user queries require same-realm signed identity')
+    const query = authenticatedKnowledgeRequest(principal, request)
+    return this.invoke('knowledge', 'query', [query], { realm: query.realm, userId: query.userId!, roles: [...query.roles] }, signal) as Promise<KnowledgeHit[]>
+  }
+
+  private async invoke(seam: string, method: string, args: unknown[], identity?: KnowledgeQueryPrincipal, signal?: AbortSignal): Promise<unknown> {
+    signal?.throwIfAborted()
     // 闸 C：记一次**逻辑调用**，不是一次网络往返。重试不计数 —— 计了的话一段抖动的
     // 网络就会触发预算告警，把网络问题记到组件粒度的头上，而这个闸测的是组件粒度。
     //
@@ -150,15 +164,19 @@ export class SeamProxyClient {
     const attempts = retryable ? this.maxAttempts : 1
     let last: RemoteSeamError | undefined
     for (let i = 0; i < attempts; i++) {
+      signal?.throwIfAborted()
       // Reserve only the endpoint we are about to call. Preselecting a retry
       // list would reserve half-open probes that might never be sent.
-      const endpoint = this.balancer.next()
-      if (!endpoint) throw last ?? new RemoteSeamError('unavailable', `seam ${seam}: 所有远端端点均已熔断或正在探测`)
+      const lease = this.balancer.acquire()
+      if (!lease) throw last ?? new RemoteSeamError('unavailable', `seam ${seam}: 所有远端端点均已熔断或正在探测`)
+      const endpoint = lease.url
       try {
-        const value = await this.send(endpoint, seam, method, args)
+        const value = await this.send(endpoint, seam, method, args, identity, signal)
+        signal?.throwIfAborted()
         this.balancer.succeed(endpoint)
         return value
       } catch (e) {
+        if (signal?.aborted) { lease.release(); signal.throwIfAborted() }
         const err = e instanceof RemoteSeamError
           ? e
           : new RemoteSeamError('internal', String(e), endpoint)
@@ -173,11 +191,11 @@ export class SeamProxyClient {
     throw last ?? new RemoteSeamError('internal', `seam ${seam}.${method}: 重试耗尽`)
   }
 
-  private async send(endpoint: string, seam: string, method: string, args: unknown[]): Promise<unknown> {
+  private async send(endpoint: string, seam: string, method: string, args: unknown[], identity?: KnowledgeQueryPrincipal, signal?: AbortSignal): Promise<unknown> {
     const headers = seamRequestHeaders({
-      realm: this.realm,
-      userId: this.userId,
-      roles: [...this.roles],
+      realm: identity?.realm ?? this.realm,
+      userId: identity?.userId ?? this.userId,
+      roles: [...(identity?.roles ?? this.roles)],
       token: this.token,
       identityAssertionSecret: this.identityAssertionSecret,
     })
@@ -185,8 +203,8 @@ export class SeamProxyClient {
     const url = `${endpoint}/seam/${encodeURIComponent(seam)}/${encodeURIComponent(method)}`
     const body = JSON.stringify({ seam, method, args })
     const result = this.tls === undefined
-      ? await plainRequest(url, headers, body, this.timeoutMs, endpoint)
-      : await mutualTLSRequest(url, headers, body, this.timeoutMs, this.tls.get(), endpoint)
+      ? await plainRequest(url, headers, body, this.timeoutMs, endpoint, signal)
+      : await mutualTLSRequest(url, headers, body, this.timeoutMs, this.tls.get(), endpoint, signal)
 
     let payload: SeamResponse
     try { payload = JSON.parse(result.body) as SeamResponse } catch {
@@ -208,16 +226,16 @@ export class SeamProxyClient {
 interface HTTPResult { status: number; body: string }
 
 async function plainRequest(
-  url: string, headers: Record<string, string>, body: string, timeoutMs: number, endpoint: string,
+  url: string, headers: Record<string, string>, body: string, timeoutMs: number, endpoint: string, signal?: AbortSignal,
 ): Promise<HTTPResult> {
-  let res: Response
   try {
-    res = await fetch(url, { method: 'POST', signal: AbortSignal.timeout(timeoutMs), headers, body })
+    const timeout = AbortSignal.timeout(timeoutMs)
+    const res = await fetch(url, { method: 'POST', redirect: 'error', signal: signal ? AbortSignal.any([timeout, signal]) : timeout, headers, body })
+    return { status: res.status, body: await res.text() }
   } catch (e) {
     const timedOut = e instanceof Error && e.name === 'TimeoutError'
     throw new RemoteSeamError(timedOut ? 'timeout' : 'unavailable', String(e), endpoint)
   }
-  return { status: res.status, body: await res.text() }
 }
 
 function mutualTLSRequest(
@@ -227,13 +245,14 @@ function mutualTLSRequest(
   timeoutMs: number,
   tls: MutualTLSCredentials,
   endpoint: string,
+  signal?: AbortSignal,
 ): Promise<HTTPResult> {
   assertMutualTLSEndpoint(rawURL)
   const url = new URL(rawURL)
   return new Promise((resolve, reject) => {
     const request = httpsRequest(url, {
       method: 'POST', headers, ca: tls.ca, cert: tls.cert, key: tls.key,
-      servername: tls.serverName ?? url.hostname, rejectUnauthorized: true, minVersion: 'TLSv1.2',
+      servername: tls.serverName ?? url.hostname, rejectUnauthorized: true, minVersion: 'TLSv1.2', signal,
     }, (response) => {
       const chunks: Buffer[] = []
       response.on('data', (chunk: Buffer) => chunks.push(chunk))

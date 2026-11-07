@@ -286,6 +286,12 @@ function tablesIn(ddl: string): string[] {
  */
 const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequisites?: DdlSource | DdlSource[] }> = [
   {
+    label: '角色动作授权（Go governance ↔ 迁移 021）',
+    a: { files: [`${MIGRATION_DIR}/021_governance_role_policies.sql`] },
+    b: { files: ['control-plane/governance/internal/store/store.go'], constName: 'rolePolicyDDL' },
+    prerequisites: { files: ['control-plane/governance/internal/store/store.go'], constName: 'DDL' },
+  },
+  {
     label: 'Thread 异步命令（Go collaborator ↔ 迁移 016）',
     a: {files: [`${MIGRATION_DIR}/016_collaborator_thread_commands.sql`]},
     b: {files: ['control-plane/collaborator/internal/store/thread_commands.go'], constName: 'threadCommandsDDL'},
@@ -350,8 +356,8 @@ const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequis
     b: { files: ['control-plane/projects/internal/store/store.go'], constName: 'DDL' },
   },
   {
-    label: 'collab_space_grants（Go collaborator ↔ 迁移 002）',
-    a: { files: [`${MIGRATION_DIR}/002_collaborator_realm_grants.sql`] },
+    label: 'collab_space_grants 与审计（Go collaborator ↔ 迁移 002/020/023）',
+    a: { files: [`${MIGRATION_DIR}/002_collaborator_realm_grants.sql`, `${MIGRATION_DIR}/020_collaborator_space_grant_management.sql`, `${MIGRATION_DIR}/023_collaborator_space_grant_incarnation.sql`] },
     b: { files: ['control-plane/collaborator/internal/store/store.go'], constName: 'DDL' },
   },
   {
@@ -507,7 +513,9 @@ function statementsOf(sql: string): string[] {
 
 function targetTables(stmt: string): string[] {
   if (/^DO\s+\$/iu.test(stmt)) {
-    return [...new Set([...stmt.matchAll(/\b(?:ALTER\s+TABLE|UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+([A-Za-z_][A-Za-z0-9_]*)/giu)].map((m) => m[1]!))]
+    const mutations = [...stmt.matchAll(/\b(?:ALTER\s+TABLE|UPDATE(?!\s+(?:OF|ON)\b)|INSERT\s+INTO|DELETE\s+FROM)\s+([A-Za-z_][A-Za-z0-9_]*)/giu)].map((m) => m[1]!)
+    const triggers = [...stmt.matchAll(/\bCREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+\S+[\s\S]*?\bON\s+([A-Za-z_][A-Za-z0-9_]*)/giu)].map((m) => m[1]!)
+    return [...new Set([...mutations, ...triggers])]
   }
   const mutation = /^(?:ALTER\s+TABLE|UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+([A-Za-z_][A-Za-z0-9_]*)/iu.exec(stmt)
   if (mutation) return [mutation[1]!]
@@ -534,6 +542,7 @@ describe('迁移 ↔ 服务 DDL 收敛（常跑，不依赖 DSN）', () => {
     ])
     expect(targetTables(block)).toEqual(['state', 'audit'])
     expect(targetTables('UPDATE scheduler_tasks t SET assigned_cluster_id=n.cluster_id FROM scheduler_nodes n')).toEqual(['scheduler_tasks'])
+    expect(targetTables("DO $claims$ BEGIN INSERT INTO claims VALUES(1); CREATE OR REPLACE TRIGGER remember AFTER INSERT OR UPDATE OF realm,space_id ON spaces FOR EACH ROW EXECUTE FUNCTION record_claim(); END $claims$")).toEqual(['claims', 'spaces'])
   })
 
   /**
@@ -653,6 +662,17 @@ async function shapeUnderDdl(ddl: string, tables: string[], schema: string, prer
 }
 
 describe(`共表结构一致（需 LUMO_TEST_PG_DSN，当前${dsnState}）`, () => {
+  live('角色策略升级同时收敛角色元数据与权限表（迁移 021 ↔ 服务启动）', async () => {
+    const base = await ddlOf({ files: ['control-plane/governance/internal/store/store.go'], constName: 'DDL' })
+    const migration = await ddlOf({ files: [`${MIGRATION_DIR}/021_governance_role_policies.sql`] })
+    const runtime = await ddlOf({ files: ['control-plane/governance/internal/store/store.go'], constName: 'rolePolicyDDL' })
+    const tables = ['governance_role_permissions', 'governance_roles']
+    const a = await shapeUnderDdl(`${base};\n${migration}`, tables, 'ddlshape_role_policy_migration')
+    const b = await shapeUnderDdl(`${base};\n${runtime}`, tables, 'ddlshape_role_policy_runtime')
+    expect(a).toEqual(b)
+    expect(a.governance_roles?.columns).toEqual(expect.arrayContaining([expect.objectContaining({ column_name: 'permission_revision' }), expect.objectContaining({ column_name: 'parent_role_id' })]))
+    expect(a.governance_roles?.foreignKeys).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'governance_roles_parent_fkey' })]))
+  })
   for (const [index, check] of SHAPE_CHECKS.entries()) {
     live(`${check.label}：两份 DDL 建出的结构逐项相同`, async () => {
       const tables = await sharedTablesOf(check)

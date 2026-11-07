@@ -23,7 +23,7 @@ func (s *Server) createRunReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	producer, ok := s.taskParticipant(w, r, c)
@@ -152,7 +152,7 @@ func (s *Server) bindRunReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	if _, ok = s.taskParticipant(w, r, c); !ok {

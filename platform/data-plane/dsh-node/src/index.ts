@@ -32,6 +32,7 @@ import {
 import { assertLocalStoragePath, resolveDeploymentProfile, withClusterStatus } from './deployment.ts'
 import { FAKE_IP_PROVIDER_ID } from '@lumo/web-fetch-fakeip'
 import { superagentProfileOverlay } from './superagent.ts'
+import { validateSessionKnowledge } from '../../../dsh-plugins/user-auth/src/session-knowledge.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const packagedRuntimeRoot = process.env['LUMO_RUNTIME_ROOT']
@@ -163,6 +164,7 @@ if (userSessionExecution !== undefined) {
     || ['authorityUrl', 'nodeId', 'projectId', 'workspaceRoot', 'provider', 'model'].some(key => typeof (userSessionExecution as Record<string, unknown>)[key] !== 'string' || !(userSessionExecution as Record<string, string>)[key].trim())
     || (userSessionExecution as { projectId: string }).projectId !== projectID) throw new Error('LUMO_USER_SESSION_EXECUTION requires a fixed authority/node/project/workspace/provider/model and the deployment project')
   if (deployment.mode === 'local' || !isWebProfile) throw new Error('Dynamic user Sessions require an authenticated server Web profile')
+  validateSessionKnowledge((userSessionExecution as { knowledge?: unknown }).knowledge, platformRealm)
 }
 const threadExecution: unknown = process.env['LUMO_THREAD_EXECUTION'] ? JSON.parse(process.env['LUMO_THREAD_EXECUTION']) : undefined
 if (threadExecution !== undefined && (typeof threadExecution !== 'object' || threadExecution === null || Array.isArray(threadExecution))) {
@@ -594,7 +596,7 @@ ${roleRows}
 ${skillLocalRows}
 ${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
       name: ${JSON.stringify(userAuthEntry)}
-      inject: ${userSessionExecution ? '[webServer, connection, remoteAccess, typertGateway, agents, sessionQuery, sessionPersistence, meteringScope]' : '[webServer]'}
+      inject: ${userSessionExecution ? `[webServer, connection, remoteAccess, typertGateway, agents, sessionQuery, sessionPersistence, meteringScope${(userSessionExecution as { knowledge?: unknown }).knowledge ? ', knowledgeAuthenticatedQuery' : ''}]` : '[webServer]'}
       config:
         host: ${JSON.stringify(process.env['LUMO_AUTH_HOST'] ?? '0.0.0.0')}
         port: ${authPort}
@@ -620,6 +622,7 @@ ${userSessionExecution ? `        sessionTransport: ${JSON.stringify(userSession
         connectorUrl: ${JSON.stringify(process.env['LUMO_CONNECTOR_GATEWAY_URL'] ?? 'http://localhost:8082')}
         governanceUrl: ${JSON.stringify(governanceURL)}
         registryUrl: ${JSON.stringify(process.env['LUMO_REGISTRY_URL'] ?? 'http://localhost:8084')}
+        collaboratorUrl: ${JSON.stringify(process.env['LUMO_COLLABORATOR_URL'] ?? '')}
         llmGatewayUrl: ${JSON.stringify(process.env['LUMO_LLM_GATEWAY_URL'] ?? '')}
         usageLedgerUrl: ${JSON.stringify(process.env['LUMO_USAGE_LEDGER_URL'] ?? '')}
         edgeGatewayUrl: ${JSON.stringify(process.env['LUMO_EDGE_GATEWAY_URL'] ?? '')}

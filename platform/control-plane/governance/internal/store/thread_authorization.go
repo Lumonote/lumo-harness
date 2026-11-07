@@ -22,5 +22,13 @@ func (s *Store) RuntimeThreadPrincipal(ctx context.Context, realm, userID string
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AuthPrincipal{}, ErrNotFound
 	}
-	return principal, err
+	if err != nil {
+		return AuthPrincipal{}, err
+	}
+	resolved, err := s.ResolveRoles(ctx, realm, principal.Roles)
+	if err != nil {
+		return AuthPrincipal{}, err
+	}
+	principal.EffectiveRoles = resolved.EffectiveRoles
+	return principal, nil
 }

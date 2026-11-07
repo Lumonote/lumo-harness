@@ -163,9 +163,11 @@ func main() {
 	}
 	log.Info("CRDT 合并内核已启用", "kernel", merger.Name())
 
+	api := server.New(h, st, ring, headerAuth{}, log)
+	api.ConfigureSpaceAuthorization(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(server.New(h, st, ring, headerAuth{}, log).Routes())),
+		Handler:           observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(api.Routes())),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

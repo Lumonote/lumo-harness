@@ -8,9 +8,10 @@ package server
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/projects/internal/domain"
@@ -58,6 +59,10 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
 		return false
 	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		http.Error(w, `{"error":"body must contain one JSON object"}`, http.StatusBadRequest)
+		return false
+	}
 	return true
 }
 
@@ -87,6 +92,13 @@ func (s *Server) require(w http.ResponseWriter, r *http.Request, projectID strin
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return domain.Project{}, "", false
 	}
+	if action == domain.ActionEdit && p.Status != domain.StatusActive {
+		http.Error(w, `{"error":"archived project is read-only"}`, http.StatusConflict)
+		return domain.Project{}, "", false
+	}
+	if action != domain.ActionRead {
+		*r = *r.WithContext(store.WithProjectMutationActor(r.Context(), projectID, c.realm, c.user, action))
+	}
 	return p, role, true
 }
 
@@ -95,14 +107,20 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/projects", s.create)
 	mux.HandleFunc("GET /v1/projects", s.list)
 	mux.HandleFunc("GET /v1/projects/{id}", s.get)
+	mux.HandleFunc("PATCH /v1/projects/{id}", s.rename)
 	mux.HandleFunc("GET /v1/projects/{id}/members", s.listMembers)
 	mux.HandleFunc("POST /v1/projects/{id}/members", s.addMember)
 	mux.HandleFunc("PATCH /v1/projects/{id}/members/{userId}", s.updateMember)
 	mux.HandleFunc("DELETE /v1/projects/{id}/members/{userId}", s.removeMember)
 	mux.HandleFunc("GET /v1/projects/{id}/artifacts", s.listArtifacts)
 	mux.HandleFunc("PUT /v1/projects/{id}/artifacts/{kind}/{name}", s.putArtifact)
+	mux.HandleFunc("DELETE /v1/projects/{id}/artifacts/{kind}/{name}", s.deleteArtifact)
 	mux.HandleFunc("GET /v1/projects/{id}/spaces", s.listSpaces)
 	mux.HandleFunc("POST /v1/projects/{id}/spaces", s.createSpace)
+	mux.HandleFunc("PATCH /v1/projects/{id}/spaces/{spaceID}", s.renameSpace)
+	mux.HandleFunc("DELETE /v1/projects/{id}/spaces/{spaceID}", s.deleteSpace)
+	mux.HandleFunc("POST /v1/projects/{id}/automations", s.createAutomation)
+	mux.HandleFunc("PATCH /v1/projects/{id}/automations/{automationId}", s.patchAutomation)
 	mux.HandleFunc("GET /v1/projects/{id}/automations", s.listAutomations)
 	mux.HandleFunc("PUT /v1/projects/{id}/automations/{automationId}", s.putAutomation)
 	mux.HandleFunc("DELETE /v1/projects/{id}/automations/{automationId}", s.deleteAutomation)
@@ -132,7 +150,11 @@ func (s *Server) reportProject(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, `{"error":"project_id is required for report authorization"}`, http.StatusBadRequest)
 		return false
 	}
-	_, _, ok := s.require(w, r, projectID, domain.ActionRead)
+	action := domain.ActionRead
+	if r.Method != http.MethodGet {
+		action = domain.ActionEdit
+	}
+	_, _, ok := s.require(w, r, projectID, action)
 	return ok
 }
 
@@ -141,8 +163,8 @@ func reportLiveHead(w http.ResponseWriter, r *http.Request) (*int64, bool) {
 	if raw == "" {
 		return nil, true
 	}
-	var head int64
-	if _, err := fmt.Sscanf(raw, "%d", &head); err != nil || head < 0 {
+	head, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || head < 0 {
 		http.Error(w, `{"error":"live_head must be a non-negative integer"}`, http.StatusBadRequest)
 		return nil, false
 	}
@@ -157,7 +179,7 @@ func (s *Server) getTaskReport(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	report, err := s.store.GetTaskReport(r.Context(), r.Header.Get("X-Lumo-Realm"), r.PathValue("taskID"), liveHead)
+	report, err := s.store.GetTaskReport(r.Context(), r.Header.Get("X-Lumo-Realm"), r.URL.Query().Get("project_id"), r.PathValue("taskID"), liveHead)
 	if errors.Is(err, store.ErrReportStale) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"stale": true, "reason": "replication-lag", "message": "session log replication is stale; report is withheld"})
 		return
@@ -196,7 +218,7 @@ func (s *Server) createTaskReport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 		return
 	}
-	report, err := s.store.CreateTaskReport(r.Context(), domain.TaskReport{
+	report, err := s.store.CreateTaskReport(r.Context(), r.URL.Query().Get("project_id"), domain.TaskReport{
 		ID: reportID, Realm: c.realm, TaskID: r.PathValue("taskID"), RunID: req.RunID,
 		Sections: req.Sections, Status: domain.ReportDraft, CreatedBy: c.user,
 	}, liveHead)
@@ -205,6 +227,13 @@ func (s *Server) createTaskReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		if s.projectWriteError(w, err) {
+			return
+		}
+		if errors.Is(err, store.ErrConflict) {
+			http.Error(w, `{"error":"report conflicts with existing state"}`, http.StatusConflict)
+			return
+		}
 		if errors.Is(err, store.ErrInvalidReport) {
 			http.Error(w, `{"error":"invalid report"}`, http.StatusBadRequest)
 			return
@@ -231,7 +260,10 @@ func (s *Server) confirmTaskReport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"report_id required"}`, http.StatusBadRequest)
 		return
 	}
-	report, err := s.store.ConfirmTaskReport(r.Context(), c.realm, r.PathValue("taskID"), req.ReportID, c.user)
+	report, err := s.store.ConfirmTaskReport(r.Context(), c.realm, r.URL.Query().Get("project_id"), r.PathValue("taskID"), req.ReportID, c.user)
+	if err != nil && s.projectWriteError(w, err) {
+		return
+	}
 	if errors.Is(err, store.ErrInvalidReport) {
 		http.Error(w, `{"error":"report requires evidence in every section"}`, http.StatusUnprocessableEntity)
 		return
@@ -265,7 +297,10 @@ func (s *Server) confirmReportByID(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"report_id required"}`, http.StatusBadRequest)
 		return
 	}
-	report, err := s.store.ConfirmTaskReportByID(r.Context(), c.realm, reportID, c.user)
+	report, err := s.store.ConfirmTaskReportByID(r.Context(), c.realm, r.URL.Query().Get("project_id"), reportID, c.user)
+	if err != nil && s.projectWriteError(w, err) {
+		return
+	}
 	if errors.Is(err, store.ErrInvalidReport) {
 		http.Error(w, `{"error":"report requires evidence in every section"}`, http.StatusUnprocessableEntity)
 		return
@@ -294,10 +329,15 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil || req.Name == "" {
-		http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
+	name, valid := projectName(req.Name)
+	if !valid {
+		http.Error(w, `{"error":"name must contain 1–120 characters without control characters"}`, http.StatusBadRequest)
+		return
+	}
+	req.Name = name
 	// ID 服务侧生成（uuid 形态可读前缀）；调用方不自带——ID 是引用键不是自由文本。
 	id, err := newProjectID()
 	if err != nil {
@@ -380,9 +420,13 @@ func (s *Server) putArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Version string `json:"version"`
+		Version         string  `json:"version"`
+		ExpectedVersion *string `json:"expectedVersion"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil || req.Version == "" {
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Version == "" {
 		http.Error(w, `{"error":"version required"}`, http.StatusBadRequest)
 		return
 	}
@@ -391,8 +435,11 @@ func (s *Server) putArtifact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
 		return
 	}
-	if err := s.store.UpsertArtifact(r.Context(), a); err != nil {
-		http.Error(w, `{"error":"invalid artifact"}`, http.StatusBadRequest)
+	if err := s.store.SaveArtifact(r.Context(), a, req.ExpectedVersion); err != nil {
+		if !s.projectWriteError(w, err) {
+			s.log.Error("save project artifact", "err", err)
+			http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, a)
@@ -422,17 +469,33 @@ func (s *Server) createSpace(w http.ResponseWriter, r *http.Request) {
 		ID   string `json:"spaceId"`
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil || req.Name == "" {
-		http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
+	if !decodeJSON(w, r, &req) {
 		return
 	}
+	name, valid := projectName(req.Name)
+	if !valid {
+		http.Error(w, `{"error":"valid name required"}`, http.StatusBadRequest)
+		return
+	}
+	req.Name = name
 	if req.ID == "" {
-		req.ID, _ = newID("space_")
+		var err error
+		req.ID, err = newID("space_")
+		if err != nil {
+			http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+			return
+		}
+	}
+	if !validResourceID(req.ID) {
+		http.Error(w, `{"error":"invalid spaceId"}`, http.StatusBadRequest)
+		return
 	}
 	space := domain.Space{ID: req.ID, ProjectID: id, Realm: p.Realm, Name: req.Name}
 	if err := s.store.UpsertSpace(r.Context(), space); err != nil {
-		s.log.Error("创建空间失败", "err", err)
-		http.Error(w, `{"error":"space conflict"}`, http.StatusConflict)
+		if !s.projectWriteError(w, err) {
+			s.log.Error("创建空间失败", "err", err)
+			http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		}
 		return
 	}
 	writeJSON(w, http.StatusCreated, space)
@@ -458,8 +521,7 @@ func (s *Server) putAutomation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var a domain.Automation
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&a); err != nil {
-		http.Error(w, `{"error":"invalid automation"}`, http.StatusBadRequest)
+	if !decodeJSON(w, r, &a) {
 		return
 	}
 	a.ID, a.ProjectID = r.PathValue("automationId"), id
@@ -468,7 +530,10 @@ func (s *Server) putAutomation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.UpsertAutomation(r.Context(), a); err != nil {
-		http.Error(w, `{"error":"invalid automation"}`, http.StatusBadRequest)
+		if !s.projectWriteError(w, err) {
+			s.log.Error("save project automation", "err", err)
+			http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, a)
@@ -480,7 +545,14 @@ func (s *Server) deleteAutomation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	automationID := r.PathValue("automationId")
-	if err := s.store.DeleteAutomation(r.Context(), id, automationID); err != nil {
+	expected, ok := expectedRevision(w, r, false)
+	if !ok {
+		return
+	}
+	if err := s.store.DeleteAutomationVersion(r.Context(), id, automationID, expected); err != nil {
+		if s.projectWriteError(w, err) {
+			return
+		}
 		s.log.Error("删除自动化失败", "err", err)
 		http.Error(w, `{"error":"internal"}`, 500)
 		return
@@ -544,6 +616,9 @@ func (s *Server) addMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.AddMember(r.Context(), id, req.UserID, req.Role); err != nil {
+		if s.projectWriteError(w, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, store.ErrAlreadyMember):
 			http.Error(w, `{"error":"already a member"}`, http.StatusConflict)
@@ -570,6 +645,9 @@ func (s *Server) updateMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.UpdateMemberRole(r.Context(), id, uid, req.Role); err != nil {
+		if s.projectWriteError(w, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, store.ErrLastOwner):
 			http.Error(w, `{"error":"cannot demote the last owner"}`, http.StatusConflict)
@@ -590,6 +668,9 @@ func (s *Server) removeMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.RemoveMember(r.Context(), id, uid); err != nil {
+		if s.projectWriteError(w, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, store.ErrLastOwner):
 			http.Error(w, `{"error":"cannot remove the last owner"}`, http.StatusConflict)
@@ -619,6 +700,9 @@ func (s *Server) transition(w http.ResponseWriter, r *http.Request, event string
 	}
 	p, err := s.store.Transition(r.Context(), id, event)
 	if err != nil {
+		if s.projectWriteError(w, err) {
+			return
+		}
 		s.log.Error("生命周期转移失败", "err", err)
 		http.Error(w, `{"error":"transition failed"}`, http.StatusInternalServerError)
 		return
@@ -638,6 +722,9 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.DeleteProject(r.Context(), id); err != nil {
+		if s.projectWriteError(w, err) {
+			return
+		}
 		if errors.Is(err, store.ErrNotArchived) {
 			http.Error(w, `{"error":"must be archived before deletion"}`, http.StatusConflict)
 			return

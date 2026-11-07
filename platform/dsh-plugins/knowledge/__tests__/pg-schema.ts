@@ -41,7 +41,17 @@ async function create(base: string, schema: string): Promise<string> {
   const admin = new pg.Client({ connectionString: base })
   await admin.connect()
   try {
+    // Extensions are database-wide. Install in the common schema before a
+    // worker's provider uses its own search_path, otherwise the first worker
+    // creates vector in a private schema and the other workers cannot see it.
+    await admin.query('BEGIN')
+    await admin.query('SELECT pg_advisory_xact_lock(823054)')
+    await admin.query('CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public')
     await admin.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`)
+    await admin.query('COMMIT')
+  } catch (error) {
+    await admin.query('ROLLBACK')
+    throw error
   } finally {
     await admin.end()
   }

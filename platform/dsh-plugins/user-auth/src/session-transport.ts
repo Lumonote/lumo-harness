@@ -5,7 +5,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { buildForkSeed, SessionId, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { PeerScope } from '@deepseek-ai/dsh-typert-protocol'
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway/types'
 import type { RemoteAccessBinding } from '@deepseek-ai/dsh-api-remote-access/types'
@@ -14,6 +14,7 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import { SessionOwnerClient, type SessionOwner } from '../../../shared/session-owners.ts'
 import type { SessionMeterScope } from '../../../shared/seam-contracts/meter-attribution.ts'
 import type { Principal } from './client.ts'
+import { installSessionKnowledge, USER_SESSION_KNOWLEDGE_TOOL, validateSessionKnowledge, type SessionKnowledgeConfig } from './session-knowledge.ts'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface PrincipalMap { 'lumo-user': { readonly kind: 'lumo-user'; readonly realm: string; readonly userId: string; readonly requestId: string } }
@@ -27,14 +28,20 @@ export interface SessionTransportConfig {
   workspaceRoot: string
   provider: string
   model: string
+  knowledge?: SessionKnowledgeConfig
 }
+export type SessionAuthority = () => Promise<Principal | void>
 export interface AuthenticatedSessionTransport {
-  execute(principal: Principal, action: string, request: Record<string, unknown>, signal: AbortSignal, authority?: () => Promise<void>): Promise<unknown>
+  execute(principal: Principal, action: string, request: Record<string, unknown>, signal: AbortSignal, authority?: SessionAuthority): Promise<unknown>
   stream(principal: Principal, action: string, request: Record<string, unknown>, signal: AbortSignal): Promise<AsyncIterable<unknown>>
 }
 export class PendingSessionInputError extends Error {
   readonly code = 'session_pending_input'
   constructor() { super('Session has durable pending input; automatic replay is disabled until its history is reviewed') }
+}
+export class SessionForkUnavailableError extends Error {
+  readonly code = 'session_fork_unavailable'
+  constructor() { super('Session has no completed turn to fork') }
 }
 const unary = new Set(['state', 'wait', 'events', 'page', 'projections', 'rename', 'prompt', 'cancel', 'updateQueue'])
 const streams = new Set(['follow', 'observeState', 'observeEvent', 'observeProjections'])
@@ -49,6 +56,20 @@ function target(request: Record<string, unknown>): string {
   const ref = address?.sessionId ?? request.sessionId
   if (typeof ref !== 'string' || !/^session-[a-f0-9]{32}$/u.test(ref)) throw new Error('A managed Session identity is required')
   return ref
+}
+function textOnly(content: unknown): void {
+  if (!Array.isArray(content) || content.some(part => !part || typeof part !== 'object' || part.type !== 'text' || typeof part.text !== 'string')) throw new Error('Authenticated Session accepts only text message parts')
+}
+function completedPrefix(events: readonly SessionEvent[]): SessionEvent['seq'] {
+  const last = events.findLast(event => event.type === 'turn/end')
+  if (!last) throw new SessionForkUnavailableError()
+  let boundary = last.seq
+  for (const event of events.slice(boundary + 1)) {
+    if (event.type === 'turn/start' || event.type === 'agent/inbox/spliced' || event.type === 'user/message' && event.surfaceOp === 'append') break
+    boundary = event.seq
+  }
+  if (events[boundary]?.seq !== boundary) throw new Error('Session fork boundary is invalid')
+  return boundary
 }
 async function workspace(root: string, id: string): Promise<string> {
   const absolute = resolve(root)
@@ -69,13 +90,16 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
   const access = ctx.get('remoteAccess') as unknown as Access | undefined
   const meters = ctx.get('meteringScope') as SessionMeterScope | undefined
   const persistence = ctx.get('sessionPersistence')
+  validateSessionKnowledge(config.knowledge)
+  const knowledge = config.knowledge === undefined ? undefined : ctx.get('knowledgeAuthenticatedQuery')
+  if (config.knowledge && !knowledge) throw new Error('Dynamic Session knowledge requires a current-user authenticated knowledge query capability')
   if (!connection || !gateway || !access || !meters || !persistence || !ctx.get('sessionQuery') || !ctx.get('agents')) throw new Error('Dynamic Session transport requires connection, Gateway, access, agents, persistence, query and metering')
   const owners = new SessionOwnerClient(config.authorityUrl, token, fetcher)
   const grants = new Map<string, readonly RemoteAccessBinding[]>()
   const known = new Map<string, SessionOwner>()
   const pendingInputs = new Set<string>()
   const prepared = new WeakSet<Agent>()
-  const authorities = new Map<string, () => Promise<void>>()
+  const authorities = new Map<string, SessionAuthority>()
   const polls = new Map<string, ReturnType<typeof setInterval>>()
   const handles = new Set<AgentHandle>()
   const releasePolicy = access.registerPolicy('lumo-user', { bindings: p => grants.get(p.requestId) ?? [] })
@@ -94,7 +118,16 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
     pendingInputs.delete(owner.session_ref)
     if (ctx.agents.list().filter(current => prepared.has(current)).length >= 64) throw new Error('Authenticated Session active capacity reached')
     agent.ctx.tools.restrict({ allow: [] })
-    agent.ctx.tools.guard(() => 'Authenticated Session text execution does not grant tool access')
+    agent.ctx.tools.guard(exec => config.knowledge && exec.name === USER_SESSION_KNOWLEDGE_TOOL ? undefined : 'Authenticated Session execution does not grant this tool access')
+    if (config.knowledge && knowledge) installSessionKnowledge(agent, knowledge, config.knowledge, config.projectId, async () => {
+      const authority = authorities.get(owner.session_ref)
+      if (!authority) throw new Error('Knowledge query requires current login authority')
+      const principal = await authority()
+      if (!principal || principal.user_id !== owner.owner_user_id || principal.realm !== owner.realm) throw new Error('Knowledge query requires the current authenticated Session owner')
+      await authorizeProject(principal)
+      await own(principal, owner.session_ref)
+      return principal
+    })
     agent.model.select({ provider: config.provider, model: config.model })
     agent.ctx.on('agent/pre-step', async (_payload, next) => {
       const authority = authorities.get(owner.session_ref)
@@ -129,18 +162,19 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
     signal.addEventListener('abort', abort, { once: true })
     return { peer, close: async () => { grants.delete(requestId); signal.removeEventListener('abort', abort); await peer.dispose() } }
   }
-  async function create(principal: Principal, request: Record<string, unknown>, signal: AbortSignal, authority?: () => Promise<void>): Promise<unknown> {
+  async function create(principal: Principal, signal: AbortSignal, authority?: SessionAuthority, parent = '', seed?: SessionEvent[], inheritedEventCount?: SessionLogOffset): Promise<unknown> {
     if (handles.size >= 64) throw new Error('Authenticated Session active capacity reached')
     if (!authority) throw new Error('Authenticated creation requires a current login authority')
     await authority()
-    if (Object.keys(request).length) throw new Error('Session create does not accept a caller identity, path, model or parent')
-    const reserved = await owners.reserve({ realm: principal.realm, owner_user_id: principal.user_id, project_id: config.projectId, node_id: config.nodeId, parent_session_ref: '' })
+    const reserved = await owners.reserve({ realm: principal.realm, owner_user_id: principal.user_id, project_id: config.projectId, node_id: config.nodeId, parent_session_ref: parent })
     const owner = reserved.owner
     const id = SessionId(owner.session_ref)
     if (ctx.sessions.get(id) || await persistence!.stat(id)) throw new Error('Reserved Session already exists; refusing legacy adoption')
     const cwd = await workspace(config.workspaceRoot, owner.session_ref)
     remember(owner.session_ref, owner)
-    const handle = await ctx.agents.create({ sessionId: id, meta: { cwd }, signal, agentOptions: { provider: config.provider, model: config.model }, setup: (_scope, agent) => { prepare(agent, owner) } })
+    const handle = await ctx.agents.create({ sessionId: id, meta: { cwd, ...(seed === undefined ? {} : { isSeeded: true }) },
+      ...(seed === undefined ? {} : { seed }), ...(inheritedEventCount === undefined ? {} : { inheritedEventCount }),
+      signal, agentOptions: { provider: config.provider, model: config.model }, setup: (_scope, agent) => { prepare(agent, owner) } })
     handles.add(handle)
     try {
       await persistence!.flush()
@@ -158,7 +192,22 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
     async execute(principal, action, request, signal, authority) {
       await authorizeProject(principal)
       signal.throwIfAborted()
-      if (action === 'create') return create(principal, request, signal, authority)
+      if (action === 'create') {
+        if (Object.keys(request).length) throw new Error('Session create does not accept a caller identity, path, model or parent')
+        return create(principal, signal, authority)
+      }
+      if (action === 'fork') {
+        if (Object.keys(request).some(key => key !== 'sessionId')) throw new Error('Session fork accepts only its source Session identity')
+        const ref = target(request)
+        if (!authority) throw new Error('Authenticated fork requires a current login authority')
+        await authority()
+        await own(principal, ref)
+        using source = await ctx.sessionQuery.observeSession(SessionId(ref))
+        const boundary = completedPrefix(source.events)
+        // Public fork seed construction closes the copied history. The child gets
+        // a fresh authority ID and workspace; browser-supplied metadata is never inherited.
+        return await create(principal, signal, authority, ref, buildForkSeed(source.events, boundary), SessionLogOffset(boundary + 1))
+      }
       if (action === 'list') {
         if (Object.keys(request).some(k => k !== 'after') || (request.after !== undefined && typeof request.after !== 'string')) throw new Error('Invalid Session list cursor')
         const page = await owners.list(principal.realm, principal.user_id, config.nodeId, request.after as string | undefined)
@@ -167,6 +216,11 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
       if (!unary.has(action)) throw new Error('Session action is not available in the authenticated text profile')
       const ref = target(request)
       await own(principal, ref)
+      if (action === 'prompt') textOnly(request.content)
+      if (action === 'updateQueue') {
+        const update = object(request.action)
+        if (update.kind === 'edit') textOnly(update.content)
+      }
       if (action === 'prompt') {
         if (!authority) throw new Error('Authenticated prompt requires a current login authority')
         await authority()

@@ -749,6 +749,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
           const current = await sessions.get(sessionToken)
           if (!current || principalIdentity(current) !== identity) throw new Error('Session authorization expired')
           await options.client.authorizeSessionProject(current, options.projectId ?? '')
+          return current
         }
         let checking = false
         const timer = setInterval(() => {
@@ -777,7 +778,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
           } else writeJson(res, 200, await options.sessionTransport.execute(principal, action, body, abort.signal, authority))
         } catch (error) {
           options.logger.warn('lumo-user-auth: owned Session request denied: %s', error)
-          if (!res.headersSent) writeJson(res, 403, { error: error instanceof Error && 'code' in error && error.code === 'session_pending_input' ? 'session_pending_input' : 'session_request_denied' })
+          if (!res.headersSent) writeJson(res, 403, { error: error instanceof Error && 'code' in error && ['session_pending_input', 'session_fork_unavailable'].includes(String(error.code)) ? error.code : 'session_request_denied' })
           else res.end()
         } finally { clearInterval(timer); abort.abort() }
         return

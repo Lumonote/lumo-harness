@@ -37,12 +37,13 @@ type Authenticator interface {
 
 // Server 组合 hub、store 与归属环。
 type Server struct {
-	hub      *hub.Hub
-	store    *store.Store
-	ring     *ownership.Ring
-	auth     Authenticator
-	log      *slog.Logger
-	upgrader websocket.Upgrader
+	hub                     *hub.Hub
+	store                   *store.Store
+	ring                    *ownership.Ring
+	auth                    Authenticator
+	log                     *slog.Logger
+	upgrader                websocket.Upgrader
+	spaceAuthorizationToken string
 }
 
 func New(h *hub.Hub, st *store.Store, ring *ownership.Ring, auth Authenticator, log *slog.Logger) *Server {
@@ -65,6 +66,9 @@ func New(h *hub.Hub, st *store.Store, ring *ownership.Ring, auth Authenticator, 
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	s.registerThreadCommandRoutes(mux)
+	mux.Handle("GET /v1/runtime/spaces/{spaceID}/permissions", observability.RequireControlPlaneToken(s.spaceAuthorizationToken)(http.HandlerFunc(s.handleSpacePermissions)))
+	mux.Handle("GET /v1/projects/{projectID}/spaces/{spaceID}/grants", observability.RequireControlPlaneToken(s.spaceAuthorizationToken)(http.HandlerFunc(s.handleSpaceGrants)))
+	mux.Handle("PUT /v1/projects/{projectID}/spaces/{spaceID}/grants/{userID}", observability.RequireControlPlaneToken(s.spaceAuthorizationToken)(http.HandlerFunc(s.handleSpaceGrants)))
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /metrics", handleMetrics)
 	mux.HandleFunc("GET /docs/{docID}/ws", s.handleWS)
@@ -142,7 +146,6 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, &domain.ErrForbidden{Detail: "无文档读取权限"})
 		return
 	}
-	canEdit := has(perms, domain.PermEdit)
 
 	if _, err := s.hub.Open(r.Context(), meta); err != nil {
 		writeErr(w, err)
@@ -187,11 +190,25 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	go func() {
+		defer conn.Close()
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-ticker.C:
+				current, err := s.store.Permissions(ctx, meta.Realm, meta.Space, ident.UserID)
+				if err != nil || !has(current, domain.PermRead) {
+					cancel()
+					return
+				}
 			case u := <-out:
+				current, err := s.store.Permissions(ctx, meta.Realm, meta.Space, ident.UserID)
+				if err != nil || !has(current, domain.PermRead) {
+					cancel()
+					return
+				}
 				if err := writeMessage(wsMessage{
 					Type: "update", Seq: u.Seq, Actor: u.Actor, Payload: u.Payload,
 				}); err != nil {
@@ -213,7 +230,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		if !s.ring.IsMine(docID) {
 			return
 		}
-		if !canEdit {
+		current, permissionErr := s.store.Permissions(ctx, meta.Realm, meta.Space, ident.UserID)
+		if permissionErr != nil || !has(current, domain.PermRead) {
+			return
+		}
+		if !has(current, domain.PermEdit) {
 			_ = writeMessage(wsMessage{Type: "error", Detail: "无编辑权限"})
 			continue
 		}

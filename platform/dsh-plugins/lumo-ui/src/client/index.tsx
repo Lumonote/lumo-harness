@@ -31,8 +31,15 @@ import { layoutTaskBoard, type BoardTaskInput, type BoardTaskState, type TeamPro
 import { resolveSidebarIdentity, type SidebarIdentity } from './sidebar-identity.ts'
 import { ClusterNodesPanel, SchedulerClustersPanel, SkillAccessPanel, ProjectMembersPanel, ConnectorManifestPanel, ConnectorAccountPanel, AgentPresetEditor, FlowManagementPanel, TaskIntentContractPanel, TaskCollaboratorsPanel, TaskCollaborationPanel, TaskEvidencePanel, SessionControlPanel, ThreadBoardPanel, type AgentPreset, type ProjectMember, type TaskIntentFacts, type TaskIntentContract, type TaskScoreBreakdown, type TaskResultFacts, type TaskCollaborationFacts } from './cluster-panels.tsx'
 import { TokenUsagePanel } from './token-usage-panel.tsx'
+import { ProjectSettingsPanel } from './project-settings-panel.tsx'
+import { ProjectBudgetPanel } from './project-budget-panel.tsx'
+import { ProjectSpacesPanel, ProjectAutomationsPanel, ProjectArtifactsPanel, type ProjectResourceSpace, type ProjectResourceArtifact } from './project-resources-panel.tsx'
 import { TeamLauncher, type TeamCapabilities } from './team-launcher.tsx'
 import { RunReviewPanel, type ReviewActor } from './run-review-panel.tsx'
+import { UserDirectoryPagination, userDirectoryURL } from './user-directory.tsx'
+import { DirectoryUserPicker } from './directory-user-picker.tsx'
+import { RolePermissionsPanel } from './role-permissions-panel.tsx'
+import { KnowledgeLibraryEditor, type LibraryEditorResource } from './knowledge-library-editor.tsx'
 import type { ThreadFacts } from './thread-board.ts'
 
 // A desktop WebView can evaluate more than one copy of this bundle while the
@@ -74,7 +81,7 @@ interface NodeState {
 interface DeploymentState { mode: 'local' | 'standalone' | 'cluster'; label: string; storage: 'sqlite' | 'postgres'; middleware: string[]; distributed: boolean; desktop: boolean; clusterReady: boolean; clusterOnly: boolean }
 interface Operation { name?: string; method?: string; write?: boolean; sensitivity?: string }
 interface Row { id?: string; name?: string; status?: string; realm?: string; version?: number; protocol?: string; operations?: Operation[]; projectId?: string; visibility?: string; author?: string; triggerKind?: string; triggerSpec?: string; flowRef?: string; enabled?: boolean; reviewComment?: string }
-interface Automation { automationId: string; projectId: string; triggerKind: string; triggerSpec: string; flowRef: string; enabled: boolean }
+interface Automation { automationId: string; projectId: string; triggerKind: string; triggerSpec: string; flowRef: string; enabled: boolean; revision: number }
 interface FlowDefinition { nodes?: Array<{ id?: string; operator?: string }>; edges?: Array<{ from?: string; to?: string }> }
 interface FlowVersionSnapshot { flow_id: string; version: number; reviewer: string; definition: FlowDefinition }
 interface FlowVersionDiff { flow: Row; previous: FlowVersionSnapshot; current: FlowVersionSnapshot }
@@ -92,7 +99,7 @@ interface TaskRun { id: string; attempt: number; worker_id: string; session_ref?
 interface TaskAuditEvent { id: string; event: string; actor: string; detail: Record<string, unknown>; created_at: string }
 interface PermissionDecision { allowed: boolean; action: string; reason: string; matched_policies: string[] }
 interface WorkerProfile { worker_id: string; worker_kind: 'human' | 'agent'; display_name: string; status: string; runtime_status?: string; runtime_updated_at?: string; active_tasks: number; load: number; max_concurrency: number; eligible: boolean }
-interface GovernanceRole { id: string; name: string; description?: string; status: string }
+interface GovernanceRole { id: string; name: string; description?: string; status: string; parent_role_id?: string; permission_revision?: number }
 interface GovernanceDepartment { id: string; name: string; parent_dept_id?: string; manager_user_id?: string; status: string }
 type AssignmentMode = 'auto' | 'manual'
 interface DirectoryUser { id: string; display_name: string; primary_dept_id?: string; status?: string }
@@ -161,8 +168,8 @@ interface VaultStatusInfo {
   error: string | null
 }
 interface KnowledgeSources { realm: string; state: 'synchronized'; sources: KnowledgeSourceSummary[] }
-interface KnowledgeLibraryFolder { folderId: string; realm: string; parentId: string | null; name: string; ownerUserId: string; createdAt: string }
-interface KnowledgeLibraryFile { docId: string; realm: string; folderId: string | null; filename: string; mimeType: string; byteSize: number; ownerUserId: string; extractionState: string; ocrState: string; createdAt: string }
+interface KnowledgeLibraryFolder { folderId: string; realm: string; parentId: string | null; name: string; ownerUserId: string; createdAt: string; revision?: number; canEdit?: boolean }
+interface KnowledgeLibraryFile { docId: string; realm: string; folderId: string | null; filename: string; mimeType: string; byteSize: number; sha256: string; ownerUserId: string; extractionState: string; ocrState: string; createdAt: string; revision?: number; canEdit?: boolean }
 interface KnowledgeLibraryGrant { type: 'user' | 'role'; id: string; access: 'viewer' | 'editor' }
 interface RuntimeSkill { name: string; description: string; whenToUse?: string; invocation: { modelInvocable: boolean; userInvocable: boolean }; source: string; provider: string }
 interface SkillSnapshot { complete: boolean; skills: RuntimeSkill[]; error?: string }
@@ -1231,7 +1238,7 @@ function Metric({ label, value, note, tone = '' }: { label: string; value: strin
   return <SpotlightCard className={`lumo-metric ${tone}`}><small>{label}</small><strong>{value}</strong><span>{note}</span></SpotlightCard>
 }
 
-function KnowledgeSurface({ onClose }: { onClose: () => void }) {
+export function KnowledgeSurface({ onClose }: { onClose: () => void }) {
   const [area, setArea] = useState<'search' | 'sources' | 'operations' | 'files'>('search')
   const [result, setResult] = useState<KnowledgeResult | null>(null)
   const [queryText, setQueryText] = useState('')
@@ -1265,6 +1272,15 @@ function KnowledgeSurface({ onClose }: { onClose: () => void }) {
   const [libraryFolderName, setLibraryFolderName] = useState('')
   const [libraryEntityTags, setLibraryEntityTags] = useState('')
   const [libraryBusy, setLibraryBusy] = useState(false)
+  const [libraryRemoval, setLibraryRemoval] = useState<{ type: 'file'; file: KnowledgeLibraryFile } | { type: 'folder'; folder: KnowledgeLibraryFolder } | null>(null)
+  const [libraryEditing, setLibraryEditing] = useState<LibraryEditorResource | null>(null)
+  const libraryPending = useRef(false)
+  const librarySequence = useRef(0)
+  const previewSequence = useRef(0)
+  const shareSequence = useRef(0)
+  const sourcesSequence = useRef(0)
+  const detailSequence = useRef(0)
+  const querySequence = useRef(0)
   const [previewFile, setPreviewFile] = useState<KnowledgeLibraryFile | null>(null)
   const [previewText, setPreviewText] = useState<string | null>(null)
   const [previewOfficeBytes, setPreviewOfficeBytes] = useState<{ kind: 'pdf' | 'xlsx'; data: Uint8Array<ArrayBuffer> } | null>(null)
@@ -1276,36 +1292,61 @@ function KnowledgeSurface({ onClose }: { onClose: () => void }) {
   const [shareAccess, setShareAccess] = useState<'viewer' | 'editor'>('viewer')
   const [shareError, setShareError] = useState('')
   const [shareBusy, setShareBusy] = useState(false)
+  const [shareLoading, setShareLoading] = useState(false)
+  const sharePending = useRef(false)
   const loadSources = useCallback(async () => {
+    const sequence = ++sourcesSequence.current
     setSourcesLoading(true); setSourcesError('')
-    try { setSources((await api<KnowledgeSources>('/lumo/api/knowledge/sources')).sources) }
-    catch (reason) { setSources(null); setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setSourcesLoading(false) }
+    try {
+      const response = await api<KnowledgeSources>('/lumo/api/knowledge/sources')
+      if (sequence === sourcesSequence.current) setSources(response.sources)
+    }
+    catch (reason) { if (sequence === sourcesSequence.current) { setSources(null); setSourcesError(reason instanceof Error ? reason.message : String(reason)) } }
+    finally { if (sequence === sourcesSequence.current) setSourcesLoading(false) }
   }, [])
   const loadVaultStatus = useCallback(async () => {
     try { setVaultStatus(await api<VaultStatusInfo>('/lumo/api/knowledge/vault/status')) }
     catch { setVaultStatus(undefined) }
   }, [])
-  const loadLibrary = useCallback(async () => {
+  const loadLibrary = useCallback(async (throwOnError = false) => {
+    const sequence = ++librarySequence.current
+    ++previewSequence.current; ++shareSequence.current
+    setPreviewFile(null); setPreviewText(null); setPreviewOfficeBytes(null); setPreviewLoading(false); setShareTarget(null)
     setLibraryLoading(true); setLibraryError('')
     try {
       const [folderResponse, fileResponse] = await Promise.all([
         api<{ folders: KnowledgeLibraryFolder[] }>('/lumo/api/knowledge/library/folders'),
         api<{ files: KnowledgeLibraryFile[] }>('/lumo/api/knowledge/library/files'),
       ])
+      if (sequence !== librarySequence.current) return
       setLibraryFolders(folderResponse.folders); setLibraryFiles(fileResponse.files)
-    } catch (reason) { setLibraryError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setLibraryLoading(false) }
+      setLibraryFolderId(current => folderResponse.folders.some(folder => folder.folderId === current) ? current : null)
+    } catch (reason) {
+      if (sequence !== librarySequence.current) return
+      setLibraryError(reason instanceof Error ? reason.message : String(reason))
+      setLibraryFolders([]); setLibraryFiles([]); setLibraryRemoval(null)
+      ++previewSequence.current; ++shareSequence.current
+      setPreviewFile(null); setPreviewText(null); setPreviewOfficeBytes(null); setPreviewLoading(false); setShareTarget(null)
+      if (throwOnError) throw reason
+    }
+    finally { if (sequence === librarySequence.current) setLibraryLoading(false) }
   }, [])
-  useEffect(() => { void loadSources(); void loadVaultStatus(); void loadLibrary() }, [loadSources, loadVaultStatus, loadLibrary])
+  useEffect(() => {
+    void loadSources(); void loadVaultStatus(); void loadLibrary()
+    return () => { ++librarySequence.current; ++sourcesSequence.current; ++previewSequence.current; ++shareSequence.current; ++detailSequence.current; ++querySequence.current }
+  }, [loadSources, loadVaultStatus, loadLibrary])
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const text = queryText.trim()
     if (!text) { setError('先输入要检索的问题。'); return }
+    const sequence = ++querySequence.current
     setBusy(true); setError(''); setSelectedHit(null)
-    try { setResult(await api('/lumo/api/knowledge/query', { method: 'POST', body: JSON.stringify({ text, topK: Number(topK) }) })) }
-    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setBusy(false) }
+    try {
+      const response = await api<KnowledgeResult>('/lumo/api/knowledge/query', { method: 'POST', body: JSON.stringify({ text, topK: Number(topK) }) })
+      if (sequence === querySequence.current) setResult(response)
+    }
+    catch (reason) { if (sequence === querySequence.current) setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { if (sequence === querySequence.current) setBusy(false) }
   }
   const useExample = (text: string) => { setQueryText(text); setError('') }
   const resetSourceForm = () => {
@@ -1375,17 +1416,19 @@ function KnowledgeSurface({ onClose }: { onClose: () => void }) {
     finally { setSourceBusy(''); }
   }
   const createLibraryFolder = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); setLibraryBusy(true); setLibraryError(''); setLibraryNotice('')
+    event.preventDefault()
+    if (libraryPending.current || !canWriteLibraryFolder) return
+    libraryPending.current = true; setLibraryBusy(true); setLibraryError(''); setLibraryNotice('')
     try {
       await api('/lumo/api/knowledge/library/folders', { method: 'POST', body: JSON.stringify({ name: libraryFolderName, parentId: libraryFolderId }) })
       setLibraryFolderName(''); setLibraryNotice('文件夹已创建。'); await loadLibrary()
     } catch (reason) { setLibraryError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setLibraryBusy(false) }
+    finally { libraryPending.current = false; setLibraryBusy(false) }
   }
   const uploadLibraryFile = async (input: HTMLInputElement) => {
     const file = input.files?.[0]
-    if (!file) return
-    setLibraryBusy(true); setLibraryError(''); setLibraryNotice('')
+    if (!file || libraryPending.current || !canWriteLibraryFolder) return
+    libraryPending.current = true; setLibraryBusy(true); setLibraryError(''); setLibraryNotice('')
     try {
       const query = libraryFolderId === null ? '' : `?folder_id=${encodeURIComponent(libraryFolderId)}`
       const entities = libraryEntityTags.split(/[,，]/u).map(value => value.trim()).filter(Boolean)
@@ -1399,28 +1442,73 @@ function KnowledgeSurface({ onClose }: { onClose: () => void }) {
       setLibraryNotice(response.indexed ? `已上传并加入向量与知识图谱索引：${response.file.filename}${entities.length ? `（${entities.length} 个实体标签）` : ''}` : `已保存 ${response.file.filename}，但当前格式没有生成可检索文本。`)
       await loadLibrary()
     } catch (reason) { setLibraryError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { input.value = ''; setLibraryBusy(false) }
+    finally { input.value = ''; libraryPending.current = false; setLibraryBusy(false) }
   }
   const openLibraryPreview = async (file: KnowledgeLibraryFile) => {
+    const sequence = ++previewSequence.current
     setPreviewFile(file); setPreviewText(null); setPreviewOfficeBytes(null); setPreviewLoading(true); setLibraryError('')
     try {
       const ext = file.filename.toLowerCase().split('.').pop() ?? ''
       const url = `/lumo/api/knowledge/library/files/${encodeURIComponent(file.docId)}/preview`
       if (ext === 'docx' || ext === 'pptx') {
-        setPreviewOfficeBytes({ kind: 'pdf', data: await apiBytes(url) })
+        const data = await apiBytes(url)
+        if (sequence === previewSequence.current) setPreviewOfficeBytes({ kind: 'pdf', data })
       } else if (ext === 'xlsx') {
-        setPreviewOfficeBytes({ kind: 'xlsx', data: await apiBytes(url) })
+        const data = await apiBytes(url)
+        if (sequence === previewSequence.current) setPreviewOfficeBytes({ kind: 'xlsx', data })
       } else if (!['pdf', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'tif', 'tiff', 'bmp'].includes(ext)) {
-        setPreviewText(await apiText(url))
+        const text = await apiText(url)
+        if (sequence === previewSequence.current) setPreviewText(text)
       }
-    } catch (reason) { setLibraryError(reason instanceof Error ? reason.message : String(reason)); setPreviewFile(null); setPreviewOfficeBytes(null) }
-    finally { setPreviewLoading(false) }
+    } catch (reason) { if (sequence === previewSequence.current) { setLibraryError(reason instanceof Error ? reason.message : String(reason)); setPreviewFile(null); setPreviewOfficeBytes(null) } }
+    finally { if (sequence === previewSequence.current) setPreviewLoading(false) }
   }
-  const closeLibraryPreview = () => { setPreviewFile(null); setPreviewText(null); setPreviewOfficeBytes(null) }
+  const closeLibraryPreview = () => { ++previewSequence.current; setPreviewFile(null); setPreviewText(null); setPreviewOfficeBytes(null); setPreviewLoading(false) }
+  const openLibraryEditor = (resource: LibraryEditorResource) => {
+    closeLibraryPreview(); ++shareSequence.current; setShareTarget(null); setLibraryRemoval(null); setLibraryEditing(resource)
+  }
+  const removeLibraryItem = async () => {
+    if (!libraryRemoval || libraryPending.current) return
+    const target = libraryRemoval
+    if (!(target.type === 'file' ? target.file.canEdit : target.folder.canEdit)) return
+    libraryPending.current = true; setLibraryBusy(true); setLibraryError(''); setLibraryNotice('')
+    try {
+      if (target.type === 'file') {
+        const { docId, sha256, revision } = target.file
+        await api(`/lumo/api/knowledge/library/files/${encodeURIComponent(docId)}`, { method: 'DELETE', body: JSON.stringify({ expectedSha256: sha256, ...(revision === undefined ? {} : { expectedRevision: revision }) }) })
+        closeLibraryPreview()
+        ++querySequence.current; ++detailSequence.current
+        setBusy(false); setDetailLoading(false)
+        setLibraryFiles(current => current.filter(file => file.docId !== docId))
+        setResult(current => current ? { ...current, hits: current.hits.filter(hit => hit.docId !== docId) } : null)
+        setSelectedHit(current => current?.docId === docId ? null : current)
+        setSourceDetail(current => current?.doc.docId === docId ? null : current)
+        if (loadedSource?.doc.docId === docId) resetSourceForm()
+        setLibraryNotice(`已删除「${target.file.filename}」，文件已从资料库和检索中移除。`)
+        await loadSources()
+      } else {
+        const revision = target.folder.revision
+        await api(`/lumo/api/knowledge/library/folders/${encodeURIComponent(target.folder.folderId)}`, { method: 'DELETE', ...(revision === undefined ? {} : { body: JSON.stringify({ expectedRevision: revision }) }) })
+        setLibraryFolders(current => current.filter(folder => folder.folderId !== target.folder.folderId))
+        setLibraryNotice(`已删除空文件夹「${target.folder.name}」。`)
+      }
+      ++shareSequence.current; setShareTarget(null); setLibraryRemoval(null)
+      await loadLibrary()
+    } catch (reason) {
+      setLibraryError(reason instanceof ApiError && reason.status === 409 ? '内容已变化或目录非空，未执行删除。请刷新后重试。' : reason instanceof Error ? reason.message : String(reason))
+      setLibraryRemoval(null)
+    } finally { libraryPending.current = false; setLibraryBusy(false) }
+  }
   const openLibraryShares = async (target: { type: 'folder' | 'file'; id: string; name: string }) => {
-    setShareTarget(target); setShareError(''); setShareID(''); setShareGrants([])
-    try { setShareGrants((await api<{ grants: KnowledgeLibraryGrant[] }>(`/lumo/api/knowledge/library/${target.type === 'folder' ? 'folders' : 'files'}/${encodeURIComponent(target.id)}/shares`)).grants) }
-    catch (reason) { setShareTarget(null); setLibraryError(reason instanceof Error ? reason.message : String(reason)) }
+    if (sharePending.current) return
+    const sequence = ++shareSequence.current
+    setShareTarget(target); setShareError(''); setShareID(''); setShareGrants([]); setShareLoading(true)
+    try {
+      const response = await api<{ grants: KnowledgeLibraryGrant[] }>(`/lumo/api/knowledge/library/${target.type === 'folder' ? 'folders' : 'files'}/${encodeURIComponent(target.id)}/shares`)
+      if (sequence === shareSequence.current) setShareGrants(response.grants)
+    }
+    catch (reason) { if (sequence === shareSequence.current) { setShareTarget(null); setLibraryError(reason instanceof Error ? reason.message : String(reason)) } }
+    finally { if (sequence === shareSequence.current) setShareLoading(false) }
   }
   const addLibraryGrant = () => {
     const id = shareID.trim()
@@ -1429,28 +1517,34 @@ function KnowledgeSurface({ onClose }: { onClose: () => void }) {
     setShareGrants(current => [...current, { type: shareType, id, access: shareAccess }]); setShareID(''); setShareError('')
   }
   const saveLibraryGrants = async () => {
-    if (!shareTarget) return
-    setShareBusy(true); setShareError('')
+    if (!shareTarget || shareLoading || sharePending.current) return
+    sharePending.current = true; setShareBusy(true); setShareError('')
     try {
       await api(`/lumo/api/knowledge/library/${shareTarget.type === 'folder' ? 'folders' : 'files'}/${encodeURIComponent(shareTarget.id)}/shares`, { method: 'PUT', body: JSON.stringify({ grants: shareGrants }) })
       setLibraryNotice(`已更新「${shareTarget.name}」的平台内分享。`); setShareTarget(null); await loadLibrary()
     } catch (reason) { setShareError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setShareBusy(false) }
+    finally { sharePending.current = false; setShareBusy(false) }
   }
   const openSourceDetail = async (docId: string) => {
+    const sequence = ++detailSequence.current
     setDetailLoading(true); setSourceDetail(null)
     try {
-      setSourceDetail((await api<{ source: KnowledgeSource }>(`/lumo/api/knowledge/sources/${encodeURIComponent(docId)}`)).source)
-    } catch (reason) { setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setDetailLoading(false) }
+      const response = await api<{ source: KnowledgeSource }>(`/lumo/api/knowledge/sources/${encodeURIComponent(docId)}`)
+      if (sequence === detailSequence.current) setSourceDetail(response.source)
+    } catch (reason) { if (sequence === detailSequence.current) setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { if (sequence === detailSequence.current) setDetailLoading(false) }
   }
   const visibleSources = (sources ?? []).filter(source => activeSpace === '' || source.space === activeSpace)
   const activeLibraryFolder = libraryFolders.find(folder => folder.folderId === libraryFolderId)
-  const activeLibraryChildren = libraryFolders.filter(folder => folder.parentId === libraryFolderId)
-  const activeLibraryFiles = libraryFiles.filter(file => file.folderId === libraryFolderId)
+  const visibleFolderIDs = new Set(libraryFolders.map(folder => folder.folderId))
+  const activeLibraryChildren = libraryFolders.filter(folder => folder.parentId === libraryFolderId || (libraryFolderId === null && folder.parentId !== null && !visibleFolderIDs.has(folder.parentId)))
+  const activeLibraryFiles = libraryFiles.filter(file => file.folderId === libraryFolderId || (libraryFolderId === null && file.folderId !== null && !visibleFolderIDs.has(file.folderId)))
+  const canWriteLibraryFolder = libraryFolderId === null || activeLibraryFolder?.canEdit === true
   const libraryFolderPath = (() => {
     const path: KnowledgeLibraryFolder[] = []; let folder = activeLibraryFolder
-    while (folder) {
+    const seen = new Set<string>()
+    while (folder && !seen.has(folder.folderId)) {
+      seen.add(folder.folderId)
       path.unshift(folder)
       const parentId = folder.parentId
       folder = parentId === null ? undefined : libraryFolders.find(item => item.folderId === parentId)
@@ -1501,27 +1595,45 @@ function KnowledgeSurface({ onClose }: { onClose: () => void }) {
     {area === 'files' ? <>
       {libraryError ? <Notice error close={() => setLibraryError('')}>{libraryError}</Notice> : null}
       {libraryNotice ? <Notice close={() => setLibraryNotice('')}>{libraryNotice}</Notice> : null}
+      {libraryEditing ? <KnowledgeLibraryEditor
+        key={`${libraryEditing.type}:${libraryEditing.type === 'file' ? libraryEditing.file.docId : libraryEditing.folder.folderId}`}
+        request={api} resource={libraryEditing} folders={libraryFolders} onClose={() => setLibraryEditing(null)}
+        onSaved={async () => {
+          await loadLibrary(true)
+          ++querySequence.current; ++detailSequence.current
+          setResult(null); setSelectedHit(null); setSourceDetail(null); setBusy(false); setDetailLoading(false)
+          setLibraryNotice('资料名称和位置已更新。')
+          await loadSources()
+        }}
+      /> : null}
       <Section title="文件资料" meta={`${libraryFiles.length} 个当前身份可访问的文件`} actions={<BusyButton className="lumo-secondary" busy={libraryLoading} onClick={() => void loadLibrary()}>刷新</BusyButton>}>
         <p className="lumo-section-note">支持目录继承权限，文件夹或文件可分享给平台内用户和角色。上传的可识别文本会进入现有向量索引；可填写实体标签建立知识图谱关系。扫描 PDF 和图片由同一 DSH API 容器执行中文/英文 OCR。</p>
         <div className="lumo-library-toolbar">
           <div className="lumo-library-breadcrumb"><button type="button" onClick={() => { setLibraryFolderId(null); closeLibraryPreview() }}>资料库根目录</button>{libraryFolderPath.map(folder => <span key={folder.folderId}><i>／</i><button type="button" onClick={() => { setLibraryFolderId(folder.folderId); closeLibraryPreview() }}>{folder.name}</button></span>)}</div>
-          <form className="lumo-library-folder-form" onSubmit={createLibraryFolder}><input aria-label="新文件夹名称" value={libraryFolderName} maxLength={240} placeholder="新建文件夹" required onChange={event => setLibraryFolderName(event.target.value)} /><BusyButton type="submit" busy={libraryBusy} className="lumo-secondary">创建文件夹</BusyButton></form>
+          {canWriteLibraryFolder ? <>
+          <form className="lumo-library-folder-form" onSubmit={createLibraryFolder}><input aria-label="新文件夹名称" value={libraryFolderName} maxLength={240} placeholder="新建文件夹" required disabled={libraryBusy} onChange={event => setLibraryFolderName(event.target.value)} /><BusyButton type="submit" busy={libraryBusy} className="lumo-secondary">创建文件夹</BusyButton></form>
           <input className="lumo-library-entities" aria-label="知识图谱实体标签" value={libraryEntityTags} maxLength={1500} placeholder="图谱实体标签，逗号分隔（可选）" onChange={event => setLibraryEntityTags(event.target.value)} />
           <label className="lumo-button lumo-primary lumo-library-upload">{libraryBusy ? '处理中…' : '上传文件'}<input type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.tif,.tiff,.bmp,.txt,.log,.md,.markdown,.csv,.tsv,.json,.html,.htm,.xml,.yaml,.yml,.docx,.xlsx,.pptx" disabled={libraryBusy} onChange={event => void uploadLibraryFile(event.currentTarget)} /></label>
+          </> : <span className="lumo-section-note">当前目录为只读分享，可预览和下载文件。</span>}
         </div>
         <div className="lumo-library-layout">
           <div className="lumo-library-list">
-            {libraryLoading ? <Empty>正在读取当前身份可以访问的目录和文件。</Empty> : libraryError ? <Empty>资料库请求未成功，请刷新后重试。</Empty> : <>
-              {activeLibraryFolder?.parentId ? <button type="button" className="lumo-library-folder-row" onClick={() => { setLibraryFolderId(activeLibraryFolder.parentId); closeLibraryPreview() }}><b>↰　上一级</b><small>返回父文件夹</small></button> : null}
-              {activeLibraryChildren.map(folder => <div className="lumo-library-folder-row" key={folder.folderId}><button type="button" onClick={() => { setLibraryFolderId(folder.folderId); closeLibraryPreview() }}><b>▰　{folder.name}</b><small>文件夹 · 由创建者和上级授权共同控制</small></button><button type="button" className="lumo-quiet" onClick={() => void openLibraryShares({ type: 'folder', id: folder.folderId, name: folder.name })}>分享</button></div>)}
+            {libraryLoading ? <Empty>正在读取当前身份可以访问的目录和文件。</Empty> : <>
+              {activeLibraryFolder?.parentId && visibleFolderIDs.has(activeLibraryFolder.parentId) ? <button type="button" className="lumo-library-folder-row" onClick={() => { setLibraryFolderId(activeLibraryFolder.parentId); closeLibraryPreview() }}><b>↰　上一级</b><small>返回父文件夹</small></button> : null}
+              {activeLibraryChildren.map(folder => <div className="lumo-library-folder-row" key={folder.folderId}><button type="button" onClick={() => { setLibraryFolderId(folder.folderId); setLibraryRemoval(null); closeLibraryPreview() }}><b>▰　{folder.name}</b><small>文件夹 · {folder.canEdit ? '可编辑' : '只读'}{folder.parentId && !visibleFolderIDs.has(folder.parentId) ? ' · 共享入口' : ''}</small></button>{folder.canEdit ? <div className="lumo-row-actions">{Number.isSafeInteger(folder.revision) && (folder.revision ?? 0) >= 1 ? <button type="button" className="lumo-quiet" disabled={libraryBusy} onClick={() => openLibraryEditor({ type: 'folder', folder })}>整理</button> : null}<button type="button" className="lumo-quiet" disabled={libraryBusy} onClick={() => void openLibraryShares({ type: 'folder', id: folder.folderId, name: folder.name })}>分享</button><button type="button" className="lumo-quiet lumo-delete-action" disabled={libraryBusy} onClick={() => setLibraryRemoval({ type: 'folder', folder })}>删除</button></div> : null}</div>)}
               {activeLibraryFiles.map(file => <article className={`lumo-library-file ${previewFile?.docId === file.docId ? 'selected' : ''}`} key={file.docId}>
                 <div><b>{file.filename}</b><small>{file.mimeType.split(';', 1)[0]} · {(file.byteSize / 1024 / 1024).toFixed(file.byteSize >= 1024 * 1024 ? 1 : 2)} MB · {file.extractionState === 'ready' ? '文本已入索引' : file.ocrState === 'unavailable' ? 'OCR 不可用' : file.extractionState === 'unsupported' ? '暂不支持文本提取' : file.extractionState === 'failed' ? '文本提取失败' : file.extractionState}</small></div>
-                <div className="lumo-row-actions"><button type="button" className="lumo-quiet" onClick={() => void openLibraryPreview(file)}>预览</button><button type="button" className="lumo-quiet" onClick={() => void openLibraryShares({ type: 'file', id: file.docId, name: file.filename })}>分享</button><a className="lumo-quiet" href={`/lumo/api/knowledge/library/files/${encodeURIComponent(file.docId)}/content?download=1`}>下载</a></div>
+                <div className="lumo-row-actions"><button type="button" className="lumo-quiet" disabled={libraryBusy} onClick={() => void openLibraryPreview(file)}>预览</button>{file.canEdit ? <>{Number.isSafeInteger(file.revision) && (file.revision ?? 0) >= 1 ? <button type="button" className="lumo-quiet" disabled={libraryBusy} onClick={() => openLibraryEditor({ type: 'file', file })}>整理</button> : null}<button type="button" className="lumo-quiet" disabled={libraryBusy} onClick={() => void openLibraryShares({ type: 'file', id: file.docId, name: file.filename })}>分享</button></> : null}<a className="lumo-quiet" href={`/lumo/api/knowledge/library/files/${encodeURIComponent(file.docId)}/content?download=1`}>下载</a>{file.canEdit && /^[a-f0-9]{64}$/u.test(file.sha256) ? <button type="button" className="lumo-quiet lumo-delete-action" disabled={libraryBusy} onClick={() => setLibraryRemoval({ type: 'file', file })}>删除</button> : null}</div>
               </article>)}
-              {activeLibraryChildren.length === 0 && activeLibraryFiles.length === 0 ? <Empty>此文件夹还没有内容。可新建子文件夹或上传文件。</Empty> : null}
+              {activeLibraryChildren.length === 0 && activeLibraryFiles.length === 0 ? <Empty>{libraryError ? '资料库请求未成功，请刷新后重试。' : '此文件夹还没有内容。' + (canWriteLibraryFolder ? '可新建子文件夹或上传文件。' : '')}</Empty> : null}
             </>}
           </div>
           <aside className="lumo-library-preview">
+            {libraryRemoval ? <div className="lumo-library-removal" role="alertdialog" aria-label="确认删除资料">
+              <b>删除「{libraryRemoval.type === 'file' ? libraryRemoval.file.filename : libraryRemoval.folder.name}」？</b>
+              <p>{libraryRemoval.type === 'file' ? '文件将从资料库和知识检索中移除。此操作无法在页面撤销。' : '仅允许删除空文件夹，请先移走或删除其中内容。'}</p>
+              <div className="lumo-form-actions"><BusyButton className="lumo-danger" busy={libraryBusy} onClick={() => void removeLibraryItem()}>确认删除</BusyButton><button type="button" className="lumo-secondary" disabled={libraryBusy} onClick={() => setLibraryRemoval(null)}>取消</button></div>
+            </div> : null}
             {previewFile === null ? <div className="lumo-inspector-empty"><span>资料预览</span><p>选择一个文件查看内容、来源版本和 OCR 状态。</p></div> : <>
               <div className="lumo-library-preview-head"><div><span className="lumo-inspector-label">文件预览</span><h3>{previewFile.filename}</h3><small>{previewFile.ocrState === 'ready' ? 'OCR 已完成' : previewFile.ocrState === 'failed' ? 'OCR 未识别到文本' : previewFile.ocrState === 'unavailable' ? 'OCR 执行环境不可用' : previewFile.extractionState === 'ready' ? '文本已加入知识索引' : '未生成检索文本'}</small></div><button type="button" className="lumo-quiet" onClick={closeLibraryPreview}>关闭</button></div>
               {previewLoading ? <Empty>正在读取预览。</Empty> : previewOfficeBytes?.kind === 'pdf' ? <div className="lumo-library-native-preview"><PdfDataPreview data={previewOfficeBytes.data} /></div> : previewOfficeBytes?.kind === 'xlsx' ? <div className="lumo-library-native-preview"><ExcelDataPreview filename={previewFile.filename} data={previewOfficeBytes.data} /></div> : ['application/pdf', 'image/'].some(kind => kind === 'application/pdf' ? previewFile.mimeType === kind : previewFile.mimeType.startsWith(kind)) ? previewFile.mimeType.startsWith('image/') ? <img className="lumo-library-image" src={`/lumo/api/knowledge/library/files/${encodeURIComponent(previewFile.docId)}/preview`} alt={previewFile.filename} /> : <iframe className="lumo-library-pdf" title={`${previewFile.filename} 预览`} src={`/lumo/api/knowledge/library/files/${encodeURIComponent(previewFile.docId)}/preview`} /> : previewText !== null ? <pre className="lumo-library-text-preview">{previewText}</pre> : <Empty>此文件没有可用的内嵌预览。</Empty>}
@@ -1529,11 +1641,11 @@ function KnowledgeSurface({ onClose }: { onClose: () => void }) {
           </aside>
         </div>
       </Section>
-      {shareTarget ? <Section title={`分享「${shareTarget.name}」`} meta="平台内授权 · 不创建公开链接" actions={<button type="button" className="lumo-quiet" onClick={() => setShareTarget(null)}>关闭</button>}>
+      {shareTarget ? <Section title={`分享「${shareTarget.name}」`} meta="平台内授权 · 不创建公开链接" actions={<button type="button" className="lumo-quiet" disabled={shareBusy} onClick={() => { ++shareSequence.current; setShareTarget(null) }}>关闭</button>}>
         <p className="lumo-section-note">添加用户 ID 或角色 ID。文件夹授权会继承到下级目录和文件；移除某个授权不会覆盖上级目录授予的权限。</p>
         {shareError ? <Notice error>{shareError}</Notice> : null}
-        <div className="lumo-library-grants">{shareGrants.length ? shareGrants.map((grant, index) => <div key={`${grant.type}:${grant.id}`}><span><b>{grant.type === 'user' ? '用户' : '角色'}</b>　{grant.id}　·　{grant.access === 'editor' ? '编辑' : '查看'}</span><button type="button" className="lumo-quiet" onClick={() => setShareGrants(current => current.filter((_, row) => row !== index))}>移除</button></div>) : <Empty>尚未添加直接分享对象。所有者和管理员始终保留管理权限。</Empty>}</div>
-        <div className="lumo-library-share-controls"><select aria-label="分享对象类型" value={shareType} onChange={event => setShareType(event.target.value as 'user' | 'role')}><option value="role">角色</option><option value="user">用户</option></select><input aria-label="用户或角色 ID" value={shareID} maxLength={128} placeholder={shareType === 'role' ? '例如：knowledge_reader' : '平台用户 ID'} onChange={event => setShareID(event.target.value)} /><select aria-label="分享权限" value={shareAccess} onChange={event => setShareAccess(event.target.value as 'viewer' | 'editor')}><option value="viewer">查看</option><option value="editor">编辑与分享</option></select><button type="button" className="lumo-secondary" onClick={addLibraryGrant}>添加</button><BusyButton type="button" busy={shareBusy} className="lumo-primary" onClick={() => void saveLibraryGrants()}>保存分享</BusyButton></div>
+        <div className="lumo-library-grants">{shareLoading ? <Empty>正在读取现有分享权限。</Empty> : shareGrants.length ? shareGrants.map((grant, index) => <div key={`${grant.type}:${grant.id}`}><span><b>{grant.type === 'user' ? '用户' : '角色'}</b>　{grant.id}　·　{grant.access === 'editor' ? '编辑' : '查看'}</span><button type="button" className="lumo-quiet" disabled={shareBusy} onClick={() => setShareGrants(current => current.filter((_, row) => row !== index))}>移除</button></div>) : <Empty>尚未添加直接分享对象。所有者和管理员始终保留管理权限。</Empty>}</div>
+        <fieldset className="lumo-library-share-controls" disabled={shareLoading || shareBusy}><select aria-label="分享对象类型" value={shareType} onChange={event => setShareType(event.target.value as 'user' | 'role')}><option value="role">角色</option><option value="user">用户</option></select><input aria-label="用户或角色 ID" value={shareID} maxLength={128} placeholder={shareType === 'role' ? '例如：knowledge_reader' : '平台用户 ID'} onChange={event => setShareID(event.target.value)} /><select aria-label="分享权限" value={shareAccess} onChange={event => setShareAccess(event.target.value as 'viewer' | 'editor')}><option value="viewer">查看</option><option value="editor">编辑与分享</option></select><button type="button" className="lumo-secondary" onClick={addLibraryGrant}>添加</button><BusyButton type="button" busy={shareBusy} className="lumo-primary" onClick={() => void saveLibraryGrants()}>保存分享</BusyButton></fieldset>
       </Section> : null}
     </> : null}
   </div>
@@ -3219,8 +3331,21 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
 			api(`/lumo/api/agent-presets/${encodeURIComponent(preset.id)}`, { method: 'PATCH', body: JSON.stringify({ revision: preset.revision, status: nextStatus }) }),
 		)
 	}
-  const refreshDashboard = async () => { const projectID = dashboard?.project?.id; if (!projectID) return; try { setDashboard(await api<Dashboard>(`/lumo/api/projects/${encodeURIComponent(projectID)}/dashboard`)) } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } }
-  const projectLifecycle = async (action: 'archive' | 'unarchive') => { const projectID = dashboard?.project?.id; if (!projectID) return; const result = await run(`project-${action}`, action === 'archive' ? '项目已归档。' : '项目已恢复。', () => api(`/lumo/api/projects/${encodeURIComponent(projectID)}/${action}`, { method: 'POST' })); if (result !== undefined) setDashboard(null) }
+  const refreshDashboard = async () => {
+    const projectID = dashboard?.project?.id
+    if (!projectID) throw new Error('项目详情不可用，请重新打开。')
+    setDashboard(await api<Dashboard>(`/lumo/api/projects/${encodeURIComponent(projectID)}/dashboard`))
+  }
+  const projectLifecycle = async (action: 'archive' | 'unarchive') => {
+    const projectID = dashboard?.project?.id
+    if (!projectID) throw new Error('项目详情不可用，请重新打开。')
+    setBusy(`project-${action}`); setNotice('')
+    try {
+      await api(`/lumo/api/projects/${encodeURIComponent(projectID)}/${action}`, { method: 'POST' })
+      setNotice(action === 'archive' ? '项目已归档。' : '项目已恢复。')
+      await load(); setDashboard(null)
+    } finally { setBusy('') }
+  }
   const online = countOnline(data)
   const permissionDecisions = rowsOf<PermissionDecision>(governance?.permissions, 'decisions')
 	const agentWorkerByPreset = new Map(agentWorkers.map(worker => [worker.worker_id.replace(/^agent:/u, ''), worker]))
@@ -3291,22 +3416,36 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
   </div>
 }
 
-function DashboardSheet({ data, clusterReady, close, refresh, lifecycle }: { data: Dashboard; clusterReady: boolean; close: () => void; refresh: () => Promise<void>; lifecycle: (action: 'archive' | 'unarchive') => Promise<void> }) {
+export function DashboardSheet({ data, clusterReady, close, refresh, lifecycle, request = api }: { data: Dashboard; clusterReady: boolean; close: () => void; refresh: () => Promise<void>; lifecycle: (action: 'archive' | 'unarchive') => Promise<void>; request?: typeof api }) {
   const project = data.project ?? {}
-  const [spaceName, setSpaceName] = useState('')
-  const [automationID, setAutomationID] = useState('')
-  const [triggerKind, setTriggerKind] = useState('event')
-  const [triggerSpec, setTriggerSpec] = useState('')
-  const [flowRef, setFlowRef] = useState('')
-  const [resourceBusy, setResourceBusy] = useState('')
-  const [resourceNotice, setResourceNotice] = useState('')
   const projectID = project.id ?? ''
+  const owner = data.yourRole === 'owner'
+  const canEdit = clusterReady && project.status === 'active' && (owner || data.yourRole === 'editor')
+  const [busy, setBusy] = useState('')
+  const [error, setError] = useState('')
+  const pending = useRef(false)
   const facts = [['成员', data.members?.length ?? 0], ['知识空间', data.spaces?.length ?? 0], ['制品', data.artifacts?.length ?? 0], ['自动化', data.automations?.length ?? 0], ['计量事件', data.usage?.length ?? 0], ['预算', data.budget?.remaining ?? data.budget?.amount ?? '未设置']]
-  const addSpace = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!projectID || !spaceName.trim()) return; setResourceBusy('space'); setResourceNotice(''); try { await api(`/lumo/api/projects/${encodeURIComponent(projectID)}/spaces`, { method: 'POST', body: JSON.stringify({ name: spaceName.trim() }) }); setSpaceName(''); setResourceNotice('知识空间已创建。'); await refresh() } catch (reason) { setResourceNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setResourceBusy('') } }
-  const saveAutomation = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); if (!projectID || !automationID.trim() || !triggerSpec.trim() || !flowRef.trim()) return; setResourceBusy('automation'); setResourceNotice(''); try { await api(`/lumo/api/projects/${encodeURIComponent(projectID)}/automations/${encodeURIComponent(automationID.trim())}`, { method: 'PUT', body: JSON.stringify({ triggerKind, triggerSpec: triggerSpec.trim(), flowRef: flowRef.trim(), enabled: true }) }); setResourceNotice('自动化调度已保存。'); await refresh() } catch (reason) { setResourceNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setResourceBusy('') } }
-  const spaces = (data.spaces ?? []) as Array<Record<string, unknown>>
-  const automations = (data.automations ?? []) as unknown as Array<Record<string, unknown>>
-  return <aside className="lumo-sheet" aria-label="项目详情"><header><div><span className="lumo-eyebrow">项目详情卡</span><h3>{project.name ?? project.id}</h3><p>{data.yourRole ?? '成员'} · {project.realm ?? '未设置'} · {project.status === 'active' ? '启用中' : project.status ?? '未声明状态'}</p></div><div className="lumo-sheet-actions"><BusyButton className="lumo-secondary lumo-small" onClick={() => void refresh()}>刷新</BusyButton><BusyButton className="lumo-danger lumo-small" onClick={() => void lifecycle(project.status === 'archived' ? 'unarchive' : 'archive')}>{project.status === 'archived' ? '恢复项目' : '归档项目'}</BusyButton><MagneticButton aria-label="关闭项目详情" className="lumo-quiet" onClick={close}>×</MagneticButton></div></header><div className="lumo-fact-grid">{facts.map(([label, value]) => <div key={String(label)}><small>{label}</small><b>{String(value)}</b></div>)}</div>{resourceNotice ? <Notice close={() => setResourceNotice('')}>{resourceNotice}</Notice> : null}{clusterReady ? <ProjectMembersPanel request={api} projectID={projectID} members={(data.members ?? []) as ProjectMember[]} editable={data.yourRole === 'owner' && project.status === 'active'} refresh={refresh} /> : null}<div className="lumo-sheet-grid"><div><h4>知识空间</h4>{spaces.length ? <div className="lumo-sheet-list">{spaces.map(space => <span key={String(space.spaceId ?? space.id)}><b>{String(space.name ?? space.spaceId ?? space.id)}</b><small>{String(space.spaceId ?? space.id ?? '')}</small></span>)}</div> : <Empty>项目还没有知识空间。</Empty>}<form className="lumo-resource-form" onSubmit={addSpace}><input aria-label="知识空间名称" value={spaceName} onChange={event => setSpaceName(event.target.value)} placeholder="新空间名称" /><BusyButton type="submit" busy={resourceBusy === 'space'} className="lumo-primary lumo-small">新建空间</BusyButton></form></div><div><h4>自动化调度</h4>{automations.length ? <div className="lumo-sheet-list">{automations.map(automation => <span key={String(automation.automationId ?? automation.id)}><b>{String(automation.automationId ?? automation.id)}</b><small>{String(automation.triggerKind ?? '')} · {String(automation.flowRef ?? '')} · {automation.enabled === false ? '停用' : '启用'}</small></span>)}</div> : <Empty>项目还没有自动化规则。</Empty>}<form className="lumo-resource-form lumo-automation-form" onSubmit={saveAutomation}><input aria-label="自动化 ID" value={automationID} onChange={event => setAutomationID(event.target.value)} placeholder="automation-id" /><select aria-label="触发类型" value={triggerKind} onChange={event => setTriggerKind(event.target.value)}><option value="event">事件</option><option value="cron">定时</option><option value="webhook">Webhook</option></select><input aria-label="触发规则" value={triggerSpec} onChange={event => setTriggerSpec(event.target.value)} placeholder="事件名或 cron 表达式" /><input aria-label="流程引用" value={flowRef} onChange={event => setFlowRef(event.target.value)} placeholder="flow-id" /><BusyButton type="submit" busy={resourceBusy === 'automation'} className="lumo-primary lumo-small">保存规则</BusyButton></form></div></div></aside>
+  const [budgetOpen, setBudgetOpen] = useState(false)
+  const perform = async (key: string, operation: () => Promise<unknown>) => {
+    if (pending.current) return
+    pending.current = true; setBusy(key); setError('')
+    try { await operation() } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { pending.current = false; setBusy('') }
+  }
+  return <aside className="lumo-sheet" aria-label="项目详情">
+    <header><div><span className="lumo-eyebrow">项目详情卡</span><h3>{project.name ?? project.id}</h3><p>{data.yourRole ?? '成员'} · {project.realm ?? '未设置'} · {project.status === 'active' ? '启用中' : project.status ?? '未声明状态'}</p></div><div className="lumo-sheet-actions"><BusyButton busy={busy === 'refresh'} disabled={busy !== ''} className="lumo-secondary lumo-small" onClick={() => void perform('refresh', refresh)}>刷新</BusyButton>{owner && clusterReady ? <BusyButton busy={busy === 'lifecycle'} disabled={busy !== ''} className="lumo-danger lumo-small" onClick={() => void perform('lifecycle', () => lifecycle(project.status === 'archived' ? 'unarchive' : 'archive'))}>{project.status === 'archived' ? '恢复项目' : '归档项目'}</BusyButton> : null}<MagneticButton aria-label="关闭项目详情" className="lumo-quiet" onClick={close}>×</MagneticButton></div></header>
+    <div className="lumo-fact-grid">{facts.map(([label, value]) => <div key={String(label)}><small>{label}</small><b>{String(value)}</b></div>)}</div>
+    {error ? <div className="lumo-cluster-feedback error" role="alert">{error}</div> : null}
+    {clusterReady && projectID ? <ProjectSettingsPanel key={projectID} request={request} project={{ id: projectID, name: project.name ?? '', status: project.status ?? '' }} role={data.yourRole ?? ''} refresh={refresh} /> : null}
+    {clusterReady && projectID ? <details className="lumo-budget-details" onToggle={event => setBudgetOpen(event.currentTarget.open)}>
+      <summary>项目预算<span>查看额度与管理本期预算</span></summary>
+      {budgetOpen ? <ProjectBudgetPanel key={projectID} request={request} projectID={projectID} editable={owner && project.status === 'active'} /> : null}
+    </details> : null}
+    {clusterReady ? <ProjectMembersPanel request={request} projectID={projectID} members={(data.members ?? []) as ProjectMember[]} editable={owner} refresh={refresh} /> : null}
+    <ProjectSpacesPanel key={`spaces:${projectID}`} request={request} projectID={projectID} spaces={(data.spaces ?? []) as ProjectResourceSpace[]} editable={canEdit} refresh={refresh} canManageGrants={owner && clusterReady} members={(data.members ?? []) as ProjectMember[]} />
+    <ProjectAutomationsPanel key={`automations:${projectID}`} request={request} projectID={projectID} automations={data.automations ?? []} editable={canEdit} refresh={refresh} />
+    <ProjectArtifactsPanel key={`artifacts:${projectID}`} request={request} projectID={projectID} artifacts={(data.artifacts ?? []) as ProjectResourceArtifact[]} editable={canEdit} refresh={refresh} />
+  </aside>
 }
 
 function AccountSurface({ onClose }: { onClose: () => void }) {
@@ -3405,7 +3544,8 @@ function AccountSurface({ onClose }: { onClose: () => void }) {
   </div>
 }
 
-function OrganizationManagement({ view }: { view: 'users' | 'departments' | 'roles' }) {
+export function OrganizationManagement({ view }: { view: 'users' | 'departments' | 'roles' }) {
+  const pageSize = 50
   const [users, setUsers] = useState<DirectoryUser[]>([])
   const [roles, setRoles] = useState<GovernanceRole[]>([])
   const [departments, setDepartments] = useState<GovernanceDepartment[]>([])
@@ -3413,10 +3553,13 @@ function OrganizationManagement({ view }: { view: 'users' | 'departments' | 'rol
   const [selectedRoleID, setSelectedRoleID] = useState('')
   const [editingDepartment, setEditingDepartment] = useState<GovernanceDepartment | null>(null)
   const [editingRole, setEditingRole] = useState<GovernanceRole | null>(null)
+  const [permissionRole, setPermissionRole] = useState<GovernanceRole | null>(null)
   const [creating, setCreating] = useState(false)
   const [query, setQuery] = useState('')
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('all')
+  const [departmentID, setDepartmentID] = useState('')
+  const [page, setPage] = useState({ total: 0, offset: 0, hasMore: false, search: '', status: 'all', departmentID: '' })
   const [loading, setLoading] = useState(true)
   const [access, setAccess] = useState<UserAccess | null>(null)
   const [accessError, setAccessError] = useState('')
@@ -3426,23 +3569,46 @@ function OrganizationManagement({ view }: { view: 'users' | 'departments' | 'rol
   const [error, setError] = useState('')
   const selected = users.find(user => user.id === selectedUserID)
   const sequence = useRef(0)
+  const pendingSelection = useRef('')
+  const pendingMutation = useRef(false)
+  const currentPage = page.search === search && page.status === status && page.departmentID === departmentID
+  const searchPending = query.trim() !== search
   useEffect(() => { const timer = window.setTimeout(() => setSearch(query.trim()), 250); return () => window.clearTimeout(timer) }, [query])
-  const load = useCallback(async () => {
+  const load = useCallback(async (offset = 0) => {
     const current = ++sequence.current
     setLoading(true)
     try {
-      const [userResult, roleResult, departmentResult] = await Promise.all([
-        api<{ users?: DirectoryUser[] }>('/lumo/api/users' + (search ? `?q=${encodeURIComponent(search)}` : '')), api<{ roles?: GovernanceRole[] }>('/lumo/api/roles'), api<{ departments?: GovernanceDepartment[] }>('/lumo/api/departments'),
+      type DirectoryPage = { users?: DirectoryUser[]; total?: number; has_more?: boolean }
+      const readPage = (requestedOffset: number) => api<DirectoryPage>(userDirectoryURL({ query: search, status, departmentId: departmentID, limit: pageSize, offset: requestedOffset }))
+      const [firstPage, roleResult, departmentResult] = await Promise.all([
+        readPage(offset), api<{ roles?: GovernanceRole[] }>('/lumo/api/roles'), api<{ departments?: GovernanceDepartment[] }>('/lumo/api/departments'),
       ])
       if (current !== sequence.current) return
+      let userResult = firstPage
+      let resolvedOffset = offset
+      // A directory can shrink while an administrator is on a later page.
+      // Keep the displayed rows and range together until a valid page arrives.
+      for (let correction = 0; resolvedOffset > 0 && typeof userResult.total === 'number' && resolvedOffset >= userResult.total; correction++) {
+        resolvedOffset = correction < 2 ? Math.max(0, Math.floor((userResult.total - 1) / pageSize) * pageSize) : 0
+        userResult = await readPage(resolvedOffset)
+        if (current !== sequence.current) return
+      }
+      const preferredID = search === pendingSelection.current && status === 'all' && !departmentID ? pendingSelection.current : ''
+      while (preferredID && !userResult.users?.some(user => user.id === preferredID) && userResult.has_more && (userResult.users?.length ?? 0) > 0) {
+        resolvedOffset += pageSize
+        userResult = await readPage(resolvedOffset)
+        if (current !== sequence.current) return
+      }
       setUsers(userResult.users ?? []); setRoles(roleResult.roles ?? []); setDepartments(departmentResult.departments ?? [])
-      setSelectedUserID(id => userResult.users?.some(user => user.id === id) ? id : userResult.users?.[0]?.id ?? '')
+      setPage({ total: userResult.total ?? userResult.users?.length ?? 0, offset: resolvedOffset, hasMore: userResult.has_more ?? false, search, status, departmentID })
+      setSelectedUserID(id => userResult.users?.some(user => user.id === preferredID) ? preferredID : userResult.users?.some(user => user.id === id) ? id : userResult.users?.[0]?.id ?? '')
+      if (pendingSelection.current === preferredID) pendingSelection.current = ''
       setSelectedRoleID(id => roleResult.roles?.some(role => role.id === id && role.status === 'active') ? id : roleResult.roles?.find(role => role.status === 'active')?.id ?? '')
       setError('')
     } catch (reason) { if (current === sequence.current) setError(reason instanceof Error ? reason.message : String(reason)) }
     finally { if (current === sequence.current) setLoading(false) }
-  }, [search])
-  useEffect(() => { void load(); return () => { sequence.current++ } }, [load])
+  }, [search, status, departmentID])
+  useEffect(() => { void load(0); return () => { sequence.current++ } }, [load])
   useEffect(() => {
     setAccess(null); setAccessError('')
     if (!selectedUserID || creating) return
@@ -3452,12 +3618,12 @@ function OrganizationManagement({ view }: { view: 'users' | 'departments' | 'rol
       .catch(reason => { if (active) setAccessError(reason instanceof Error ? reason.message : String(reason)) })
     return () => { active = false }
   }, [selectedUserID, creating, revision])
-  const run = async (key: string, success: string, operation: () => Promise<unknown>): Promise<boolean> => {
-    if (busy) return false
-    setBusy(key); setError(''); setNotice('')
-    try { await operation(); setNotice(success); await load(); setRevision(value => value + 1); return true }
+  const run = async (key: string, success: string, operation: () => Promise<unknown>, refresh = true): Promise<boolean> => {
+    if (pendingMutation.current) return false
+    pendingMutation.current = true; setBusy(key); setError(''); setNotice('')
+    try { await operation(); setNotice(success); if (refresh) await load(currentPage ? page.offset : 0); setRevision(value => value + 1); return true }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); return false }
-    finally { setBusy('') }
+    finally { pendingMutation.current = false; setBusy('') }
   }
   const saveUser = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -3469,8 +3635,9 @@ function OrganizationManagement({ view }: { view: 'users' | 'departments' | 'rol
       const id = String(fields.get('id') ?? '').trim()
       const password = String(fields.get('password') ?? '')
       if (password !== String(fields.get('confirmation') ?? '')) { setError('两次输入的密码不一致。'); return }
-      if (await run('user', `用户「${displayName}」已创建。`, () => api('/lumo/api/users', { method: 'POST', body: JSON.stringify({ ...body, id, username: String(fields.get('username') ?? '').trim(), password }) }))) {
-        form.reset(); setCreating(false); setQuery(''); setSearch(''); setSelectedUserID(id)
+      if (await run('user', `用户「${displayName}」已创建。`, () => api('/lumo/api/users', { method: 'POST', body: JSON.stringify({ ...body, id, username: String(fields.get('username') ?? '').trim(), password }) }), false)) {
+        form.reset(); pendingSelection.current = id; setCreating(false); setQuery(id); setSearch(id); setStatus('all'); setDepartmentID('')
+        if (search === id && status === 'all' && !departmentID) void load(0)
       }
     } else if (selected) {
       await run('user', `用户「${displayName}」已更新。`, () => api(`/lumo/api/users/${encodeURIComponent(selected.id)}`, { method: 'PUT', body: JSON.stringify({ ...body, status: String(fields.get('status') ?? 'active') }) }))
@@ -3521,18 +3688,20 @@ function OrganizationManagement({ view }: { view: 'users' | 'departments' | 'rol
     return true
   }
   const statusName = (value?: string) => value === 'disabled' ? '已停用' : value === 'suspended' ? '已暂停' : '正常'
-  const visible = users.filter(user => status === 'all' || (user.status ?? 'active') === status)
+  const visible = users
   const departmentOptions = departments.filter(department => department.status === 'active').map(department => <option key={department.id} value={department.id}>{department.name}</option>)
   const title = view === 'users' ? '用户管理' : view === 'departments' ? '部门管理' : '角色管理'
-  const meta = loading ? '正在同步' : view === 'users' ? `${visible.length} 位用户` : view === 'departments' ? `${departments.length} 个部门` : `${roles.length} 个角色`
-  return <Section title={title} meta={meta} actions={<div className="lumo-form-actions"><BusyButton className="lumo-secondary" busy={loading} disabled={Boolean(busy)} onClick={() => void load()}>刷新</BusyButton>{view === 'users' ? <BusyButton className="lumo-primary" disabled={Boolean(busy)} onClick={() => { setCreating(true); setError(''); setNotice('') }}>新建用户</BusyButton> : null}</div>}>
+  const meta = loading ? '正在同步' : view === 'users' ? `${page.total} 位用户` : view === 'departments' ? `${departments.length} 个部门` : `${roles.length} 个角色`
+  return <Section title={title} meta={meta} actions={<div className="lumo-form-actions"><BusyButton className="lumo-secondary" busy={loading} disabled={Boolean(busy) || searchPending} onClick={() => void load(currentPage ? page.offset : 0)}>刷新</BusyButton>{view === 'users' ? <BusyButton className="lumo-primary" disabled={Boolean(busy)} onClick={() => { setCreating(true); setError(''); setNotice('') }}>新建用户</BusyButton> : null}</div>}>
     {error ? <Notice error>{error}</Notice> : null}
     {notice ? <Notice close={() => setNotice('')}>{notice}</Notice> : null}
     <div className="lumo-organization-grid" id="lumo-organization-users" hidden={view !== 'users'}>
       <div>
-        <div className="lumo-organization-filter"><label><span>搜索用户</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="名称或用户 ID" /></label><label><span>用户状态</span><select value={status} onChange={event => setStatus(event.target.value)}><option value="all">全部状态</option><option value="active">正常</option><option value="suspended">已暂停</option><option value="disabled">已停用</option></select></label></div>
-        <div className="lumo-organization-users" aria-label="用户目录" aria-busy={loading}>{visible.map(user => <button type="button" key={user.id} className={!creating && selectedUserID === user.id ? 'selected' : ''} disabled={Boolean(busy)} aria-pressed={!creating && selectedUserID === user.id} onClick={() => { setSelectedUserID(user.id); setCreating(false); setError(''); setNotice('') }}><span><b>{user.display_name}</b><small>{user.id} · {departments.find(department => department.id === user.primary_dept_id)?.name ?? (user.primary_dept_id || '未分配部门')}</small></span><em>{statusName(user.status)}</em></button>)}</div>
+        <div className="lumo-organization-filter"><label><span>搜索用户</span><input value={query} disabled={Boolean(busy)} onChange={event => setQuery(event.target.value)} placeholder="名称或用户 ID" /></label><label><span>用户状态</span><select value={status} disabled={Boolean(busy)} onChange={event => setStatus(event.target.value)}><option value="all">全部状态</option><option value="active">正常</option><option value="suspended">已暂停</option><option value="disabled">已停用</option></select></label><label><span>所属部门</span><select value={departmentID} disabled={Boolean(busy)} onChange={event => setDepartmentID(event.target.value)}><option value="">全部部门</option>{departments.map(department => <option key={department.id} value={department.id}>{department.name}{department.status === 'active' ? '' : '（已停用）'}</option>)}</select></label></div>
+        <div className="lumo-organization-users" aria-label="用户目录" aria-busy={loading || searchPending}>{visible.map(user => <button type="button" key={user.id} className={!creating && selectedUserID === user.id ? 'selected' : ''} disabled={Boolean(busy) || loading || searchPending || !currentPage} aria-pressed={!creating && selectedUserID === user.id} onClick={() => { setSelectedUserID(user.id); setCreating(false); setError(''); setNotice('') }}><span><b>{user.display_name}</b><small>{user.id} · {departments.find(department => department.id === user.primary_dept_id)?.name ?? (user.primary_dept_id || '未分配部门')}</small></span><em>{statusName(user.status)}</em></button>)}</div>
         {!visible.length ? <Empty>{loading ? '正在读取用户。' : error ? '用户目录读取失败。' : '没有匹配的用户。'}</Empty> : null}
+        {error && visible.length ? <p className="lumo-muted">目录尚未更新，当前显示上次成功读取的结果。</p> : null}
+        <UserDirectoryPagination total={page.total} limit={pageSize} offset={page.offset} hasMore={page.hasMore} loading={loading || searchPending || Boolean(busy) || !currentPage} onOffsetChange={offset => void load(offset)} />
       </div>
       <div className="lumo-organization-detail">
         {creating || selected ? <>
@@ -3574,12 +3743,13 @@ function OrganizationManagement({ view }: { view: 'users' | 'departments' | 'rol
         <form key={editingDepartment?.id ?? 'new-department'} className="lumo-governance-form lumo-user-form" onSubmit={saveDepartment}>
           <label><span>部门名称</span><input name="name" required maxLength={160} defaultValue={editingDepartment?.name ?? ''} /></label>
           <label><span>上级部门</span><select name="parent_dept_id" defaultValue={editingDepartment?.parent_dept_id ?? ''}><option value="">根部门</option>{departments.filter(canParentDepartment).map(department => <option key={department.id} value={department.id}>{department.name}</option>)}</select></label>
-          <label><span>负责人 ID</span><input name="manager_user_id" list="lumo-department-managers" maxLength={128} defaultValue={editingDepartment?.manager_user_id ?? ''} /><datalist id="lumo-department-managers">{users.filter(user => user.status === 'active').map(user => <option key={user.id} value={user.id}>{user.display_name}</option>)}</datalist></label>
+          {view === 'departments' ? <DirectoryUserPicker request={api} initialUserId={editingDepartment?.manager_user_id ?? ''} disabled={Boolean(busy)} /> : null}
           {editingDepartment ? <label><span>状态</span><select name="status" defaultValue={editingDepartment.status}><option value="active">正常</option><option value="disabled">停用</option></select></label> : null}
           <div className="lumo-user-form-actions"><BusyButton type="submit" busy={busy === 'department'} disabled={Boolean(busy)} className="lumo-primary">{editingDepartment ? '保存部门' : '创建部门'}</BusyButton>{editingDepartment ? <BusyButton className="lumo-secondary" disabled={Boolean(busy)} onClick={() => setEditingDepartment(null)}>取消</BusyButton> : null}</div>
         </form>
       </div>
-      <div id="lumo-organization-roles" hidden={view !== 'roles'}><h3>角色目录</h3><div className="lumo-compact-list">{roles.map(role => <div key={role.id}><span><b>{role.name}</b><small>{role.id}{role.description ? ` · ${role.description}` : ''}</small></span><em>{role.status === 'active' ? '正常' : '已停用'}</em><BusyButton className="lumo-secondary lumo-small" disabled={Boolean(busy)} onClick={() => setEditingRole(role)}>编辑</BusyButton></div>)}</div>
+      <div id="lumo-organization-roles" hidden={view !== 'roles'}><h3>角色目录</h3><div className="lumo-compact-list">{roles.map(role => <div key={role.id}><span><b>{role.name}</b><small>{role.id}{role.description ? ` · ${role.description}` : ''}</small></span><em>{role.status === 'active' ? '正常' : '已停用'}</em><BusyButton className="lumo-secondary lumo-small" disabled={Boolean(busy)} onClick={() => setEditingRole(role)}>编辑</BusyButton><BusyButton className="lumo-secondary lumo-small" disabled={Boolean(busy)} onClick={() => setPermissionRole(role)}>配置权限</BusyButton></div>)}</div>
+        {view === 'roles' && permissionRole ? <RolePermissionsPanel key={permissionRole.id} request={api} role={roles.find(role => role.id === permissionRole.id) ?? permissionRole} roles={roles} /> : null}
         <h3>{editingRole ? `编辑角色 · ${editingRole.name}` : '新建角色'}</h3>
         <form key={editingRole?.id ?? 'new-role'} className="lumo-governance-form lumo-user-form" onSubmit={saveRole}>
           <label><span>角色 ID</span><input name="id" required readOnly={Boolean(editingRole)} defaultValue={editingRole?.id ?? ''} maxLength={128} pattern="[A-Za-z0-9_\x2d][A-Za-z0-9._\x2d]{0,127}" /></label>

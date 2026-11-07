@@ -190,6 +190,10 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $.Values.vault.tokenSecret }}, key: {{ $.Values.vault.tokenKey }}, optional: true } }
             {{- end }}
             {{- if eq $name "governance" }}
+            - name: LUMO_GOVERNANCE_POLICY_URL
+              value: {{ $.Values.governance.permissionPolicyUrl | quote }}
+            - name: LUMO_COLLABORATOR_URL
+              value: {{ default (printf "http://%s-collaborator:%v" (include "lumo-platform.name" $) $.Values.services.collaborator.port) $.Values.governance.collaboratorUrl | quote }}
             - name: LUMO_BOT_TEAMS_URL
               value: {{ default (printf "http://%s-dsh-web:%v" (include "lumo-platform.name" $) $.Values.dshWeb.port) $.Values.governance.botTeamsUrl | quote }}
             - name: LUMO_DESKTOP_GATEWAY_ENABLED

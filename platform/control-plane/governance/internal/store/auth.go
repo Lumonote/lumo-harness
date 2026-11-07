@@ -46,6 +46,7 @@ type AuthPrincipal struct {
 	DisplayName      string    `json:"display_name"`
 	PrimaryDeptID    string    `json:"primary_dept_id,omitempty"`
 	Roles            []string  `json:"roles"`
+	EffectiveRoles   []string  `json:"effective_roles"`
 	SessionExpiresAt time.Time `json:"session_expires_at"`
 	LocalAuthEnabled bool      `json:"local_auth_enabled"`
 	AuthMethod       string    `json:"auth_method"`
@@ -455,7 +456,16 @@ func (s *Store) authPrincipal(ctx context.Context, realm, userID string) (AuthPr
 		}
 		principal.Roles = append(principal.Roles, role)
 	}
-	return principal, rows.Err()
+	if err := rows.Err(); err != nil {
+		return AuthPrincipal{}, err
+	}
+	rows.Close()
+	resolved, err := s.ResolveRoles(ctx, realm, principal.Roles)
+	if err != nil {
+		return AuthPrincipal{}, err
+	}
+	principal.EffectiveRoles = resolved.EffectiveRoles
+	return principal, nil
 }
 
 func (s *Store) verifyLoginMFA(ctx context.Context, realm, userID, code string, key []byte) (required, valid bool, err error) {

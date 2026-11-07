@@ -8,7 +8,9 @@ import { prepareSkillHubArchive, skillHubArchiveUrls, stageSkillHub, verifySkill
 
 const roots: string[] = []
 const pythonCommand = process.platform === 'win32' ? 'python' : 'python3'
-const pythonHome = execFileSync(pythonCommand, ['-c', 'import sys; print(sys.base_prefix)'], { encoding: 'utf8' }).trim()
+const pythonRuntime: { home: string; executable: string } = JSON.parse(execFileSync(pythonCommand,
+  ['-c', 'import json, sys; print(json.dumps({"home": sys.base_prefix, "executable": sys.executable}))'],
+  { encoding: 'utf8' }))
 const nodeName = process.platform === 'win32' ? 'node.exe' : 'node'
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
@@ -18,7 +20,16 @@ function fixture(options: { missingEntry?: boolean; unsafePath?: boolean } = {})
   const runtime = join(root, 'runtime')
   mkdirSync(runtime)
   symlinkSync(process.execPath, join(runtime, nodeName))
-  symlinkSync(pythonHome, join(runtime, 'python'), process.platform === 'win32' ? 'junction' : 'dir')
+  if (process.platform === 'win32') {
+    symlinkSync(pythonRuntime.home, join(runtime, 'python'), 'junction')
+  } else {
+    // Framework/Homebrew installs may only provide bin/python3.x in base_prefix.
+    // Recreate the bundled layout explicitly while retaining the real standard library.
+    const python = join(runtime, 'python')
+    mkdirSync(join(python, 'bin'), { recursive: true })
+    symlinkSync(pythonRuntime.executable, join(python, 'bin', 'python3'))
+    symlinkSync(join(pythonRuntime.home, 'lib'), join(python, 'lib'), 'dir')
+  }
   const cli = join(root, 'skillhub-kit', 'cli')
   mkdirSync(cli, { recursive: true })
   writeFileSync(join(cli, 'release.py'), "VERSION = 'skillhub fixture 1.0'\n")

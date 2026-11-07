@@ -35,15 +35,17 @@ type Config struct {
 	// Health supplies the derived readiness. It is required whenever the
 	// declaration says ready, because a declared-but-unverified cluster is
 	// exactly the state that must not open the management surface.
-	Health            domain.HealthSource
-	SchedulerURL      string
-	ClusterID         string
-	ControlPlaneToken string
-	BotTeamsURL       string
-	AuthMaxAttempts   int
-	AuthLockFor       time.Duration
-	AuthSessionTTL    time.Duration
-	AuthCaptchaTTL    time.Duration
+	Health              domain.HealthSource
+	SchedulerURL        string
+	ClusterID           string
+	ControlPlaneToken   string
+	BotTeamsURL         string
+	CollaboratorURL     string
+	PermissionPolicyURL string
+	AuthMaxAttempts     int
+	AuthLockFor         time.Duration
+	AuthSessionTTL      time.Duration
+	AuthCaptchaTTL      time.Duration
 	// AuthMFAKey is a base64 32-byte AES key. MFA remains unavailable rather
 	// than storing recoverable factor secrets when it is not configured.
 	AuthMFAKey string
@@ -67,6 +69,12 @@ type Server struct {
 }
 
 func New(st *store.Store, cfg Config, log *slog.Logger) (*Server, error) {
+	if err := validateCollaboratorURL(cfg.CollaboratorURL, cfg.ControlPlaneToken); err != nil {
+		return nil, err
+	}
+	if err := validatePermissionPolicyURL(cfg.PermissionPolicyURL); err != nil {
+		return nil, err
+	}
 	if log == nil {
 		log = slog.Default()
 	}
@@ -102,6 +110,7 @@ func New(st *store.Store, cfg Config, log *slog.Logger) (*Server, error) {
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
+	s.registerRolePolicyRoutes(mux)
 	s.registerRunReviewRoutes(mux)
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /metrics", metrics)
@@ -361,41 +370,17 @@ const (
 	actionExecutionUpdate delegationAction = domain.ActionTaskExecutionUpdate
 )
 
-// delegationRoleActions is the one policy entry point for the legacy
-// gateway-issued roles. Handlers ask for an action, not for an ad-hoc role
-// list; a later policy engine can replace this map without reopening every
-// endpoint's authorization logic.
-var delegationRoleActions = map[string]map[delegationAction]bool{
-	"platform_admin": {actionDelegate: true, actionExecutionUpdate: true},
-	"realm_admin":    {actionDelegate: true, actionExecutionUpdate: true},
-	"admin":          {actionDelegate: true, actionExecutionUpdate: true},
-	"manager":        {actionDelegate: true},
-	"dept_manager":   {actionDelegate: true},
-	"operator":       {actionDelegate: true, actionExecutionUpdate: true},
-	"owner":          {actionDelegate: true},
-	"agent_operator": {actionDelegate: true, actionExecutionUpdate: true},
-}
-
 var permissionActions = []delegationAction{actionDelegate, actionExecutionUpdate}
 
+// Only the existing directory boundary uses these direct built-in roles.
+// Configuring a Task action never grants organization-directory authority.
 func (c caller) permits(action delegationAction) bool {
 	for role := range c.roles {
-		if delegationRoleActions[role][action] {
+		if domain.LegacyRoleAllows(role, action) {
 			return true
 		}
 	}
 	return false
-}
-
-func (c caller) grantingRoles(action delegationAction) []string {
-	roles := []string{}
-	for role := range c.roles {
-		if delegationRoleActions[role][action] {
-			roles = append(roles, role)
-		}
-	}
-	sort.Strings(roles)
-	return roles
 }
 
 func (c caller) roleNames() []string {
@@ -417,9 +402,8 @@ func validPermissionAction(action delegationAction) bool {
 }
 
 // permissionDecision is the adapter that supplies the Realm role grant and
-// Project membership facts to the pure Realm ∩ Project ∩ Space policy. Space
-// remains nil until its authoritative service is wired in, which makes every
-// Space-scoped request a deliberate fail-closed decision.
+// Project membership facts and current authoritative Space grants to the pure
+// Realm ∩ Project ∩ Space policy. Unknown sources remain fail closed.
 func (s *Server) permissionDecision(ctx context.Context, c caller, action delegationAction, resource domain.PermissionResource) (domain.PermissionDecision, error) {
 	if resource.Realm == "" {
 		resource.Realm = c.realm
@@ -431,28 +415,48 @@ func (s *Server) permissionDecision(ctx context.Context, c caller, action delega
 			Context: domain.PermissionContext{RealmAllowed: false},
 		}), nil
 	}
-	var projectAllowed *bool
-	if strings.TrimSpace(resource.ProjectID) != "" {
-		allowed := isRealmAdmin(c)
-		if !allowed {
-			member, err := s.store.ProjectMember(ctx, resource.ProjectID, c.userID)
+	roles, err := s.resolveRolePolicy(ctx, c)
+	if err != nil {
+		return domain.PermissionDecision{}, err
+	}
+	roleAction := roles.Actions[action]
+	var projectAllowed, spaceAllowed *bool
+	if resource.SpaceID != "" {
+		projectID, found, err := s.store.SpaceProject(ctx, c.realm, resource.SpaceID)
+		if err != nil {
+			return domain.PermissionDecision{}, err
+		}
+		if found && (resource.ProjectID == "" || resource.ProjectID == projectID) {
+			resource.ProjectID = projectID
+			spaceAllowed, err = s.currentSpacePermission(ctx, c, resource.SpaceID)
 			if err != nil {
 				return domain.PermissionDecision{}, err
 			}
-			allowed = member
+		} else if found {
+			denied := false
+			spaceAllowed = &denied
+		}
+	}
+	if strings.TrimSpace(resource.ProjectID) != "" {
+		allowed, err := s.store.PermissionProjectAccess(ctx, c.realm, resource.ProjectID, c.userID, isRealmAdmin(c))
+		if err != nil {
+			return domain.PermissionDecision{}, err
 		}
 		projectAllowed = &allowed
 	}
-	roles := c.grantingRoles(action)
-	decision := domain.EvaluatePermission(domain.PermissionRequest{
+	request := domain.PermissionRequest{
 		Actor:    domain.PermissionActor{UserID: c.userID, Realm: c.realm, Roles: c.roleNames()},
 		Resource: resource, Action: action,
-		Context: domain.PermissionContext{RealmAllowed: len(roles) > 0, ProjectAllowed: projectAllowed},
-	})
-	for _, role := range roles {
-		decision.MatchedPolicies = append([]string{"realm:role:" + role}, decision.MatchedPolicies...)
+		Context: domain.PermissionContext{RealmAllowed: roleAction.Allowed, ProjectAllowed: projectAllowed, SpaceAllowed: spaceAllowed},
 	}
-	return decision, nil
+	decision := domain.EvaluatePermission(request)
+	decision.RoleResolution = &roles
+	decision.PolicyAdapter = "legacy-adapter:postgres-role-facts"
+	decision.MatchedPolicies = append(append([]string{}, roleAction.MatchedPolicies...), decision.MatchedPolicies...)
+	if roleAction.ExplicitDeny {
+		decision.Reason = "角色动作策略存在显式拒绝（deny 优先）"
+	}
+	return s.applyPermissionOPA(ctx, request, roles, decision)
 }
 
 func (s *Server) requirePermission(ctx context.Context, w http.ResponseWriter, c caller, action delegationAction, resource domain.PermissionResource) bool {
@@ -533,19 +537,11 @@ func (s *Server) explainPermission(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, decision)
 }
 
-func requireDelegationAuthority(w http.ResponseWriter, c caller) bool {
+func requireDirectoryAuthority(w http.ResponseWriter, c caller) bool {
 	if c.permits(actionDelegate) {
 		return true
 	}
 	writeError(w, http.StatusForbidden, "forbidden", "task:delegate permission required")
-	return false
-}
-
-func requireExecutionReporter(w http.ResponseWriter, c caller) bool {
-	if c.permits(actionExecutionUpdate) {
-		return true
-	}
-	writeError(w, http.StatusForbidden, "forbidden", "task:execution:update permission required")
 	return false
 }
 
@@ -554,15 +550,21 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !requireDirectoryAuthority(w, c) {
 		return
 	}
-	users, err := s.store.ListUsers(r.Context(), c.realm, r.URL.Query().Get("q"))
+	options, err := parseUserDirectoryOptions(r.URL.Query())
 	if err != nil {
 		s.respondStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"users": users})
+	page, err := s.store.ListUsersPage(r.Context(), c.realm, options)
+	if err != nil {
+		s.respondStoreError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, page)
 }
 
 type userTagsRequest struct {
@@ -884,7 +886,7 @@ func (s *Server) previewDelegation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok {
 		return
 	}
 	var req domain.DelegationSpec
@@ -915,7 +917,7 @@ func (s *Server) createDelegation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok {
 		return
 	}
 	var req delegationRequest
@@ -1034,7 +1036,7 @@ func (s *Server) listDelegations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	// Only realm-level operator roles can inspect the entire realm. A
@@ -1069,9 +1071,18 @@ func (s *Server) listDelegations(w http.ResponseWriter, r *http.Request) {
 		s.respondStoreError(w, err)
 		return
 	}
-	for i := range tasks {
-		tasks[i] = s.reconcileCancelling(r.Context(), c.realm, tasks[i])
+	visible := make([]domain.DelegatedTask, 0, len(tasks))
+	for _, task := range tasks {
+		decision, err := s.permissionDecision(r.Context(), c, actionDelegate, domain.PermissionResource{Kind: "task", ID: task.ID, ProjectID: task.ProjectID})
+		if err != nil {
+			s.respondStoreError(w, err)
+			return
+		}
+		if decision.Allowed {
+			visible = append(visible, s.reconcileCancelling(r.Context(), c.realm, task))
+		}
 	}
+	tasks = visible
 	result := map[string]any{"tasks": tasks}
 	if query.Has("cursor") || query.Has("limit") {
 		result["next_cursor"] = nextCursor
@@ -1084,7 +1095,7 @@ func (s *Server) getDelegation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	task, err := s.store.GetDelegationTask(r.Context(), c.realm, r.PathValue("taskID"))
@@ -1128,7 +1139,10 @@ func (s *Server) listWorkers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
+		return
+	}
+	if !s.requirePermission(r.Context(), w, c, actionDelegate, permissionResourceFromQuery(r, c.realm)) {
 		return
 	}
 	profiles, err := s.store.ListWorkerProfiles(r.Context(), c.realm, r.URL.Query().Get("project_id"), r.URL.Query().Get("q"))
@@ -1148,7 +1162,10 @@ func (s *Server) workerProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
+		return
+	}
+	if !s.requirePermission(r.Context(), w, c, actionDelegate, permissionResourceFromQuery(r, c.realm)) {
 		return
 	}
 	profile, err := s.store.GetWorkerProfile(r.Context(), c.realm, r.PathValue("workerID"), r.URL.Query().Get("project_id"))
@@ -1431,7 +1448,7 @@ func (s *Server) transitionTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	task, ok := s.taskParticipant(w, r, c)
@@ -1466,7 +1483,7 @@ func (s *Server) listTaskRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	if _, ok := s.taskViewer(w, r, c); !ok {
@@ -1485,7 +1502,7 @@ func (s *Server) listTaskAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	if _, ok := s.taskViewer(w, r, c); !ok {
@@ -1515,7 +1532,7 @@ func (s *Server) createTaskRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireExecutionReporter(w, c) {
+	if !ok || !s.requireExecutionReporter(w, r, c) {
 		return
 	}
 	task, err := s.store.GetDelegationTask(r.Context(), c.realm, r.PathValue("taskID"))
@@ -1571,7 +1588,7 @@ func (s *Server) updateTaskRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireExecutionReporter(w, c) {
+	if !ok || !s.requireExecutionReporter(w, r, c) {
 		return
 	}
 	if _, err := s.store.GetDelegationTask(r.Context(), c.realm, r.PathValue("taskID")); err != nil {
@@ -1618,7 +1635,7 @@ func (s *Server) recordOutcome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	task, ok := s.taskParticipant(w, r, c)
@@ -1692,7 +1709,7 @@ func (s *Server) cancelDelegation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	task, ok := s.taskParticipant(w, r, c)
@@ -1744,7 +1761,7 @@ func (s *Server) retryDelegation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	task, ok := s.taskParticipant(w, r, c)
@@ -1828,7 +1845,7 @@ func (s *Server) reassignDelegation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	task, ok := s.taskParticipant(w, r, c)
@@ -1918,7 +1935,7 @@ func (s *Server) updateDelegationStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireExecutionReporter(w, c) {
+	if !ok || !s.requireExecutionReporter(w, r, c) {
 		return
 	}
 	task, err := s.store.GetDelegationTask(r.Context(), c.realm, r.PathValue("taskID"))
@@ -2424,6 +2441,12 @@ func (s *Server) listDesktopNodes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) respondStoreError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, errPermissionPolicyUnavailable), errors.Is(err, store.ErrRolePolicyUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "permission_policy_unavailable", "权限策略暂时不可用，未放行动作")
+	case errors.Is(err, store.ErrRolePolicyChanged):
+		writeError(w, http.StatusConflict, "role_policy_changed", "角色策略已更新，请重新读取后编辑")
+	case errors.Is(err, errSpaceAuthorizationUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "space_authorization_unavailable", "Space 授权服务暂时不可用，未放行动作")
 	case errors.Is(err, store.ErrLastAdmin):
 		writeError(w, http.StatusConflict, "last_admin", "必须保留可登录的管理员、长期管理员授权和已有的本地管理员恢复入口")
 	case errors.Is(err, store.ErrLegacyTask):

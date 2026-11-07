@@ -252,6 +252,8 @@ type PermissionDecision struct {
 	Resource        PermissionResource `json:"resource"`
 	Reason          string             `json:"reason"`
 	MatchedPolicies []string           `json:"matched_policies"`
+	RoleResolution  *RoleResolution    `json:"role_resolution,omitempty"`
+	PolicyAdapter   string             `json:"policy_adapter,omitempty"`
 }
 
 // EvaluatePermission implements the documented minimum-permission rule:
@@ -1061,11 +1063,13 @@ type Department struct {
 }
 
 type Role struct {
-	ID          string `json:"id"`
-	Realm       string `json:"realm"`
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Status      string `json:"status"`
+	ID                 string `json:"id"`
+	Realm              string `json:"realm"`
+	Name               string `json:"name"`
+	Description        string `json:"description,omitempty"`
+	Status             string `json:"status"`
+	ParentRoleID       string `json:"parent_role_id,omitempty"`
+	PermissionRevision int64  `json:"permission_revision"`
 }
 
 type SkillKind string

@@ -74,6 +74,9 @@ func receiptHTTPHandler(t *testing.T, st *store.Store) http.Handler {
 
 func TestDelegationHTTPReceiptRetryConflictAndAuthority(t *testing.T) {
 	st, pool := receiptHTTPStore(t)
+	if _, err := pool.Exec(context.Background(), `CREATE TABLE projects(id TEXT PRIMARY KEY,realm TEXT NOT NULL,status TEXT NOT NULL); CREATE TABLE project_members(project_id TEXT,user_id TEXT); INSERT INTO projects VALUES('p1','r1','active')`); err != nil {
+		t.Fatal(err)
+	}
 	handler := receiptHTTPHandler(t, st)
 	body := `{"title":"Work","intent":"Produce a report","project_id":"p1","assignee_worker_id":"user:worker","auto_assign":false}`
 	request := func(handler http.Handler, user, roles, key, body string) *httptest.ResponseRecorder {

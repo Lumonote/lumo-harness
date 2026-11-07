@@ -30,6 +30,9 @@ export interface KnowledgeQuery {
   userId?: string
   /** 仅宿主在验证 Realm 管理员身份后设置。 */
   libraryAdmin?: boolean
+  /** Interactive user queries may be narrowed to current active project Spaces.
+   * The authoritative Provider rechecks project membership and Space bindings. */
+  projectId?: string
   text: string
   topK: number
   scope: 'published' | 'draft'
@@ -108,6 +111,31 @@ export interface KnowledgeHit {
   text: string
 }
 
+export interface KnowledgeQueryPrincipal {
+  realm: string
+  userId: string
+  roles: readonly string[]
+}
+export interface AuthenticatedKnowledgeRequest {
+  projectId: string
+  text: string
+  topK: number
+  spaces?: readonly string[]
+}
+/** Host-only read capability. Remote implementations sign each request with the
+ * supplied current authenticated identity, never the shared deployment owner. */
+export interface AuthenticatedKnowledgeQuery {
+  query(principal: KnowledgeQueryPrincipal, request: AuthenticatedKnowledgeRequest, signal: AbortSignal): Promise<KnowledgeHit[]>
+}
+export function authenticatedKnowledgeRequest(principal: KnowledgeQueryPrincipal, request: AuthenticatedKnowledgeRequest): KnowledgeQuery {
+  if (!principal.realm?.trim() || !principal.userId?.trim() || !Array.isArray(principal.roles)
+    || !principal.roles.length || principal.roles.some(role => typeof role !== 'string' || !role.trim())
+    || !request.projectId?.trim()) throw new Error('Authenticated knowledge queries require a current user, roles and project')
+  return { realm: principal.realm, userId: principal.userId, roles: [...principal.roles], projectId: request.projectId,
+    libraryAdmin: principal.roles.some(role => ['platform_admin', 'realm_admin', 'admin'].includes(role)),
+    text: request.text, topK: request.topK, scope: 'published', spaces: request.spaces }
+}
+
 /**
  * 管理面展示的源文档摘要。它不是 KnowledgeSeam 的一部分：检索/写入
  * consumer 仍只能看到四个 seam 操作，来源管理必须经由受身份保护的宿主 API。
@@ -153,6 +181,10 @@ export type KnowledgeLibraryPrincipal = { type: 'user' | 'role'; id: string; acc
 export type KnowledgeLibraryGrant = KnowledgeLibraryPrincipal & { resourceType: 'folder' | 'file'; resourceId: string }
 export interface KnowledgeLibraryFolder {
   folderId: string; realm: string; parentId: string | null; name: string; ownerUserId: string; createdAt: string
+  /** 目录整理的乐观并发版本；旧 Provider 可省略，PG Provider 始终返回。 */
+  revision?: number
+  /** 列表查询按可信身份计算，编辑操作仍须服务端校验。 */
+  canEdit?: boolean
 }
 export interface KnowledgeLibraryFile {
   docId: string; realm: string; folderId: string | null; filename: string; mimeType: string
@@ -160,16 +192,25 @@ export interface KnowledgeLibraryFile {
   extractionState: 'pending' | 'ready' | 'failed' | 'unsupported'
   ocrState: 'not_needed' | 'pending' | 'ready' | 'failed' | 'unavailable'
   createdAt: string
+  /** 文件名/目录元数据的并发版本，与原始内容 SHA 独立。 */
+  revision?: number
+  /** 由带身份的列表查询计算；详情读取不携带此展示提示，写入时仍须重新校验。 */
+  canEdit?: boolean
 }
 export interface KnowledgeLibraryManager {
   listLibraryFolders(realm: string, userId: string, roles: string[], isAdmin: boolean): Promise<KnowledgeLibraryFolder[]>
   canAccessLibraryFolder(input: { realm: string; folderId: string; userId: string; roles: string[]; isAdmin: boolean; access?: KnowledgeLibraryAccess }): Promise<boolean>
   createLibraryFolder(input: { realm: string; parentId: string | null; name: string; ownerUserId: string; roles: string[]; isAdmin: boolean }): Promise<KnowledgeLibraryFolder>
-  deleteLibraryFolder(input: { realm: string; folderId: string; actorUserId: string; roles: string[]; isAdmin: boolean }): Promise<void>
+  updateLibraryFolder(input: { realm: string; folderId: string; actorUserId: string; roles: string[]; isAdmin: boolean; expectedRevision: number; name?: string; parentId?: string | null }): Promise<KnowledgeLibraryFolder>
+  deleteLibraryFolder(input: { realm: string; folderId: string; actorUserId: string; roles: string[]; isAdmin: boolean; expectedRevision?: number }): Promise<void>
   listLibraryFiles(realm: string, userId: string, roles: string[], isAdmin: boolean): Promise<KnowledgeLibraryFile[]>
   getLibraryFile(docId: string, realm: string): Promise<KnowledgeLibraryFile | undefined>
-  createLibraryFile(file: KnowledgeLibraryFile): Promise<void>
+  createLibraryFile(file: KnowledgeLibraryFile, actorContext?: { roles: string[]; isAdmin: boolean }): Promise<void>
+  updateLibraryFile(input: { realm: string; docId: string; actorUserId: string; roles: string[]; isAdmin: boolean; expectedRevision: number; filename?: string; folderId?: string | null }): Promise<KnowledgeLibraryFile>
+  /** 仅供失败上传回滚元数据；用户删除必须走 deleteLibraryFile，避免留下可检索的来源。 */
   removeLibraryFile(docId: string, realm: string): Promise<void>
+  /** 校验编辑权限和读取时的内容 SHA，原子失效文件、来源、分享及检索投影，并记录外部清理意图。 */
+  deleteLibraryFile(input: { realm: string; docId: string; actorUserId: string; roles: string[]; isAdmin: boolean; expectedSha256: string; expectedRevision?: number }): Promise<void>
   canAccessLibraryFile(input: { docId: string; realm: string; userId: string; roles: string[]; isAdmin: boolean; access?: KnowledgeLibraryAccess }): Promise<boolean>
   setLibraryGrants(input: { realm: string; resourceType: 'folder' | 'file'; resourceId: string; actorUserId: string; roles: string[]; isAdmin: boolean; grants: KnowledgeLibraryPrincipal[] }): Promise<void>
   listLibraryGrants(realm: string, resourceType: 'folder' | 'file', resourceId: string): Promise<KnowledgeLibraryPrincipal[]>

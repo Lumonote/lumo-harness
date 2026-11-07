@@ -80,6 +80,11 @@ connectorOAuth:
   adminRoles: admin,realm_admin,platform_admin
 governance:
   botTeamsUrl: ""
+  # Optional exact OPA boolean decision URL. Empty uses PostgreSQL role facts
+  # locally; OPA receives the same facts and can only further restrict.
+  permissionPolicyUrl: ""
+  # Trusted Space grant read source; defaults to this release's Collaborator.
+  collaboratorUrl: ""
   # Existing Secret containing LUMO_AUTH_* environment entries, including
   # bootstrap credentials and optional MFA, Passkey, and OIDC configuration.
   authSecret: ""
@@ -285,6 +290,8 @@ dshWeb:
   # Optional authenticated text Sessions. Configure authorityUrl, stable nodeId,
   # matching projectId, absolute workspaceRoot, provider and model explicitly.
   # This node-local entry currently requires exactly one Web replica.
+  # Optional knowledge: {realm: dev, defaultTopK: 5, spaces: [space-id]} enables
+  # only current-user published queries in this project; omit for text-only.
   userSessionExecution: {}
   registryUrl: http://lumo-platform-registry:8084
   llmGatewayUrl: http://lumo-platform-llm-gateway:8088

@@ -21,6 +21,11 @@ import { loadCatalog, installItem, searchCatalog, type SkillHubConfig, type Skil
 import { registerSkillHubRuntime, type SkillHubRuntime } from './skillhub-runtime.ts'
 import { LocalAssetError, LocalAssetStore } from './local-assets.ts'
 
+interface ProjectBudgetService {
+  readProjectBudget(input: { realm: string; projectId: string; actorUserId: string }): Promise<unknown>
+  configureProjectBudget(input: { realm: string; projectId: string; actorUserId: string; mode: 'adjust' | 'reset'; total: number; softLimit: number; overdraft: number; expectedRevision: number; confirmReset?: boolean }): Promise<unknown>
+}
+
 /** Read-only structural projection of the session-query seam. Keeping the
  * host plugin's build boundary local avoids pulling the platform contract
  * implementation (and its transitive runtime modules) into this UI package. */
@@ -37,14 +42,17 @@ interface KnowledgeQueryService {
 }
 
 interface KnowledgeLibraryManagerService {
-  listLibraryFolders(realm: string, userId: string, roles: string[], isAdmin: boolean): Promise<Array<{ folderId: string; realm: string; parentId: string | null; name: string; ownerUserId: string; createdAt: string }>>
+  listLibraryFolders(realm: string, userId: string, roles: string[], isAdmin: boolean): Promise<LibraryFolderInfo[]>
   canAccessLibraryFolder(input: { realm: string; folderId: string; userId: string; roles: string[]; isAdmin: boolean; access?: 'viewer' | 'editor' }): Promise<boolean>
-  createLibraryFolder(input: { realm: string; parentId: string | null; name: string; ownerUserId: string; roles: string[]; isAdmin: boolean }): Promise<{ folderId: string; realm: string; parentId: string | null; name: string; ownerUserId: string; createdAt: string }>
-  deleteLibraryFolder(input: { realm: string; folderId: string; actorUserId: string; roles: string[]; isAdmin: boolean }): Promise<void>
+  createLibraryFolder(input: { realm: string; parentId: string | null; name: string; ownerUserId: string; roles: string[]; isAdmin: boolean }): Promise<LibraryFolderInfo>
+  updateLibraryFolder?(input: { realm: string; folderId: string; actorUserId: string; roles: string[]; isAdmin: boolean; expectedRevision: number; name?: string; parentId?: string | null }): Promise<LibraryFolderInfo>
+  deleteLibraryFolder(input: { realm: string; folderId: string; actorUserId: string; roles: string[]; isAdmin: boolean; expectedRevision?: number }): Promise<void>
   listLibraryFiles(realm: string, userId: string, roles: string[], isAdmin: boolean): Promise<LibraryFileInfo[]>
   getLibraryFile(docId: string, realm: string): Promise<LibraryFileInfo | undefined>
-  createLibraryFile(file: LibraryFileInfo): Promise<void>
+  createLibraryFile(file: LibraryFileInfo, actorContext?: { roles: string[]; isAdmin: boolean }): Promise<void>
+  updateLibraryFile?(input: { realm: string; docId: string; actorUserId: string; roles: string[]; isAdmin: boolean; expectedRevision: number; filename?: string; folderId?: string | null }): Promise<LibraryFileInfo>
   removeLibraryFile(docId: string, realm: string): Promise<void>
+  deleteLibraryFile?(input: { realm: string; docId: string; actorUserId: string; roles: string[]; isAdmin: boolean; expectedSha256: string; expectedRevision?: number }): Promise<void>
   canAccessLibraryFile(input: { docId: string; realm: string; userId: string; roles: string[]; isAdmin: boolean; access?: 'viewer' | 'editor' }): Promise<boolean>
   setLibraryGrants(input: { realm: string; resourceType: 'folder' | 'file'; resourceId: string; actorUserId: string; roles: string[]; isAdmin: boolean; grants: Array<{ type: 'user' | 'role'; id: string; access: 'viewer' | 'editor' }> }): Promise<void>
   listLibraryGrants(realm: string, resourceType: 'folder' | 'file', resourceId: string): Promise<Array<{ type: 'user' | 'role'; id: string; access: 'viewer' | 'editor' }>>
@@ -52,11 +60,17 @@ interface KnowledgeLibraryManagerService {
   upsertSource(entry: { docId: string; realm: string; space: string; title: string; chunks: Array<{ text: string; metadata: Record<string, unknown> }> }): Promise<unknown>
 }
 
+interface LibraryFolderInfo {
+  folderId: string; realm: string; parentId: string | null; name: string; ownerUserId: string; createdAt: string
+  revision?: number; canEdit?: boolean
+}
+
 interface LibraryFileInfo {
   docId: string; realm: string; folderId: string | null; filename: string; mimeType: string
   objectKey: string; byteSize: number; sha256: string; ownerUserId: string
   extractionState: 'pending' | 'ready' | 'failed' | 'unsupported'
   ocrState: 'not_needed' | 'pending' | 'ready' | 'failed' | 'unavailable'; createdAt: string
+  revision?: number; canEdit?: boolean
 }
 
 interface ObjectStoreService {
@@ -132,6 +146,7 @@ export interface Config {
   flowsUrl: string
   connectorUrl: string
   governanceUrl: string
+  collaboratorUrl?: string
   registryUrl: string
   llmGatewayUrl?: string
   usageLedgerUrl?: string
@@ -170,6 +185,7 @@ export interface Config {
 
 export const Config: z<Config> = z.object({
   schedulerUrl: z.string(), projectsUrl: z.string(), flowsUrl: z.string(), connectorUrl: z.string(), governanceUrl: z.string(), registryUrl: z.string().default(''),
+  collaboratorUrl: z.string().default(''),
   llmGatewayUrl: z.string().default(''), usageLedgerUrl: z.string().default(''),
   edgeGatewayUrl: z.string().default(''), terminalGatewayUrl: z.string().default(''),
   // 有缺省（空串）**不是**给 localhost 兜底：空串是「本部署没有这个服务」的显式标记，
@@ -197,7 +213,7 @@ export const Config: z<Config> = z.object({
   skillhubSnapshotFile: z.string().default('.lumo/skill-snapshot.json'),
 })
 
-type ServiceName = 'scheduler' | 'projects' | 'flows' | 'connector' | 'governance' | 'registry' | 'session-control' | 'llm-gateway' | 'usage-ledger' | 'edge-gateway' | 'terminal-gateway'
+type ServiceName = 'scheduler' | 'projects' | 'flows' | 'connector' | 'governance' | 'collaborator' | 'registry' | 'session-control' | 'llm-gateway' | 'usage-ledger' | 'edge-gateway' | 'terminal-gateway'
 interface UpstreamResult { ok: boolean; status: number; data: unknown; error?: string }
 
 interface PluginSummary {
@@ -215,6 +231,7 @@ function base(config: Config, service: ServiceName): string {
     flows: config.flowsUrl,
     connector: config.connectorUrl,
     governance: config.governanceUrl,
+    collaborator: config.collaboratorUrl ?? '',
     registry: config.registryUrl,
     'session-control': config.sessionControlUrl,
     'llm-gateway': config.llmGatewayUrl ?? '',
@@ -373,8 +390,9 @@ async function readBody(req: IncomingMessage, maxBytes = 1 << 20): Promise<Buffe
   return Buffer.concat(chunks)
 }
 
-async function readJson(req: IncomingMessage, maxBytes = 1 << 20): Promise<Record<string, unknown>> {
+async function readJson(req: IncomingMessage, maxBytes = 1 << 20, allowEmpty = false): Promise<Record<string, unknown>> {
   const body = await readBody(req, maxBytes)
+  if (allowEmpty && body.length === 0) return {}
   try {
     const value: unknown = JSON.parse(body.toString('utf8'))
     if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new TypeError('JSON object required')
@@ -482,6 +500,23 @@ function requiredText(body: Record<string, unknown>, field: string, maxBytes: nu
     throw new TypeError(`${field} must be a non-empty string up to ${maxBytes} bytes`)
   }
   return value.trim()
+}
+
+function libraryRevision(body: Record<string, unknown>, required: true): number
+function libraryRevision(body: Record<string, unknown>, required?: boolean): number | undefined
+function libraryRevision(body: Record<string, unknown>, required = false): number | undefined {
+  const revision = body.expectedRevision
+  if (revision === undefined && !required) return undefined
+  if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1) throw new TypeError('请刷新资料列表后提交当前资料版本')
+  return revision
+}
+
+function libraryDestination(body: Record<string, unknown>, field: string): string | null | undefined {
+  if (!Object.hasOwn(body, field)) return undefined
+  if (body[field] === null) return null
+  const id = typeof body[field] === 'string' ? safeID(body[field]) : undefined
+  if (id === undefined) throw new TypeError(`${field} 无效`)
+  return id
 }
 
 function sourceChunks(body: Record<string, unknown>): Array<{ text: string; metadata: Record<string, unknown> }> {
@@ -725,11 +760,13 @@ function documentChunks(text: string, filename: string, mimeType: string, entiti
   return chunks.map((chunk, index) => ({ text: chunk, metadata: { filename, mimeType, chunkIndex: index, libraryFile: true, ...(entities.length === 0 ? {} : { entities }) } }))
 }
 
-function publicLibraryFile(file: LibraryFileInfo): Omit<LibraryFileInfo, 'objectKey' | 'sha256'> {
+function publicLibraryFile(file: LibraryFileInfo): Omit<LibraryFileInfo, 'objectKey'> {
   return {
     docId: file.docId, realm: file.realm, folderId: file.folderId, filename: file.filename, mimeType: file.mimeType,
     byteSize: file.byteSize, ownerUserId: file.ownerUserId, extractionState: file.extractionState, ocrState: file.ocrState,
-    createdAt: file.createdAt,
+    createdAt: file.createdAt, sha256: file.sha256,
+    ...(file.revision === undefined ? {} : { revision: file.revision }),
+    ...(file.canEdit === undefined ? {} : { canEdit: file.canEdit }),
   }
 }
 
@@ -817,7 +854,7 @@ interface AgentTeamsService {
   }>
 }
 
-export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, vault: VaultService | undefined, req: IncomingMessage, res: ServerResponse, skillhubRuntime?: SkillHubRuntime, agentTeams?: AgentTeamsService, objectStore?: ObjectStoreService, officeToPdf?: OfficeToPdfService, agentThreads?: AgentThreadReader): Promise<void> {
+export async function api(config: Config, knowledge: KnowledgeQueryService | undefined, skills: SkillRegistryService | undefined, sessionLogQuery: SessionLogQuerySeam | undefined, vault: VaultService | undefined, req: IncomingMessage, res: ServerResponse, skillhubRuntime?: SkillHubRuntime, agentTeams?: AgentTeamsService, objectStore?: ObjectStoreService, officeToPdf?: OfficeToPdfService, agentThreads?: AgentThreadReader, projectBudgets?: ProjectBudgetService): Promise<void> {
   const pathname = new URL(req.url ?? '/', 'http://lumo.local').pathname
   // 单机版（Local Desktop）：vault 知识源 + fallback 身份,知识管理路由不套 realm 管理员角色门。
   const singleMachine = config.deploymentMode === 'local'
@@ -1035,11 +1072,33 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       }
       writeJson(res, 405, { error: 'method not allowed' }); return
     }
+    if (req.method === 'PATCH') {
+      if (typeof manager.updateLibraryFolder !== 'function') { writeJson(res, 501, { error: '当前资料库不支持整理目录，请更新 Provider' }); return }
+      try {
+        const body = await readJson(req)
+        const expectedRevision = libraryRevision(body, true)
+        const name = Object.hasOwn(body, 'name') ? requiredText(body, 'name', 240) : undefined
+        const parentId = libraryDestination(body, 'parentId')
+        if (name === undefined && parentId === undefined) throw new TypeError('请提供目录名称或目标目录')
+        const folder = await manager.updateLibraryFolder({ realm: identity.realm, folderId, actorUserId: identity.userId, roles: identity.roles, isAdmin, expectedRevision, ...(name === undefined ? {} : { name }), ...(parentId === undefined ? {} : { parentId }) })
+        writeJson(res, 200, { folder })
+      } catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '资料目录未更新' }) }
+      return
+    }
     if (req.method === 'DELETE') {
-      try { await manager.deleteLibraryFolder({ realm: identity.realm, folderId, actorUserId: identity.userId, roles: identity.roles, isAdmin }); writeJson(res, 200, { folderId, state: 'removed' }) }
+      try {
+        const body = await readJson(req, 1 << 20, true)
+        // Old providers do not expose revisions. Keep their empty DELETE body
+        // readable, while a versioned provider must compare the displayed version.
+        const folder = (await manager.listLibraryFolders(identity.realm, identity.userId, identity.roles, isAdmin)).find(item => item.folderId === folderId)
+        const expectedRevision = libraryRevision(body, folder?.revision !== undefined)
+        await manager.deleteLibraryFolder({ realm: identity.realm, folderId, actorUserId: identity.userId, roles: identity.roles, isAdmin, ...(expectedRevision === undefined ? {} : { expectedRevision }) })
+        writeJson(res, 200, { folderId, state: 'removed' })
+      }
       catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '资料文件夹未删除' }) }
       return
     }
+    writeJson(res, 405, { error: 'method not allowed' }); return
   }
 
   const libraryFilesPath = '/lumo/api/knowledge/library/files'
@@ -1079,14 +1138,18 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
         sha256: createHash('sha256').update(body).digest('hex'), ownerUserId: identity.userId,
         extractionState: extracted.extractionState, ocrState: extracted.ocrState, createdAt: new Date().toISOString(),
       }
-      await manager.createLibraryFile(file)
+      // Extraction and object storage can take seconds. Recheck destination ACL
+      // inside the provider's write transaction after either operation completes.
+      await manager.createLibraryFile(file, { roles: identity.roles, isAdmin: isRealmAdmin(identity) })
       try {
         if (chunks.length > 0) await manager.upsertSource({ docId, realm: identity.realm, space: 'library', title: filename, chunks })
       } catch (error) {
         await manager.removeLibraryFile(docId, identity.realm)
         throw error
       }
-      writeJson(res, 201, { file: publicLibraryFile(file), indexed: extracted.text !== '' })
+      const storedFile = await manager.getLibraryFile(docId, identity.realm)
+      if (storedFile === undefined) { writeJson(res, 409, { error: '上传资料已被移除，请刷新列表' }); return }
+      writeJson(res, 201, { file: publicLibraryFile({ ...storedFile, canEdit: true }), indexed: extracted.text !== '' })
     } catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '资料文件未上传' }) }
     return
   }
@@ -1101,6 +1164,30 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     if (file === undefined) { writeJson(res, 404, { error: '资料文件不存在' }); return }
     const isAdmin = isRealmAdmin(identity)
     const route = libraryFile[2]
+    if (route === undefined && req.method === 'PATCH') {
+      if (typeof manager.updateLibraryFile !== 'function') { writeJson(res, 501, { error: '当前资料库不支持整理文件，请更新 Provider' }); return }
+      try {
+        const body = await readJson(req)
+        const expectedRevision = libraryRevision(body, true)
+        const filename = Object.hasOwn(body, 'filename') ? requiredText(body, 'filename', 240) : undefined
+        const folderId = libraryDestination(body, 'folderId')
+        if (filename === undefined && folderId === undefined) throw new TypeError('请提供文件名称或目标目录')
+        const updated = await manager.updateLibraryFile({ realm: identity.realm, docId, actorUserId: identity.userId, roles: identity.roles, isAdmin, expectedRevision, ...(filename === undefined ? {} : { filename }), ...(folderId === undefined ? {} : { folderId }) })
+        writeJson(res, 200, { file: publicLibraryFile(updated) })
+      } catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '资料文件未更新' }) }
+      return
+    }
+    if (route === undefined && req.method === 'DELETE') {
+      if (typeof manager.deleteLibraryFile !== 'function') { writeJson(res, 501, { error: '当前知识库不支持文件删除' }); return }
+      try {
+        const body = await readJson(req)
+        if (typeof body.expectedSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(body.expectedSha256)) throw new TypeError('请刷新文件列表后提交当前文件版本')
+        const expectedRevision = libraryRevision(body, file.revision !== undefined)
+        await manager.deleteLibraryFile({ realm: identity.realm, docId, actorUserId: identity.userId, roles: identity.roles, isAdmin, expectedSha256: body.expectedSha256, ...(expectedRevision === undefined ? {} : { expectedRevision }) })
+        writeJson(res, 200, { docId, state: 'removed' })
+      } catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '资料文件未删除' }) }
+      return
+    }
     if (route === 'shares') {
       if (!await manager.canAccessLibraryFile({ docId, realm: identity.realm, userId: identity.userId, roles: identity.roles, isAdmin, access: 'editor' })) { writeJson(res, 403, { error: '没有管理此资料文件分享的权限' }); return }
       if (req.method === 'GET') {
@@ -1577,7 +1664,12 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
 
   if (pathname === '/lumo/api/users' && (req.method === 'GET' || req.method === 'POST')) {
     if (req.method === 'GET') {
-      writeUpstream(res, await upstream(config, identity, 'governance', `/v1/users?q=${encodeURIComponent(new URL(req.url ?? '/', 'http://lumo.local').searchParams.get('q') ?? '')}`, req)); return
+      const incoming = new URL(req.url ?? '/', 'http://lumo.local').searchParams
+      const params = new URLSearchParams()
+      for (const key of ['q', 'status', 'department_id', 'limit', 'offset']) {
+        for (const value of incoming.getAll(key)) params.append(key, value)
+      }
+      writeUpstream(res, await upstream(config, identity, 'governance', `/v1/users?${params}`, req)); return
     }
     if (!requireClusterReady(config, res)) return
     try { writeUpstream(res, await upstream(config, identity, 'governance', '/v1/users', req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
@@ -1605,6 +1697,26 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     if (userID === undefined) { writeJson(res, 400, { error: 'invalid user id' }); return }
     try { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/users/${encodeURIComponent(userID)}`, req, 'PUT', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
     return
+  }
+
+  if (pathname === '/lumo/api/permission-actions') {
+    if (!requireClusterReady(config, res)) return
+    if (req.method !== 'GET') { writeJson(res, 405, { error: 'method not allowed' }); return }
+    writeUpstream(res, await upstream(config, identity, 'governance', '/v1/permission-actions', req)); return
+  }
+
+  const rolePolicy = pathname.match(/^\/lumo\/api\/roles\/([^/]+)\/(permissions|parent)$/u)
+  if (rolePolicy !== null) {
+    if (!requireClusterReady(config, res)) return
+    const id = safeID(rolePolicy[1])
+    if (id === undefined) { writeJson(res, 400, { error: 'invalid role id' }); return }
+    const path = `/v1/roles/${encodeURIComponent(id)}/${rolePolicy[2]}`
+    if (req.method === 'GET' && rolePolicy[2] === 'permissions') { writeUpstream(res, await upstream(config, identity, 'governance', path, req)); return }
+    if (req.method === 'PUT' || (req.method === 'DELETE' && rolePolicy[2] === 'permissions')) {
+      try { writeUpstream(res, await upstream(config, identity, 'governance', path, req, req.method, await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+      return
+    }
+    writeJson(res, 405, { error: 'method not allowed' }); return
   }
 
   if (pathname === '/lumo/api/roles' && (req.method === 'GET' || req.method === 'POST')) {
@@ -2019,6 +2131,17 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     return
   }
 
+  const projectDetail = pathname.match(/^\/lumo\/api\/projects\/([^/]+)$/u)
+  if (projectDetail !== null && (req.method === 'GET' || req.method === 'PATCH')) {
+    const projectID = safeID(projectDetail[1])
+    if (projectID === undefined) { writeJson(res, 400, { error: 'invalid project id' }); return }
+    const path = `/v1/projects/${encodeURIComponent(projectID)}`
+    if (req.method === 'GET') { writeUpstream(res, await upstream(config, identity, 'projects', path, req)); return }
+    try { writeUpstream(res, await upstream(config, identity, 'projects', path, req, 'PATCH', await readBody(req))) }
+    catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
+  }
+
   const dashboard = pathname.match(/^\/lumo\/api\/projects\/([^/]+)\/dashboard$/u)
   if (req.method === 'GET' && dashboard !== null) {
     const projectID = safeID(dashboard[1])
@@ -2116,14 +2239,37 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     writeJson(res, 405, { error: 'method not allowed' }); return
   }
 
+  const projectBudget = pathname.match(/^\/lumo\/api\/projects\/([^/]+)\/budget$/u)
+  if (projectBudget !== null) {
+    if (config.deploymentMode === 'local' || projectBudgets === undefined) { writeJson(res, 501, { error: '当前运行节点未装配项目预算管理' }); return }
+    const projectId = safeID(projectBudget[1])
+    if (projectId === undefined) { writeJson(res, 400, { error: 'invalid project id' }); return }
+    const actor = { realm: identity.realm, projectId, actorUserId: identity.userId }
+    try {
+      if (req.method === 'GET') { writeJson(res, 200, await projectBudgets.readProjectBudget(actor)); return }
+      if (req.method === 'POST') {
+        if (!requireClusterReady(config, res)) return
+        const body = await readJson(req)
+        if ((body.mode !== 'adjust' && body.mode !== 'reset') || ![body.total, body.softLimit, body.overdraft, body.expectedRevision].every(value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)) { writeJson(res, 400, { error: '预算参数无效，请提交非负整数额度和读取版本' }); return }
+        writeJson(res, 200, await projectBudgets.configureProjectBudget({ ...actor, mode: body.mode, total: body.total as number, softLimit: body.softLimit as number, overdraft: body.overdraft as number, expectedRevision: body.expectedRevision as number, confirmReset: body.confirmReset === true })); return
+      }
+      writeJson(res, 405, { error: 'method not allowed' })
+    } catch (error) {
+      const status = typeof error === 'object' && error !== null && 'status' in error && typeof error.status === 'number' && [400,403,409].includes(error.status) ? error.status : error instanceof SyntaxError || error instanceof TypeError ? 400 : 503
+      writeJson(res, status, { error: error instanceof Error ? error.message : '项目预算服务不可用' })
+    }
+    return
+  }
+
   const projectResource = pathname.match(/^\/lumo\/api\/projects\/([^/]+)\/(members|artifacts|spaces|automations|usage)$/u)
   if (projectResource !== null) {
     const projectID = safeID(projectResource[1])
     if (projectID === undefined) { writeJson(res, 400, { error: 'invalid project id' }); return }
     const resource = projectResource[2]
     if (req.method === 'GET') { writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/${encodeURIComponent(projectID)}/${resource}`, req)); return }
-    if (req.method === 'POST' && resource === 'spaces') {
-      try { writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/${encodeURIComponent(projectID)}/spaces`, req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    if (req.method === 'POST' && (resource === 'spaces' || resource === 'automations')) {
+      if (!requireClusterReady(config, res)) return
+      try { writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/${encodeURIComponent(projectID)}/${resource}`, req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
       return
     }
   }
@@ -2132,14 +2278,49 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   if (automation !== null) {
     const projectID = safeID(automation[1]); const automationID = safeID(automation[2])
     if (projectID === undefined || automationID === undefined) { writeJson(res, 400, { error: 'invalid project or automation id' }); return }
-    if (req.method === 'PUT') {
-      try { writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/${encodeURIComponent(projectID)}/automations/${encodeURIComponent(automationID)}`, req, 'PUT', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    if (req.method === 'PUT' || req.method === 'PATCH') {
+      if (!requireClusterReady(config, res)) return
+      try { writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/${encodeURIComponent(projectID)}/automations/${encodeURIComponent(automationID)}`, req, req.method, await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
       return
     }
     if (req.method === 'DELETE') {
-      writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/${encodeURIComponent(projectID)}/automations/${encodeURIComponent(automationID)}`, req, 'DELETE'))
+      if (!requireClusterReady(config, res)) return
+      const incoming = new URL(req.url ?? '/', 'http://lumo.local').searchParams
+      const params = new URLSearchParams()
+      for (const value of incoming.getAll('expectedRevision')) params.append('expectedRevision', value)
+      writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/${encodeURIComponent(projectID)}/automations/${encodeURIComponent(automationID)}${params.size ? `?${params}` : ''}`, req, 'DELETE'))
       return
     }
+  }
+
+  const spaceGrants = pathname.match(/^\/lumo\/api\/projects\/([^/]+)\/spaces\/([^/]+)\/grants(?:\/([^/]+))?$/u)
+  if (spaceGrants !== null) {
+    if (!requireClusterReady(config, res)) return
+    const projectID = safeID(spaceGrants[1]); const spaceID = safeID(spaceGrants[2]); const userID = spaceGrants[3] === undefined ? undefined : safeID(spaceGrants[3])
+    if (projectID === undefined || spaceID === undefined || (spaceGrants[3] !== undefined && userID === undefined)) { writeJson(res, 400, { error: 'invalid Space grant scope' }); return }
+    const path = `/v1/projects/${encodeURIComponent(projectID)}/spaces/${encodeURIComponent(spaceID)}/grants${userID === undefined ? '' : `/${encodeURIComponent(userID)}`}`
+    if (req.method === 'GET' && userID === undefined) { writeUpstream(res, await upstream(config, identity, 'collaborator', path, req)); return }
+    if (req.method === 'PUT' && userID !== undefined) {
+      try { writeUpstream(res, await upstream(config, identity, 'collaborator', path, req, 'PUT', await readBody(req))) }
+      catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+      return
+    }
+    writeJson(res, 405, { error: 'method not allowed' }); return
+  }
+
+  const spaceChange = pathname.match(/^\/lumo\/api\/projects\/([^/]+)\/spaces\/([^/]+)$/u)
+  const artifactChange = pathname.match(/^\/lumo\/api\/projects\/([^/]+)\/artifacts\/([^/]+)\/([^/]+)$/u)
+  if (spaceChange !== null || artifactChange !== null) {
+    if (!requireClusterReady(config, res)) return
+    const match = spaceChange ?? artifactChange!
+    const ids = match.slice(1).map(value => safeID(value))
+    if (ids.some(value => value === undefined)) { writeJson(res, 400, { error: 'invalid resource id' }); return }
+    const allowed = spaceChange ? ['PATCH','DELETE'] : ['PUT','DELETE']
+    if (!allowed.includes(req.method ?? '')) { writeJson(res, 405, { error: 'method not allowed' }); return }
+    const path = `/v1/projects/${encodeURIComponent(ids[0]!)}/${spaceChange ? 'spaces' : 'artifacts'}/${ids.slice(1).map(value => encodeURIComponent(value!)).join('/')}`
+    try { writeUpstream(res, await upstream(config, identity, 'projects', path, req, req.method, await readBody(req))) }
+    catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+    return
   }
 
   const connectorInvoke = pathname.match(/^\/lumo\/api\/connectors\/([^/]+)\/invoke$/u)
@@ -2323,6 +2504,7 @@ export function apply(ctx: Context, config: Config): void {
           runtimeCtx.get('objectStore') as ObjectStoreService | undefined,
           runtimeCtx.get('officeToPdf') as OfficeToPdfService | undefined,
           runtimeCtx.get('agentThreads') as AgentThreadReader | undefined,
+          runtimeCtx.get('projectBudgets') as ProjectBudgetService | undefined,
         ),
       })
       const disposeOps = runtimeCtx.webServer.register({ kind: 'exact', path: '/lumo/ops', handler: ops })

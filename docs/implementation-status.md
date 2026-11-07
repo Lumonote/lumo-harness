@@ -1,5 +1,27 @@
 # Implementation status (2026-09-15)
 
+## 2026-11-07 管理能力续开发与权限收敛
+
+本批继续补齐知识资料整理、项目空间/自动化/预算管理、跨页用户选择、角色动作策略与单父
+继承、Space grant 管理及实例隔离、动态 owner 历史分支与可选当前用户只读知识查询。
+新增共享内容正向引用审计，但不执行物理 GC。补上慢请求/等待锁期间撤权、项目 Realm/
+归档边界、Space 同 ID 重建及 legacy 解绑复活等保护；迁移为 020–024。
+
+当前版本完整平台套件 **1873 PASS / 0 FAIL / 36 SKIP**（216 文件，真实 PG/Redis/HTTP），
+另显式补跑认证 HTTP **14 PASS**；剩余 22 项 MinIO 测试未执行。三个 Go 服务全包
+race 共 **420 PASS / 0 FAIL / 0 SKIP**（包含子测试），vet/build、平台与 UI 类型检查、
+UI bundle、17 项真实 PG DDL shape 及 7 项 OPA Rego 检查通过。角色审计旧 CHECK 枚举
+遗漏由真实验收发现并修复，新增升级与幂等回归已通过。
+详见[管理功能交付与验证记录](./management-optimization-2026-11-07.md)及
+[当前剩余功能](./remaining-development-2026-11-07.md)。浏览器视觉、外部真实模型及物理
+多主机生产验收仍未完成。
+
+## 2026-11-07 知识库、用户与项目管理优化
+
+优化前的完整代码已提交到 `codex/v1.2.1`，提交 `43366c7`。本批继续补齐资料文件删除、批量 ACL、上传删除与分享撤权竞态保护，接入用户目录分页和全库筛选，以及项目重命名、并发 owner 保护、资源隔离、归档写保护和自动化编辑。页面按实际角色显示操作，并处理重复提交、陈旧响应和保存后刷新失败。
+
+本批验收：知识库 **63 PASS / 0 FAIL / 0 SKIP**（含 18 项真实 PG）；Lumo UI **283 PASS / 0 FAIL / 0 SKIP**；Projects 真实 PG 全包 race、vet 通过（43 个顶层测试）；Governance 真实 PG 全包 race 通过（7 个有测试包，新增目录 4 项实际执行）。全平台 TypeScript 检查、UI bundle 与 diff 检查通过。详见[管理功能交付与验证记录](./management-optimization-2026-11-07.md)。此前的外部模型、物理跨主机和浏览器视觉验收边界保持见下文各批记录。
+
 ## 2026-11-07 原生模型配置与 Docker 故障验收
 
 已对齐 DeepSeek Harness 原生 patch、默认模型与凭据加载，补齐 Compose/Helm 模型配置挂载和每进程 home 隔离，修复 compact 重复启动独立节点及共享生成 patch。4 项原生 HTTP 合约、26 项部署定向检查、4 个部署回归测试及本机 Helm 全组合通过。Docker 双节点 Thread 的 28 个断言、完整集群的 22 个故障断言及故障前后健康/行为探针通过。外部原生供应商调用返回 `AUTH / access-denied`，真实两轮历史和用量未通过；物理跨主机和生产 HA 仍未验收。详见[配置与 Docker 验收记录](./model-and-docker-acceptance-2026-11-07.md)。

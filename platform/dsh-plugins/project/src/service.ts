@@ -45,6 +45,24 @@ CREATE TABLE IF NOT EXISTS project_spaces (
   realm      TEXT NOT NULL,
   name       TEXT NOT NULL
 );
+ALTER TABLE project_spaces ADD COLUMN IF NOT EXISTS incarnation UUID NOT NULL DEFAULT gen_random_uuid();
+CREATE TABLE IF NOT EXISTS project_space_claims (
+  realm TEXT NOT NULL,
+  space_id TEXT NOT NULL,
+  PRIMARY KEY (realm, space_id)
+);
+DO $space_claims$
+BEGIN
+  EXECUTE $function$CREATE OR REPLACE FUNCTION record_project_space_claim() RETURNS trigger AS $body$
+  BEGIN
+    INSERT INTO project_space_claims(realm,space_id) VALUES(NEW.realm,NEW.space_id) ON CONFLICT DO NOTHING;
+    RETURN NEW;
+  END;
+  $body$ LANGUAGE plpgsql$function$;
+  EXECUTE 'CREATE OR REPLACE TRIGGER project_space_claim AFTER INSERT OR UPDATE OF realm,space_id ON project_spaces FOR EACH ROW EXECUTE FUNCTION record_project_space_claim()';
+END;
+$space_claims$;
+INSERT INTO project_space_claims(realm,space_id) SELECT realm,space_id FROM project_spaces ON CONFLICT DO NOTHING;
 -- 同项目内 Space 名唯一。具名唯一索引而不是建表时的内联 UNIQUE：既有库上
 -- CREATE TABLE IF NOT EXISTS 是空操作，内联约束加不上去；而内联 UNIQUE 的自动名
 -- （project_spaces_project_id_name_key）与具名索引并存会让「谁先建表」留下不同的
@@ -58,8 +76,10 @@ CREATE TABLE IF NOT EXISTS project_automations (
   trigger_kind  TEXT NOT NULL CHECK (trigger_kind IN ('cron','webhook','event')),
   trigger_spec  TEXT NOT NULL,
   flow_ref      TEXT NOT NULL,
-  enabled       BOOLEAN NOT NULL DEFAULT true
+  enabled       BOOLEAN NOT NULL DEFAULT true,
+  revision      BIGINT NOT NULL DEFAULT 1
 );
+ALTER TABLE project_automations ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
 `
 
 export type ProjectRole = 'owner' | 'editor' | 'viewer'
@@ -158,7 +178,7 @@ export interface ProjectDashboard {
   members: Array<{ userId: string; role: ProjectRole }>
   artifacts: Array<{ kind: ArtifactKind; name: string; version: string }>
   spaces: Array<{ spaceId: string; name: string }>
-  automations: Array<{ automationId: string; triggerKind: string; flowRef: string; enabled: boolean }>
+  automations: Array<{ automationId: string; triggerKind: string; triggerSpec: string; flowRef: string; enabled: boolean; revision: number }>
   /** 用量与预算（§6.4 并行预算树的项目侧） */
   usage: { tokens: number; costUsd: number; budgetRemaining: number }
 }
@@ -183,15 +203,38 @@ export class ProjectService {
     await this.pool.query(PROJECT_DDL)
   }
 
-  async create(project: Project, owner: string): Promise<void> {
+  /** Share the Go control plane's parent lock for every lifecycle/resource write. */
+  private async withProject<T>(projectId: string, active: boolean, mutate: (client: pg.PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
-      await client.query(
+      const project = await client.query<{ status: string }>(
+        'SELECT status FROM projects WHERE id=$1 AND realm=$2 FOR UPDATE', [projectId, this.realm],
+      )
+      if (!this.realm || project.rowCount === 0) throw new Error('项目不存在或不属于当前 Realm')
+      if (active && project.rows[0]!.status !== 'active') throw new Error('归档项目不可修改资源')
+      const result = await mutate(client)
+      await client.query('COMMIT')
+      return result
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async create(project: Project, owner: string): Promise<void> {
+    if (!this.realm || project.realm !== this.realm) throw new Error('项目 Realm 与当前配置不一致')
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const inserted = await client.query(
         `INSERT INTO projects (id, realm, name, created_by) VALUES ($1,$2,$3,$4)
-         ON CONFLICT (id) DO NOTHING`,
+         ON CONFLICT (id) DO NOTHING RETURNING id`,
         [project.projectId, project.realm, project.name, owner],
       )
+      if (inserted.rowCount === 0) throw new Error('项目 ID 已存在')
       await client.query(
         `INSERT INTO project_members (project_id, user_id, role) VALUES ($1,$2,'owner')
          ON CONFLICT (project_id, user_id) DO UPDATE SET role = 'owner'`,
@@ -208,24 +251,39 @@ export class ProjectService {
 
   /** 归档是常态；删除是异常（§11.1 —— 删除须显式授权，此处不提供 delete API） */
   async archive(projectId: string): Promise<void> {
-    await this.pool.query(
+    await this.withProject(projectId, false, client => client.query(
       `UPDATE projects SET status = 'archived', archived_at = now() WHERE id = $1`,
       [projectId],
-    )
+    ))
   }
 
   async addMember(projectId: string, userId: string, role: ProjectRole): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO project_members (project_id, user_id, role) VALUES ($1,$2,$3)
-       ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
-      [projectId, userId, role],
-    )
+    if (!['owner', 'editor', 'viewer'].includes(role)) throw new Error('无效项目角色')
+    await this.withProject(projectId, false, async client => {
+      if (role !== 'owner') {
+        const current = await client.query<{ role: string }>(
+          'SELECT role FROM project_members WHERE project_id=$1 AND user_id=$2', [projectId, userId],
+        )
+        if (current.rows[0]?.role === 'owner') {
+          const owners = await client.query<{ total: string }>(
+            "SELECT count(*)::text AS total FROM project_members WHERE project_id=$1 AND role='owner'", [projectId],
+          )
+          if (Number(owners.rows[0]!.total) <= 1) throw new Error('不能降级最后一个项目所有者')
+        }
+      }
+      await client.query(
+        `INSERT INTO project_members (project_id, user_id, role) VALUES ($1,$2,$3)
+         ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
+        [projectId, userId, role],
+      )
+    })
   }
 
   async roleOf(projectId: string, userId: string): Promise<ProjectRole | undefined> {
     const row = await this.pool.query<{ role: ProjectRole }>(
-      'SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2',
-      [projectId, userId],
+      `SELECT m.role FROM project_members m JOIN projects p ON p.id=m.project_id
+       WHERE m.project_id = $1 AND m.user_id = $2 AND p.realm=$3`,
+      [projectId, userId, this.realm],
     )
     return row.rows[0]?.role
   }
@@ -233,41 +291,50 @@ export class ProjectService {
   async attachArtifact(
     projectId: string, kind: ArtifactKind, name: string, version: string,
   ): Promise<void> {
-    await this.pool.query(
+    await this.withProject(projectId, true, client => client.query(
       `INSERT INTO project_artifacts (project_id, kind, name, version)
        VALUES ($1,$2,$3,$4)
        ON CONFLICT (project_id, kind, name) DO UPDATE SET version = EXCLUDED.version`,
       [projectId, kind, name, version],
-    )
+    ))
   }
 
   async addSpace(spaceId: string, projectId: string, realm: string, name: string): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO project_spaces (space_id, project_id, realm, name) VALUES ($1,$2,$3,$4)
-       ON CONFLICT (space_id) DO UPDATE SET name = EXCLUDED.name`,
-      [spaceId, projectId, realm, name],
-    )
+    if (!this.realm || realm !== this.realm) throw new Error('知识空间 Realm 与当前配置不一致')
+    await this.withProject(projectId, true, async client => {
+      const saved = await client.query(
+        `INSERT INTO project_spaces (space_id, project_id, realm, name) VALUES ($1,$2,$3,$4)
+         ON CONFLICT (space_id) DO UPDATE SET name = EXCLUDED.name
+         WHERE project_spaces.project_id=EXCLUDED.project_id AND project_spaces.realm=EXCLUDED.realm`,
+        [spaceId, projectId, realm, name],
+      )
+      if (saved.rowCount === 0) throw new Error('知识空间 ID 已用于其他项目')
+    })
   }
 
   async addAutomation(
     automationId: string, projectId: string,
     triggerKind: 'cron' | 'webhook' | 'event', triggerSpec: string, flowRef: string,
   ): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO project_automations (automation_id, project_id, trigger_kind, trigger_spec, flow_ref)
-       VALUES ($1,$2,$3,$4,$5)
-       ON CONFLICT (automation_id) DO UPDATE SET
-         trigger_kind = EXCLUDED.trigger_kind, trigger_spec = EXCLUDED.trigger_spec,
-         flow_ref = EXCLUDED.flow_ref`,
-      [automationId, projectId, triggerKind, triggerSpec, flowRef],
-    )
+    await this.withProject(projectId, true, async client => {
+      const saved = await client.query(
+        `INSERT INTO project_automations (automation_id, project_id, trigger_kind, trigger_spec, flow_ref)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (automation_id) DO UPDATE SET
+           trigger_kind = EXCLUDED.trigger_kind, trigger_spec = EXCLUDED.trigger_spec,
+           flow_ref = EXCLUDED.flow_ref, revision=project_automations.revision+1
+         WHERE project_automations.project_id=EXCLUDED.project_id`,
+        [automationId, projectId, triggerKind, triggerSpec, flowRef],
+      )
+      if (saved.rowCount === 0) throw new Error('自动化 ID 已用于其他项目')
+    })
   }
 
   /** 项目仪表板（控制台「项目」入口：成员/引用/空间/自动化/用量预算 一屏） */
   async dashboard(projectId: string): Promise<ProjectDashboard | undefined> {
     const p = await this.pool.query<{ id: string; realm: string; name: string; status: 'active' | 'archived' }>(
-      'SELECT id, realm, name, status FROM projects WHERE id = $1',
-      [projectId],
+      'SELECT id, realm, name, status FROM projects WHERE id = $1 AND realm=$2',
+      [projectId, this.realm],
     )
     if (p.rows.length === 0) return undefined
 
@@ -278,8 +345,8 @@ export class ProjectService {
         'SELECT kind, name, version FROM project_artifacts WHERE project_id = $1', [projectId]),
       this.pool.query<{ space_id: string; name: string }>(
         'SELECT space_id, name FROM project_spaces WHERE project_id = $1', [projectId]),
-      this.pool.query<{ automation_id: string; trigger_kind: string; flow_ref: string; enabled: boolean }>(
-        'SELECT automation_id, trigger_kind, flow_ref, enabled FROM project_automations WHERE project_id = $1', [projectId]),
+      this.pool.query<{ automation_id: string; trigger_kind: string; trigger_spec: string; flow_ref: string; enabled: boolean; revision: string }>(
+        'SELECT automation_id, trigger_kind, trigger_spec, flow_ref, enabled, revision FROM project_automations WHERE project_id = $1', [projectId]),
       // usage_ledger 由 @lumo/metering 建表；此处只读聚合（组件不直连他人写路径）
       this.pool.query<{ tokens: string | null; cost: string | null }>(
         `SELECT SUM(tokens)::text AS tokens, SUM(cost_usd)::text AS cost
@@ -297,7 +364,7 @@ export class ProjectService {
       spaces: spaces.rows.map((r) => ({ spaceId: r.space_id, name: r.name })),
       automations: automations.rows.map((r) => ({
         automationId: r.automation_id, triggerKind: r.trigger_kind,
-        flowRef: r.flow_ref, enabled: r.enabled,
+        triggerSpec: r.trigger_spec, flowRef: r.flow_ref, enabled: r.enabled, revision: Number(r.revision),
       })),
       usage: {
         tokens: Number(usage.rows[0]?.tokens ?? 0),

@@ -6,6 +6,7 @@
  */
 import pg from 'pg'
 import { randomUUID } from 'node:crypto'
+import { extname } from 'node:path'
 import {
   type KnowledgeDoc,
   type KnowledgeHit,
@@ -53,8 +54,10 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_vec_hnsw ON knowledge_chunks
 CREATE TABLE IF NOT EXISTS knowledge_tombstones (
   doc_id     TEXT PRIMARY KEY,
   realm      TEXT NOT NULL,
+  library_file BOOLEAN NOT NULL DEFAULT false,
   removed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE knowledge_tombstones ADD COLUMN IF NOT EXISTS library_file BOOLEAN NOT NULL DEFAULT false;
 
 -- 源文档是重建真相；向量表和图表都只是可删除的派生投影。
 CREATE TABLE IF NOT EXISTS knowledge_sources (
@@ -75,12 +78,16 @@ CREATE TABLE IF NOT EXISTS knowledge_library_folders (
   parent_id TEXT,
   name TEXT NOT NULL,
   owner_user_id TEXT NOT NULL,
+  revision BIGINT NOT NULL DEFAULT 1,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (realm, folder_id),
   FOREIGN KEY (realm, parent_id) REFERENCES knowledge_library_folders (realm, folder_id) ON DELETE RESTRICT
 );
+ALTER TABLE knowledge_library_folders ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_library_folder_sibling
   ON knowledge_library_folders (realm, COALESCE(parent_id, ''), lower(name));
+CREATE INDEX IF NOT EXISTS idx_knowledge_library_folder_parent
+  ON knowledge_library_folders (realm, parent_id);
 
 CREATE TABLE IF NOT EXISTS knowledge_library_files (
   doc_id TEXT PRIMARY KEY,
@@ -94,9 +101,11 @@ CREATE TABLE IF NOT EXISTS knowledge_library_files (
   owner_user_id TEXT NOT NULL,
   extraction_state TEXT NOT NULL DEFAULT 'pending' CHECK (extraction_state IN ('pending','ready','failed','unsupported')),
   ocr_state TEXT NOT NULL DEFAULT 'not_needed' CHECK (ocr_state IN ('not_needed','pending','ready','failed','unavailable')),
+  revision BIGINT NOT NULL DEFAULT 1,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   FOREIGN KEY (realm, folder_id) REFERENCES knowledge_library_folders (realm, folder_id) ON DELETE RESTRICT
 );
+ALTER TABLE knowledge_library_files ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
 CREATE INDEX IF NOT EXISTS idx_knowledge_library_files_realm_folder
   ON knowledge_library_files (realm, folder_id, created_at DESC);
 
@@ -160,6 +169,17 @@ type LibraryFileRow = {
   doc_id: string; realm: string; folder_id: string | null; filename: string; mime_type: string
   object_key: string; byte_size: string | number; sha256: string; owner_user_id: string
   extraction_state: KnowledgeLibraryFile['extractionState']; ocr_state: KnowledgeLibraryFile['ocrState']; created_at: string
+  can_edit?: boolean
+  revision: string | number
+}
+type LibraryFolderRow = {
+  folder_id: string; realm: string; parent_id: string | null; name: string; owner_user_id: string
+  created_at: string; revision: string | number; can_edit?: boolean
+}
+
+function libraryFolder(row: LibraryFolderRow): KnowledgeLibraryFolder {
+  return { folderId: row.folder_id, realm: row.realm, parentId: row.parent_id, name: row.name, ownerUserId: row.owner_user_id,
+    createdAt: row.created_at, revision: Number(row.revision), ...(row.can_edit === undefined ? {} : { canEdit: row.can_edit }) }
 }
 
 function libraryFile(row: LibraryFileRow): KnowledgeLibraryFile {
@@ -167,8 +187,42 @@ function libraryFile(row: LibraryFileRow): KnowledgeLibraryFile {
     docId: row.doc_id, realm: row.realm, folderId: row.folder_id, filename: row.filename, mimeType: row.mime_type,
     objectKey: row.object_key, byteSize: Number(row.byte_size), sha256: row.sha256, ownerUserId: row.owner_user_id,
     extractionState: row.extraction_state, ocrState: row.ocr_state, createdAt: row.created_at,
+    revision: Number(row.revision),
+    ...(row.can_edit === undefined ? {} : { canEdit: row.can_edit }),
   }
 }
+
+function validLibraryName(value: string): string {
+  const name = value.trim()
+  if (name.length === 0 || Buffer.byteLength(name, 'utf8') > 240 || /[\\/\u0000-\u001f\u007f]/u.test(name) || name === '.' || name === '..') throw new TypeError('资料名称无效')
+  return name
+}
+
+function assertRevision(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1) throw new TypeError('必须提供读取时的有效资料版本')
+}
+
+/** A single recursive walk propagates matching ancestor grants to all descendants. */
+const libraryFolderAccessCte = `WITH RECURSIVE allowed_folders(folder_id, required_access) AS (
+  SELECT f.folder_id, access.required FROM knowledge_library_folders f
+    CROSS JOIN (VALUES ('viewer'), ('editor')) access(required) WHERE f.realm=$1 AND (
+    $5::boolean OR f.owner_user_id=$2 OR EXISTS (
+      SELECT 1 FROM knowledge_library_folder_grants g WHERE g.realm=$1 AND g.folder_id=f.folder_id
+        AND (g.principal_type='user' AND g.principal_id=$2 OR g.principal_type='role' AND g.principal_id=ANY($3::text[]))
+        AND (access.required='viewer' OR g.access='editor')
+    )
+  )
+  UNION
+  SELECT f.folder_id, parent.required_access FROM knowledge_library_folders f JOIN allowed_folders parent ON f.parent_id=parent.folder_id
+    WHERE f.realm=$1
+)`
+
+/** Requires the surrounding query to alias the library file as d. */
+function libraryFileAccessSql(access = '$4'): string { return `($5::boolean OR d.owner_user_id=$2
+  OR d.folder_id IN (SELECT folder_id FROM allowed_folders WHERE required_access=${access})
+  OR EXISTS (SELECT 1 FROM knowledge_library_file_grants g WHERE g.realm=$1 AND g.doc_id=d.doc_id
+    AND (g.principal_type='user' AND g.principal_id=$2 OR g.principal_type='role' AND g.principal_id=ANY($3::text[]))
+    AND (${access}='viewer' OR g.access='editor')))` }
 
 function readChunks(value: unknown): KnowledgeIngest['chunks'] {
   const decoded: unknown = typeof value === 'string' ? JSON.parse(value) : value
@@ -233,9 +287,31 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
     }
   }
 
+  /** ACL changes include inherited ancestors, so serialize the complete realm's ACL snapshot. */
+  private async lockLibraryAcl(client: pg.PoolClient, realm: string): Promise<void> {
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1), 74107)', [realm])
+  }
+
   /** 写 source-of-truth、向量投影和图 outbox；调用方已持有该 doc 的锁。 */
   private async writeSource(client: pg.PoolClient, entry: KnowledgeIngest, vectors: number[][]): Promise<KnowledgeSourceSummary> {
-    const { doc, chunks } = entry
+    let { doc } = entry
+    const file = await client.query<{ realm: string; filename: string }>(
+      'SELECT realm, filename FROM knowledge_library_files WHERE doc_id=$1 FOR KEY SHARE', [doc.docId],
+    )
+    if (file.rows[0] !== undefined && file.rows[0].realm !== doc.realm) throw forbidden(`knowledge file ${doc.docId} belongs to another realm`)
+    const lifecycle = await client.query<{ deleted_library: boolean; library_source: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM knowledge_tombstones WHERE doc_id=$1 AND library_file) AS deleted_library,
+       EXISTS (SELECT 1 FROM knowledge_sources WHERE doc_id=$1 AND chunks @> '[{"metadata":{"libraryFile":true}}]'::jsonb) AS library_source`,
+      [doc.docId],
+    )
+    const hasFile = file.rows[0] !== undefined
+    if (lifecycle.rows[0]?.deleted_library || !hasFile && (lifecycle.rows[0]?.library_source || entry.chunks.some(chunk => chunk.metadata.libraryFile === true))) {
+      throw new KnowledgeSourceConflictError('资料文件已删除或不存在，请重新上传文件')
+    }
+    // The source lock is acquired after embedding. An upload deleted while embedding was
+    // in flight must never recreate the source or clear its deletion tombstone.
+    if (hasFile) doc = { ...doc, title: file.rows[0]!.filename }
+    const chunks = hasFile ? entry.chunks.map(chunk => ({ ...chunk, metadata: { ...chunk.metadata, filename: file.rows[0]!.filename, libraryFile: true } })) : entry.chunks
     const written = await client.query<{
       doc_id: string; realm: string; space: string; title: string; source_version: number; embedding_model: string; updated_at: string
     }>(
@@ -271,7 +347,7 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
     // 图投影意图与 chunk 写入同事务（outbox；跨存储无事务，见 graph-projector.ts）
     await client.query(
       `INSERT INTO knowledge_graph_outbox (doc_id, realm, op, payload) VALUES ($1,$2,'upsert',$3)`,
-      [doc.docId, doc.realm, JSON.stringify(collectProjection(doc, chunks))],
+      [doc.docId, doc.realm, JSON.stringify({ ...collectProjection(doc, chunks), ...(hasFile ? { libraryFile: true } : {}) })],
     )
     await this.enqueueVector(client, doc.docId, doc.realm)
     const row = written.rows[0]!
@@ -310,6 +386,8 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
       throw forbidden(`PgKnowledgeProvider: 角色 ${request.roles.join(',')} 无知识库检索权限`)
     }
     if (request.scope !== 'published') throw forbidden('knowledge: only published sources are searchable')
+    request = await this.projectQueryScope(request)
+    if (request.spaces?.length === 0) return []
     if (this.vectorProjection) {
       const candidateRequest = { ...request, topK: Math.min(Math.max(request.topK, request.topK * 5), 100) }
       const hits = await this.vectorProjection.query(candidateRequest)
@@ -363,18 +441,46 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
   }
 
   private async filterLibraryHits(request: KnowledgeQuery, hits: KnowledgeHit[]): Promise<KnowledgeHit[]> {
-    const allowed: KnowledgeHit[] = []
-    for (const hit of hits) {
-      const file = await this.getLibraryFile(hit.docId, request.realm)
-      // 手工登记的旧来源没有文件 ACL，保留原有 realm/role 授权；文件资料必须有经过签名的用户身份。
-      if (file === undefined) { allowed.push(hit); continue }
-      if (request.libraryAdmin === true) { allowed.push(hit); continue }
-      if (request.userId === undefined || request.userId === '') continue
-      if (await this.canAccessLibraryFile({
-        docId: hit.docId, realm: request.realm, userId: request.userId, roles: request.roles, isAdmin: false,
-      })) allowed.push(hit)
-    }
-    return allowed.slice(0, request.topK)
+    if (hits.length === 0) return []
+    const identified = typeof request.userId === 'string' && request.userId !== ''
+    const projectFilter = request.projectId === undefined ? '' : `AND EXISTS(SELECT 1 FROM project_spaces ps
+      JOIN projects p ON p.id=ps.project_id AND p.realm=ps.realm AND p.status='active'
+      JOIN project_members pm ON pm.project_id=p.id AND pm.user_id=$2
+      JOIN governance_users u ON u.realm=p.realm AND u.id=pm.user_id AND u.status='active'
+      WHERE ps.realm=s.realm AND ps.space_id=s.space AND p.id=$9)`
+    const sources = await this.pool.query<{ doc_id: string; source_version: number }>(
+      `${libraryFolderAccessCte}
+       SELECT s.doc_id, s.source_version FROM knowledge_sources s
+       LEFT JOIN knowledge_library_files d ON d.realm=s.realm AND d.doc_id=s.doc_id
+       WHERE s.realm=$1 AND s.doc_id=ANY($6::text[]) AND s.embedding_model=$7
+         ${projectFilter}
+         AND NOT EXISTS (SELECT 1 FROM knowledge_tombstones t WHERE t.realm=s.realm AND t.doc_id=s.doc_id)
+         AND (d.doc_id IS NULL AND NOT (s.chunks @> '[{"metadata":{"libraryFile":true}}]'::jsonb)
+           OR d.doc_id IS NOT NULL AND $8::boolean AND ${libraryFileAccessSql()})`,
+      [request.realm, request.userId ?? '', identified ? request.roles : [], 'viewer', request.libraryAdmin === true,
+        [...new Set(hits.map(hit => hit.docId))], this.embeddingModel, identified || request.libraryAdmin === true,
+        ...(request.projectId === undefined ? [] : [request.projectId])],
+    )
+    // Final authority check also closes a race where a search candidate was read before deletion
+    // but its file row was removed before ACL filtering (absence must not turn it into a public source).
+    const current = new Map(sources.rows.map(source => [source.doc_id, source.source_version]))
+    return hits.filter(hit => current.get(hit.docId) === hit.sourceVersion).slice(0, request.topK)
+  }
+
+  private async projectQueryScope(request: KnowledgeQuery): Promise<KnowledgeQuery> {
+    if (request.projectId === undefined) return request
+    if (!request.projectId.trim() || !request.userId?.trim()) throw forbidden('knowledge: project queries require an authenticated user')
+    const result = await this.pool.query<{ spaces: string[] }>(
+      `SELECT COALESCE(array_agg(ps.space_id) FILTER (WHERE ps.space_id IS NOT NULL),'{}'::text[]) AS spaces
+       FROM projects p JOIN project_members pm ON pm.project_id=p.id AND pm.user_id=$3
+       JOIN governance_users u ON u.realm=p.realm AND u.id=pm.user_id AND u.status='active'
+       LEFT JOIN project_spaces ps ON ps.project_id=p.id AND ps.realm=p.realm
+       WHERE p.realm=$1 AND p.id=$2 AND p.status='active' GROUP BY p.id`,
+      [request.realm, request.projectId, request.userId],
+    )
+    const allowed = result.rows[0]?.spaces
+    if (!allowed) throw forbidden('knowledge: current active project membership is required')
+    return { ...request, spaces: allowed.filter(space => spaceAllowed(space, request.spaces)) }
   }
 
   async remove(docId: string, realm: string): Promise<void> {
@@ -384,19 +490,7 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
       await client.query('BEGIN')
       const current = await this.lockSource(client, docId)
       this.assertOwner(current, docId, realm)
-      await client.query('DELETE FROM knowledge_library_files WHERE doc_id=$1 AND realm=$2', [docId, realm])
-      await client.query('DELETE FROM knowledge_chunks WHERE doc_id = $1 AND realm = $2', [docId, realm])
-      await client.query('DELETE FROM knowledge_sources WHERE doc_id = $1 AND realm = $2', [docId, realm])
-      await client.query(
-        `INSERT INTO knowledge_tombstones (doc_id, realm) VALUES ($1,$2)
-         ON CONFLICT (doc_id) DO UPDATE SET removed_at = now()`,
-        [docId, realm],
-      )
-      await client.query(
-        `INSERT INTO knowledge_graph_outbox (doc_id, realm, op) VALUES ($1,$2,'remove')`,
-        [docId, realm],
-      )
-      await this.enqueueVector(client, docId, realm)
+      await this.removeSourceState(client, docId, realm)
       await client.query('COMMIT')
     } catch (e) {
       await client.query('ROLLBACK')
@@ -503,19 +597,7 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
       this.assertOwner(current, docId, realm)
       if (current === undefined) throw new KnowledgeSourceConflictError(`knowledge source ${docId} no longer exists`)
       if (current.source_version !== expectedSourceVersion) throw new KnowledgeSourceConflictError(`knowledge source ${docId} changed; reload before deleting`)
-      await client.query('DELETE FROM knowledge_library_files WHERE doc_id=$1 AND realm=$2', [docId, realm])
-      await client.query('DELETE FROM knowledge_chunks WHERE doc_id = $1 AND realm = $2', [docId, realm])
-      await client.query('DELETE FROM knowledge_sources WHERE doc_id = $1 AND realm = $2', [docId, realm])
-      await client.query(
-        `INSERT INTO knowledge_tombstones (doc_id, realm) VALUES ($1,$2)
-         ON CONFLICT (doc_id) DO UPDATE SET removed_at = now()`,
-        [docId, realm],
-      )
-      await client.query(
-        `INSERT INTO knowledge_graph_outbox (doc_id, realm, op) VALUES ($1,$2,'remove')`,
-        [docId, realm],
-      )
-      await this.enqueueVector(client, docId, realm)
+      await this.removeSourceState(client, docId, realm)
       await client.query('COMMIT')
     } catch (error) {
       await client.query('ROLLBACK')
@@ -526,16 +608,14 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
   }
 
   async listLibraryFolders(realm: string, userId: string, roles: string[], isAdmin: boolean): Promise<KnowledgeLibraryFolder[]> {
-    const rows = await this.pool.query<{ folder_id: string; realm: string; parent_id: string | null; name: string; owner_user_id: string; created_at: string }>(
-      `SELECT folder_id, realm, parent_id, name, owner_user_id, created_at::text
-       FROM knowledge_library_folders WHERE realm=$1 ORDER BY lower(name), folder_id`, [realm],
+    const rows = await this.pool.query<LibraryFolderRow>(
+      `${libraryFolderAccessCte}
+       SELECT folder_id, realm, parent_id, name, owner_user_id, created_at::text, revision,
+         folder_id IN (SELECT folder_id FROM allowed_folders WHERE required_access='editor') AS can_edit
+       FROM knowledge_library_folders WHERE realm=$1 AND folder_id IN (SELECT folder_id FROM allowed_folders WHERE required_access=$4)
+       ORDER BY lower(name), folder_id`, [realm, userId, roles, 'viewer', isAdmin],
     )
-    const visible: KnowledgeLibraryFolder[] = []
-    for (const row of rows.rows) {
-      if (!isAdmin && !await this.canAccessFolder(realm, row.folder_id, userId, roles, 'viewer')) continue
-      visible.push({ folderId: row.folder_id, realm: row.realm, parentId: row.parent_id, name: row.name, ownerUserId: row.owner_user_id, createdAt: row.created_at })
-    }
-    return visible
+    return rows.rows.map(libraryFolder)
   }
 
   async canAccessLibraryFolder(input: { realm: string; folderId: string; userId: string; roles: string[]; isAdmin: boolean; access?: KnowledgeLibraryAccess }): Promise<boolean> {
@@ -543,77 +623,230 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
   }
 
   async createLibraryFolder(input: { realm: string; parentId: string | null; name: string; ownerUserId: string; roles: string[]; isAdmin: boolean }): Promise<KnowledgeLibraryFolder> {
-    const name = input.name.trim()
-    if (name.length === 0 || Buffer.byteLength(name, 'utf8') > 240 || /[\\/\u0000-\u001f]/u.test(name) || name === '.' || name === '..') {
-      throw new TypeError('资料文件夹名称无效')
-    }
-    if (input.parentId !== null && !input.isAdmin
-      && !await this.canAccessFolder(input.realm, input.parentId, input.ownerUserId, input.roles, 'editor')) {
-      throw forbidden('没有在此资料文件夹中创建子目录的权限')
-    }
-    const folderId = `folder-${randomUUID()}`
-    const result = await this.pool.query<{ folder_id: string; realm: string; parent_id: string | null; name: string; owner_user_id: string; created_at: string }>(
-      `INSERT INTO knowledge_library_folders (folder_id, realm, parent_id, name, owner_user_id)
-       VALUES ($1,$2,$3,$4,$5) RETURNING folder_id, realm, parent_id, name, owner_user_id, created_at::text`,
-      [folderId, input.realm, input.parentId, name, input.ownerUserId],
-    )
-    const row = result.rows[0]!
-    return { folderId: row.folder_id, realm: row.realm, parentId: row.parent_id, name: row.name, ownerUserId: row.owner_user_id, createdAt: row.created_at }
+    const name = validLibraryName(input.name)
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await this.lockLibraryAcl(client, input.realm)
+      await this.assertLibraryDestination(client, input.realm, input.parentId, input.ownerUserId, input.roles, input.isAdmin)
+      const result = await client.query<LibraryFolderRow>(
+        `INSERT INTO knowledge_library_folders (folder_id, realm, parent_id, name, owner_user_id)
+         VALUES ($1,$2,$3,$4,$5) RETURNING folder_id, realm, parent_id, name, owner_user_id, created_at::text, revision`,
+        [`folder-${randomUUID()}`, input.realm, input.parentId, name, input.ownerUserId],
+      )
+      await client.query('COMMIT')
+      return { ...libraryFolder(result.rows[0]!), canEdit: true }
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
   }
 
-  async deleteLibraryFolder(input: { realm: string; folderId: string; actorUserId: string; roles: string[]; isAdmin: boolean }): Promise<void> {
-    if (!input.isAdmin && !await this.canAccessFolder(input.realm, input.folderId, input.actorUserId, input.roles, 'editor')) throw forbidden('没有删除该资料文件夹的权限')
-    const result = await this.pool.query(
-      `DELETE FROM knowledge_library_folders f WHERE f.realm=$1 AND f.folder_id=$2
-       AND NOT EXISTS (SELECT 1 FROM knowledge_library_folders c WHERE c.realm=f.realm AND c.parent_id=f.folder_id)
-       AND NOT EXISTS (SELECT 1 FROM knowledge_library_files d WHERE d.realm=f.realm AND d.folder_id=f.folder_id)`,
-      [input.realm, input.folderId],
-    )
-    if (result.rowCount === 0) throw new KnowledgeSourceConflictError('资料文件夹不存在或仍含有子目录/文件')
+  async updateLibraryFolder(input: { realm: string; folderId: string; actorUserId: string; roles: string[]; isAdmin: boolean; expectedRevision: number; name?: string; parentId?: string | null }): Promise<KnowledgeLibraryFolder> {
+    assertRevision(input.expectedRevision)
+    if (input.name === undefined && input.parentId === undefined) throw new TypeError('请提供目录名称或目标目录')
+    const name = input.name === undefined ? undefined : validLibraryName(input.name)
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await this.lockLibraryAcl(client, input.realm)
+      const current = (await client.query<LibraryFolderRow>(
+        'SELECT folder_id, realm, parent_id, name, owner_user_id, created_at::text, revision FROM knowledge_library_folders WHERE realm=$1 AND folder_id=$2 FOR UPDATE', [input.realm, input.folderId],
+      )).rows[0]
+      if (current === undefined) throw new KnowledgeSourceConflictError('资料目录已不存在，请刷新')
+      if (!input.isAdmin && !await this.canAccessFolder(input.realm, input.folderId, input.actorUserId, input.roles, 'editor', client)) throw forbidden('没有整理该资料目录的权限')
+      if (Number(current.revision) !== input.expectedRevision) throw new KnowledgeSourceConflictError('资料目录已变更，请刷新后重试')
+      const parentId = input.parentId === undefined ? current.parent_id : input.parentId
+      if (parentId !== current.parent_id) {
+        await this.assertLibraryDestination(client, input.realm, parentId, input.actorUserId, input.roles, input.isAdmin)
+        if (parentId !== null) {
+          const cycle = await client.query<{ cyclic: boolean }>(
+            `WITH RECURSIVE descendants(folder_id) AS (
+               SELECT folder_id FROM knowledge_library_folders WHERE realm=$1 AND folder_id=$2
+               UNION SELECT f.folder_id FROM knowledge_library_folders f JOIN descendants p ON f.parent_id=p.folder_id WHERE f.realm=$1
+             ) SELECT EXISTS (SELECT 1 FROM descendants WHERE folder_id=$3) AS cyclic`,
+            [input.realm, input.folderId, parentId],
+          )
+          if (cycle.rows[0]?.cyclic) throw new TypeError('不能将资料目录移动到自身或子目录')
+        }
+      }
+      const row = (await client.query<LibraryFolderRow>(
+        `UPDATE knowledge_library_folders SET name=$3, parent_id=$4, revision=revision+1 WHERE realm=$1 AND folder_id=$2
+         RETURNING folder_id, realm, parent_id, name, owner_user_id, created_at::text, revision`,
+        [input.realm, input.folderId, name ?? current.name, parentId],
+      )).rows[0]!
+      const canEdit = input.isAdmin || await this.canAccessFolder(input.realm, input.folderId, input.actorUserId, input.roles, 'editor', client)
+      await client.query('COMMIT')
+      return { ...libraryFolder(row), canEdit }
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
+  }
+
+  private async assertLibraryDestination(client: pg.PoolClient, realm: string, folderId: string | null, userId: string, roles: string[], isAdmin: boolean): Promise<void> {
+    if (folderId === null) return
+    const folder = await client.query('SELECT 1 FROM knowledge_library_folders WHERE realm=$1 AND folder_id=$2 FOR KEY SHARE', [realm, folderId])
+    if (folder.rowCount === 0) throw new KnowledgeSourceConflictError('目标资料目录不存在')
+    if (!isAdmin && !await this.canAccessFolder(realm, folderId, userId, roles, 'editor', client)) throw forbidden('没有在目标资料目录中整理文件的权限')
+  }
+
+  async deleteLibraryFolder(input: { realm: string; folderId: string; actorUserId: string; roles: string[]; isAdmin: boolean; expectedRevision?: number }): Promise<void> {
+    if (input.expectedRevision !== undefined) assertRevision(input.expectedRevision)
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await this.lockLibraryAcl(client, input.realm)
+      if (!input.isAdmin && !await this.canAccessFolder(input.realm, input.folderId, input.actorUserId, input.roles, 'editor', client)) throw forbidden('没有删除该资料文件夹的权限')
+      const current = (await client.query<{ revision: string | number }>('SELECT revision FROM knowledge_library_folders WHERE realm=$1 AND folder_id=$2 FOR UPDATE', [input.realm, input.folderId])).rows[0]
+      if (current === undefined || input.expectedRevision !== undefined && Number(current.revision) !== input.expectedRevision) throw new KnowledgeSourceConflictError('资料目录已变更或不存在，请刷新后重试')
+      const result = await client.query(
+        `DELETE FROM knowledge_library_folders f WHERE f.realm=$1 AND f.folder_id=$2
+         AND NOT EXISTS (SELECT 1 FROM knowledge_library_folders c WHERE c.realm=f.realm AND c.parent_id=f.folder_id)
+         AND NOT EXISTS (SELECT 1 FROM knowledge_library_files d WHERE d.realm=f.realm AND d.folder_id=f.folder_id)`,
+        [input.realm, input.folderId],
+      )
+      if (result.rowCount === 0) throw new KnowledgeSourceConflictError('资料文件夹不存在或仍含有子目录/文件')
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
   }
 
   async listLibraryFiles(realm: string, userId: string, roles: string[], isAdmin: boolean): Promise<KnowledgeLibraryFile[]> {
     const rows = await this.pool.query<LibraryFileRow>(
-      `SELECT doc_id, realm, folder_id, filename, mime_type, object_key, byte_size, sha256, owner_user_id,
-              extraction_state, ocr_state, created_at::text
-       FROM knowledge_library_files WHERE realm=$1 ORDER BY created_at DESC, doc_id`, [realm],
+      `${libraryFolderAccessCte}
+       SELECT doc_id, realm, folder_id, filename, mime_type, object_key, byte_size, sha256, owner_user_id,
+              extraction_state, ocr_state, created_at::text, revision, ${libraryFileAccessSql("'editor'")} AS can_edit
+       FROM knowledge_library_files d WHERE realm=$1 AND ${libraryFileAccessSql()}
+       ORDER BY created_at DESC, doc_id`, [realm, userId, roles, 'viewer', isAdmin],
     )
-    const visible: KnowledgeLibraryFile[] = []
-    for (const row of rows.rows) {
-      if (!isAdmin && !await this.canAccessLibraryFile({ docId: row.doc_id, realm, userId, roles, isAdmin, access: 'viewer' })) continue
-      visible.push(libraryFile(row))
-    }
-    return visible
+    return rows.rows.map(libraryFile)
   }
 
   async getLibraryFile(docId: string, realm: string): Promise<KnowledgeLibraryFile | undefined> {
     const result = await this.pool.query<LibraryFileRow>(
       `SELECT doc_id, realm, folder_id, filename, mime_type, object_key, byte_size, sha256, owner_user_id,
-              extraction_state, ocr_state, created_at::text
+              extraction_state, ocr_state, created_at::text, revision
        FROM knowledge_library_files WHERE doc_id=$1 AND realm=$2`, [docId, realm],
     )
     const row = result.rows[0]
     return row === undefined ? undefined : libraryFile(row)
   }
 
-  async createLibraryFile(file: KnowledgeLibraryFile): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO knowledge_library_files
-         (doc_id, realm, folder_id, filename, mime_type, object_key, byte_size, sha256, owner_user_id, extraction_state, ocr_state)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [file.docId, file.realm, file.folderId, file.filename, file.mimeType, file.objectKey, file.byteSize, file.sha256,
-        file.ownerUserId, file.extractionState, file.ocrState],
-    )
+  async createLibraryFile(file: KnowledgeLibraryFile, actorContext?: { roles: string[]; isAdmin: boolean }): Promise<void> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await this.lockLibraryAcl(client, file.realm)
+      if (actorContext !== undefined) await this.assertLibraryDestination(client, file.realm, file.folderId, file.ownerUserId, actorContext.roles, actorContext.isAdmin)
+      await client.query(
+        `INSERT INTO knowledge_library_files
+           (doc_id, realm, folder_id, filename, mime_type, object_key, byte_size, sha256, owner_user_id, extraction_state, ocr_state)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [file.docId, file.realm, file.folderId, file.filename, file.mimeType, file.objectKey, file.byteSize, file.sha256,
+          file.ownerUserId, file.extractionState, file.ocrState],
+      )
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
+  }
+
+  async updateLibraryFile(input: { realm: string; docId: string; actorUserId: string; roles: string[]; isAdmin: boolean; expectedRevision: number; filename?: string; folderId?: string | null }): Promise<KnowledgeLibraryFile> {
+    assertRevision(input.expectedRevision)
+    if (input.filename === undefined && input.folderId === undefined) throw new TypeError('请提供文件名称或目标目录')
+    const filename = input.filename === undefined ? undefined : validLibraryName(input.filename)
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await this.lockLibraryAcl(client, input.realm)
+      await this.lockSource(client, input.docId)
+      const current = (await client.query<LibraryFileRow>(
+        `SELECT doc_id, realm, folder_id, filename, mime_type, object_key, byte_size, sha256, owner_user_id,
+           extraction_state, ocr_state, created_at::text, revision FROM knowledge_library_files WHERE realm=$1 AND doc_id=$2 FOR UPDATE`,
+        [input.realm, input.docId],
+      )).rows[0]
+      if (current === undefined) throw new KnowledgeSourceConflictError('资料文件已不存在，请刷新')
+      if (!await this.fileAccess({ realm: input.realm, docId: input.docId, userId: input.actorUserId, roles: input.roles, isAdmin: input.isAdmin, access: 'editor' }, client)) throw forbidden('没有整理该资料文件的权限')
+      if (Number(current.revision) !== input.expectedRevision) throw new KnowledgeSourceConflictError('资料文件已变更，请刷新后重试')
+      if (filename !== undefined && extname(filename).toLowerCase() !== extname(current.filename).toLowerCase()) throw new TypeError('重命名必须保留原文件扩展名')
+      const folderId = input.folderId === undefined ? current.folder_id : input.folderId
+      if (folderId !== current.folder_id) await this.assertLibraryDestination(client, input.realm, folderId, input.actorUserId, input.roles, input.isAdmin)
+      const row = (await client.query<LibraryFileRow>(
+        `UPDATE knowledge_library_files SET filename=$3, folder_id=$4, revision=revision+1 WHERE realm=$1 AND doc_id=$2
+         RETURNING doc_id, realm, folder_id, filename, mime_type, object_key, byte_size, sha256, owner_user_id,
+           extraction_state, ocr_state, created_at::text, revision`,
+        [input.realm, input.docId, filename ?? current.filename, folderId],
+      )).rows[0]!
+      if (row.filename !== current.filename) {
+        // Rename does not change content, embedding or sourceVersion. Update authoritative display
+        // metadata and replayable projections under the same source lock, with no embedding call.
+        const source = (await client.query<StoredSource>(
+          `SELECT doc_id, realm, space, title, source_version, embedding_model, chunks
+           FROM knowledge_sources WHERE realm=$1 AND doc_id=$2`, [input.realm, input.docId],
+        )).rows[0]
+        if (source !== undefined) {
+          const chunks = readChunks(source.chunks).map(chunk => ({ ...chunk, metadata: { ...chunk.metadata, filename: row.filename, libraryFile: true } }))
+          await client.query('UPDATE knowledge_sources SET title=$3, chunks=$4, updated_at=now() WHERE realm=$1 AND doc_id=$2', [input.realm, input.docId, row.filename, JSON.stringify(chunks)])
+          await client.query('UPDATE knowledge_chunks SET title=$3 WHERE realm=$1 AND doc_id=$2', [input.realm, input.docId, row.filename])
+          await client.query("INSERT INTO knowledge_graph_outbox (doc_id, realm, op, payload) VALUES ($1,$2,'upsert',$3)", [input.docId, input.realm, JSON.stringify(collectProjection({ title: row.filename, space: source.space, sourceVersion: source.source_version }, chunks))])
+          await this.enqueueVector(client, input.docId, input.realm)
+        }
+      }
+      const canEdit = await this.fileAccess({ realm: input.realm, docId: input.docId, userId: input.actorUserId, roles: input.roles, isAdmin: input.isAdmin, access: 'editor' }, client)
+      await client.query('COMMIT')
+      return { ...libraryFile(row), canEdit }
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
   }
 
   async removeLibraryFile(docId: string, realm: string): Promise<void> {
     await this.pool.query('DELETE FROM knowledge_library_files WHERE doc_id=$1 AND realm=$2', [docId, realm])
   }
 
+  async deleteLibraryFile(input: { realm: string; docId: string; actorUserId: string; roles: string[]; isAdmin: boolean; expectedSha256: string; expectedRevision?: number }): Promise<void> {
+    if (!/^[a-f0-9]{64}$/u.test(input.expectedSha256)) throw new TypeError('必须提供读取文件时的有效 SHA-256')
+    if (input.expectedRevision !== undefined) assertRevision(input.expectedRevision)
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await this.lockLibraryAcl(client, input.realm)
+      const source = await this.lockSource(client, input.docId)
+      this.assertOwner(source, input.docId, input.realm)
+      const files = await client.query<{ sha256: string; revision: string | number }>(
+        'SELECT sha256, revision FROM knowledge_library_files WHERE realm=$1 AND doc_id=$2 FOR UPDATE',
+        [input.realm, input.docId],
+      )
+      const file = files.rows[0]
+      if (file === undefined) throw new KnowledgeSourceConflictError('资料文件已不存在，请刷新列表')
+      if (!await this.fileAccess({
+        docId: input.docId, realm: input.realm, userId: input.actorUserId, roles: input.roles,
+        isAdmin: input.isAdmin, access: 'editor',
+      }, client)) throw forbidden('没有删除该资料文件的权限')
+      if (file.sha256 !== input.expectedSha256) throw new KnowledgeSourceConflictError('资料文件内容已变更，请刷新后再删除')
+      if (input.expectedRevision !== undefined && Number(file.revision) !== input.expectedRevision) throw new KnowledgeSourceConflictError('资料文件名称或目录已变更，请刷新后再删除')
+      await this.removeSourceState(client, input.docId, input.realm)
+      // Content-addressed raw objects may have other references; retain them until a reference-aware GC.
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally { client.release() }
+  }
+
   async canAccessLibraryFile(input: { docId: string; realm: string; userId: string; roles: string[]; isAdmin: boolean; access?: KnowledgeLibraryAccess }): Promise<boolean> {
+    return this.fileAccess(input, this.pool)
+  }
+
+  private async fileAccess(input: { docId: string; realm: string; userId: string; roles: string[]; isAdmin: boolean; access?: KnowledgeLibraryAccess }, client: pg.Pool | pg.PoolClient): Promise<boolean> {
     if (input.isAdmin) return true
     const required = input.access ?? 'viewer'
-    const result = await this.pool.query<{ allowed: boolean }>(
+    const result = await client.query<{ allowed: boolean }>(
       `WITH RECURSIVE file_scope AS (
          SELECT f.folder_id, d.owner_user_id FROM knowledge_library_files d
          LEFT JOIN knowledge_library_folders f ON f.realm=d.realm AND f.folder_id=d.folder_id
@@ -646,24 +879,42 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
     return result.rows[0]?.allowed === true
   }
 
+  /** Caller holds the source lock; authoritative state and replayable cleanup intents commit together. */
+  private async removeSourceState(client: pg.PoolClient, docId: string, realm: string): Promise<void> {
+    // Persist the former resource kind: an old upload cannot bypass deletion by dropping
+    // metadata.libraryFile and retrying as a manually managed source with the same ID.
+    await client.query(
+      `INSERT INTO knowledge_tombstones (doc_id, realm, library_file)
+       SELECT $1, $2, EXISTS (SELECT 1 FROM knowledge_library_files WHERE doc_id=$1 AND realm=$2)
+         OR EXISTS (SELECT 1 FROM knowledge_sources WHERE doc_id=$1 AND realm=$2 AND chunks @> '[{"metadata":{"libraryFile":true}}]'::jsonb)
+       ON CONFLICT (doc_id) DO UPDATE SET removed_at=now(),
+         library_file=knowledge_tombstones.library_file OR EXCLUDED.library_file`, [docId, realm],
+    )
+    await client.query('DELETE FROM knowledge_library_files WHERE doc_id=$1 AND realm=$2', [docId, realm])
+    await client.query('DELETE FROM knowledge_chunks WHERE doc_id=$1 AND realm=$2', [docId, realm])
+    await client.query('DELETE FROM knowledge_sources WHERE doc_id=$1 AND realm=$2', [docId, realm])
+    await client.query("INSERT INTO knowledge_graph_outbox (doc_id, realm, op) VALUES ($1,$2,'remove')", [docId, realm])
+    await this.enqueueVector(client, docId, realm)
+  }
+
   async setLibraryGrants(input: { realm: string; resourceType: 'folder' | 'file'; resourceId: string; actorUserId: string; roles: string[]; isAdmin: boolean; grants: KnowledgeLibraryPrincipal[] }): Promise<void> {
-    const canEdit = input.isAdmin || (input.resourceType === 'folder'
-      ? await this.canAccessFolder(input.realm, input.resourceId, input.actorUserId, input.roles, 'editor')
-      : await this.canAccessLibraryFile({ docId: input.resourceId, realm: input.realm, userId: input.actorUserId, roles: input.roles, isAdmin: false, access: 'editor' }))
-    if (!canEdit) throw forbidden('只有资料所有者、编辑者或 Realm 管理员可以调整分享权限')
     if (input.grants.length > 200 || input.grants.some(grant => !/^[A-Za-z0-9._:-]{1,128}$/u.test(grant.id))) throw new TypeError('分享对象无效')
+    if (input.grants.some(grant => grant.type !== 'user' && grant.type !== 'role' || grant.access !== 'viewer' && grant.access !== 'editor')) throw new TypeError('分享权限无效')
     const table = input.resourceType === 'folder' ? 'knowledge_library_folder_grants' : 'knowledge_library_file_grants'
     const idColumn = input.resourceType === 'folder' ? 'folder_id' : 'doc_id'
-    const exists = input.resourceType === 'folder'
-      ? await this.pool.query('SELECT 1 FROM knowledge_library_folders WHERE realm=$1 AND folder_id=$2', [input.realm, input.resourceId])
-      : await this.pool.query('SELECT 1 FROM knowledge_library_files WHERE realm=$1 AND doc_id=$2', [input.realm, input.resourceId])
-    if (exists.rowCount === 0) throw new KnowledgeSourceConflictError('资料对象不存在')
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
+      await this.lockLibraryAcl(client, input.realm)
+      const resourceTable = input.resourceType === 'folder' ? 'knowledge_library_folders' : 'knowledge_library_files'
+      const exists = await client.query(`SELECT 1 FROM ${resourceTable} WHERE realm=$1 AND ${idColumn}=$2 FOR KEY SHARE`, [input.realm, input.resourceId])
+      if (exists.rowCount === 0) throw new KnowledgeSourceConflictError('资料对象不存在')
+      const canEdit = input.isAdmin || (input.resourceType === 'folder'
+        ? await this.canAccessFolder(input.realm, input.resourceId, input.actorUserId, input.roles, 'editor', client)
+        : await this.fileAccess({ docId: input.resourceId, realm: input.realm, userId: input.actorUserId, roles: input.roles, isAdmin: false, access: 'editor' }, client))
+      if (!canEdit) throw forbidden('只有资料所有者、编辑者或 Realm 管理员可以调整分享权限')
       await client.query(`DELETE FROM ${table} WHERE realm=$1 AND ${idColumn}=$2`, [input.realm, input.resourceId])
       for (const grant of input.grants) {
-        if (grant.type !== 'user' && grant.type !== 'role' || grant.access !== 'viewer' && grant.access !== 'editor') throw new TypeError('分享权限无效')
         await client.query(
           `INSERT INTO ${table} (realm, ${idColumn}, principal_type, principal_id, access, granted_by) VALUES ($1,$2,$3,$4,$5,$6)`,
           [input.realm, input.resourceId, grant.type, grant.id, grant.access, input.actorUserId],
@@ -685,8 +936,8 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
     return result.rows.map(row => ({ type: row.principal_type, id: row.principal_id, access: row.access }))
   }
 
-  private async canAccessFolder(realm: string, folderId: string, userId: string, roles: string[], access: KnowledgeLibraryAccess): Promise<boolean> {
-    const result = await this.pool.query<{ allowed: boolean }>(
+  private async canAccessFolder(realm: string, folderId: string, userId: string, roles: string[], access: KnowledgeLibraryAccess, client: pg.Pool | pg.PoolClient = this.pool): Promise<boolean> {
+    const result = await client.query<{ allowed: boolean }>(
       `WITH RECURSIVE ancestors AS (
          SELECT folder_id, parent_id, owner_user_id FROM knowledge_library_folders WHERE realm=$1 AND folder_id=$2
          UNION ALL

@@ -211,7 +211,11 @@ func (s *Server) runtimeBotAuthorization(w http.ResponseWriter, r *http.Request)
 			actor.roles[role] = true
 		}
 		decision, e := s.permissionDecision(r.Context(), actor, actionDelegate, domain.PermissionResource{Realm: realm, ProjectID: project, Kind: "bot-delegation"})
-		if e != nil || !decision.Allowed {
+		if e != nil {
+			s.respondStoreError(w, e)
+			return
+		}
+		if !decision.Allowed {
 			deny()
 			return
 		}

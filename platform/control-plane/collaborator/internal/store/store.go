@@ -109,8 +109,25 @@ CREATE TABLE IF NOT EXISTS collab_space_grants (
   realm       TEXT NOT NULL,
   subject     TEXT NOT NULL,
   permissions TEXT[] NOT NULL,
+  revision    BIGINT NOT NULL DEFAULT 1,
+  project_id  TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (realm, space, subject)
 );
+ALTER TABLE collab_space_grants ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
+ALTER TABLE collab_space_grants ADD COLUMN IF NOT EXISTS project_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE collab_space_grants ADD COLUMN IF NOT EXISTS space_incarnation UUID;
+CREATE TABLE IF NOT EXISTS collab_space_grant_audit (
+  realm TEXT NOT NULL,
+  space TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  revision BIGINT NOT NULL,
+  project_id TEXT NOT NULL,
+  actor_user_id TEXT NOT NULL,
+  permissions TEXT[] NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (realm, space, subject, revision)
+);
+ALTER TABLE collab_space_grant_audit ADD COLUMN IF NOT EXISTS space_incarnation UUID;
 
 -- 把主键修正到 (realm, space, subject)。旧 local-lite 的 DDL 用的是 (space, subject)，
 -- 两个 realm 会在同一个 space id 上互相覆盖 —— 这是租户隔离缺陷，不是格式问题。
@@ -553,14 +570,48 @@ func (s *Store) RecordDispatchFailure(ctx context.Context, id domain.DocumentID,
 // Permissions 查询主体在空间上的权限集合（空 = 无任何权限）。
 func (s *Store) Permissions(ctx context.Context, realm domain.RealmID, space domain.SpaceID, subject string) ([]domain.Permission, error) {
 	var perms []string
+	var projectID string
+	var incarnation *string
 	err := s.pg.QueryRow(ctx,
-		`SELECT permissions FROM collab_space_grants WHERE realm = $1 AND space = $2 AND subject = $3`,
-		string(realm), string(space), subject).Scan(&perms)
+		`SELECT permissions,project_id,space_incarnation::text FROM collab_space_grants WHERE realm = $1 AND space = $2 AND subject = $3`,
+		string(realm), string(space), subject).Scan(&perms, &projectID, &incarnation)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("collaborator: 读取空间权限失败: %w", err)
+	}
+	if projectID != "" {
+		if incarnation == nil {
+			return nil, nil
+		}
+		var allowed bool
+		err = s.pg.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM project_spaces ps
+		 JOIN projects p ON p.id=ps.project_id AND p.realm=ps.realm AND p.status='active'
+		 JOIN project_members pm ON pm.project_id=p.id AND pm.user_id=$4
+		 JOIN governance_users u ON u.realm=p.realm AND u.id=pm.user_id AND u.status='active'
+		 WHERE ps.realm=$1 AND ps.space_id=$2 AND ps.project_id=$3 AND ps.incarnation=$5::uuid)`, string(realm), string(space), projectID, subject, *incarnation).Scan(&allowed)
+		if err != nil {
+			return nil, fmt.Errorf("collaborator: 验证空间项目边界失败: %w", err)
+		}
+		if !allowed {
+			return nil, nil
+		}
+	} else {
+		// Only a deployment without Projects authority can prove this is an
+		// independent legacy Space. Claims cannot reconstruct bindings deleted
+		// before the upgrade, so their absence must never re-enable an old grant.
+		var hasSpaces, hasClaims bool
+		err = s.pg.QueryRow(ctx, `SELECT to_regclass('project_spaces') IS NOT NULL,to_regclass('project_space_claims') IS NOT NULL`).Scan(&hasSpaces, &hasClaims)
+		if err != nil {
+			return nil, fmt.Errorf("collaborator: 验证旧空间项目授权源失败: %w", err)
+		}
+		if hasSpaces != hasClaims {
+			return nil, errors.New("collaborator: Projects Space claim schema is incomplete")
+		}
+		if hasSpaces {
+			return nil, nil
+		}
 	}
 	out := make([]domain.Permission, 0, len(perms))
 	for _, p := range perms {
@@ -577,7 +628,7 @@ func (s *Store) Grant(ctx context.Context, space domain.SpaceID, realm domain.Re
 	}
 	_, err := s.pg.Exec(ctx,
 		`INSERT INTO collab_space_grants (space, realm, subject, permissions) VALUES ($1,$2,$3,$4)
-		 ON CONFLICT (realm, space, subject) DO UPDATE SET permissions = EXCLUDED.permissions`,
+		 ON CONFLICT (realm, space, subject) DO UPDATE SET permissions = EXCLUDED.permissions, revision=collab_space_grants.revision+1`,
 		string(space), string(realm), subject, raw)
 	if err != nil {
 		return fmt.Errorf("collaborator: 授权失败: %w", err)

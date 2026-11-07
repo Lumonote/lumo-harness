@@ -148,7 +148,7 @@ CREATE TABLE IF NOT EXISTS governance_auth_security_events (
 );
 ALTER TABLE governance_auth_security_events DROP CONSTRAINT IF EXISTS governance_auth_security_events_event_check;
 ALTER TABLE governance_auth_security_events ADD CONSTRAINT governance_auth_security_events_event_check
-  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected','user_created','user_updated','credentials_reset','role_assigned','role_revoked','role_updated','department_updated','node_updated','skill_access_updated','oidc_login','oidc_linked','oidc_unlinked'));
+  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected','user_created','user_updated','credentials_reset','role_assigned','role_revoked','role_updated','department_updated','node_updated','skill_access_updated','oidc_login','oidc_linked','oidc_unlinked','role_permissions_updated','role_parent_updated'));
 CREATE INDEX IF NOT EXISTS governance_auth_security_events_user_idx
   ON governance_auth_security_events (realm, user_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS governance_auth_totp (
@@ -501,6 +501,33 @@ type Store struct {
 	oidcRealm  string
 }
 
+const rolePolicyDDL = `
+ALTER TABLE governance_roles ADD COLUMN IF NOT EXISTS parent_role_id TEXT;
+ALTER TABLE governance_roles ADD COLUMN IF NOT EXISTS permission_revision BIGINT NOT NULL DEFAULT 1;
+DO $$ BEGIN
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='governance_roles_parent_fkey' AND conrelid='governance_roles'::regclass) THEN
+  ALTER TABLE governance_roles ADD CONSTRAINT governance_roles_parent_fkey FOREIGN KEY(realm,parent_role_id) REFERENCES governance_roles(realm,id);
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='governance_roles_parent_check' AND conrelid='governance_roles'::regclass) THEN
+  ALTER TABLE governance_roles ADD CONSTRAINT governance_roles_parent_check CHECK(parent_role_id IS NULL OR parent_role_id<>id);
+ END IF;
+ IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='governance_roles_permission_revision_check' AND conrelid='governance_roles'::regclass) THEN
+  ALTER TABLE governance_roles ADD CONSTRAINT governance_roles_permission_revision_check CHECK(permission_revision>0);
+ END IF;
+END $$;
+CREATE TABLE IF NOT EXISTS governance_role_permissions (
+ realm TEXT NOT NULL,role_id TEXT NOT NULL,
+ action TEXT NOT NULL CHECK(action IN ('task:delegate','task:execution:update')),
+ effect TEXT NOT NULL CHECK(effect IN ('allow','deny')),
+ PRIMARY KEY(realm,role_id,action),
+ FOREIGN KEY(realm,role_id) REFERENCES governance_roles(realm,id) ON DELETE CASCADE
+);
+ALTER TABLE governance_auth_security_events DROP CONSTRAINT IF EXISTS governance_auth_security_events_event_check;
+ALTER TABLE governance_auth_security_events ADD CONSTRAINT governance_auth_security_events_event_check
+  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected','user_created','user_updated','credentials_reset','role_assigned','role_revoked','role_updated','department_updated','node_updated','skill_access_updated','oidc_login','oidc_linked','oidc_unlinked','role_permissions_updated','role_parent_updated'));
+
+`
+
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 func (s *Store) Init(ctx context.Context) error {
@@ -535,6 +562,9 @@ func (s *Store) Init(ctx context.Context) error {
 	}
 	if _, err := tx.Exec(ctx, botAuthorizationDDL); err != nil {
 		return fmt.Errorf("initialize Bot authorization: %w", err)
+	}
+	if _, err := tx.Exec(ctx, rolePolicyDDL); err != nil {
+		return fmt.Errorf("initialize role policies: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit governance schema initialization: %w", err)
@@ -1089,9 +1119,9 @@ func (s *Store) CreateRole(ctx context.Context, role domain.Role) (domain.Role, 
 	if !validOrgStatus(role.Status) {
 		return domain.Role{}, fmt.Errorf("%w: invalid role status", ErrBadRequest)
 	}
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO governance_roles (realm,id,name,description,status) VALUES ($1,$2,$3,$4,$5)`,
-		role.Realm, role.ID, role.Name, role.Description, role.Status)
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO governance_roles (realm,id,name,description,status) VALUES ($1,$2,$3,$4,$5) RETURNING permission_revision`,
+		role.Realm, role.ID, role.Name, role.Description, role.Status).Scan(&role.PermissionRevision)
 	if isUniqueViolation(err) {
 		return domain.Role{}, ErrConflict
 	}
@@ -1102,7 +1132,7 @@ func (s *Store) CreateRole(ctx context.Context, role domain.Role) (domain.Role, 
 }
 
 func (s *Store) ListRoles(ctx context.Context, realm string) ([]domain.Role, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, realm, name, description, status FROM governance_roles WHERE realm=$1 ORDER BY name`, realm)
+	rows, err := s.pool.Query(ctx, `SELECT id, realm, name, description, status,COALESCE(parent_role_id,''),permission_revision FROM governance_roles WHERE realm=$1 ORDER BY name`, realm)
 	if err != nil {
 		return nil, err
 	}
@@ -1110,7 +1140,7 @@ func (s *Store) ListRoles(ctx context.Context, realm string) ([]domain.Role, err
 	out := []domain.Role{}
 	for rows.Next() {
 		var role domain.Role
-		if err := rows.Scan(&role.ID, &role.Realm, &role.Name, &role.Description, &role.Status); err != nil {
+		if err := rows.Scan(&role.ID, &role.Realm, &role.Name, &role.Description, &role.Status, &role.ParentRoleID, &role.PermissionRevision); err != nil {
 			return nil, err
 		}
 		out = append(out, role)
@@ -2524,7 +2554,23 @@ func (s *Store) roleIDs(ctx context.Context, realm, userID string) (map[string]b
 		}
 		out[roleID] = true
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	direct := make([]string, 0, len(out))
+	for id := range out {
+		direct = append(direct, id)
+	}
+	resolved, err := s.ResolveRoles(ctx, realm, direct)
+	if err != nil {
+		return nil, err
+	}
+	effective := map[string]bool{}
+	for _, id := range resolved.EffectiveRoles {
+		effective[id] = true
+	}
+	return effective, nil
 }
 
 func (s *Store) departmentAncestors(ctx context.Context, realm, primaryDeptID string) (map[string]bool, error) {

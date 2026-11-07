@@ -264,6 +264,16 @@
         "model": {
           "type": "string",
           "pattern": "\\S"
+        },
+        "knowledge": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["realm"],
+          "properties": {
+            "realm": { "type": "string", "pattern": "\\S" },
+            "defaultTopK": { "type": "integer", "minimum": 1, "maximum": 10 },
+            "spaces": { "type": "array", "maxItems": 100, "uniqueItems": true, "items": { "type": "string", "pattern": "\\S" } }
+          }
         }
       },
       "anyOf": [

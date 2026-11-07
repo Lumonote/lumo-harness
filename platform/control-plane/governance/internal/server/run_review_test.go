@@ -49,7 +49,7 @@ func TestRunReviewHTTPRequiresRuntimeCredentialAndStrictInput(t *testing.T) {
 func TestRunReviewHTTPBindsImmutableRuntimeEvidence(t *testing.T) {
 	st, pool := receiptHTTPStore(t)
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `CREATE TABLE project_members(project_id TEXT NOT NULL,user_id TEXT NOT NULL,role TEXT NOT NULL,PRIMARY KEY(project_id,user_id));
+	if _, err := pool.Exec(ctx, `CREATE TABLE projects(id TEXT PRIMARY KEY,realm TEXT NOT NULL,status TEXT NOT NULL); INSERT INTO projects VALUES('p1','r1','active'),('p2','r1','active'); CREATE TABLE project_members(project_id TEXT NOT NULL,user_id TEXT NOT NULL,role TEXT NOT NULL,PRIMARY KEY(project_id,user_id));
 	 INSERT INTO project_members VALUES('p1','u1','editor');
 	 INSERT INTO governance_agent_presets(realm,id,project_id,name,owner_user_id,status,provider,model_ref,connector_ids,knowledge_space_ids,revision,max_concurrency)
 	 VALUES('r1','producer-agent','p1','Producer','worker','active','provider','model-a','[]','[]',1,2),('r1','review-agent','p1','Reviewer','worker','active','provider','model-b','[]','[]',1,2);

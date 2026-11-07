@@ -1,0 +1,74 @@
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render, screen } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ProjectSpacesPanel, ProjectAutomationsPanel, ProjectArtifactsPanel } from '../src/client/project-resources-panel.tsx'
+
+afterEach(cleanup)
+function shared() { return { request: vi.fn().mockResolvedValue({}), projectID: 'p/1', editable: true, refresh: vi.fn().mockResolvedValue(undefined) } }
+const space = { spaceId: 'space/1', name: 'Before' }
+const automation = { automationId: 'auto/1', triggerKind: 'event', triggerSpec: 'task.done', flowRef: 'flow', enabled: false, revision: 3 }
+const artifact = { kind: 'skill', name: 'review', version: '1' }
+
+describe('project resource lifecycle panels', () => {
+ it('renames a space using the name read and confirms detachment without deleting knowledge', async () => {
+  const p = shared(); render(<ProjectSpacesPanel {...p} spaces={[space]} />)
+  fireEvent.click(screen.getByRole('button', { name: '重命名空间 Before' }))
+  fireEvent.change(screen.getByRole('textbox', { name: '项目空间名称' }), { target: { value: 'After' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存空间名称' }))
+  await screen.findByText('空间名称已保存。')
+  expect(p.request).toHaveBeenLastCalledWith('/lumo/api/projects/p%2F1/spaces/space%2F1', { method: 'PATCH', body: '{"name":"After","expectedName":"Before"}' })
+  fireEvent.click(screen.getByRole('button', { name: '移除空间 Before' }))
+  expect(p.request).toHaveBeenCalledOnce()
+  expect(screen.getByText('移除仅解除项目挂载，知识来源和原始资料会保留。')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '确认移除空间' }))
+  await screen.findByText('空间已从项目移除，知识资料保留。')
+  expect(p.request).toHaveBeenLastCalledWith('/lumo/api/projects/p%2F1/spaces/space%2F1', { method: 'DELETE', body: '{"expectedName":"Before"}' })
+ })
+ it('creates automation with POST then edits with the captured revision', async () => {
+  const p = shared(); render(<ProjectAutomationsPanel {...p} automations={[automation]} />)
+  fireEvent.click(screen.getByRole('button', { name: '编辑自动化 auto/1' }))
+  fireEvent.change(screen.getByRole('textbox', { name: '自动化触发规则' }), { target: { value: 'task.updated' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存自动化修改' }))
+  await screen.findByText('自动化规则已保存。')
+  expect(p.request).toHaveBeenLastCalledWith('/lumo/api/projects/p%2F1/automations/auto%2F1', { method: 'PATCH', body: JSON.stringify({ expectedRevision: 3, triggerKind: 'event', triggerSpec: 'task.updated', flowRef: 'flow', enabled: false }) })
+  fireEvent.change(screen.getByRole('textbox', { name: '规则 ID' }), { target: { value: 'new' } })
+  fireEvent.change(screen.getByRole('textbox', { name: '自动化触发规则' }), { target: { value: 'created' } })
+  fireEvent.change(screen.getByRole('textbox', { name: '自动化流程引用' }), { target: { value: 'flow' } })
+  fireEvent.click(screen.getByRole('button', { name: '创建自动化' }))
+  await screen.findByText('自动化规则已保存。')
+  expect(p.request).toHaveBeenLastCalledWith('/lumo/api/projects/p%2F1/automations', { method: 'POST', body: JSON.stringify({ automationId: 'new', triggerKind: 'event', triggerSpec: 'created', flowRef: 'flow', enabled: true }) })
+ })
+ it('uses expectedVersion for mount/update/unmount and preserves the underlying artifact', async () => {
+  const p = shared(); render(<ProjectArtifactsPanel {...p} artifacts={[artifact]} />)
+  fireEvent.click(screen.getByRole('button', { name: '更新制品 review' }))
+  fireEvent.change(screen.getByRole('textbox', { name: '制品版本' }), { target: { value: '2' } })
+  fireEvent.click(screen.getByRole('button', { name: '更新制品引用' }))
+  await screen.findByText('制品引用已保存。')
+  expect(p.request).toHaveBeenLastCalledWith('/lumo/api/projects/p%2F1/artifacts/skill/review', { method: 'PUT', body: '{"version":"2","expectedVersion":"1"}' })
+  fireEvent.click(screen.getByRole('button', { name: '卸载制品 review' }))
+  expect(p.request).toHaveBeenCalledOnce()
+  fireEvent.click(screen.getByRole('button', { name: '确认卸载制品' }))
+  await screen.findByText('制品已从项目卸载，源制品保留。')
+  expect(p.request).toHaveBeenLastCalledWith('/lumo/api/projects/p%2F1/artifacts/skill/review', { method: 'DELETE', body: '{"expectedVersion":"1"}' })
+ })
+ it('preserves a stale automation edit and exposes a refresh instruction on conflict', async () => {
+  const p = { ...shared(), request: vi.fn().mockRejectedValue(Object.assign(new Error('changed'), { status: 409 })) }
+  const f = render(<ProjectAutomationsPanel {...p} automations={[automation]} />)
+  fireEvent.click(screen.getByRole('button', { name: '编辑自动化 auto/1' }))
+  fireEvent.change(screen.getByRole('textbox', { name: '自动化触发规则' }), { target: { value: 'my draft' } })
+  f.rerender(<ProjectAutomationsPanel {...p} automations={[{ ...automation, revision: 4 }]} />)
+  fireEvent.click(screen.getByRole('button', { name: '保存自动化修改' }))
+  expect((await screen.findByRole('alert')).textContent).toContain('请刷新数据后重新编辑')
+  expect(JSON.parse(p.request.mock.calls[0]![1].body).expectedRevision).toBe(3)
+  expect((screen.getByRole('textbox', { name: '自动化触发规则' }) as HTMLInputElement).value).toBe('my draft')
+ })
+ it('shows read-only lists for viewers or archived projects', () => {
+  const p = { ...shared(), editable: false }
+  render(<><ProjectSpacesPanel {...p} spaces={[space]} /><ProjectAutomationsPanel {...p} automations={[automation]} /><ProjectArtifactsPanel {...p} artifacts={[artifact]} /></>)
+  expect(screen.queryAllByRole('button')).toHaveLength(0)
+  expect(screen.queryAllByRole('textbox')).toHaveLength(0)
+  expect(screen.getByText('Before')).toBeTruthy()
+  expect(screen.getByText('auto/1')).toBeTruthy()
+  expect(screen.getByText('review')).toBeTruthy()
+ })
+})

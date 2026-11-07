@@ -53,11 +53,14 @@ func (s *Server) appendDecision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
 		return
 	}
-	decision, err := s.store.AppendDecision(r.Context(), domain.Decision{
+	decision, err := s.store.AppendActiveDecision(r.Context(), domain.Decision{
 		ID: id, Realm: c.realm, ProjectID: p.ID, Kind: req.Kind,
 		Summary: req.Summary, Body: req.Body, Supersedes: req.Supersedes, Evidence: req.Evidence,
 	})
 	if err != nil {
+		if s.projectWriteError(w, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, domain.ErrInvalidDecision):
 			// 闭集外的 kind / 空 summary / 自取代：契约漂移，400 并带上合法取值。

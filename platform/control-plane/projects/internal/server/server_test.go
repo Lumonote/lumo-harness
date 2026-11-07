@@ -58,6 +58,12 @@ func schemaDSN(t *testing.T, base, schema string) string {
 // setupTS 惯例缩写冲突避开：返回（测试服、池清理）。
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	ts, _ := newTestServerWithPool(t)
+	return ts
+}
+
+func newTestServerWithPool(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
+	t.Helper()
 	schema := fmt.Sprintf("proj_srv_%d", time.Now().UnixNano())
 	pool, err := pgxpool.New(context.Background(), schemaDSN(t, testDSN(t), schema))
 	if err != nil {
@@ -87,7 +93,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	server.New(st, nil).Register(mux)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	return ts
+	return ts, pool
 }
 
 func do(t *testing.T, method, target, body string, headers map[string]string) (*http.Response, string) {

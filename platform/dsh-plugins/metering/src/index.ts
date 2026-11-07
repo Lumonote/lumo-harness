@@ -71,6 +71,10 @@ export function apply(ctx: Context, config: MeteringConfig): void {
     clearCap: async (...args: Parameters<typeof meter.clearCap>) => { await ready; return meter.clearCap(...args) },
     spentCents: async (...args: Parameters<typeof meter.spentCents>) => { await ready; return meter.spentCents(...args) },
   })
+  ctx.provide('projectBudgets', {
+    readProjectBudget: async (...args: Parameters<typeof meter.readProjectBudget>) => { await ready; return meter.readProjectBudget(...args) },
+    configureProjectBudget: async (...args: Parameters<typeof meter.configureProjectBudget>) => { await ready; return meter.configureProjectBudget(...args) },
+  })
 
   const drainIntervalMs = Math.max(config.drainIntervalMs ?? 1000, 100)
   const drainBatchSize = config.drainBatchSize ?? 100

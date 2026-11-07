@@ -101,7 +101,7 @@ func (s *Server) listChildTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, ok := s.caller(w, r)
-	if !ok || !requireDelegationAuthority(w, c) {
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
 	}
 	if _, ok := s.taskViewer(w, r, c); !ok {
@@ -112,5 +112,16 @@ func (s *Server) listChildTasks(w http.ResponseWriter, r *http.Request) {
 		s.respondStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks})
+	visible := make([]domain.DelegatedTask, 0, len(tasks))
+	for _, task := range tasks {
+		decision, err := s.permissionDecision(r.Context(), c, actionDelegate, domain.PermissionResource{Kind: "task", ID: task.ID, ProjectID: task.ProjectID})
+		if err != nil {
+			s.respondStoreError(w, err)
+			return
+		}
+		if decision.Allowed {
+			visible = append(visible, task)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": visible})
 }

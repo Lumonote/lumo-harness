@@ -27,6 +27,7 @@ interface Slot {
   failures: number
   openedAt: number
   halfOpen: boolean
+  probeSerial: number
 }
 
 export class Balancer {
@@ -45,6 +46,7 @@ export class Balancer {
       failures: 0,
       openedAt: 0,
       halfOpen: false,
+      probeSerial: 0,
     }))
     this.threshold = Math.max(config.failureThreshold ?? 5, 1)
     this.openForMs = Math.max(config.openForMs ?? 10_000, 100)
@@ -56,13 +58,20 @@ export class Balancer {
    * 此时**不做「反正都坏了就随便挑一个」的兜底**：那会在故障期继续制造超时堆积。
    */
   next(): string | null {
+    return this.acquire()?.url ?? null
+  }
+
+  /** Reserve an endpoint. Cancellation releases only this call's probe; a
+   * stale canceled request cannot release a newer recovery attempt. */
+  acquire(): { url: string; release(): void } | null {
     const n = this.slots.length
     for (let i = 0; i < n; i++) {
       const slot = this.slots[(this.cursor + i) % n]!
       if (this.usable(slot)) {
-        if (slot.failures >= this.threshold) slot.halfOpen = true
+        const probe = slot.failures >= this.threshold ? ++slot.probeSerial : undefined
+        if (probe !== undefined) slot.halfOpen = true
         this.cursor = (this.cursor + i + 1) % n
-        return slot.url
+        return { url: slot.url, release: () => { if (probe !== undefined && slot.probeSerial === probe) slot.halfOpen = false } }
       }
     }
     return null
@@ -126,7 +135,7 @@ export class Balancer {
     const kept = new Map(this.slots.map((s) => [s.url, s]))
     this.slots.length = 0
     for (const url of normalized) {
-      this.slots.push(kept.get(url) ?? { url, failures: 0, openedAt: 0, halfOpen: false })
+      this.slots.push(kept.get(url) ?? { url, failures: 0, openedAt: 0, halfOpen: false, probeSerial: 0 })
     }
     this.cursor = 0
   }

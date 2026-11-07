@@ -45,7 +45,7 @@
 
 ## 动态文本会话与 Bot
 
-动态用户配置 `LUMO_USER_SESSION_EXECUTION`，登录进入 `/lumo/chat`。该模式阻断原生共享 owner 的 HTTP/WS 入口，当前支持文本创建、列表、历史、输入、观察和停止；未开放 fork、附件、知识或连接器工具。逐请求、逐 step 及运行中检查当前登录与项目权限，撤权会停止执行并关闭流；持久待执行消息未被确认时拒绝自动恢复，避免崩溃后重复计费。完整配置与接口见 [动态 Session owner](./dynamic-session-owner-2026-11-06.md)。
+动态用户配置 `LUMO_USER_SESSION_EXECUTION`，登录进入 `/lumo/chat`。该模式阻断原生共享 owner 的 HTTP/WS 入口，支持文本创建、列表、历史、输入、观察、停止和同 owner 的已完成历史分支；附件或连接器工具尚未开放。逐请求、逐 step 及运行中检查当前登录与项目权限，撤权会停止执行并关闭流；持久待执行消息未被确认时拒绝自动恢复，避免崩溃后重复计费。完整配置、知识查询档位与接口见 [动态 Session owner](./dynamic-session-owner-2026-11-06.md)。
 
 治理 `LUMO_BOT_TEAMS_URL` 指向团队 authority 所在节点的认证代理地址。`GET /lumo/runtime/teams/{id}` 只接受 service Bearer，读取当前持久团队事实；代理重建固定 realm/token，不依赖浏览器身份。无可信团队读面时授权拒绝。映射/grant 的安装与 v2 签名示例见 [Bot 接入](./bot-ingress.md) 和 [部署说明](../platform/deploy/bot/README.md)。旧 v1 事件仍可执行纯内部流程，不能继承作者身份启动团队委派；迁移也补标历史消息及 replay 链。
 

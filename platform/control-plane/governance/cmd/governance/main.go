@@ -216,21 +216,23 @@ func main() {
 	})
 
 	srv, err := server.New(st, server.Config{
-		DeploymentMode:    mode,
-		ClusterStatus:     *clusterStatus,
-		Health:            readinessSource,
-		SchedulerURL:      envOr("LUMO_SCHEDULER_URL", ""),
-		ClusterID:         envOr("LUMO_CLUSTER_ID", ""),
-		ControlPlaneToken: os.Getenv("LUMO_CONTROL_PLANE_TOKEN"),
-		BotTeamsURL:       os.Getenv("LUMO_BOT_TEAMS_URL"),
-		AuthMaxAttempts:   envInt("LUMO_AUTH_MAX_ATTEMPTS", 5),
-		AuthLockFor:       envSeconds("LUMO_AUTH_LOCK_SECONDS", 300),
-		AuthSessionTTL:    envSeconds("LUMO_AUTH_SESSION_TTL_SECONDS", 86400),
-		AuthCaptchaTTL:    envSeconds("LUMO_AUTH_CAPTCHA_TTL_SECONDS", 120),
-		AuthMFAKey:        os.Getenv("LUMO_AUTH_MFA_KEY"),
-		WebAuthn:          webauthnConfig,
-		OIDC:              oidcConfig,
-		DeviceGateway:     deviceGateway,
+		DeploymentMode:      mode,
+		ClusterStatus:       *clusterStatus,
+		Health:              readinessSource,
+		SchedulerURL:        envOr("LUMO_SCHEDULER_URL", ""),
+		ClusterID:           envOr("LUMO_CLUSTER_ID", ""),
+		ControlPlaneToken:   os.Getenv("LUMO_CONTROL_PLANE_TOKEN"),
+		BotTeamsURL:         os.Getenv("LUMO_BOT_TEAMS_URL"),
+		CollaboratorURL:     os.Getenv("LUMO_COLLABORATOR_URL"),
+		PermissionPolicyURL: os.Getenv("LUMO_GOVERNANCE_POLICY_URL"),
+		AuthMaxAttempts:     envInt("LUMO_AUTH_MAX_ATTEMPTS", 5),
+		AuthLockFor:         envSeconds("LUMO_AUTH_LOCK_SECONDS", 300),
+		AuthSessionTTL:      envSeconds("LUMO_AUTH_SESSION_TTL_SECONDS", 86400),
+		AuthCaptchaTTL:      envSeconds("LUMO_AUTH_CAPTCHA_TTL_SECONDS", 120),
+		AuthMFAKey:          os.Getenv("LUMO_AUTH_MFA_KEY"),
+		WebAuthn:            webauthnConfig,
+		OIDC:                oidcConfig,
+		DeviceGateway:       deviceGateway,
 	}, log)
 	if err != nil {
 		log.Error("initialize governance server", "err", err)

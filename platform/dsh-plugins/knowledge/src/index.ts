@@ -24,7 +24,7 @@ import { GraphProjector } from './graph-projector.ts'
 import { defineGraphRagTool } from './graph-rag.ts'
 import { MilvusKnowledgeProvider, NebulaGraphProvider } from './remote-provider.ts'
 import { TeiRerankClient } from './rerank.ts'
-import type { KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
+import { authenticatedKnowledgeRequest, type AuthenticatedKnowledgeQuery, type KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
 import type { GraphSeam } from '../../../shared/seam-contracts/graph.ts'
 
 export interface EmbeddingConfig {
@@ -124,6 +124,7 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     knowledge: KnowledgeSeam
     knowledgeGraph: GraphSeam
+    knowledgeAuthenticatedQuery: AuthenticatedKnowledgeQuery
   }
 }
 
@@ -170,6 +171,13 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   if (!remote) {
     ctx.provide('knowledge', provider)
     ctx.provide('knowledgeGraph', graph)
+    ctx.provide('knowledgeAuthenticatedQuery', { async query(principal, request, signal) {
+      signal.throwIfAborted()
+      if (principal.realm !== config.realm) throw new Error('knowledge: authenticated query must match the configured realm')
+      const hits = await provider.query(authenticatedKnowledgeRequest(principal, request))
+      signal.throwIfAborted()
+      return hits
+    } })
   }
 
   // 交叉编码器重排（§5.4.5）。未配置 → undefined → 两个 Consumer 完全不重排、不过量召回。

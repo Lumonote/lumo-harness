@@ -24,15 +24,15 @@ func (s *Store) UpdateRole(ctx context.Context, role domain.Role, actor string) 
 	if err != nil {
 		return domain.Role{}, err
 	}
-	tag, err := tx.Exec(ctx, `UPDATE governance_roles SET name=$3,description=$4,status=$5 WHERE realm=$1 AND id=$2`, role.Realm, role.ID, role.Name, role.Description, role.Status)
+	err = tx.QueryRow(ctx, `UPDATE governance_roles SET name=$3,description=$4,status=$5,permission_revision=permission_revision+1 WHERE realm=$1 AND id=$2 RETURNING COALESCE(parent_role_id,''),permission_revision`, role.Realm, role.ID, role.Name, role.Description, role.Status).Scan(&role.ParentRoleID, &role.PermissionRevision)
 	if isUniqueViolation(err) {
 		return domain.Role{}, ErrConflict
 	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Role{}, ErrNotFound
+	}
 	if err != nil {
 		return domain.Role{}, err
-	}
-	if tag.RowsAffected() == 0 {
-		return domain.Role{}, ErrNotFound
 	}
 	if err := s.preserveActiveAdmin(ctx, tx, role.Realm, before); err != nil {
 		return domain.Role{}, err

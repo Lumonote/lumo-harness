@@ -73,6 +73,13 @@ describe('authenticated Session Gateway transport', () => {
     await expect(h.transport.execute(alice, 'state', { sessionId: ref }, new AbortController().signal)).rejects.toThrow('predates')
     expect(h.invoke).not.toHaveBeenCalled()
   })
+  it('rejects attachment prompt and queue edit content before Gateway dispatch', async () => {
+    const h = harness()
+    const content = [{ type: 'image', attachmentId: 'r/content/private', mediaType: 'image/png' }]
+    await expect(h.transport.execute(alice, 'prompt', { sessionId: ref, content }, new AbortController().signal, async () => {})).rejects.toThrow('only text')
+    await expect(h.transport.execute(alice, 'updateQueue', { sessionId: ref, action: { kind: 'edit', content } }, new AbortController().signal)).rejects.toThrow('only text')
+    expect(h.invoke).not.toHaveBeenCalled()
+  })
   it('lists only the current project while retaining the authority pagination cursor', async () => {
     const h = harness()
     h.fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ owners: [owner, { ...owner, session_ref: `session-${'b'.repeat(32)}`, project_id: 'other' }], next_cursor: 'authority-cursor' })))

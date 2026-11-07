@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS knowledge_graph_outbox (
 -- 部分索引：只扫未投影的尾巴，已投影历史不拖慢轮询
 CREATE INDEX IF NOT EXISTS idx_knowledge_outbox_pending
   ON knowledge_graph_outbox (seq) WHERE projected_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_knowledge_outbox_doc_pending
+  ON knowledge_graph_outbox (realm, doc_id, seq) WHERE projected_at IS NULL;
 `
 
 /**
@@ -139,14 +141,19 @@ export class GraphProjector {
   async drain(): Promise<number> {
     if (this.running) return 0        // 单实例内不并发重入（定时器压车）
     this.running = true
-    const client = await this.pool.connect()
+    let client: pg.PoolClient | undefined
     try {
+      client = await this.pool.connect()
       await client.query('BEGIN')
       const pending = await client.query<{
         seq: string; doc_id: string; realm: string; op: string; payload: DocProjection
       }>(
-        `SELECT seq, doc_id, realm, op, payload FROM knowledge_graph_outbox
-         WHERE projected_at IS NULL
+        `SELECT seq, doc_id, realm, op, payload FROM knowledge_graph_outbox pending
+         WHERE projected_at IS NULL AND NOT EXISTS (
+           SELECT 1 FROM knowledge_graph_outbox earlier
+           WHERE earlier.realm=pending.realm AND earlier.doc_id=pending.doc_id
+             AND earlier.seq<pending.seq AND earlier.projected_at IS NULL
+         )
          ORDER BY seq
          LIMIT $1
          FOR UPDATE SKIP LOCKED`,
@@ -157,7 +164,8 @@ export class GraphProjector {
         return 0
       }
 
-      // 同 doc 的多条记录按 seq 顺序执行 —— remove 之后的 upsert 必须真的重新建节点
+      // Only the earliest pending operation for a document is eligible. SKIP LOCKED alone
+      // would let a second replica apply a later remove while an earlier upsert is still running.
       for (const row of pending.rows) {
         if (row.op === 'remove') {
           await this.graph.removeNode(row.doc_id, row.realm)
@@ -175,10 +183,10 @@ export class GraphProjector {
       await client.query('COMMIT')
       return pending.rows.length
     } catch (e) {
-      await client.query('ROLLBACK')
+      await client?.query('ROLLBACK')
       throw e
     } finally {
-      client.release()
+      client?.release()
       this.running = false
     }
   }
