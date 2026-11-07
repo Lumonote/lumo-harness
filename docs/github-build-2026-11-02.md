@@ -47,3 +47,11 @@ RocketMQ 门禁已在运行 `41405260712` 远端通过；下一项集群探针�
 修复提交 `9008360` 的远端运行 [42376294108](https://github.com/Lumonote/lumo-harness/actions/runs/42376294108) 已真实编出 `linux-x64/bin/glibc/system.node`，Typecheck 与完整 Unit tests 通过（1819 通过、313 跳过）。随后独立的数据库门禁首次走到知识库配额用例，暴露平台 job 的服务仍是普通 `postgres:16-alpine`，缺少 `vector.control`，两项知识库测试报 `0A000: extension "vector" is not available`；共享 DDL 的 34 项通过。平台 job 现与 Compose 和恢复演练统一采用 `pgvector/pgvector:pg16`，提供知识库实际依赖的 vector/HNSW，不删除或跳过这些测试。
 
 `a01182e` 的远端运行 [42376830186](https://github.com/Lumonote/lumo-harness/actions/runs/42376830186) 已通过上述数据库门禁，后续归档测试的 7 条失败来自写死的 macOS `/private/tmp` 路径。测试现使用 `node:os.tmpdir()`，并解析真实路径以保留归档拒绝符号链接的契约。真实 Linux Node 24 容器验证由 7 失败转为 12 项全通过，本机同样全通过。独立 PG16 + pgvector 验收中，配额/DDL 36 项、后续治理/恢复 61 项、含真实 PG 的归档 13 项和 Python 恢复演练 13 项均通过；最终 Ubuntu 结果仍由对应修复提交的 Actions 确认。
+
+## 2026-11-07：桌面插件的共享模块漏编译
+
+桌面 release 运行 [42375268299](https://github.com/Lumonote/lumo-harness/actions/runs/42375268299) 在 Vite 构建后、Rust 编译前失败：`@lumo/agent-teams/lib/index.js` 引用的 `../../../shared/session-owners.js` 不存在。原编译步骤只遍历插件 `src/`，而 `transpileModule` 不追踪依赖图；会话 owner 新增的跨目录值导入以及它继续引用的 `session-execution` 因此都没有生成。原缺件检查正确地阻止了不完整产物发包。
+
+现将同一编译步骤抽成 `desktop/packaged-typescript.mjs`，以转译后的 JavaScript AST 追踪相对运行导入与导出，递归编译依赖并重写路径。跨目录模块放入插件自身 `lib/__lumo_runtime__/`，保留插件的 ESM 与裸包依赖解析范围；原 `src → lib` 入口及资源相对路径保持稳定。类型导入由 TypeScript 擦除，不把类型引用的 pg 等依赖带入运行闭包。缺件检查继续执行。
+
+同一真实 TS/Node 回归修复前 4 失败、1 通过；补齐当前源码验收后 12 项通过，包括多层 shared、循环、多行 re-export、字面量动态导入、缺件拒绝、删除测试源码后加载产物，以及实际 `SessionOwnerClient → boundedJSON` 调用。六个实际插件共编译 25 个模块（23 个 src 模块、2 个 shared 模块），桌面相关 46 项通过；完整平台单测 1831 通过、0 失败、313 跳过。该验证覆盖此次失败的 emit 阶段，完整 macOS/Windows 安装包仍需对应 release 运行确认。

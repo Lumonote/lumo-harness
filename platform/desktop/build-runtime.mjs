@@ -27,6 +27,7 @@ import { acquireBuildLock } from './build-lock.mjs'
 import { findCrossTreeImports } from './dsh-node-self-contained.mjs'
 import { prepareSourcePlugins } from '../tools/prepare-source-plugins.mjs'
 import { copyRuntimePackage, planRuntimePackages, resolveInstalledPackage } from './runtime-dependencies.mjs'
+import { compilePackagedTypeScriptPlugin } from './packaged-typescript.mjs'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(desktopRoot, '..', '..')
@@ -855,83 +856,19 @@ function hasNonSystemDarwinDependency(output) {
   })
 }
 
-/** 递归列出 src/ 下的 .ts/.tsx 源文件（绝对路径）。 */
-function listTypeScriptSources(directory) {
-  const sources = []
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const entryPath = resolve(directory, entry.name)
-    if (entry.isDirectory()) sources.push(...listTypeScriptSources(entryPath))
-    else if (/\.tsx?$/.test(entry.name) && !entry.name.endsWith('.d.ts')) sources.push(entryPath)
-  }
-  return sources
-}
-
-/**
- * 构建期兜底：产物里每条相对说明符都必须指向已产出的文件。单文件转译不解析模块图，
- * 漏转一个兄弟模块只会在用户机器上以「启动即 ERR_MODULE_NOT_FOUND」的形式暴露。
- */
-function assertRelativeImportsEmitted(packageName, destination, emitted) {
-  for (const outputPath of emitted) {
-    const output = readFileSync(outputPath, 'utf8')
-    const specifiers = [
-      ...output.matchAll(/^(?:import|export)\b[^\n]*?["'](\.\.?\/[^"']+)["']/gm),
-      ...output.matchAll(/\bimport\s*\(\s*["'](\.\.?\/[^"']+)["']\s*\)/g),
-    ]
-    for (const [, specifier] of specifiers) {
-      const target = resolve(dirname(outputPath), specifier)
-      if (!emitted.has(target) && !existsSync(target)) {
-        throw new Error(`无法构建桌面 runtime：${packageName}/${relative(destination, outputPath)} 相对导入了 ${specifier}，但该文件未产出`)
-      }
-    }
-  }
-}
-
 function compilePackagedTypeScriptPlugins() {
   const requireFromDsh = createRequire(resolve(dshRoot, 'package.json'))
   const typescript = requireFromDsh('typescript')
-
   for (const packageName of packagedTypeScriptPlugins) {
     const packageInfo = packageSources.get(packageName)
     if (packageInfo === undefined) throw new Error(`无法构建桌面 runtime：${packageName} 未进入依赖闭包`)
-
-    const sourceRoot = resolve(packageInfo.root, 'src')
-    const destination = resolve(modulesRoot, ...packageName.split('/'))
-    // 转译整个 src/ 并保持目录形状，而不是只转入口 index.ts：transpileModule 是单文件
-    // 语义（不解析模块图），多文件插件（web-fetch-fakeip 的 src/index.ts 相对导入了同目录
-    // 的 ./resolver.ts）只转入口会把 `./resolver.ts` 原样留在产物里——Node 按导入方目录
-    // 解析成 lib/resolver.ts，而该文件从未产出，桌面 runtime 启动即 ERR_MODULE_NOT_FOUND。
-    // 相对说明符交给 rewriteRelativeImportExtensions 由 .ts 改写成 .js。
-    const emitted = new Set()
-    for (const sourcePath of listTypeScriptSources(sourceRoot)) {
-      const relativeSource = relative(sourceRoot, sourcePath)
-      const outputPath = resolve(destination, 'lib', relativeSource.replace(/\.tsx?$/, '.js'))
-      const result = typescript.transpileModule(readFileSync(sourcePath, 'utf8'), {
-        compilerOptions: {
-          module: typescript.ModuleKind.ESNext,
-          target: typescript.ScriptTarget.ES2022,
-          verbatimModuleSyntax: true,
-          rewriteRelativeImportExtensions: true,
-        },
-        fileName: sourcePath,
-      })
-
-      mkdirSync(dirname(outputPath), { recursive: true })
-      writeFileSync(outputPath, result.outputText)
-      emitted.add(outputPath)
-    }
-    assertRelativeImportsEmitted(packageName, destination, emitted)
-
-    const manifestPath = resolve(destination, 'package.json')
-    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-    manifest.main = './lib/index.js'
-    if (manifest.exports?.['.'] !== undefined && typeof manifest.exports['.'] === 'object') {
-      manifest.exports['.'] = {
-        ...manifest.exports['.'],
-        import: './lib/index.js',
-        default: './lib/index.js',
-      }
-    }
-    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+    compilePackagedTypeScriptPlugin({
+      typescript,
+      packageName,
+      packageRoot: packageInfo.root,
+      destination: resolve(modulesRoot, ...packageName.split('/')),
+      dependencyRoot: resolve(repoRoot, 'platform'),
+    })
   }
 }
 
