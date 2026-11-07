@@ -58,8 +58,10 @@ TLS 握手，使用 TCP 负载均衡或 TLS passthrough，且不注入 PROXY pro
 
 服务端可选动态文本会话入口通过 `LUMO_USER_SESSION_EXECUTION` JSON 显式开启，Compose
 将其传给 Web，Compact 继承相同 Web 定义。Helm 使用 `dshWeb.userSessionExecution` 对象；
-默认 `{}` 不启用。它要求单个稳定 Web 执行进程，Helm 会拒绝开启后的多副本配置。
-完整配置与当前能力范围见[动态用户会话合同](../../docs/dynamic-session-owner-2026-11-06.md)。
+默认 `{}` 不启用。默认单节点；多 Web 副本必须显式配置固定节点路由、独立稳定节点身份、
+StatefulSet 和持久工作目录。PG 节点/会话执行租约约束唯一有效执行代，失租后当前进程
+封闭，owner 与工作区保持原节点归属。配置见[动态路由合同](../../docs/dynamic-session-routing-2026-11-07.md)，
+批准模型列表与原生持久选择见[模型选择](../../docs/dynamic-session-model-selection-2026-11-07.md)。
 
 Thread 连续文本执行使用独立的 `LUMO_THREAD_EXECUTION` JSON；Compose 各 DSH 进程和
 Compact 子进程透传，Helm 分别使用 `dshNode.threadExecution` / `dshWeb.threadExecution`。

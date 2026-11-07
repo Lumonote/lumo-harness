@@ -1,5 +1,7 @@
 /** Service-authenticated owner registry. New IDs are allocated by the authority;
  * no runtime can claim an arbitrary existing session through this contract. */
+import { boundedJSON } from './session-execution.ts'
+
 export interface SessionOwner {
   session_ref: string
   realm: string
@@ -25,12 +27,11 @@ export class SessionOwnerClient {
       headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })
-    if (!response.ok) throw new Error(`Session owner authority refused: HTTP ${response.status}`)
-    const text = await response.text()
-    if (Buffer.byteLength(text) > 128 * 1024) throw new Error('Session owner authority response exceeds bound')
-    const value: unknown = JSON.parse(text)
-    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid owner response')
-    return value as Record<string, unknown>
+    if (!response.ok) {
+      await response.body?.cancel()
+      throw new Error(`Session owner authority refused: HTTP ${response.status}`)
+    }
+    return boundedJSON(response)
   }
   async reserve(input: Omit<SessionOwner, 'session_ref' | 'state' | 'created_at' | 'activated_at'>): Promise<SessionOwnerReservation> {
     const value = await this.call('', input)
@@ -56,6 +57,13 @@ export class SessionOwnerClient {
     const owners = value.owners.map(parseSessionOwner)
     for (const owner of owners) if (owner.realm !== realm || owner.owner_user_id !== userId || owner.node_id !== nodeId || owner.state !== 'active') throw new Error('Owner list scope mismatch')
     return { owners, next_cursor: value.next_cursor }
+  }
+  async listProject(realm: string,userId: string,projectId: string,after = ''): Promise<{ owners: SessionOwner[]; next_cursor: string }> {
+    const value=await this.call(`?${new URLSearchParams({realm,owner_user_id:userId,project_id:projectId,after,limit:'100'})}`)
+    if(!Array.isArray(value.owners)||value.owners.length>100||typeof value.next_cursor!=='string') throw new Error('Invalid owner project list')
+    const owners=value.owners.map(parseSessionOwner)
+    for(const owner of owners) if(owner.realm!==realm||owner.owner_user_id!==userId||owner.project_id!==projectId||owner.state!=='active') throw new Error('Owner project list scope mismatch')
+    return {owners,next_cursor:value.next_cursor}
   }
 }
 export function parseSessionOwner(value: unknown): SessionOwner {

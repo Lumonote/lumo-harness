@@ -3011,3 +3011,15 @@ body *::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-brand-primar
 .lumo-role-explanation { margin-top: 16px; font-size: var(--lumo-fs-xxs-12); overflow-wrap: anywhere; }
 .lumo-role-explanation summary { cursor: pointer; color: var(--lumo-ink); }
 @media (max-width: 700px) { .lumo-role-action-list > div { grid-template-columns: minmax(0, 1fr); gap: 6px; } }
+
+.lumo-recovery-grid { display: grid; grid-template-columns: minmax(240px, .8fr) minmax(0, 1.2fr); gap: 24px; margin-top: 20px; }
+.lumo-recovery-grid > div { min-width: 0; }
+.lumo-recovery-grid .lumo-compact-list { max-height: 420px; overflow-y: auto; }
+.lumo-recovery-grid .lumo-compact-list > button { flex-wrap: wrap; }
+.lumo-recovery-grid .lumo-compact-list > button[aria-pressed="true"] { background: var(--lumo-cyan-soft); }
+.lumo-recovery-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px 16px; padding: 18px; border: 1px solid var(--lumo-line); border-radius: 8px; }
+.lumo-recovery-facts dt { color: var(--lumo-faint); }
+.lumo-recovery-facts dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.lumo-recovery-confirm { padding: 16px; margin-block: 16px; border: 1px solid var(--lumo-line); border-radius: 8px; background: var(--lumo-bg); overflow-wrap: anywhere; }
+@media (max-width: 900px) { .lumo-recovery-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 500px) { .lumo-recovery-facts { grid-template-columns: minmax(0, 1fr); gap: 6px; } .lumo-recovery-facts dd { margin-bottom: 10px; } }

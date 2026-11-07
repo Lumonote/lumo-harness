@@ -192,6 +192,20 @@ spec:
             {{- if eq $name "governance" }}
             - name: LUMO_GOVERNANCE_POLICY_URL
               value: {{ $.Values.governance.permissionPolicyUrl | quote }}
+            {{- if $.Values.governance.recoveryProvider.enabled }}
+            - name: LUMO_RECOVERY_PROVIDER_ID
+              value: {{ required "governance.recoveryProvider.id is required when enabled" $.Values.governance.recoveryProvider.id | quote }}
+            - name: LUMO_RECOVERY_PROVIDER_URL
+              value: {{ required "governance.recoveryProvider.url is required when enabled" $.Values.governance.recoveryProvider.url | quote }}
+            - name: LUMO_RECOVERY_OPERATIONS
+              value: {{ join "," $.Values.governance.recoveryProvider.operations | quote }}
+            - name: LUMO_RECOVERY_TARGET_SCOPES
+              value: {{ $.Values.governance.recoveryProvider.scopes | toJson | quote }}
+            - name: LUMO_RECOVERY_PROVIDER_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ required "governance.recoveryProvider.credentialsSecret is required when enabled" $.Values.governance.recoveryProvider.credentialsSecret }}, key: {{ $.Values.governance.recoveryProvider.tokenKey }}, optional: false } }
+            - name: LUMO_RECOVERY_RECEIPT_KEY
+              valueFrom: { secretKeyRef: { name: {{ $.Values.governance.recoveryProvider.credentialsSecret }}, key: {{ $.Values.governance.recoveryProvider.receiptKeyKey }}, optional: false } }
+            {{- end }}
             - name: LUMO_COLLABORATOR_URL
               value: {{ default (printf "http://%s-collaborator:%v" (include "lumo-platform.name" $) $.Values.services.collaborator.port) $.Values.governance.collaboratorUrl | quote }}
             - name: LUMO_BOT_TEAMS_URL

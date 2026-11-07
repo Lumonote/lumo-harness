@@ -37,6 +37,16 @@ objectStore:
   registryBucket: lumo-registry
   # Existing Secret with accessKey and secretKey. No values contain credentials.
   credentialsSecret: ""
+  managedContent:
+    # Identical across replicas using this bucket; do not reuse for another store.
+    # Empty derives the identity from endpoint, port and bucket.
+    storageId: ""
+    # Physical deletion requires explicit opt-in. Legacy content/ is excluded.
+    deleteEnabled: false
+    retentionMs: 604800000
+    graceMs: 86400000
+    ioTimeoutMs: 30000
+    gcIntervalMs: 60000
 postgres:
   dsn: postgres://lumo:lumo@postgres:5432/lumo
 redis:
@@ -83,6 +93,18 @@ governance:
   # Optional exact OPA boolean decision URL. Empty uses PostgreSQL role facts
   # locally; OPA receives the same facts and can only further restrict.
   permissionPolicyUrl: ""
+  # This only enables the two-person workflow's trusted provider protocol.
+  # No provider or destructive operation is enabled by default.
+  recoveryProvider:
+    enabled: false
+    id: ""
+    url: ""
+    operations: []
+    # Each scope binds an explicit operation + exact realm + namespace and nonempty target prefix.
+    scopes: []
+    credentialsSecret: ""
+    tokenKey: token
+    receiptKeyKey: receipt-key
   # Trusted Space grant read source; defaults to this release's Collaborator.
   collaboratorUrl: ""
   # Existing Secret containing LUMO_AUTH_* environment entries, including
@@ -289,7 +311,11 @@ dshWeb:
   threadExecution: {}
   # Optional authenticated text Sessions. Configure authorityUrl, stable nodeId,
   # matching projectId, absolute workspaceRoot, provider and model explicitly.
-  # This node-local entry currently requires exactly one Web replica.
+  # Multiple replicas require StatefulSet + persistent spool/home and routing:
+  # {nodeIdFromEnvironment: true, transportSecurity: mesh-mtls,
+  #  routes: {lumo-platform-dsh-web-0: http://<pod-0>:3080, ...}}
+  # Each configured origin must identify exactly one stable node. Sessions
+  # remain bound to their original node and its disk; no automatic migration.
   # Optional knowledge: {realm: dev, defaultTopK: 5, spaces: [space-id]} enables
   # only current-user published queries in this project; omit for text-only.
   userSessionExecution: {}

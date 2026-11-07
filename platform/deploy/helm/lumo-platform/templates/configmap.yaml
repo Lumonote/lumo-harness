@@ -28,6 +28,16 @@ data:
   LUMO_MINIO_PORT: {{ .Values.objectStore.port | quote }}
   LUMO_MINIO_SSL: {{ .Values.objectStore.useSSL | quote }}
   LUMO_MINIO_BUCKET: {{ .Values.objectStore.bucket | quote }}
+  {{- with .Values.objectStore.managedContent }}
+  {{- if .storageId }}
+  LUMO_MANAGED_CONTENT_STORE_ID: {{ .storageId | quote }}
+  {{- end }}
+  LUMO_MANAGED_CONTENT_GC_ENABLED: {{ .deleteEnabled | quote }}
+  LUMO_MANAGED_CONTENT_RETENTION_MS: {{ .retentionMs | int64 | quote }}
+  LUMO_MANAGED_CONTENT_GRACE_MS: {{ .graceMs | int64 | quote }}
+  LUMO_MANAGED_CONTENT_IO_TIMEOUT_MS: {{ .ioTimeoutMs | int64 | quote }}
+  LUMO_MANAGED_CONTENT_GC_INTERVAL_MS: {{ .gcIntervalMs | int64 | quote }}
+  {{- end }}
   REGISTRY_S3_ENDPOINT: {{ printf "%s:%v" .Values.objectStore.endpoint .Values.objectStore.port | quote }}
   REGISTRY_S3_SSL: {{ .Values.objectStore.useSSL | quote }}
   REGISTRY_S3_BUCKET: {{ .Values.objectStore.registryBucket | quote }}

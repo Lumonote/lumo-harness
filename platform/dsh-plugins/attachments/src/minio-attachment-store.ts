@@ -10,6 +10,9 @@
  *     21：fail closed，不降级本地文件——那是第二条真相源）。
  */
 import { createHash } from 'node:crypto'
+import { mkdtemp,mkdir,writeFile,rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import {
   AttachmentError,
@@ -18,6 +21,11 @@ import {
 } from '@deepseek-ai/dsh-attachment'
 import type {
   ImageAttachmentLimits,
+  FileAttachmentRef,
+  SaveFileAttachment,
+  SaveFileStreamAttachment,
+  ImageRequestTarget,
+  RequestImageAttachment,
   ImageAttachmentRef,
   SaveImageAttachment,
   StoredImageAttachment,
@@ -25,11 +33,15 @@ import type {
 import {
   prepareImageFile,
   validateImageFile,
+  readImageFile,
+  readRequestImageFile,
 } from '@deepseek-ai/dsh-attachment-local'
 import type { NormalizationPolicy } from '@deepseek-ai/dsh-attachment-local'
 import type { Context } from '@deepseek-ai/cordis'
 
 import type { ObjectStoreSeam } from '../../../shared/seam-contracts/object-store.ts'
+import { validRealmKey } from '../../../shared/seam-contracts/object-store.ts'
+import { bounded,chunks,saveFile,readFile } from './file-transfer.ts'
 import {
   attachmentObjectKey,
   parseAttachmentKey,
@@ -54,6 +66,10 @@ export interface MinioAttachmentOptions {
   normalizedImageMaxPixels?: number
   /** 归一化后编码字节安全上限。默认 4 MiB。 */
   normalizedImageMaxBytes?: number
+  /** Server-side admission limits; no host path or executable is granted. */
+  maxFileBytes?: number
+  maxConcurrentTransfers?: number
+  transferTimeoutMs?: number
 }
 
 const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -64,6 +80,14 @@ const DEFAULT_MAX_IMAGE_DIMENSION = 8192
 const DEFAULT_NORMALIZED_MAX_PIXELS = 2048 * 2048
 const DEFAULT_NORMALIZED_MAX_DIMENSION = 2048
 const DEFAULT_NORMALIZED_MAX_BYTES = 4 * 1024 * 1024
+
+function positiveSetting(value: number | undefined, fallback: number, max = Number.MAX_SAFE_INTEGER): number {
+  const resolved = value ?? fallback
+  if (!Number.isSafeInteger(resolved) || resolved < 1 || resolved > max) {
+    throw new TypeError('Invalid attachment limit')
+  }
+  return resolved
+}
 
 function sha256Hex(data: Uint8Array): string {
   return createHash('sha256').update(data).digest('hex')
@@ -79,29 +103,74 @@ export class MinioAttachmentStore extends AttachmentStore {
 
   private readonly objectStore: ObjectStoreSeam
   private readonly normalizationPolicy: Readonly<NormalizationPolicy>
+  private readonly maxFileBytes:number
+  private readonly maxConcurrentTransfers:number
+  private readonly transferTimeoutMs:number
+  private activeTransfers=0
 
   constructor(ctx: Context, options: MinioAttachmentOptions) {
     super(ctx)
+    if(!validRealmKey(options.realm))throw new TypeError('Attachment Realm is invalid')
     this.realm = options.realm
     this.objectStore = ctx.objectStore as ObjectStoreSeam
     this.imageLimits = Object.freeze({
-      maxImageBytes: options.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES,
-      maxImagesPerMessage: options.maxImagesPerMessage ?? DEFAULT_MAX_IMAGES_PER_MESSAGE,
-      maxMessageImageBytes: options.maxMessageImageBytes ?? DEFAULT_MAX_MESSAGE_IMAGE_BYTES,
-      maxImagePixels: options.maxImagePixels ?? DEFAULT_MAX_IMAGE_PIXELS,
-      maxImageDimension: options.maxImageDimension ?? DEFAULT_MAX_IMAGE_DIMENSION,
+      maxImageBytes: positiveSetting(options.maxImageBytes, DEFAULT_MAX_IMAGE_BYTES),
+      maxImagesPerMessage: positiveSetting(options.maxImagesPerMessage, DEFAULT_MAX_IMAGES_PER_MESSAGE),
+      maxMessageImageBytes: positiveSetting(options.maxMessageImageBytes, DEFAULT_MAX_MESSAGE_IMAGE_BYTES),
+      maxImagePixels: positiveSetting(options.maxImagePixels, DEFAULT_MAX_IMAGE_PIXELS),
+      maxImageDimension: positiveSetting(options.maxImageDimension, DEFAULT_MAX_IMAGE_DIMENSION),
       mediaTypes: Object.freeze(['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const),
     })
     this.normalizationPolicy = Object.freeze({
-      maxPixels: options.normalizedImageMaxPixels ?? DEFAULT_NORMALIZED_MAX_PIXELS,
-      maxDimension: options.normalizedImageMaxDimension ?? DEFAULT_NORMALIZED_MAX_DIMENSION,
-      maxBytes: options.normalizedImageMaxBytes ?? DEFAULT_NORMALIZED_MAX_BYTES,
+      maxPixels: positiveSetting(options.normalizedImageMaxPixels, DEFAULT_NORMALIZED_MAX_PIXELS),
+      maxDimension: positiveSetting(options.normalizedImageMaxDimension, DEFAULT_NORMALIZED_MAX_DIMENSION),
+      maxBytes: positiveSetting(options.normalizedImageMaxBytes, DEFAULT_NORMALIZED_MAX_BYTES),
+    })
+    this.maxFileBytes=positiveSetting(options.maxFileBytes,50*1024*1024,1024*1024*1024)
+    this.maxConcurrentTransfers=positiveSetting(options.maxConcurrentTransfers,4,16)
+    this.transferTimeoutMs=positiveSetting(options.transferTimeoutMs,60000,300000)
+  }
+
+  private async transfer<T>(signal:AbortSignal|undefined,work:(active:AbortSignal)=>Promise<T>):Promise<T>{
+    if(this.activeTransfers>=this.maxConcurrentTransfers)throw new AttachmentError('Attachment transfer capacity reached.','ATTACHMENT_WRITE_FAILED')
+    this.activeTransfers++
+    const active=AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(this.transferTimeoutMs)])
+    try{return await work(active)}finally{this.activeTransfers--}
+  }
+
+  override saveFile(input:SaveFileAttachment):Promise<FileAttachmentRef>{
+    return this.saveFileStream({data:(async function*(){yield input.data})(),name:input.name})
+  }
+  override saveFileStream(input:SaveFileStreamAttachment):Promise<FileAttachmentRef>{
+    return this.transfer(input.signal,signal=>saveFile(this.objectStore,this.realm,input,this.maxFileBytes,signal))
+  }
+  override async *readFileStream(ref:FileAttachmentRef,signal?:AbortSignal):AsyncIterable<Uint8Array>{
+    if(this.activeTransfers>=this.maxConcurrentTransfers)throw new AttachmentError('Attachment transfer capacity reached.','ATTACHMENT_READ_FAILED')
+    this.activeTransfers++
+    const active=AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(this.transferTimeoutMs)])
+    try{yield*readFile(this.objectStore,this.realm,ref,this.maxFileBytes,active)}finally{this.activeTransfers--}
+  }
+
+  override readImageRequest(ref:ImageAttachmentRef,target:ImageRequestTarget,signal?:AbortSignal):Promise<RequestImageAttachment>{
+    return this.transfer(signal,async active=>{
+      // Upstream's public helper owns encoding, policy identity, alpha handling
+      // and byte budgets. Its cache is a disposable local derivative only.
+      const stored=await this.readVerifiedImage(ref,active)
+      const directory=await mkdtemp(join(tmpdir(),'lumo-image-variant-'))
+      // Await the bounded-pixel native codec itself before releasing capacity
+      // or deleting its transient directory; cancellation is checked by the
+      // public helper around the codec, never a race that leaks late writes.
+      try{return await readRequestImageFile(directory,stored,target,active)}finally{await rm(directory,{recursive:true,force:true})}
     })
   }
 
   /** 校验一张图而不触存储（batch 调方先全验再全存）。 */
   async validateImage(input: SaveImageAttachment): Promise<void> {
-    await validateImageFile(input, this.imageLimits, this.normalizationPolicy)
+    return this.transfer(undefined, async signal => {
+      signal.throwIfAborted()
+      await validateImageFile(input, this.imageLimits, this.normalizationPolicy)
+      signal.throwIfAborted()
+    })
   }
 
   /**
@@ -109,11 +178,17 @@ export class MinioAttachmentStore extends AttachmentStore {
    * 引用 = `<realm>/content/<sha256>`——自描述对象键，同内容同键幂等。
    */
   async saveImage(input: SaveImageAttachment): Promise<ImageAttachmentRef> {
-    const prepared = await prepareImageFile(input, this.imageLimits, this.normalizationPolicy)
-    const objectKey = attachmentObjectKey(this.realm, String(prepared.ref.attachmentId))
-    const { sha256 } = parseAttachmentKey(objectKey)
-    await this.objectStore.put(this.realm, `content/${sha256}`, Buffer.from(prepared.data), prepared.ref.mediaType)
-    return { ...prepared.ref, attachmentId: AttachmentId(objectKey) }
+    return this.transfer(undefined, async signal => {
+      signal.throwIfAborted()
+      // Native image work keeps its capacity slot until it actually settles.
+      const prepared = await prepareImageFile(input, this.imageLimits, this.normalizationPolicy)
+      signal.throwIfAborted()
+      const objectKey = attachmentObjectKey(this.realm, String(prepared.ref.attachmentId))
+      const { sha256 } = parseAttachmentKey(objectKey)
+      await bounded(this.objectStore.put(this.realm, `content/${sha256}`, Buffer.from(prepared.data), prepared.ref.mediaType), signal)
+      signal.throwIfAborted()
+      return { ...prepared.ref, attachmentId: AttachmentId(objectKey) }
+    })
   }
 
   /**
@@ -122,23 +197,42 @@ export class MinioAttachmentStore extends AttachmentStore {
    *   digest/长度不符 → ATTACHMENT_CORRUPT；后端不可达穿透 capabilityUnavailable。
    */
   async readImage(ref: ImageAttachmentRef, signal?: AbortSignal): Promise<StoredImageAttachment> {
-    signal?.throwIfAborted()
+    return this.transfer(signal,active=>this.readVerifiedImage(ref,active))
+  }
+  private async readVerifiedImage(ref:ImageAttachmentRef,signal:AbortSignal):Promise<StoredImageAttachment>{
+    signal.throwIfAborted()
     let parsed
     try {
       parsed = parseAttachmentKey(String(ref.attachmentId))
+      if(parsed.realm!==this.realm||!Number.isSafeInteger(ref.bytes)||ref.bytes<0||ref.bytes>this.normalizationPolicy.maxBytes
+        ||!Number.isSafeInteger(ref.width)||ref.width<1||!Number.isSafeInteger(ref.height)||ref.height<1
+        ||ref.width>this.imageLimits.maxImageDimension||ref.height>this.imageLimits.maxImageDimension
+        ||ref.width>this.normalizationPolicy.maxDimension||ref.height>this.normalizationPolicy.maxDimension
+        ||ref.width*ref.height>this.imageLimits.maxImagePixels||ref.width*ref.height>this.normalizationPolicy.maxPixels
+        ||!this.imageLimits.mediaTypes.includes(ref.mediaType))throw new Error('Invalid attachment metadata')
     } catch {
       throw new AttachmentError('Attachment reference is invalid.', 'INVALID_ATTACHMENT_REF')
     }
-    const stored = await this.objectStore.get(parsed.realm, `content/${parsed.sha256}`)
-    signal?.throwIfAborted()
+    if(!this.objectStore.getStream)throw new AttachmentError('The object provider cannot stream images.','ATTACHMENT_READ_FAILED')
+    const stored = await bounded(this.objectStore.getStream(this.realm, `content/${parsed.sha256}`,signal),signal)
     if (stored === undefined) {
       throw new AttachmentError('Attachment object is missing.', 'ATTACHMENT_NOT_FOUND')
     }
-    const data = stored.body
+    if(stored.bytes!==ref.bytes||stored.bytes>this.normalizationPolicy.maxBytes)throw new AttachmentError('Stored attachment failed integrity verification.','ATTACHMENT_CORRUPT')
+    const parts:Buffer[]=[];let bytes=0
+    for await(const part of chunks(stored.body,signal)){bytes+=part.byteLength;if(bytes>ref.bytes||bytes>this.normalizationPolicy.maxBytes)throw new AttachmentError('Stored attachment exceeds its reference size.','ATTACHMENT_CORRUPT');parts.push(Buffer.from(part))}
+    const data=Buffer.concat(parts)
     if (sha256Hex(data) !== parsed.sha256 || data.byteLength !== ref.bytes) {
       throw new AttachmentError('Stored attachment failed integrity verification.', 'ATTACHMENT_CORRUPT')
     }
-    signal?.throwIfAborted()
-    return { ref, data }
+    const directory=await mkdtemp(join(tmpdir(),'lumo-image-verify-'))
+    try{
+      const parent=join(directory,'objects',parsed.sha256.slice(0,2))
+      await mkdir(parent,{recursive:true,mode:0o700});await writeFile(join(parent,parsed.sha256),data,{mode:0o600,signal})
+      // This public upstream reader verifies actual format and dimensions as
+      // well as digest/length. Temporary files are never exposed as host paths.
+      const verified=await bounded(readImageFile(directory,{...ref,attachmentId:AttachmentId(`sha256:${parsed.sha256}`)},signal),signal)
+      return {ref,data:verified.data}
+    }finally{await rm(directory,{recursive:true,force:true})}
   }
 }

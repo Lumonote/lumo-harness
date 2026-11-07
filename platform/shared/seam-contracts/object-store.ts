@@ -12,10 +12,18 @@
  */
 
 import { createHash } from 'node:crypto'
+import type { ManagedContentSeam } from './managed-content.ts'
 
 /** 对象读取结果。缺对象由调用方以 undefined 处理（不是异常——命名对象缺失是正常态）。 */
 export interface StoredObject {
   body: Buffer
+  contentType?: string
+}
+export interface StoredObjectStream {
+  /** Lazy: no response handle is acquired until the first iteration. Breaking
+   * iteration or aborting the supplied signal must release an open handle. */
+  body: AsyncIterable<Uint8Array>
+  bytes: number
   contentType?: string
 }
 
@@ -26,12 +34,18 @@ export interface ObjectStat {
 
 /** 对象存储 seam（Provider 接口；契约纯函数见下方导出）。 */
 export interface ObjectStoreSeam {
+  /** Optional explicit namespace with durable PG reference accounting. */
+  readonly managedContent?: ManagedContentSeam
   /** 命名对象写入。key 是 realm 内相对键（键规则见 {@link joinRealmKey}）。 */
   put(realm: string, key: string, body: Buffer | string, contentType?: string): Promise<void>
   /** 内容寻址写入：键 = content/<sha256>，同内容幂等同键。返回完整对象键。 */
   putContent(realm: string, body: Buffer | string, contentType?: string): Promise<string>
   /** 读取。缺对象返回 undefined；后端不可达抛 capabilityUnavailable。 */
   get(realm: string, key: string): Promise<StoredObject | undefined>
+  /** Optional bounded-memory transfer. Providers must respect cancellation and
+   * exact byteSize, and must never expose managed namespace mutation here. */
+  putStream?(realm: string, key: string, body: AsyncIterable<Uint8Array>, byteSize: number, contentType?: string, signal?: AbortSignal): Promise<void>
+  getStream?(realm: string, key: string, signal?: AbortSignal): Promise<StoredObjectStream | undefined>
   /** 删除（幂等：缺对象不报错）。 */
   delete(realm: string, key: string): Promise<void>
   stat(realm: string, key: string): Promise<ObjectStat | undefined>

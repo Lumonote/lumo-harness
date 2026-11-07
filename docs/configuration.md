@@ -64,6 +64,13 @@ Compose 模型 overlay 和 Helm 的 `dshNode.harness` / `dshWeb.harness` 只负�
 原生文件及凭据送到 DSH。部署命令、持久化和更新步骤见
 [部署说明](../platform/deploy/README.md#原生模型配置的部署)。
 
+动态用户会话沿用同一套原生 provider/model 路由。`dshWeb.userSessionExecution`
+可选的 `modelChoices` 每项必须写 `id`、`label`、`provider`、`model` 和
+`billingModel`；后者是 `llm_providers` 中启用且有非负输入/输出费率的精确主键。
+模型选择器只提交 choice ID 和当前 Session 日志序号，切换写入原生
+`model/selection` 事件；浏览器不能提交 provider、URL、密钥、价格或账单 owner。
+撤销某条 route 后，恢复/分支会话会安全拒绝旧选择，需重新批准并创建新会话。
+
 ## 关键环境变量
 
 | 范围 | 变量 | 用途 |
@@ -96,6 +103,10 @@ Compose 模型 overlay 和 Helm 的 `dshNode.harness` / `dshWeb.harness` 只负�
 | 部署 | `LUMO_POSTGRES_USER`、`LUMO_POSTGRES_PASSWORD`、`LUMO_POSTGRES_DB`、`LUMO_PG_DSN` | Compose 数据库账号与连接串 |
 | 本地单机 | `LUMO_DEPLOYMENT_MODE=local`、`LUMO_SQLITE_PATH` | Rust 桌面 worker 的 SQLite 文件；local 模式不会读取或连接服务器中间件 |
 | 部署 | `LUMO_MINIO_ROOT_USER`、`LUMO_MINIO_ROOT_PASSWORD` | Compose 对象存储账号；Registry 使用同一组变量 |
+| 托管资料 | `LUMO_MANAGED_CONTENT_STORE_ID` | 同一 MinIO 桶的稳定存储身份，所有副本必须一致；不同存储不可共用。缺省按端点、端口和桶派生；Compose 显式默认 `lumo-compose-objects`，多个独立部署需覆盖。 |
+| 托管资料 | `LUMO_MANAGED_CONTENT_GC_ENABLED` | 默认 `false`，只有精确 `true` 才执行物理删除。仅回收新 `managed-content/v1/` 中由 PG 证明已释放的对象，旧 `content/` 不删除。 |
+| 托管资料 | `LUMO_MANAGED_CONTENT_RETENTION_MS`、`LUMO_MANAGED_CONTENT_GRACE_MS` | 新上传的最小保留期和最后一个引用释放后的宽限期；默认 7 天、1 天，均需满足才可回收，配置记录在上传对象上。 |
+| 托管资料 | `LUMO_MANAGED_CONTENT_IO_TIMEOUT_MS`、`LUMO_MANAGED_CONTENT_GC_INTERVAL_MS` | MinIO 写入/删除超时，默认 30 秒；每副本回收周期默认 60 秒。超时上传保持 pending 且不可复用；删除失败保持删除栅栏。详见 [托管内容生命周期](managed-content-lifecycle-2026-11-07.md)。 |
 | 部署 | `LUMO_VAULT_TOKEN`、`LUMO_CORS_ORIGIN`、`LUMO_PROMETHEUS_PORT` | 外部凭证、前端来源和观测入口 |
 | 调度 | `LUMO_INSTANCE`、`LUMO_NACOS_ADDR` | 实例身份、Nacos 目录。`LUMO_INSTANCE` 同时是心跳表的实例身份；未设置时回落为 `<hostname>-<pid>`（K8s 下 hostname 即 Pod 名），Compose 各服务显式设置 |
 | 调度（联邦注册表） | `LUMO_SCHEDULER_CLUSTER_ID`、`LUMO_CLUSTER_ENFORCE`、`LUMO_CLUSTER_SUSPECT_MS`、`LUMO_CLUSTER_DOWN_MS` | 本实例代表哪个集群自报存活、是否参与失联判定（三态：未设 = 由身份派生）、两段式阈值（默认 30s / 90s；`suspect < down` 是启动期硬约束，反了拒绝启动）。**没开判定就没有上报方的义务；开了则整个拓扑必须有承载节点自报**，否则闸门恒放行——`platform/deploy/cluster-registry-check.py` 专抓这个组合 |

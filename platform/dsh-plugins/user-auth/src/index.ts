@@ -5,6 +5,8 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 
 import { createSessionTransport, type SessionTransportConfig } from './session-transport.ts'
 import { validateSessionKnowledge } from './session-knowledge.ts'
+import { routeSessionTransport, trustedSessionRoutes } from './session-routing.ts'
+import { SessionModelPolicy } from './session-model-policy.ts'
 import { CarrierSession } from './carrier-session.ts'
 import { GovernanceAuthClient } from './client.ts'
 import { ConnectorOAuthClient } from './connector-oauth.ts'
@@ -32,6 +34,8 @@ export interface Config {
   projectId?: string
   identityAssertionSecret: string
   sessionTransport?: SessionTransportConfig
+  /** Must equal this process's session-log writer identity. Injected by the launcher. */
+  sessionWriterHolder?: string
   timeoutMs?: number
 }
 
@@ -49,6 +53,7 @@ export const Config: z<Config> = z.object({
   projectId: z.string(),
   identityAssertionSecret: z.string(),
   sessionTransport: z.any(),
+  sessionWriterHolder: z.string(),
   timeoutMs: z.number().default(5000),
 }) as z<Config>
 
@@ -80,7 +85,16 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   })
   if (config.sessionTransport && config.sessionTransport.projectId !== config.projectId) throw new Error('Dynamic Session project must match the authenticated deployment project')
   validateSessionKnowledge(config.sessionTransport?.knowledge, config.realm)
-  const sessionTransport = config.sessionTransport ? createSessionTransport(ctx, config.sessionTransport, config.controlPlaneToken, principal => client.authorizeSessionProject(principal, config.sessionTransport!.projectId)) : undefined
+  let sessionTransport
+  if(config.sessionTransport){
+    new SessionModelPolicy(config.sessionTransport)
+    if(!config.sessionWriterHolder?.trim())throw new Error('Dynamic Session execution requires its process session-log writer identity')
+    const routes=trustedSessionRoutes(config.sessionTransport)
+    const authorize=(principal: import('./client.ts').Principal)=>client.authorizeSessionProject(principal,config.sessionTransport!.projectId)
+    const local=createSessionTransport(ctx,config.sessionTransport,config.controlPlaneToken,authorize,undefined,{realm:config.realm,writerHolder:config.sessionWriterHolder,endpoint:routes.get(config.sessionTransport.nodeId)??''})
+    await local.runtime!.start()
+    sessionTransport=routeSessionTransport(local,config.sessionTransport,config.realm,config.controlPlaneToken,authorize)
+  }
   const server = createAuthProxy({
     ...(sessionTransport ? { sessionTransport } : {}),
     serverRuntimeToken: config.controlPlaneToken,

@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS session_owners (
  activated_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS session_owners_owner_idx ON session_owners (realm, owner_user_id, node_id, session_ref) WHERE state = 'active';
+CREATE INDEX IF NOT EXISTS session_owners_project_idx ON session_owners(realm,owner_user_id,project_id,session_ref) WHERE state='active';
 `
 
 var ErrOwnerConflict = errors.New("session owner creation conflict")
@@ -144,6 +145,28 @@ func (s *Store) SessionOwners(ctx context.Context, realm, user, node, after stri
 		o, err := scanOwner(rows)
 		if err != nil {
 			return nil, fmt.Errorf("read owner: %w", err)
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// Project listing is independent of the replica receiving the browser request.
+// It does not expose other users, other projects or reserved identities.
+func (s *Store) SessionOwnersForProject(ctx context.Context, realm, user, project, after string, limit int) ([]SessionOwner, error) {
+	if strings.TrimSpace(realm) == "" || strings.TrimSpace(user) == "" || strings.TrimSpace(project) == "" || limit < 1 || limit > 100 {
+		return nil, ErrOwnerInvalid
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+ownerColumns+` FROM session_owners WHERE realm=$1 AND owner_user_id=$2 AND project_id=$3 AND state='active' AND session_ref>$4 ORDER BY session_ref LIMIT $5`, realm, user, project, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SessionOwner{}
+	for rows.Next() {
+		o, err := scanOwner(rows)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, o)
 	}

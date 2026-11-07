@@ -21,7 +21,7 @@ import { createAuthProxy, listenAuthProxy, closeAuthProxy } from '../src/proxy.t
 import type { GovernanceAuthClient } from '../src/client.ts'
 const closers: Array<() => Promise<unknown>> = []
 afterEach(async () => { for (const close of closers.splice(0).reverse()) await close() })
-const modes = ['clean', 'next-turn', 'next-step', ...(process.env.LUMO_AUTH_PROXY_TEST === '1' ? ['http'] as const : [])] as const
+const modes = ['clean', 'fenced', 'models', 'next-turn', 'next-step', ...(process.env.LUMO_AUTH_PROXY_TEST === '1' ? ['http'] as const : [])] as const
 it.each(modes)('real Gateway + access + AgentLoop preserves history and refuses unaccounted pending input: %s', async pending => {
   const temp = await realpath(await mkdtemp(join(tmpdir(), 'owned-runtime-')))
   closers.push(() => rm(temp, { recursive: true, force: true }))
@@ -35,11 +35,12 @@ it.each(modes)('real Gateway + access + AgentLoop preserves history and refuses 
     await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
     await ctx.plugin(JsonlPersistence, { root: join(temp, 'sessions'), compression: 'none' })
     await ctx.plugin(AgentLoop, { agents: [] })
-    ctx.llm.registerAdapter(['mock'], new (class extends LlmAdapter { override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> { requests.push(options); if (pending === 'http') await responseBarrier; yield { type: 'text-delta', index: 0, text: `Answer ${requests.length}` }; yield { type: 'finish', reason: { kind: 'stop' } } } })())
+    ctx.llm.registerAdapter(['mock', 'alternate'], new (class extends LlmAdapter { override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> { requests.push(options); if (pending === 'http') await responseBarrier; yield { type: 'text-delta', index: 0, text: `Answer ${requests.length}` }; yield { type: 'finish', reason: { kind: 'stop' } } } })())
     await ctx.plugin(RemoteAccess)
     await ctx.plugin(Gateway)
     ctx.provide('connection', { createPeer: options => new Peer(ctx, options) } as never)
     const meters = new SessionMeterRegistry(); ctx.provide('meteringScope', meters)
+    ctx.provide('sessionModelBilling', { quote: async (route: unknown) => route })
     ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'mock', model: 'mock' }), saveSelection: async () => {} } as never)
     ctx.provide('attachments', { imageLimits: { maxImageBytes: 1000, maxImagesPerMessage: 1, maxMessageImageBytes: 1000, maxImagePixels: 1000, maxImageDimension: 1000, mediaTypes: [] }, admitPromptContent: async content => content } as never)
     ctx.provide('fileUploads', { registerAgentResolver: () => () => {}, resolve: () => undefined, bindPrompt: () => ({ commit() {}, [Symbol.dispose]() {} }), retirePrompt() {} } as never)
@@ -50,11 +51,17 @@ it.each(modes)('real Gateway + access + AgentLoop preserves history and refuses 
     const schema = z.object({ sessionId: z.string(), requestId: z.string(), content: z.array(z.object({ type: z.literal('text'), text: z.string() })), mode: z.literal('queue') })
     ctx.typert.register({ package: '@lumo/owned-runtime-test', face: 'host', schemas: [], model: { services: [], events: [], objects: [] }, invocations: [{ id: '@lumo/owned-runtime-test#session/prompt', service: 'sessionController', namespace: 'session', method: 'prompt', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', codec: { mode: 'strict', typeSymbol: '@lumo/owned#Prompt', create: () => schema } }], cancellation: { parameter: 'signal' }, result: { mode: 'strict', typeSymbol: '@lumo/owned#Result', create: () => z.object({ accepted: z.literal(true) }) } }] })
     const fetcher = async (url: string, init?: RequestInit) => {
+      if(url.includes('/v1/session-execution/')){
+        const input=JSON.parse(String(init?.body))
+        return new Response(JSON.stringify(url.includes('/nodes/')?{node:{...input,fence:1,expires_at:'2099-01-01'}}:{lease:{...input,session_ref:ref,node_fence:1,fencing_token:1,expires_at:'2099-01-01'}}))
+      }
       if (url.endsWith('/activate')) fact.state = 'active'
       const body = url.endsWith('/session-owners') ? { owner: fact, creation_token: 'c'.repeat(64) } : { owner: fact }
       return new Response(JSON.stringify(body))
     }
-    const transport = createSessionTransport(ctx, { authorityUrl: 'http://owner', nodeId: 'n', projectId: 'p', workspaceRoot: join(temp, 'workspaces'), provider: 'mock', model: 'mock' }, 'token', async () => {}, fetcher as typeof fetch)
+    const transport = createSessionTransport(ctx, { authorityUrl: 'http://owner', nodeId: 'n', projectId: 'p', workspaceRoot: join(temp, 'workspaces'), provider: 'mock', model: 'mock',
+      ...(pending === 'models' ? { modelChoices: [{ id: 'default', label: '默认', provider: 'mock', model: 'mock', billingModel: 'mock' }, { id: 'alternate', label: '备用', provider: 'alternate', model: 'alternate', billingModel: 'alternate' }] } : {}),
+    }, 'token', async () => {}, fetcher as typeof fetch,pending==='fenced'?{realm:'r',writerHolder:'writer',endpoint:''}:undefined)
     if (pending === 'http') {
       const proxy = createAuthProxy({ host: '127.0.0.1', port: 0, secureCookie: false, realm: 'r', projectId: 'p', identityAssertionSecret: 'a'.repeat(32), upstreamPort: 1,
         client: { session: async token => ({ ...alice, user_id: token }), authorizeSessionProject: async () => {} } as unknown as GovernanceAuthClient,
@@ -79,6 +86,12 @@ it.each(modes)('real Gateway + access + AgentLoop preserves history and refuses 
   const signal = new AbortController().signal
   const first = await runtime()
   await expect(first.transport.execute(alice, 'create', {}, signal, async () => {})).resolves.toEqual({ sessionId: ref })
+  if (pending === 'models') {
+    const view = await first.transport.execute(alice, 'models', { sessionId: ref }, signal, async () => {}) as { policy_digest: string; selection_revision: number }
+    await expect(first.transport.execute(alice, 'selectModel', { sessionId: ref, choice_id: 'alternate', expected_revision: view.selection_revision, policy_digest: view.policy_digest }, signal, async () => {})).resolves.toMatchObject({ selected_choice_id: 'alternate' })
+    expect(first.meters.resolve(ref)?.modelRoutes).toEqual([{ provider: 'mock', model: 'mock', billingModel: 'mock' }, { provider: 'alternate', model: 'alternate', billingModel: 'alternate' }])
+    await expect(first.transport.execute(alice, 'selectModel', { sessionId: ref, provider: 'evil', model: 'free' }, signal, async () => {})).rejects.toThrow()
+  }
   const request = { sessionId: ref, requestId: 'first', content: [{ type: 'text', text: 'first prompt' }], mode: 'queue' }
   await expect(first.transport.execute({ ...alice, user_id: 'bob' }, 'prompt', request, signal, async () => {})).rejects.toThrow()
   await expect(first.transport.execute(alice, 'prompt', request, signal, async () => {})).resolves.toEqual({ accepted: true })
@@ -104,6 +117,7 @@ it.each(modes)('real Gateway + access + AgentLoop preserves history and refuses 
   await second.transport.execute(alice, 'prompt', { ...request, requestId: 'second', content: [{ type: 'text', text: 'continue' }] }, signal, async () => {})
   await second.ctx.agents.get(SessionId(ref))!.whenIdle()
   expect(requests).toHaveLength(2)
+  if (pending === 'models') expect(requests.map(request => [request.provider, request.model])).toEqual([['alternate', 'alternate'], ['alternate', 'alternate']])
   expect(JSON.stringify(requests[1])).toContain('first prompt')
   expect(JSON.stringify(requests[1])).toContain('Answer 1')
   expect(requests[1]!.tools ?? []).toEqual([])

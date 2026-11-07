@@ -39,6 +39,7 @@ import { RunReviewPanel, type ReviewActor } from './run-review-panel.tsx'
 import { UserDirectoryPagination, userDirectoryURL } from './user-directory.tsx'
 import { DirectoryUserPicker } from './directory-user-picker.tsx'
 import { RolePermissionsPanel } from './role-permissions-panel.tsx'
+import { RecoveryWorkflowPanel } from './recovery-workflow-panel.tsx'
 import { KnowledgeLibraryEditor, type LibraryEditorResource } from './knowledge-library-editor.tsx'
 import type { ThreadFacts } from './thread-board.ts'
 
@@ -3111,7 +3112,7 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
 }
 
 function OperationsSurface({ onClose }: { onClose: () => void }) {
-  const [area, setArea] = useState<'projects' | 'delivery' | 'operations' | 'token-usage' | 'users' | 'departments' | 'roles' | 'permissions'>(() => pendingDelegationGoal ? 'delivery' : 'projects')
+  const [area, setArea] = useState<'projects' | 'delivery' | 'operations' | 'token-usage' | 'users' | 'departments' | 'roles' | 'permissions' | 'recovery'>(() => pendingDelegationGoal ? 'delivery' : 'projects')
   const [data, setData] = useState<Overview>(emptyOverview)
   const [organizationAllowed, setOrganizationAllowed] = useState(false)
   const [platformAdmin, setPlatformAdmin] = useState(false)
@@ -3372,6 +3373,7 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
         { id: 'users' as const, title: '用户管理', description: '用户资料、登录方式与角色分配' },
         { id: 'departments' as const, title: '部门管理', description: '部门目录、上下级关系与负责人' },
         { id: 'roles' as const, title: '角色管理', description: '角色目录、启停与授权维护' },
+        { id: 'recovery' as const, title: '恢复审批', description: '双人审批、恢复执行与回执核对' },
       ] : []),
       ...(data.deployment.clusterReady ? [{ id: 'permissions' as const, title: '权限', description: '查看当前身份的有效权限和判定原因' }] : []),
     ]} />
@@ -3398,6 +3400,7 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
     </> : null}
     {area === 'permissions' ? <Section title="权限诊断" meta="Realm ∩ Project ∩ Space · 未知边界默认拒绝"><p className="lumo-form-hint">这里展示当前登录身份的有效权限和判定依据；用户角色分配在“用户管理”中维护。</p><div className="lumo-compact-list">{governance?.permissions?.ok ? permissionDecisions.map(decision => <div key={decision.action}><span><b>{decision.action}</b><small>{decision.reason}</small></span><em>{decision.allowed ? `允许 · ${decision.matched_policies.join(' + ')}` : '拒绝'}</em></div>) : <Empty>{governance?.permissions?.error || '权限策略版本尚未部署；当前不会将其伪装为空权限。'}</Empty>}</div></Section> : null}
     {area === 'token-usage' && platformAdmin ? <TokenUsagePanel platformAdmin={platformAdmin} /> : null}
+    {area === 'recovery' && organizationAllowed && data.deployment.clusterReady ? <RecoveryWorkflowPanel request={api} /> : null}
     {area === 'delivery' ? <>
     <Section title="任务执行视图" meta="Task → 当前 Run 投影 · 非子 Agent 运行树"><OrchestrationTopology tasks={delegations} busy={busy} cancel={cancelTask} retry={retryTask} reassign={reassignTask} showRuns={showTaskRuns} /></Section>
     {runsTask ? <Section title={`执行详情 · ${runsTask.title}`} meta={`${taskRuns.length} 次不可变 Run · ${taskCollaboration?.summary.total ?? 0} 个子任务`} actions={<BusyButton className="lumo-secondary lumo-small" onClick={closeTaskRuns}>关闭</BusyButton>}>

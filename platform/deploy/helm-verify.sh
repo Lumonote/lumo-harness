@@ -64,6 +64,23 @@ rendered_secret_names() {
   ' "$1" | sort -u
 }
 
+# Match each environment edge to its actual workload. Counts alone would allow
+# an accidentally duplicated variable in one Pod to hide a missing consumer.
+workloads_with_env_value() {
+  local file="$1" variable="$2" expected="$3"
+  awk -v variable="$variable" -v expected="$expected" '
+    /^---/ { workload = 0; name = ""; pending = 0 }
+    /^kind: (Deployment|StatefulSet)[[:space:]]*$/ { workload = 1 }
+    workload && /^  name:/ && name == "" { name = $2; gsub(/"/, "", name) }
+    workload && $0 ~ "- name: " variable "$" { pending = 1; next }
+    pending {
+      value = $0; sub(/^[[:space:]]*value:[[:space:]]*/, "", value); gsub(/"/, "", value)
+      if (value == expected) print name
+      pending = 0
+    }
+  ' "$file" | sort
+}
+
 # Secret names a document references. Three shapes are in use, and all three
 # are covered on purpose — an earlier version of this check looked for one and
 # would have missed volume-mounted references entirely:
@@ -244,11 +261,12 @@ if render_ok "cluster profile" "$cluster_render" -f "$cluster_profile"; then
   fi
 
   expected_collaborator_url="http://lumo-platform-collaborator:8081"
-  collaborator_refs="$(grep -A1 '^ *- name: LUMO_COLLABORATOR_URL$' "$cluster_render" | grep -cF "$expected_collaborator_url" || true)"
-  if [[ "$collaborator_refs" == "2" ]]; then
-    pass "cluster profile points both dsh workloads at $expected_collaborator_url"
+  collaborator_consumers="$(workloads_with_env_value "$cluster_render" LUMO_COLLABORATOR_URL "$expected_collaborator_url")"
+  expected_collaborator_consumers="$(printf '%s\n' lumo-platform-dsh-node lumo-platform-dsh-web lumo-platform-governance | sort)"
+  if [[ "$collaborator_consumers" == "$expected_collaborator_consumers" ]]; then
+    pass "cluster profile points both dsh workloads and Governance Space authorization at $expected_collaborator_url"
   else
-    fail "cluster profile must wire both thread registries to collaborator (found $collaborator_refs)"
+    fail "cluster profile must wire both thread registries and Governance Space authorization to collaborator (found [$collaborator_consumers])"
   fi
 
   # --- A3: the knowledge projection must name a seam host that exists ------
@@ -263,11 +281,12 @@ if render_ok "cluster profile" "$cluster_render" -f "$cluster_profile"; then
   # Service does not publish the seam port, so a URL naming it is unreachable
   # from another pod.
   expected_knowledge_seam_url="http://lumo-platform-dsh-node:8090"
-  knowledge_seam_refs="$(grep -A1 '^ *- name: LUMO_KNOWLEDGE_SEAM_URL$' "$cluster_render" | grep -cF "$expected_knowledge_seam_url" || true)"
-  if [[ "$knowledge_seam_refs" == "1" ]]; then
-    pass "cluster profile points the knowledge projection at $expected_knowledge_seam_url"
+  knowledge_seam_consumers="$(workloads_with_env_value "$cluster_render" LUMO_KNOWLEDGE_SEAM_URL "$expected_knowledge_seam_url")"
+  expected_knowledge_consumers="$(printf '%s\n' lumo-platform-collaborator lumo-platform-flows | sort)"
+  if [[ "$knowledge_seam_consumers" == "$expected_knowledge_consumers" ]]; then
+    pass "cluster profile points Collaborator projection and Flow knowledge queries at $expected_knowledge_seam_url"
   else
-    fail "cluster profile has $knowledge_seam_refs workload(s) with LUMO_KNOWLEDGE_SEAM_URL=$expected_knowledge_seam_url, expected 1"
+    fail "cluster profile must wire Collaborator projection and Flow queries to the knowledge seam (found [$knowledge_seam_consumers])"
   fi
   # The URL is only half the claim; the other half is that the host and port it
   # names are actually published by a Service in this same render. A host that
@@ -615,6 +634,49 @@ PY
 else
   fail "counter-case: rendering with services.edge-gateway.type=LoadBalancer failed"
 fi
+
+# --- dynamic Session replica identity and routing ---------------------------
+cat >"$report_dir/dynamic-session.yaml" <<'YAML'
+dshWeb:
+  enabled: true
+  replicas: 2
+  workloadKind: StatefulSet
+  spool:
+    persistence: { enabled: true }
+  harness:
+    persistence: { enabled: true }
+  userSessionExecution:
+    authorityUrl: http://lumo-platform-session-control:8092
+    nodeId: from-environment
+    projectId: dev-project
+    workspaceRoot: /srv/sessions
+    provider: mock
+    model: mock
+    routing:
+      nodeIdFromEnvironment: true
+      transportSecurity: tls
+      routes:
+        lumo-platform-dsh-web-0: https://web-0.example:3080
+        lumo-platform-dsh-web-1: https://web-1.example:3080
+YAML
+render_ok "two dynamic Session replicas with durable node identities and trusted routes" \
+  "$report_dir/dynamic-session-render.yaml" -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml"
+render_rejected "dynamic Session replicas with unstable Deployment identities" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" --set dshWeb.workloadKind=Deployment
+render_rejected "dynamic Session replicas sharing a configured node identity" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" --set dshWeb.userSessionExecution.routing.nodeIdFromEnvironment=false
+render_rejected "dynamic Session replicas without persistent home" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" --set dshWeb.harness.persistence.enabled=false
+render_rejected "dynamic Session replicas without persistent spool" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" --set dshWeb.spool.persistence.enabled=false
+render_rejected "dynamic Session replicas with a missing ordinal route" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" --set dshWeb.userSessionExecution.routing.routes.lumo-platform-dsh-web-1=null
+render_rejected "dynamic Session replicas with duplicate origins" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" \
+  --set dshWeb.userSessionExecution.routing.routes.lumo-platform-dsh-web-1=https://web-0.example:3080
+render_rejected "dynamic Session mesh mTLS without a configured mesh" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" \
+  --set dshWeb.userSessionExecution.routing.transportSecurity=mesh-mtls --set serviceMesh.istio.enabled=false
 
 lint_ok "base profile"
 lint_ok "cluster profile" -f "$cluster_profile"

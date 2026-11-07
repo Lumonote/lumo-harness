@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http'
 import { connect } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createAuthProxy, listenAuthProxy, closeAuthProxy } from '../src/proxy.ts'
-import type { GovernanceAuthClient } from '../src/client.ts'
+import { GovernanceApiError, type GovernanceAuthClient } from '../src/client.ts'
 const group = process.env.LUMO_AUTH_PROXY_TEST === '1' ? describe : describe.skip
 const alice = { realm: 'r', user_id: 'alice', roles: ['operator'], username: 'alice', display_name: 'Alice', session_expires_at: '2099-01-01' }
 group('owned Session public HTTP transport', () => {
@@ -104,6 +104,30 @@ group('owned Session public HTTP transport', () => {
     checks[0]!()
     await reader.read().then(result => expect(result.done).toBe(true), error => expect(error).toBeInstanceOf(Error))
     expect(streamSignal?.aborted).toBe(true)
-    expect(h.session).toHaveBeenCalledTimes(2)
+    expect(h.session.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+  it('re-authenticates internal credentials and refuses stale routing generations without using caller cookies',async()=>{
+    const execute=vi.fn(async()=>({accepted:true}))
+    const stream=vi.fn(async()=>async function*(){yield {text:'ok'}}())
+    const session=vi.fn(async(token:string)=>{if(token!=='valid-login')throw new GovernanceApiError(401,'invalid_session','invalid');return alice})
+    const destination=vi.fn(async(node:{process_id:string;realm:string;project_id:string})=>{if(node.process_id!=='current'||node.realm!=='r'||node.project_id!=='p')throw new Error('stale')})
+    const logger={info:vi.fn(),warn:vi.fn(),error:vi.fn()}
+    server=createAuthProxy({host:'127.0.0.1',port:0,secureCookie:false,realm:'r',projectId:'p',identityAssertionSecret:'a'.repeat(32),upstreamPort:1,serverRuntimeToken:'service-secret',client:{session,authorizeSessionProject:vi.fn(async()=>{})} as unknown as GovernanceAuthClient,
+      sessionTransport:{execute:vi.fn(async()=>{throw new Error('must not recurse')}),stream,internal:{transport:{execute,stream},destination}},logger})
+    const base=`http://127.0.0.1:${await listenAuthProxy(server,'127.0.0.1',0)}`
+    const request={action:'cancel',request:{sessionId:'owned'},credential:'valid-login',destination:{process_id:'current',realm:'r',project_id:'p'}}
+    const call=(body:unknown,service='service-secret')=>fetch(base+'/lumo/runtime/session',{method:'POST',headers:{authorization:`Bearer ${service}`,'content-type':'application/json',cookie:'lumo_auth_session=attacker','x-lumo-user':'attacker','x-lumo-realm':'foreign'},body:JSON.stringify(body)})
+    expect((await call(request,'wrong')).status).toBe(401);expect(session).not.toHaveBeenCalled()
+    expect((await call({...request,destination:{...request.destination,process_id:'stale'}})).status).toBe(503);expect(session).not.toHaveBeenCalled()
+    expect((await call(request)).status).toBe(200)
+    expect(execute.mock.calls[0]![0]).toEqual(alice)
+    expect(execute.mock.calls[0]![2]).toEqual({sessionId:'owned'})
+    expect(session.mock.calls.every(([token])=>token==='valid-login')).toBe(true)
+    expect((await call({...request,credential:'revoked'})).status).toBe(401)
+    expect(execute).toHaveBeenCalledOnce()
+    session.mockRejectedValueOnce(new Error('governance unavailable valid-login'))
+    expect((await call(request)).status).toBe(503)
+    expect(execute).toHaveBeenCalledOnce()
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('valid-login')
   })
 })

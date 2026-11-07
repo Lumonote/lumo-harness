@@ -2,6 +2,66 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "governance": {
+      "type": "object",
+      "properties": {
+        "recoveryProvider": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "id": { "type": "string" },
+            "url": { "type": "string" },
+            "operations": { "type": "array", "uniqueItems": true, "items": { "enum": ["restore", "key_destroy"] } },
+            "scopes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["operation", "realm", "namespace", "prefix"],
+                "properties": {
+                  "operation": { "enum": ["restore", "key_destroy"] },
+                  "realm": { "type": "string", "minLength": 1, "maxLength": 256 },
+                  "namespace": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+                  "prefix": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$" }
+                }
+              }
+            },
+            "credentialsSecret": { "type": "string" },
+            "tokenKey": { "type": "string", "minLength": 1 },
+            "receiptKeyKey": { "type": "string", "minLength": 1 }
+          },
+          "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "then": {
+            "required": ["id", "url", "operations", "scopes", "credentialsSecret", "tokenKey", "receiptKeyKey"],
+            "properties": {
+              "id": { "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+              "url": { "pattern": "^https?://[^\\s?#@]+$" },
+              "operations": { "minItems": 1 },
+              "scopes": { "minItems": 1 },
+              "credentialsSecret": { "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "objectStore": {
+      "type": "object",
+      "properties": {
+        "managedContent": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "storageId": { "type": "string", "maxLength": 256 },
+            "deleteEnabled": { "type": "boolean" },
+            "retentionMs": { "type": "integer", "minimum": 0, "maximum": 315360000000 },
+            "graceMs": { "type": "integer", "minimum": 0, "maximum": 315360000000 },
+            "ioTimeoutMs": { "type": "integer", "minimum": 100, "maximum": 120000 },
+            "gcIntervalMs": { "type": "integer", "minimum": 1000, "maximum": 2147483647 }
+          }
+        }
+      }
+    },
     "replicaCount": {
       "type": "integer",
       "minimum": 1
@@ -264,6 +324,30 @@
         "model": {
           "type": "string",
           "pattern": "\\S"
+        },
+        "modelChoices": {
+          "type": "array", "minItems": 1, "maxItems": 32,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["id", "label", "provider", "model", "billingModel"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+              "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+              "provider": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "model": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "billingModel": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "reasoningEffort": { "type": "string", "minLength": 1, "maxLength": 64 }
+            }
+          }
+        },
+        "routing": {
+          "type": "object", "additionalProperties": false,
+          "required": ["routes", "transportSecurity"],
+          "properties": {
+            "nodeIdFromEnvironment": { "type": "boolean" },
+            "transportSecurity": { "enum": ["tls", "mesh-mtls", "development"] },
+            "routes": { "type": "object", "minProperties": 1, "maxProperties": 100, "additionalProperties": { "type": "string", "pattern": "^https?://[^/\\s?#@]+/?$" } }
+          }
         },
         "knowledge": {
           "type": "object",

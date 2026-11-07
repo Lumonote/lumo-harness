@@ -12,7 +12,10 @@ import type { RemoteAccessBinding } from '@deepseek-ai/dsh-api-remote-access/typ
 import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { SessionOwnerClient, type SessionOwner } from '../../../shared/session-owners.ts'
+import { SessionExecutionClient, SessionExecutionRuntime, type ExecutionNode } from '../../../shared/session-execution.ts'
 import type { SessionMeterScope } from '../../../shared/seam-contracts/meter-attribution.ts'
+import type { SessionModelBilling } from '../../../shared/seam-contracts/model-billing.ts'
+import { SessionModelPolicy, SessionTurnModelGuard, modelSelection, type SessionModelChoice } from './session-model-policy.ts'
 import type { Principal } from './client.ts'
 import { installSessionKnowledge, USER_SESSION_KNOWLEDGE_TOOL, validateSessionKnowledge, type SessionKnowledgeConfig } from './session-knowledge.ts'
 
@@ -28,12 +31,19 @@ export interface SessionTransportConfig {
   workspaceRoot: string
   provider: string
   model: string
+  /** Explicit server-approved route + pricing bindings. Omitted keeps the
+   * existing single-model profile and does not expose model mutation. */
+  modelChoices?: SessionModelChoice[]
   knowledge?: SessionKnowledgeConfig
+  routing?: { routes: Record<string, string>; transportSecurity: 'tls' | 'mesh-mtls' | 'development'; nodeIdFromEnvironment?: boolean }
 }
-export type SessionAuthority = () => Promise<Principal | void>
+export type SessionAuthority = (() => Promise<Principal | void>) & { credential?: string }
 export interface AuthenticatedSessionTransport {
   execute(principal: Principal, action: string, request: Record<string, unknown>, signal: AbortSignal, authority?: SessionAuthority): Promise<unknown>
-  stream(principal: Principal, action: string, request: Record<string, unknown>, signal: AbortSignal): Promise<AsyncIterable<unknown>>
+  stream(principal: Principal, action: string, request: Record<string, unknown>, signal: AbortSignal, authority?: SessionAuthority): Promise<AsyncIterable<unknown>>
+  /** Internal ingress is never permitted to recurse through a routing wrapper. */
+  internal?: { transport: AuthenticatedSessionTransport; destination(node: ExecutionNode): Promise<void> }
+  runtime?: SessionExecutionRuntime
 }
 export class PendingSessionInputError extends Error {
   readonly code = 'session_pending_input'
@@ -83,12 +93,15 @@ async function workspace(root: string, id: string): Promise<string> {
   }
   return path
 }
-export function createSessionTransport(ctx: Context, config: SessionTransportConfig, token: string, authorizeProject: (principal: Principal) => Promise<void>, fetcher?: typeof fetch): AuthenticatedSessionTransport {
+export function createSessionTransport(ctx: Context, config: SessionTransportConfig, token: string, authorizeProject: (principal: Principal) => Promise<void>, fetcher?: typeof fetch, execution?: { realm: string; writerHolder: string; endpoint: string }): AuthenticatedSessionTransport {
   if (![config.nodeId, config.projectId, config.provider, config.model].every(v => typeof v === 'string' && v.trim()) || !isAbsolute(config.workspaceRoot)) throw new Error('Dynamic Session transport requires a fixed node, project, workspace and model')
   const connection = ctx.get('connection') as unknown as Connection | undefined
   const gateway = ctx.get('typertGateway') as unknown as TypertGateway | undefined
   const access = ctx.get('remoteAccess') as unknown as Access | undefined
   const meters = ctx.get('meteringScope') as SessionMeterScope | undefined
+  const models = new SessionModelPolicy(config)
+  const billing = ctx.get('sessionModelBilling') as SessionModelBilling | undefined
+  if (models.dynamic && !billing) throw new Error('Dynamic model selection requires exact model billing admission')
   const persistence = ctx.get('sessionPersistence')
   validateSessionKnowledge(config.knowledge)
   const knowledge = config.knowledge === undefined ? undefined : ctx.get('knowledgeAuthenticatedQuery')
@@ -102,6 +115,13 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
   const authorities = new Map<string, SessionAuthority>()
   const polls = new Map<string, ReturnType<typeof setInterval>>()
   const handles = new Set<AgentHandle>()
+  const resuming = new Map<string, Promise<void>>()
+  const runtime = execution ? new SessionExecutionRuntime(new SessionExecutionClient(config.authorityUrl, token, fetcher), execution.realm, config.nodeId, config.projectId, execution.endpoint, execution.writerHolder, () => {
+    for (const agent of ctx.agents.list()) if (prepared.has(agent)) agent.cancel({ kind: 'parent' })
+    // Disposal closes public write handles. The PG replication backend also
+    // checks this generation atomically, including writes queued before expiry.
+    void Promise.allSettled([...handles].map(handle => handle.dispose()))
+  }) : undefined
   const releasePolicy = access.registerPolicy('lumo-user', { bindings: p => grants.get(p.requestId) ?? [] })
   const remember = (ref: string, owner: SessionOwner): void => {
     if (!known.has(ref) && known.size >= 512) throw new Error('Authenticated Session identity capacity reached')
@@ -128,14 +148,19 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
       await own(principal, owner.session_ref)
       return principal
     })
-    agent.model.select({ provider: config.provider, model: config.model })
-    agent.ctx.on('agent/pre-step', async (_payload, next) => {
+    // Preserve native durable choices on resume/fork; a removed choice never
+    // silently becomes another provider. Fixed deployments retain their route.
+    if (models.dynamic) models.require(agent.model.current())
+    else agent.model.select(modelSelection(models.fallback))
+    const turnModels = new SessionTurnModelGuard(models)
+    agent.ctx.on('agent/pre-step', async ({ turn, modelSelection: selection }, next) => {
       const authority = authorities.get(owner.session_ref)
       if (!authority) return { kind: 'reject' }
-      try { await authority(); return next() } catch { agent.cancel({ kind: 'parent' }); return { kind: 'reject' } }
+      try { turnModels.check(turn, selection); await runtime?.ensure(owner.session_ref); await authority(); return next() } catch { agent.cancel({ kind: 'parent' }); return { kind: 'reject' } }
     })
     const release = meters.bind(owner.session_ref, { context: { userId: owner.owner_user_id, projectId: owner.project_id,
-      agentId: 'lumo-user-session', componentId: 'user-auth', feature: 'session:text' }, traceId: `session:${owner.session_ref}` })
+      agentId: 'lumo-user-session', componentId: 'user-auth', feature: 'session:text' }, traceId: `session:${owner.session_ref}`,
+      ...(models.dynamic ? { modelRoutes: models.billingRoutes() } : {}) })
     agent.ctx.effect(() => release, 'lumo-user: meter attribution')
     prepared.add(agent)
   }
@@ -144,10 +169,11 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
     if (owner) prepare(agent, owner)
     return undefined
   })
-  ctx.effect(() => async () => { releasePolicy(); grants.clear(); known.clear(); pendingInputs.clear(); authorities.clear(); for (const timer of polls.values()) clearInterval(timer); polls.clear(); await Promise.allSettled([...handles].map(h => h.dispose())) }, 'lumo-user: Session transport')
+  ctx.effect(() => async () => { releasePolicy(); grants.clear(); known.clear(); pendingInputs.clear(); authorities.clear(); for (const timer of polls.values()) clearInterval(timer); polls.clear(); await Promise.allSettled([...handles].map(h => h.dispose())); await runtime?.dispose() }, 'lumo-user: Session transport')
   async function own(principal: Principal, ref: string): Promise<SessionOwner> {
     const owner = await owners.get(principal.realm, ref)
     if (owner.state !== 'active' || owner.owner_user_id !== principal.user_id || owner.project_id !== config.projectId || owner.node_id !== config.nodeId) throw new Error('Session ownership does not authorize this user, project and node')
+    await runtime?.ensure(ref)
     const live = ctx.agents.get(SessionId(ref))
     if (live && !prepared.has(live)) throw new Error('Session Agent predates its authenticated execution scope')
     remember(ref, owner)
@@ -168,6 +194,7 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
     await authority()
     const reserved = await owners.reserve({ realm: principal.realm, owner_user_id: principal.user_id, project_id: config.projectId, node_id: config.nodeId, parent_session_ref: parent })
     const owner = reserved.owner
+    await runtime?.ensure(owner.session_ref)
     const id = SessionId(owner.session_ref)
     if (ctx.sessions.get(id) || await persistence!.stat(id)) throw new Error('Reserved Session already exists; refusing legacy adoption')
     const cwd = await workspace(config.workspaceRoot, owner.session_ref)
@@ -188,9 +215,28 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
       throw error
     }
   }
+  async function activeAgent(ref: string, signal: AbortSignal): Promise<Agent> {
+    let agent = ctx.agents.get(SessionId(ref))
+    if (!agent) {
+      let pending = resuming.get(ref)
+      if (!pending) {
+        const owner = known.get(ref)!
+        pending = ctx.agents.resume({ resumeSessionId: SessionId(ref), signal: runtime ? AbortSignal.any([signal, runtime.signal]) : signal,
+          agentOptions: { provider: config.provider, model: config.model }, setup: (_scope, current) => prepare(current, owner) })
+          .then(handle => { handles.add(handle) }).finally(() => { resuming.delete(ref) })
+        resuming.set(ref, pending)
+      }
+      await pending; agent = ctx.agents.get(SessionId(ref))
+    }
+    if (!agent || !prepared.has(agent)) throw new Error('Authenticated Session Agent is unavailable')
+    return agent
+  }
   return {
+    ...(runtime ? { runtime } : {}),
     async execute(principal, action, request, signal, authority) {
+      if (execution && principal.realm !== execution.realm) throw new Error('Session Realm does not match this execution node')
       await authorizeProject(principal)
+      await runtime?.check()
       signal.throwIfAborted()
       if (action === 'create') {
         if (Object.keys(request).length) throw new Error('Session create does not accept a caller identity, path, model or parent')
@@ -213,9 +259,20 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
         const page = await owners.list(principal.realm, principal.user_id, config.nodeId, request.after as string | undefined)
         return { ...page, owners: page.owners.filter(owner => owner.project_id === config.projectId) }
       }
-      if (!unary.has(action)) throw new Error('Session action is not available in the authenticated text profile')
+      if (!unary.has(action) && action !== 'models' && action !== 'selectModel') throw new Error('Session action is not available in the authenticated text profile')
       const ref = target(request)
       await own(principal, ref)
+      if (action === 'models' || action === 'selectModel') {
+        if (!authority) throw new Error('Authenticated model selection requires current login authority')
+        await authority()
+        if (action === 'models' && Object.keys(request).some(key => key !== 'sessionId')) throw new Error('Model catalog accepts only its owned Session identity')
+        const agent = await activeAgent(ref, signal)
+        if (action === 'models') return models.view(agent)
+        return models.select(agent, request, {
+          authorize: async () => { signal.throwIfAborted(); await authority(); await authorizeProject(principal); await own(principal, ref) },
+          admit: route => billing!.quote(route), resolve: selection => ctx.llm.resolveCallConfig(selection, signal), flush: () => persistence!.flush(),
+        })
+      }
       if (action === 'prompt') textOnly(request.content)
       if (action === 'updateQueue') {
         const update = object(request.action)
@@ -225,6 +282,7 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
         if (!authority) throw new Error('Authenticated prompt requires a current login authority')
         await authority()
         authorities.set(ref, authority)
+        if (runtime) await activeAgent(ref, signal)
         if (!polls.has(ref)) {
           const timer = setInterval(() => {
             const agent = ctx.agents.get(SessionId(ref))
@@ -234,6 +292,7 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
           timer.unref(); polls.set(ref, timer)
         }
       }
+      signal = runtime ? AbortSignal.any([signal,runtime.signal]) : signal
       const call = await peerFor(principal, [ref], signal)
       try { return await gateway!.invoke({ namespace: 'session', method: action, args: { request }, peer: call.peer, signal }) }
       catch (error) {
@@ -244,15 +303,17 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
       }
       finally { await call.close() }
     },
-    async stream(principal, action, request, signal) {
+    async stream(principal, action, request, signal, authority) {
       await authorizeProject(principal)
       if (!streams.has(action)) throw new Error('Session stream is not available')
       const ref = target(request)
       await own(principal, ref)
+      if (authority) await authority()
+      signal = runtime ? AbortSignal.any([signal, runtime.signal]) : signal
       const call = await peerFor(principal, [ref], signal)
       try {
         const source = await gateway!.stream({ namespace: 'session', method: action, args: { request }, peer: call.peer, signal })
-        return (async function* () { try { for await (const item of source) { signal.throwIfAborted(); yield item } } finally { await call.close() } })()
+        return (async function* () { try { for await (const item of source) { signal.throwIfAborted(); await runtime?.ensure(ref); if (authority) await authority(); yield item } } finally { await call.close() } })()
       } catch (error) { await call.close(); throw error }
     },
   }

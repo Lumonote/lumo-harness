@@ -39,6 +39,9 @@ func ownerError(w http.ResponseWriter, err error) {
 	status := 500
 	code := "owner_store_unavailable"
 	switch {
+	case errors.Is(err, store.ErrExecutionFenced):
+		status = 409
+		code = "session_execution_fenced"
 	case errors.Is(err, store.ErrOwnerInvalid):
 		status = 400
 		code = "invalid_owner_request"
@@ -85,7 +88,20 @@ func (s *Server) handleSessionOwners(w http.ResponseWriter, r *http.Request) {
 				}
 				limit = n
 			}
-			rows, err := s.opts.Owners.SessionOwners(r.Context(), q.Get("realm"), q.Get("owner_user_id"), q.Get("node_id"), q.Get("after"), limit)
+			var rows []store.SessionOwner
+			var err error
+			if q.Get("project_id") != "" && q.Get("node_id") == "" {
+				projectStore, ok := s.opts.Owners.(interface {
+					SessionOwnersForProject(context.Context, string, string, string, string, int) ([]store.SessionOwner, error)
+				})
+				if !ok {
+					ownerJSON(w, 503, map[string]string{"error": "owner_store_unavailable"})
+					return
+				}
+				rows, err = projectStore.SessionOwnersForProject(r.Context(), q.Get("realm"), q.Get("owner_user_id"), q.Get("project_id"), q.Get("after"), limit)
+			} else {
+				rows, err = s.opts.Owners.SessionOwners(r.Context(), q.Get("realm"), q.Get("owner_user_id"), q.Get("node_id"), q.Get("after"), limit)
+			}
 			if err != nil {
 				ownerError(w, err)
 				return

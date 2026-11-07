@@ -7,6 +7,7 @@
  * 树扣减原子性：本实现以 PG 事务完成；分布式的 RocketMQ 事务消息在 P2 接入（铁律 5）。
  */
 import pg from 'pg'
+import type { ModelRateQuote, SessionModelBillingRoute } from '../../../shared/seam-contracts/model-billing.ts'
 import { configureProjectBudget, readProjectBudget, PROJECT_BUDGET_DDL } from './project-budget.ts'
 import type { ProjectBudgetChange, ProjectBudgetIdentity } from '../../../shared/seam-contracts/project-budget.ts'
 import ledgerSchema from '../../../shared/manifests/usage-ledger.schema.json' with { type: 'json' }
@@ -158,6 +159,19 @@ export class PgMeteringSeam implements MeteringSeam, ScopeCapSeam {
 
   constructor(connectionString: string) {
     this.pool = new pg.Pool({ connectionString })
+  }
+
+  /** Explicit dynamic routes fail closed. Read a fresh quote from the gateway's
+   * one pricing registry; legacy ratesFor fallback is never used here. */
+  async quoteModel(route: SessionModelBillingRoute): Promise<ModelRateQuote> {
+    if (![route.provider, route.model, route.billingModel].every(value => typeof value === 'string' && value.trim() === value && value.length > 0 && value.length <= 256)) throw new Error('metering: invalid approved model route')
+    const result = await this.pool.query<{ price_in_per_mtok: string; price_out_per_mtok: string }>(
+      `SELECT price_in_per_mtok,price_out_per_mtok FROM llm_providers WHERE model=$1 AND enabled=true`, [route.billingModel])
+    const row = result.rows[0]
+    if (!row || typeof row.price_in_per_mtok !== 'string' || typeof row.price_out_per_mtok !== 'string') throw new Error('metering: approved model rate is unavailable')
+    const inputPerMtok = Number(row.price_in_per_mtok), outputPerMtok = Number(row.price_out_per_mtok)
+    if (![inputPerMtok, outputPerMtok].every(value => Number.isFinite(value) && value >= 0)) throw new Error('metering: approved model rate is invalid')
+    return Object.freeze({ ...route, inputPerMtok, outputPerMtok })
   }
 
   /**

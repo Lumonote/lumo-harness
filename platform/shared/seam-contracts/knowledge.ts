@@ -198,6 +198,8 @@ export interface KnowledgeLibraryFile {
   canEdit?: boolean
 }
 export interface KnowledgeLibraryManager {
+  /** Pins/releases managed content in the same transaction as file metadata. */
+  readonly managedContentTransactions?: true
   listLibraryFolders(realm: string, userId: string, roles: string[], isAdmin: boolean): Promise<KnowledgeLibraryFolder[]>
   canAccessLibraryFolder(input: { realm: string; folderId: string; userId: string; roles: string[]; isAdmin: boolean; access?: KnowledgeLibraryAccess }): Promise<boolean>
   createLibraryFolder(input: { realm: string; parentId: string | null; name: string; ownerUserId: string; roles: string[]; isAdmin: boolean }): Promise<KnowledgeLibraryFolder>

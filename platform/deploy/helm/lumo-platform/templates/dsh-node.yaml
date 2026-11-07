@@ -391,7 +391,27 @@ spec:
 {{- end }}
 {{- if .Values.dshWeb.enabled }}
 {{- if and .Values.dshWeb.userSessionExecution (ne (int .Values.dshWeb.replicas) 1) }}
-{{- fail "dshWeb.userSessionExecution requires exactly one Web replica; node-local Sessions have no cross-replica execution routing" }}
+{{- $routing := .Values.dshWeb.userSessionExecution.routing | default dict }}
+{{- if or (not $routing.nodeIdFromEnvironment) (ne .Values.dshWeb.workloadKind "StatefulSet") (not .Values.dshWeb.spool.persistence.enabled) (not .Values.dshWeb.harness.persistence.enabled) }}
+{{- fail "multiple dynamic Session Web replicas require StatefulSet, unique environment node identities, persistent spool/home and explicit trusted routing" }}
+{{- end }}
+{{- $origins := dict }}
+{{- range $ordinal := until (int .Values.dshWeb.replicas) }}
+{{- $node := printf "%s-dsh-web-%d" (include "lumo-platform.name" $) $ordinal }}
+{{- $origin := index ($routing.routes | default dict) $node }}
+{{- if or (not $origin) (hasKey $origins $origin) }}
+{{- fail "dynamic Session routing must pin a distinct trusted origin for every StatefulSet node" }}
+{{- end }}
+{{- $_ := set $origins $origin true }}
+{{- end }}
+{{- end }}
+{{- with .Values.dshWeb.userSessionExecution.routing }}
+{{- if and (eq .transportSecurity "mesh-mtls") (not $.Values.serviceMesh.istio.enabled) }}
+{{- fail "dynamic Session mesh-mtls routing requires the configured service mesh" }}
+{{- end }}
+{{- if and $.Values.productionControls.enforced (eq .transportSecurity "development") }}
+{{- fail "production dynamic Session routes require TLS or mesh mTLS" }}
+{{- end }}
 {{- end }}
 {{- with .Values.dshWeb.userSessionExecution.knowledge }}
 {{- if ne .realm $.Values.dshWeb.realm }}

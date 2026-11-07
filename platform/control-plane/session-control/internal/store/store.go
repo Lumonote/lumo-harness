@@ -336,6 +336,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, sessionOwnerDDL); err != nil {
 		return fmt.Errorf("建 session_owners 表失败: %w", err)
 	}
+	if _, err := s.pool.Exec(ctx, sessionExecutionDDL); err != nil {
+		return fmt.Errorf("initialize Session execution leases: %w", err)
+	}
 	if _, err := s.pool.Exec(ctx, DDL); err != nil {
 		return fmt.Errorf("建 session_control 表失败: %w", err)
 	}

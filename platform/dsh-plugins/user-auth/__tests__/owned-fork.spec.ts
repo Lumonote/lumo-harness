@@ -25,7 +25,7 @@ const alice = { realm: 'r', user_id: 'alice', username: 'alice', display_name: '
 const signal = new AbortController().signal
 const authority = async () => {}
 
-async function fixture() {
+async function fixture(dynamic = false) {
   const temp = await realpath(await mkdtemp(join(tmpdir(), 'owned-fork-')))
   closers.push(() => rm(temp, { recursive: true, force: true }))
   const facts = new Map<string, SessionOwner>()
@@ -44,13 +44,13 @@ async function fixture() {
     if (path.endsWith('/activate')) fact.state = 'active'
     return new Response(JSON.stringify({ owner: fact }))
   }
-  async function runtime() {
+  async function runtime(retire = false) {
     const ctx = new Context(); closers.push(() => ctx.fiber.dispose())
     await ctx.plugin(TypertRegistry)
     await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
     await ctx.plugin(JsonlPersistence, { root: join(temp, 'sessions'), compression: 'none' })
     await ctx.plugin(AgentLoop, { agents: [] })
-    ctx.llm.registerAdapter(['mock'], new (class extends LlmAdapter {
+    ctx.llm.registerAdapter(['mock', 'alternate'], new (class extends LlmAdapter {
       override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
         requests.push(options)
         yield { type: 'text-delta', index: 0, text: `Answer ${requests.length}` }
@@ -60,6 +60,7 @@ async function fixture() {
     await ctx.plugin(RemoteAccess); await ctx.plugin(Gateway)
     ctx.provide('connection', { createPeer: options => new Peer(ctx, options) } as never)
     const meters = new SessionMeterRegistry(); ctx.provide('meteringScope', meters)
+    ctx.provide('sessionModelBilling', { quote: async (route: unknown) => route })
     ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'mock', model: 'mock' }), saveSelection: async () => {} } as never)
     ctx.provide('attachments', { imageLimits: { maxImageBytes: 1000, maxImagesPerMessage: 1, maxMessageImageBytes: 1000, maxImagePixels: 1000, maxImageDimension: 1000, mediaTypes: [] }, admitPromptContent: async content => content } as never)
     ctx.provide('fileUploads', { registerAgentResolver: () => () => {}, resolve: () => undefined, bindPrompt: () => ({ commit() {}, [Symbol.dispose]() {} }), retirePrompt() {} } as never)
@@ -69,7 +70,9 @@ async function fixture() {
     await new TestController(ctx, { nativeOpen: false }).initialize()
     const schema = z.object({ sessionId: z.string(), requestId: z.string(), content: z.array(z.object({ type: z.literal('text'), text: z.string() })), mode: z.literal('queue') })
     ctx.typert.register({ package: '@lumo/owned-fork-test', face: 'host', schemas: [], model: { services: [], events: [], objects: [] }, invocations: [{ id: '@lumo/owned-fork-test#session/prompt', service: 'sessionController', namespace: 'session', method: 'prompt', invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', codec: { mode: 'strict', typeSymbol: '@lumo/owned#Prompt', create: () => schema } }], cancellation: { parameter: 'signal' }, result: { mode: 'strict', typeSymbol: '@lumo/owned#Result', create: () => z.object({ accepted: z.literal(true) }) } }] })
-    const transport = createSessionTransport(ctx, { authorityUrl: 'http://owner', nodeId: 'n', projectId: 'p', workspaceRoot: join(temp, 'workspaces'), provider: 'mock', model: 'mock' }, 'test', async () => {}, fetcher)
+    const transport = createSessionTransport(ctx, { authorityUrl: 'http://owner', nodeId: 'n', projectId: 'p', workspaceRoot: join(temp, 'workspaces'), provider: 'mock', model: 'mock',
+      ...(dynamic ? { modelChoices: [{ id: 'default', label: '默认', provider: 'mock', model: 'mock', billingModel: 'mock' }, ...retire ? [] : [{ id: 'alternate', label: '备用', provider: 'alternate', model: 'alternate', billingModel: 'alternate' }]] } : {}),
+    }, 'test', async () => {}, fetcher)
     const send = async (sessionId: string, text: string) => {
       await transport.execute(alice, 'prompt', { sessionId, requestId: `${sessionId}-${text}`, content: [{ type: 'text', text }], mode: 'queue' }, signal, authority)
       await ctx.agents.get(SessionId(sessionId))!.whenIdle()
@@ -80,6 +83,23 @@ async function fixture() {
 }
 
 describe('owned Session fork with real AgentLoop and persistence', () => {
+  it('inherits the completed model snapshot across fork and restart, then refuses a withdrawn route before execution', async () => {
+    const f = await fixture(true), first = await f.runtime()
+    const parent = (await first.transport.execute(alice, 'create', {}, signal, authority) as { sessionId: string }).sessionId
+    const view = await first.transport.execute(alice, 'models', { sessionId: parent }, signal, authority) as { policy_digest: string; selection_revision: number }
+    await first.transport.execute(alice, 'selectModel', { sessionId: parent, choice_id: 'alternate', expected_revision: view.selection_revision, policy_digest: view.policy_digest }, signal, authority)
+    await first.send(parent, 'selected route')
+    const child = (await first.transport.execute(alice, 'fork', { sessionId: parent }, signal, authority) as { sessionId: string }).sessionId
+    expect(first.ctx.agents.get(SessionId(child))!.model.current()).toEqual({ provider: 'alternate', model: 'alternate' })
+    await first.ctx.fiber.dispose()
+    const second = await f.runtime()
+    await second.send(child, 'restored route')
+    expect(f.requests.map(call => [call.provider, call.model])).toEqual([['alternate', 'alternate'], ['alternate', 'alternate']])
+    await second.ctx.fiber.dispose()
+    const revoked = await f.runtime(true)
+    await expect(revoked.transport.execute(alice, 'models', { sessionId: child }, signal, authority)).rejects.toThrow()
+    expect(f.requests).toHaveLength(2)
+  })
   it('allocates a same-owner branch, isolates workspace/history, and resumes after restart', async () => {
     const f = await fixture()
     const first = await f.runtime()

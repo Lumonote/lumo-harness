@@ -26,6 +26,7 @@ import { spaceAllowed } from '../../../shared/seam-contracts/knowledge.ts'
 import { forbidden } from '../../../shared/seam-contracts/errors.ts'
 import type { EmbeddingClient } from './embedding.ts'
 import { OUTBOX_DDL, collectProjection } from './graph-projector.ts'
+import { pinManagedContent, releaseManagedContent } from '../../../shared/managed-content.ts'
 
 /** 幂等初始化：建表 + 建索引（含动态维度 vector(n)） */
 export function ddl(dimension: number): string {
@@ -236,6 +237,7 @@ function readChunks(value: unknown): KnowledgeIngest['chunks'] {
 }
 
 export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManager, KnowledgeLibraryManager {
+  readonly managedContentTransactions = true as const
   private pool: pg.Pool
   private readonly allowedRoles: ReadonlySet<string>
   private readonly embedding: EmbeddingClient
@@ -741,6 +743,7 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
       await client.query('BEGIN')
       await this.lockLibraryAcl(client, file.realm)
       if (actorContext !== undefined) await this.assertLibraryDestination(client, file.realm, file.folderId, file.ownerUserId, actorContext.roles, actorContext.isAdmin)
+      await pinManagedContent(client,{ realm:file.realm,kind:'knowledge-file',referenceId:file.docId,objectKey:file.objectKey,sha256:file.sha256,byteSize:file.byteSize })
       await client.query(
         `INSERT INTO knowledge_library_files
            (doc_id, realm, folder_id, filename, mime_type, object_key, byte_size, sha256, owner_user_id, extraction_state, ocr_state)
@@ -806,7 +809,16 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
   }
 
   async removeLibraryFile(docId: string, realm: string): Promise<void> {
-    await this.pool.query('DELETE FROM knowledge_library_files WHERE doc_id=$1 AND realm=$2', [docId, realm])
+    const client=await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await this.lockLibraryAcl(client,realm)
+      const source=await this.lockSource(client,docId)
+      this.assertOwner(source,docId,realm)
+      await this.removeSourceState(client,docId,realm)
+      await client.query('COMMIT')
+    } catch(error) { await client.query('ROLLBACK');throw error }
+    finally { client.release() }
   }
 
   async deleteLibraryFile(input: { realm: string; docId: string; actorUserId: string; roles: string[]; isAdmin: boolean; expectedSha256: string; expectedRevision?: number }): Promise<void> {
@@ -831,7 +843,8 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
       if (file.sha256 !== input.expectedSha256) throw new KnowledgeSourceConflictError('资料文件内容已变更，请刷新后再删除')
       if (input.expectedRevision !== undefined && Number(file.revision) !== input.expectedRevision) throw new KnowledgeSourceConflictError('资料文件名称或目录已变更，请刷新后再删除')
       await this.removeSourceState(client, input.docId, input.realm)
-      // Content-addressed raw objects may have other references; retain them until a reference-aware GC.
+      // Managed pins release in removeSourceState's transaction. Legacy content
+      // stays outside managed GC because its reference history is incomplete.
       await client.query('COMMIT')
     } catch (error) {
       await client.query('ROLLBACK')
@@ -881,6 +894,8 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
 
   /** Caller holds the source lock; authoritative state and replayable cleanup intents commit together. */
   private async removeSourceState(client: pg.PoolClient, docId: string, realm: string): Promise<void> {
+    const file=(await client.query<{object_key:string}>('SELECT object_key FROM knowledge_library_files WHERE doc_id=$1 AND realm=$2 FOR UPDATE',[docId,realm])).rows[0]
+    if(file)await releaseManagedContent(client,{realm,kind:'knowledge-file',referenceId:docId,objectKey:file.object_key})
     // Persist the former resource kind: an old upload cannot bypass deletion by dropping
     // metadata.libraryFile and retrying as a manually managed source with the same ID.
     await client.query(

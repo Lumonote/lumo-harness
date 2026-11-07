@@ -78,7 +78,7 @@ END $$;
 `
 
 /** 库端当前时刻（毫秒）。所有租约时间比较都走它，不用节点本地时钟。 */
-const NOW_MS = `(EXTRACT(EPOCH FROM now()) * 1000)::bigint`
+const NOW_MS = `(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint`
 
 export class PgSessionLog implements SessionLogSeam {
   private pool: pg.Pool
@@ -89,7 +89,14 @@ export class PgSessionLog implements SessionLogSeam {
 
   async publishHead(sessionRef: string, seq: number, token: number): Promise<void> {
     if (!Number.isSafeInteger(seq) || seq < 0) throw new Error('session-log: invalid live head')
-    const result = await this.pool.query(`WITH lease AS (
+    const client=await this.pool.connect()
+    try {
+    await client.query('BEGIN')
+    const holder=await client.query<{holder:string}>('SELECT holder FROM session_writer_lease WHERE session_ref=$1',[sessionRef])
+    await this.checkExecutionHolder(client,sessionRef,holder.rows[0]?.holder??'')
+    await client.query('SELECT session_ref FROM session_writer_lease WHERE session_ref=$1 FOR UPDATE',[sessionRef])
+    await this.checkExecutionHolder(client,sessionRef,holder.rows[0]?.holder??'')
+    const result = await client.query(`WITH lease AS (
       SELECT session_ref,fencing_token FROM session_writer_lease
       WHERE session_ref=$1 AND fencing_token=$3 AND expires_at > ${NOW_MS} FOR SHARE
     ) INSERT INTO session_log_heads (session_ref,seq,fencing_token)
@@ -97,7 +104,41 @@ export class PgSessionLog implements SessionLogSeam {
       ON CONFLICT (session_ref) DO UPDATE SET seq=GREATEST(session_log_heads.seq,EXCLUDED.seq),
         fencing_token=EXCLUDED.fencing_token
       WHERE session_log_heads.fencing_token <= EXCLUDED.fencing_token`, [sessionRef, seq, token])
-    if (result.rowCount !== 1) throw new FencedOutError(sessionRef, token, (await this.lease(sessionRef))?.fencingToken ?? 0)
+    if (result.rowCount !== 1) throw new FencedOutError(sessionRef, token, undefined)
+    // The head row itself may have blocked after the writer lock was taken.
+    // Recheck the database clock after every possible wait, then roll back the
+    // tentative write if either authority expired in the meantime.
+    await this.checkExecutionHolder(client,sessionRef,holder.rows[0]?.holder??'')
+    await this.checkLiveWriter(client,sessionRef,token)
+    await client.query('COMMIT')
+    }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
+  }
+
+  /** Dynamic Sessions bind their PG log writer to the current execution
+   * generation. Lock order matches Session-control: node, execution, writer.
+   * Missing optional authority tables retain legacy non-owned deployments;
+   * a registered owner with missing/expired lease always fails closed. */
+  private async checkExecutionHolder(client: pg.PoolClient,ref: string,holder: string): Promise<void> {
+    const tables=await client.query<{owners:boolean;nodes:boolean;leases:boolean}>(`SELECT to_regclass('session_owners') IS NOT NULL AS owners,to_regclass('session_execution_nodes') IS NOT NULL AS nodes,to_regclass('session_execution_leases') IS NOT NULL AS leases`)
+    if(!tables.rows[0]!.owners)return
+    const owners=await client.query<{realm:string;node_id:string;project_id:string}>(`SELECT realm,node_id,project_id FROM session_owners WHERE session_ref=$1`,[ref])
+    const owner=owners.rows[0];if(!owner)return
+    if(!tables.rows[0]!.nodes||!tables.rows[0]!.leases)throw new FencedOutError(ref,0,undefined)
+    const node=await client.query<{process_id:string;fence:string}>(`SELECT process_id,fence FROM session_execution_nodes WHERE realm=$1 AND node_id=$2 AND project_id=$3 AND expires_at>clock_timestamp() FOR SHARE`,[owner.realm,owner.node_id,owner.project_id])
+    if(!node.rows[0])throw new FencedOutError(ref,0,undefined)
+    const lease=await client.query(`SELECT 1 FROM session_execution_leases WHERE session_ref=$1 AND realm=$2 AND node_id=$3 AND project_id=$4 AND process_id=$5 AND node_fence=$6 AND writer_holder=$7 AND expires_at>clock_timestamp() FOR SHARE`,[ref,owner.realm,owner.node_id,owner.project_id,node.rows[0].process_id,node.rows[0].fence,holder])
+    if(!lease.rowCount)throw new FencedOutError(ref,0,undefined)
+  }
+
+  private async checkLiveWriter(client: pg.PoolClient, ref: string, token: number): Promise<void> {
+    const result = await client.query<{ fencing_token: string; live: boolean }>(
+      `SELECT fencing_token,expires_at > ${NOW_MS} AS live FROM session_writer_lease WHERE session_ref=$1`,
+      [ref],
+    )
+    const current = result.rows[0]
+    if (!current?.live || Number(current.fencing_token) !== token) {
+      throw new FencedOutError(ref, token, current ? Number(current.fencing_token) : undefined)
+    }
   }
 
   async head(sessionRef: string): Promise<number> {
@@ -143,7 +184,11 @@ export class PgSessionLog implements SessionLogSeam {
   async acquire(sessionRef: string, holder: string, ttlMs: number): Promise<WriterLease | undefined> {
     // 建租 / 续租 / 接管三种情形一条语句完成：分开写会在两条语句之间留出竞态窗口，
     // 让两个节点都判定「无人持租」而各自建租。
-    const res = await this.pool.query<{ holder: string; fencing_token: string; expires_at: string }>(
+    const client=await this.pool.connect()
+    try {
+    await client.query('BEGIN')
+    await this.checkExecutionHolder(client,sessionRef,holder)
+    const res = await client.query<{ holder: string; fencing_token: string; expires_at: string }>(
       `INSERT INTO session_writer_lease (session_ref, holder, fencing_token, expires_at)
        VALUES ($1, $2, 1, ${NOW_MS} + $3)
        ON CONFLICT (session_ref) DO UPDATE
@@ -160,6 +205,8 @@ export class PgSessionLog implements SessionLogSeam {
       [sessionRef, holder, ttlMs],
     )
     const row = res.rows[0]
+    await this.checkExecutionHolder(client,sessionRef,holder)
+    await client.query('COMMIT')
     // 无返回行 = 他人持有未过期租约。不等待、不重试：等待会让调用方误以为拿到了写权。
     if (!row) return undefined
     return {
@@ -168,6 +215,7 @@ export class PgSessionLog implements SessionLogSeam {
       fencingToken: Number(row.fencing_token),
       expiresAt: Number(row.expires_at),
     }
+    }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
   }
 
   async release(sessionRef: string, holder: string): Promise<void> {
@@ -186,10 +234,15 @@ export class PgSessionLog implements SessionLogSeam {
     try {
       await client.query('BEGIN')
 
+      const writer=await client.query<{holder:string}>('SELECT holder FROM session_writer_lease WHERE session_ref=$1',[record.sessionRef])
+      await this.checkExecutionHolder(client,record.sessionRef,writer.rows[0]?.holder??'')
+
       // 锁租约行：既做 fencing 校验，又把同一会话的并发 append 串行化。
+      await client.query('SELECT session_ref FROM session_writer_lease WHERE session_ref=$1 FOR UPDATE',[record.sessionRef])
+      await this.checkExecutionHolder(client,record.sessionRef,writer.rows[0]?.holder??'')
       const leaseRes = await client.query<{ fencing_token: string; expires_at: string; expired: boolean }>(
-        `SELECT fencing_token, expires_at, expires_at < ${NOW_MS} AS expired FROM session_writer_lease
-         WHERE session_ref = $1 FOR UPDATE`,
+        `SELECT fencing_token, expires_at, expires_at <= ${NOW_MS} AS expired FROM session_writer_lease
+         WHERE session_ref = $1`,
         [record.sessionRef],
       )
       const lease = leaseRes.rows[0]
@@ -214,6 +267,11 @@ export class PgSessionLog implements SessionLogSeam {
         [record.sessionRef, record.seq, fencingToken, record.type,
          JSON.stringify(record.payload), digest, record.time],
       )
+
+      // A conflicting log row may have been locked by a repair transaction.
+      // Validate after that wait as well, before publishing any success.
+      await this.checkExecutionHolder(client,record.sessionRef,writer.rows[0]?.holder??'')
+      await this.checkLiveWriter(client,record.sessionRef,fencingToken)
 
       if ((ins.rowCount ?? 0) > 0) {
         await client.query('COMMIT')

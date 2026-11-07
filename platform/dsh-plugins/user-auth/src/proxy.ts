@@ -6,6 +6,8 @@ import type { Duplex } from 'node:stream'
 import { GovernanceApiError, GovernanceAuthClient, type Principal } from './client.ts'
 import { ownedChatHtml, ownedChatScript } from './owned-chat.ts'
 import type { AuthenticatedSessionTransport } from './session-transport.ts'
+import { SESSION_RUNTIME_PATH } from './session-routing.ts'
+import type { ExecutionNode } from '../../../shared/session-execution.ts'
 import { AUTHENTICATED_APP_HOME } from './app-home.ts'
 import { loginPage, loginScript, resolveLoginTheme, type LoginPageOptions } from './html.ts'
 import { CONNECTOR_OAUTH_CALLBACK, CONNECTOR_OAUTH_COOKIE, ConnectorOAuthClient, ConnectorOAuthError, connectorIDPattern, openConnectorBridge, sealConnectorBridge, type ConnectorOAuthStart } from './connector-oauth.ts'
@@ -347,11 +349,69 @@ function oidcRedirectMatches(redirectUrl: string | undefined, options: AuthProxy
 export function createAuthProxy(options: AuthProxyOptions): Server {
   const appHome = options.sessionTransport ? '/lumo/chat' : AUTHENTICATED_APP_HOME
   const sessions = new SessionVerifier(options.client, options.realm, options.clusterMode || options.sessionTransport ? 0 : SESSION_CACHE_MS)
+  const serveOwned = async (req: IncomingMessage,res: ServerResponse,transport: AuthenticatedSessionTransport,principal: Principal,credential: string,action: string,body: Record<string,unknown>,destination?: ExecutionNode): Promise<void> => {
+    const abort=new AbortController()
+    res.once('close',()=>abort.abort())
+    abort.signal.addEventListener('abort',()=>{if(res.headersSent&&!res.writableEnded)res.destroy()},{once:true})
+    const identity=principalIdentity(principal)
+    const authority=Object.assign(async()=>{
+      const current=await sessions.get(credential)
+      if(!current||principalIdentity(current)!==identity)throw new Error('Session authorization expired')
+      await options.client.authorizeSessionProject(current,options.projectId??'')
+      if(destination)await options.sessionTransport!.internal!.destination(destination)
+      return current
+    },{credential})
+    let checking=false
+    const timer=setInterval(()=>{if(checking||abort.signal.aborted)return;checking=true;void authority().catch(()=>abort.abort()).finally(()=>{checking=false})},SESSION_RECHECK_MS);timer.unref()
+    try{
+      await authority()
+      if(['follow','observeState','observeEvent','observeProjections'].includes(action)){
+        const source=await transport.stream(principal,action,body,abort.signal,authority)
+        res.writeHead(200,{'Content-Type':'application/x-ndjson','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})
+        for await(const frame of source){
+          abort.signal.throwIfAborted();await authority()
+          if(!res.write(`${JSON.stringify(frame)}\n`))await new Promise<void>((resolve,reject)=>{
+            const close=()=>{res.off('drain',drain);reject(new Error('Session stream closed'))};const drain=()=>{res.off('close',close);resolve()}
+            res.once('close',close);res.once('drain',drain)
+          })
+        }
+        res.end()
+      }else{
+        const result=await transport.execute(principal,action,body,abort.signal,authority)
+        await authority();abort.signal.throwIfAborted();writeJson(res,200,result)
+      }
+    }catch(error){
+      // The internal request contains a credential: never log the request,
+      // downstream error text, or reflect remote response bodies.
+      options.logger.warn('lumo-user-auth: owned Session request denied')
+      const code=error instanceof Error&&'code' in error?String(error.code):''
+      if(!res.headersSent)writeJson(res,code==='session_execution_unavailable'?503:['session_model_changed','session_model_busy'].includes(code)?409:403,{error:['session_pending_input','session_fork_unavailable','session_execution_unavailable','session_model_changed','session_model_busy','session_model_unavailable'].includes(code)?code:'session_request_denied'})
+      else res.destroy()
+    }finally{clearInterval(timer);abort.abort()}
+  }
   const server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', 'http://lumo-auth.local')
       const requestCookies = parseCookies(req)
       const sessionToken = requestCookies.get(SESSION_COOKIE)
+      if(url.pathname===SESSION_RUNTIME_PATH){
+        const expected=options.serverRuntimeToken?Buffer.from(`Bearer ${options.serverRuntimeToken}`):Buffer.alloc(0)
+        const supplied=Buffer.from(req.headers.authorization??'')
+        if(!expected.length||expected.length!==supplied.length||!timingSafeEqual(expected,supplied)){writeJson(res,401,{error:'runtime_auth_required'});return}
+        if(req.method!=='POST'||url.search||!options.sessionTransport?.internal){writeJson(res,503,{error:'session_execution_unavailable'});return}
+        let input:Record<string,unknown>
+        try{input=await readJson(req)}catch{writeJson(res,400,{error:'invalid_session_request'});return}
+        if(Object.keys(input).some(k=>!['action','request','credential','destination'].includes(k))||typeof input.action!=='string'||!input.request||typeof input.request!=='object'||Array.isArray(input.request)||typeof input.credential!=='string'||!input.credential||input.credential.length>4096||!input.destination||typeof input.destination!=='object'){writeJson(res,400,{error:'invalid_session_request'});return}
+        // Ignore all browser cookies/identity headers. Governance independently
+        // authenticates the one credential in this service-only envelope.
+        try{
+          await options.sessionTransport.internal.destination(input.destination as ExecutionNode)
+          const principal=await sessions.get(input.credential)
+          if(!principal||principal.realm!==options.realm){writeJson(res,401,{error:'runtime_auth_required'});return}
+          await serveOwned(req,res,options.sessionTransport.internal.transport,principal,input.credential,input.action,input.request as Record<string,unknown>,input.destination as ExecutionNode)
+        }catch{writeJson(res,503,{error:'session_execution_unavailable'})}
+        return
+      }
       if (url.pathname.startsWith('/lumo/runtime/teams/')) {
         const supplied = req.headers.authorization ?? ''
         const expected = options.serverRuntimeToken ? `Bearer ${options.serverRuntimeToken}` : ''
@@ -738,49 +798,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
         if (req.headers['x-lumo-auth-request'] !== '1') { writeJson(res, 403, { error: 'auth_request_header_required' }); return }
         let body: Record<string, unknown>
         try { body = await readJson(req) } catch { writeJson(res, 400, { error: 'invalid_session_request' }); return }
-        const abort = new AbortController()
-        res.once('close', () => abort.abort(new Error('Session transport disconnected')))
-        abort.signal.addEventListener('abort', () => {
-          // Also release a response currently waiting for socket backpressure.
-          if (res.headersSent && !res.writableEnded) res.destroy()
-        }, { once: true })
-        const identity = principalIdentity(principal)
-        const authority = async () => {
-          const current = await sessions.get(sessionToken)
-          if (!current || principalIdentity(current) !== identity) throw new Error('Session authorization expired')
-          await options.client.authorizeSessionProject(current, options.projectId ?? '')
-          return current
-        }
-        let checking = false
-        const timer = setInterval(() => {
-          if (checking || abort.signal.aborted) return
-          checking = true
-          void sessions.get(sessionToken).then(current => {
-            if (!current || principalIdentity(current) !== identity) abort.abort(new Error('Session authorization expired'))
-            else return options.client.authorizeSessionProject(current, options.projectId ?? '')
-          }).catch(() => abort.abort(new Error('Session authorization unavailable'))).finally(() => { checking = false })
-        }, SESSION_RECHECK_MS)
-        timer.unref()
-        try {
-          const action = match[1]!
-          if (['follow', 'observeState', 'observeEvent', 'observeProjections'].includes(action)) {
-            const source = await options.sessionTransport.stream(principal, action, body, abort.signal)
-            res.writeHead(200, { 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
-            for await (const frame of source) {
-              abort.signal.throwIfAborted()
-              if (!res.write(`${JSON.stringify(frame)}\n`)) await new Promise<void>((resolve, reject) => {
-                const close = () => { res.off('drain', drain); reject(new Error('Session stream closed')) }
-                const drain = () => { res.off('close', close); resolve() }
-                res.once('close', close); res.once('drain', drain)
-              })
-            }
-            res.end()
-          } else writeJson(res, 200, await options.sessionTransport.execute(principal, action, body, abort.signal, authority))
-        } catch (error) {
-          options.logger.warn('lumo-user-auth: owned Session request denied: %s', error)
-          if (!res.headersSent) writeJson(res, 403, { error: error instanceof Error && 'code' in error && ['session_pending_input', 'session_fork_unavailable'].includes(String(error.code)) ? error.code : 'session_request_denied' })
-          else res.end()
-        } finally { clearInterval(timer); abort.abort() }
+        await serveOwned(req,res,options.sessionTransport,principal,sessionToken ?? '',match[1]!,body)
         return
       }
       if (options.sessionTransport && (url.pathname === '/' || url.pathname.startsWith('/api') || !url.pathname.startsWith('/lumo/'))) {

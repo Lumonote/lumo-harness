@@ -15,6 +15,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { PgMeteringSeam } from './pg-meter.ts'
 import type { MeterContext, MeterRecord } from '../../../shared/seam-contracts/metering.ts'
 import { SessionMeterRegistry } from '../../../shared/seam-contracts/meter-attribution.ts'
+import { quotedModelCost, type SessionModelBillingRoute } from '../../../shared/seam-contracts/model-billing.ts'
 
 export interface MeteringConfig {
   connectionString: string
@@ -66,6 +67,7 @@ export function apply(ctx: Context, config: MeteringConfig): void {
     await meter.seedDefaultBudget('user', config.userId, config.defaultBudget)
     await meter.seedDefaultBudget('project', config.projectId, config.defaultBudget)
   })
+  ctx.provide('sessionModelBilling', { quote: async (route: SessionModelBillingRoute) => { await ready; return meter.quoteModel(route) } })
   ctx.provide('meteringCaps', {
     setCap: async (...args: Parameters<typeof meter.setCap>) => { await ready; return meter.setCap(...args) },
     clearCap: async (...args: Parameters<typeof meter.clearCap>) => { await ready; return meter.clearCap(...args) },
@@ -130,6 +132,9 @@ export function apply(ctx: Context, config: MeteringConfig): void {
     const model = options.model
     const delegatingStream = (async function* () {
       await ready
+      const route = attribution?.modelRoutes?.find(route => route.provider === options.provider && route.model === options.model)
+      if (attribution?.modelRoutes && !route) throw new Error('metering: native model route is not approved for this Session')
+      const quote = route === undefined ? undefined : await meter.quoteModel(route)
       // 前置拦截：首 token 发出前预检双树预算（§6.4 限流前置语义）
       const approval = await meter.reserve(sessCtx)
       if (!approval.approved) {
@@ -151,6 +156,7 @@ export function apply(ctx: Context, config: MeteringConfig): void {
         // on adapter errors and consumer cancellation; never invent missing usage.
         if (inputTokens + outputTokens > 0) {
           await meter.commit({ ...meterRecordOf(sessCtx, inputTokens, outputTokens, model),
+            ...(quote === undefined ? {} : { costUsd: quotedModelCost(quote, inputTokens, outputTokens) }),
             ...attribution === undefined ? {} : { traceId: attribution.traceId } })
         }
       }

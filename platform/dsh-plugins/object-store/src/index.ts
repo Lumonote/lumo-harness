@@ -17,6 +17,7 @@ import z from '@deepseek-ai/schemastery'
 
 import { MinioObjectStore } from './minio-store.ts'
 import { MinioSpillStore } from './minio-spill.ts'
+import type { ManagedContentConfig } from './managed-content.ts'
 import { assertNoLocalSpill, type ObjectStoreSeam } from '../../../shared/seam-contracts/object-store.ts'
 
 export interface ObjectStoreConfig {
@@ -29,6 +30,7 @@ export interface ObjectStoreConfig {
   region?: string
   /** 本节点 realm（身份语义，装配层注入；spill 键前缀） */
   realm: string
+  managedContent?: ManagedContentConfig
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -47,6 +49,7 @@ export const Config: z<ObjectStoreConfig> = z.object({
   bucket: z.string(),
   region: z.string(),
   realm: z.string(),
+  managedContent: z.object({ connectionString:z.string(),storageId:z.string(),retentionMs:z.number(),graceMs:z.number(),deleteEnabled:z.boolean(),ioTimeoutMs:z.number(),gcIntervalMs:z.number() }),
 })
 
 export const inject: string[] = []
@@ -54,6 +57,22 @@ export const inject: string[] = []
 export function apply(ctx: Context, config: ObjectStoreConfig): void {
   const store = new MinioObjectStore(config)
   ctx.provide('objectStore', store)
+  if (store.managedContent) {
+    ctx.effect(() => () => store.managedContent!.close(),'object-store: managed content lifecycle')
+    const interval=config.managedContent?.gcIntervalMs
+    if (interval!==undefined) {
+      if (!Number.isSafeInteger(interval)||interval<1000||interval>2147483647) throw new Error('Managed content GC interval must be 1000–2147483647ms')
+      ctx.effect(() => {
+        let running=false
+        const timer=setInterval(() => {
+          if(running)return
+          running=true
+          void store.managedContent!.collect(config.realm).catch(() => ctx.logger.warn('object-store: managed content GC failed; durable state retained')).finally(()=>{running=false})
+        },interval)
+        timer.unref();return ()=>clearInterval(timer)
+      },'object-store: managed content collection')
+    }
+  }
 
   // spill-local 与平台对象化溢出互斥（评审发现:base bundle 已装 spill-local 时
   // 装载序随机即致命）——显式拒绝,不静默共存(§5.1 行 11:节点溢出必须对象化)。
@@ -78,3 +97,5 @@ export { MinioSpillStore } from './minio-spill.ts'
 export type { MinioStoreOptions } from './minio-store.ts'
 export type { MinioSpillOptions } from './minio-spill.ts'
 export type { ObjectStoreSeam } from '../../../shared/seam-contracts/object-store.ts'
+export { PgManagedContentStore } from './managed-content.ts'
+export type { ManagedContentConfig } from './managed-content.ts'

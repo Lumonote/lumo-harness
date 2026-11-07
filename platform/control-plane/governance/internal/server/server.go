@@ -21,6 +21,7 @@ import (
 	"time"
 
 	authcrypto "github.com/lumo-harness/platform/governance/internal/auth"
+	bg "github.com/lumo-harness/platform/governance/internal/breakglass"
 	"github.com/lumo-harness/platform/governance/internal/device"
 	"github.com/lumo-harness/platform/governance/internal/domain"
 	"github.com/lumo-harness/platform/governance/internal/store"
@@ -42,6 +43,7 @@ type Config struct {
 	BotTeamsURL         string
 	CollaboratorURL     string
 	PermissionPolicyURL string
+	RecoveryProvider    bg.ProviderConfig
 	AuthMaxAttempts     int
 	AuthLockFor         time.Duration
 	AuthSessionTTL      time.Duration
@@ -69,6 +71,9 @@ type Server struct {
 }
 
 func New(st *store.Store, cfg Config, log *slog.Logger) (*Server, error) {
+	if err := cfg.RecoveryProvider.Validate(); err != nil {
+		return nil, err
+	}
 	if err := validateCollaboratorURL(cfg.CollaboratorURL, cfg.ControlPlaneToken); err != nil {
 		return nil, err
 	}
@@ -110,6 +115,7 @@ func New(st *store.Store, cfg Config, log *slog.Logger) (*Server, error) {
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
+	s.registerRecoveryRoutes(mux)
 	s.registerRolePolicyRoutes(mux)
 	s.registerRunReviewRoutes(mux)
 	mux.HandleFunc("GET /healthz", s.health)

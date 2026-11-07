@@ -286,6 +286,22 @@ function tablesIn(ddl: string): string[] {
  */
 const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequisites?: DdlSource | DdlSource[] }> = [
   {
+    label: '动态 Session execution fencing（Go session-control ↔ 迁移 027）',
+    a: { files: [`${MIGRATION_DIR}/027_session_execution_leases.sql`] },
+    b: { files: ['control-plane/session-control/internal/store/session_execution.go'], constName: 'sessionExecutionDDL' },
+    prerequisites: { files: ['control-plane/session-control/internal/store/session_owners.go'], constName: 'sessionOwnerDDL' },
+  },
+  {
+    label: 'managed content lifecycle（共享事务契约 ↔ 迁移 025）',
+    a: { files: ['shared/managed-content.ts'], constName: 'MANAGED_CONTENT_DDL' },
+    b: { files: [`${MIGRATION_DIR}/025_managed_content_lifecycle.sql`] },
+  },
+  {
+    label: '持久恢复双人审批（Go Governance ↔ 迁移 026）',
+    a: { files: [`${MIGRATION_DIR}/026_governance_recovery_workflow.sql`] },
+    b: { files: ['control-plane/governance/internal/store/recovery.go'], constName: 'recoveryDDL' },
+  },
+  {
     label: '角色动作授权（Go governance ↔ 迁移 021）',
     a: { files: [`${MIGRATION_DIR}/021_governance_role_policies.sql`] },
     b: { files: ['control-plane/governance/internal/store/store.go'], constName: 'rolePolicyDDL' },
@@ -299,7 +315,7 @@ const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequis
   },
   {
     label: '动态 Session owner（Go session-control ↔ 迁移 017）',
-    a: {files: [`${MIGRATION_DIR}/017_session_owners.sql`]},
+    a: {files: [`${MIGRATION_DIR}/017_session_owners.sql`,`${MIGRATION_DIR}/027_session_execution_leases.sql`]},
     b: {files: ['control-plane/session-control/internal/store/session_owners.go'], constName: 'sessionOwnerDDL'},
   },
   {

@@ -17,6 +17,7 @@ import { SpillLocator, SpillStore, type SaveTextSpill, type SpillRef } from '@de
 
 import { MinioObjectStore, type MinioStoreOptions } from './minio-store.ts'
 import { createHash } from 'node:crypto'
+import { validRealmKey } from '../../../shared/seam-contracts/object-store.ts'
 
 /** suggestedName → 单个安全路径段（dsh 契约：「sanitizes it to a single safe path segment」）。 */
 function sanitizeSegment(name: string): string {
@@ -39,7 +40,8 @@ export class MinioSpillStore extends SpillStore {
   constructor(ctx: Context, opts: MinioSpillOptions) {
     // SpillStore extends Service(ctx)——`super(ctx)` 注册为 `ctx.spillStore`（同 spill-local）。
     super(ctx)
-    this.store = new MinioObjectStore(opts)
+    if (!validRealmKey(opts.realm)) throw new TypeError('Spill realm is invalid')
+    this.store = new MinioObjectStore({ ...opts,managedContent:undefined })
     this.realm = opts.realm
   }
 
@@ -62,12 +64,13 @@ export class MinioSpillStore extends SpillStore {
 
   /** 测试/装配辅助：经同一 seam 取回（跨节点取回性的最小等价验证）。 */
   async readBack(locator: string): Promise<Buffer | undefined> {
-    // locator 是完整对象键（realm 已含在前缀里）——从键里拆回 realm 与相对键
-    const idx = locator.indexOf('/')
-    if (idx <= 0) return undefined
-    const realm = locator.slice(0, idx)
-    const key = locator.slice(idx + 1)
-    const got = await this.store.get(realm, key)
+    // locator 是完整对象键，但只能读取本 Provider 绑定的 realm。不能让
+    // 测试/装配辅助成为跨租户任意对象读取口。
+    const prefix = `${this.realm}/`
+    if (!locator.startsWith(prefix)) return undefined
+    const key = locator.slice(prefix.length)
+    if (!key.startsWith('spill/')) return undefined
+    const got = await this.store.get(this.realm, key)
     return got?.body
   }
 }

@@ -42,6 +42,7 @@ interface KnowledgeQueryService {
 }
 
 interface KnowledgeLibraryManagerService {
+  readonly managedContentTransactions?: true
   listLibraryFolders(realm: string, userId: string, roles: string[], isAdmin: boolean): Promise<LibraryFolderInfo[]>
   canAccessLibraryFolder(input: { realm: string; folderId: string; userId: string; roles: string[]; isAdmin: boolean; access?: 'viewer' | 'editor' }): Promise<boolean>
   createLibraryFolder(input: { realm: string; parentId: string | null; name: string; ownerUserId: string; roles: string[]; isAdmin: boolean }): Promise<LibraryFolderInfo>
@@ -73,7 +74,15 @@ interface LibraryFileInfo {
   revision?: number; canEdit?: boolean
 }
 
+/** Host-side structural projection: the UI only reserves or compensates an
+ * upload. Pin/release and collection remain outside this package boundary. */
+interface ManagedContentReference { realm: string; kind: 'knowledge-file'; referenceId: string }
+interface ManagedContentUploadService {
+  put(reference: ManagedContentReference, body: Buffer | string, contentType?: string): Promise<{ objectKey: string }>
+  abandon(reference: ManagedContentReference): Promise<boolean>
+}
 interface ObjectStoreService {
+  readonly managedContent?: ManagedContentUploadService
   putContent(realm: string, body: Buffer | string, contentType?: string): Promise<string>
   get(realm: string, key: string): Promise<{ body: Buffer; contentType?: string } | undefined>
 }
@@ -1113,6 +1122,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     const manager = requireKnowledgeLibrary(res, knowledge)
     if (manager === undefined) return
     if (objectStore === undefined) { writeJson(res, 501, { error: '对象存储未装配，无法上传资料文件' }); return }
+    if (objectStore.managedContent && manager.managedContentTransactions!==true) { writeJson(res,501,{error:'资料 Provider 尚不支持托管内容事务，请更新 Provider'});return }
     const params = new URL(req.url ?? '/', 'http://lumo.local').searchParams
     const folderValue = params.get('folder_id')
     const folderId = folderValue === null ? null : safeID(folderValue)
@@ -1120,6 +1130,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     if (folderId !== null && !await manager.canAccessLibraryFolder({ realm: identity.realm, folderId, userId: identity.userId, roles: identity.roles, isAdmin: isRealmAdmin(identity), access: 'editor' })) {
       writeJson(res, 403, { error: '没有在此资料文件夹中上传资料的权限' }); return
     }
+    let reservation: ManagedContentReference | undefined
     try {
       const filename = safeUploadFilename(typeof req.headers['x-lumo-file-name'] === 'string' ? req.headers['x-lumo-file-name'] : undefined)
       const mimeType = libraryMimeType(filename)
@@ -1132,7 +1143,10 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       const extracted = await extractLibraryText(filename, mimeType.split(';', 1)[0]!, body)
       const chunks = extracted.text === '' ? [] : documentChunks(extracted.text, filename, mimeType, entities)
       const docId = `file-${randomUUID()}`
-      const objectKey = await objectStore.putContent(identity.realm, body, mimeType)
+      reservation={realm:identity.realm,kind:'knowledge-file',referenceId:docId}
+      const objectKey = objectStore.managedContent
+        ? (await objectStore.managedContent.put(reservation,body,mimeType)).objectKey
+        : await objectStore.putContent(identity.realm, body, mimeType)
       const file: LibraryFileInfo = {
         docId, realm: identity.realm, folderId, filename, mimeType, objectKey, byteSize: body.length,
         sha256: createHash('sha256').update(body).digest('hex'), ownerUserId: identity.userId,
@@ -1150,7 +1164,10 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       const storedFile = await manager.getLibraryFile(docId, identity.realm)
       if (storedFile === undefined) { writeJson(res, 409, { error: '上传资料已被移除，请刷新列表' }); return }
       writeJson(res, 201, { file: publicLibraryFile({ ...storedFile, canEdit: true }), indexed: extracted.text !== '' })
-    } catch (error) { writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '资料文件未上传' }) }
+    } catch (error) {
+      if(reservation && objectStore.managedContent) await objectStore.managedContent.abandon(reservation).catch(()=>{})
+      writeJson(res, knowledgeManagementStatus(error), { error: error instanceof Error ? error.message : '资料文件未上传' })
+    }
     return
   }
 
@@ -1206,7 +1223,8 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     if (!await manager.canAccessLibraryFile({ docId, realm: identity.realm, userId: identity.userId, roles: identity.roles, isAdmin, access: 'viewer' })) { writeJson(res, 403, { error: '没有查看此资料文件的权限' }); return }
     if (objectStore === undefined) { writeJson(res, 501, { error: '对象存储未装配，无法读取资料文件' }); return }
     try {
-      const stored = await objectStore.get(identity.realm, file.objectKey)
+      const relativeKey=file.objectKey.startsWith(`${identity.realm}/`)?file.objectKey.slice(identity.realm.length+1):file.objectKey
+      const stored = await objectStore.get(identity.realm, relativeKey)
       if (stored === undefined) { writeJson(res, 404, { error: '资料文件对象不存在' }); return }
       const extension = extname(file.filename).toLowerCase()
       if (route === 'preview' && (extension === '.docx' || extension === '.pptx')) {
@@ -1697,6 +1715,21 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     if (userID === undefined) { writeJson(res, 400, { error: 'invalid user id' }); return }
     try { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/users/${encodeURIComponent(userID)}`, req, 'PUT', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
     return
+  }
+
+  const recoveryRoute = pathname.match(/^\/lumo\/api\/recovery-requests(?:\/([^/]+)(?:\/(approve|revoke|execute|receipt))?)?$/u)
+  if (recoveryRoute !== null) {
+    if (!requireClusterReady(config, res)) return
+    const id = recoveryRoute[1] === undefined ? undefined : safeID(recoveryRoute[1])
+    if (recoveryRoute[1] !== undefined && id === undefined) { writeJson(res, 400, { error: 'invalid recovery request id' }); return }
+    const action = recoveryRoute[2]
+    const path = `/v1/recovery-requests${id === undefined ? '' : `/${encodeURIComponent(id)}`}${action === undefined ? '' : `/${action}`}`
+    if (req.method === 'GET' && action === undefined) { writeUpstream(res, await upstream(config, identity, 'governance', path, req)); return }
+    if (req.method === 'POST' && (id === undefined || action !== undefined)) {
+      try { writeUpstream(res, await upstream(config, identity, 'governance', path, req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+      return
+    }
+    writeJson(res, 405, { error: 'method not allowed' }); return
   }
 
   if (pathname === '/lumo/api/permission-actions') {

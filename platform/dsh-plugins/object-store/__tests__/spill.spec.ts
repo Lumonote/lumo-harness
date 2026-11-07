@@ -60,6 +60,15 @@ describe(`MinioSpillStore —— 对真 MinIO（需 OBJECT_STORE_TEST_ENDPOINT�
         const got = await other.get(realm, relative)
         expect(got?.body.toString('utf8')).toBe(content)
 
+        // readBack is a host-side test/assembly helper, but it must obey the
+        // provider's bound realm as well. A provider for another realm cannot
+        // turn a caller-supplied locator into a cross-tenant read primitive.
+        const foreignCtx = new Context()
+        const foreignRealm = uniqueRealm()
+        await foreignCtx.plugin(MinioSpillStore, { ...minioOptions(), realm: foreignRealm })
+        expect(await foreignCtx.spillStore.readBack(loc)).toBeUndefined()
+        expect(await ctx.spillStore.readBack(`${realm}/content/${'0'.repeat(64)}`)).toBeUndefined()
+
         // 同 suggestedName 两次保存不碰撞（内容指纹区分）
         const ref2 = await ctx.spillStore.saveText(request({ content: 'other' }))
         expect(String(ref2.locator)).not.toBe(loc)

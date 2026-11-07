@@ -18,6 +18,8 @@
 
 ### 最新续开发记录
 
+- [2026-11-07 剩余能力续开发与验收](./remaining-completion-2026-11-07.md)：托管内容、持久恢复审批、动态执行租约与跨副本路由、批准模型选择、附件 Provider 及真实依赖验收；准确待办见[剩余功能复核](./remaining-development-2026-11-07.md)。
+- [2026-11-07 管理能力交付](./management-optimization-2026-11-07.md)：知识整理、用户分页、项目预算、角色策略与 Space grant/实例隔离。
 - [2026-11-07 原生模型配置与 Docker 双节点验收](./model-and-docker-acceptance-2026-11-07.md)：沿用 DeepSeek Harness 配置、部署隔离修复、真实 Docker 故障结果及外部供应商拒绝边界。
 - [2026-11-07 Thread 舰队、动态归属、Bot 授权与异构审核](./thread-fleet-delivery-2026-11-07.md)：五项剩余能力、迁移 016–019、配置、最终验证结果与生产验收边界。
 - [2026-11-06 动态会话归属与认证文本入口](./dynamic-session-owner-2026-11-06.md)：不可抢占归属、独立 `/lumo/chat`、非 owner Peer 与 Gateway、纯文本执行及原生共享 owner 入口关闭。

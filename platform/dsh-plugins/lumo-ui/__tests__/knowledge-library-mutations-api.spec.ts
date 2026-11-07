@@ -143,3 +143,43 @@ describe('上传目标权限二次校验', () => {
     expect((await invoke('POST', '/lumo/api/knowledge/library/files', knowledge, Buffer.from('第二份资料'), objects)).status).toBe(409)
   })
 })
+
+describe('托管资料内容上传',()=>{
+  function managedObjects(){
+    return {...objectStore(),managedContent:{
+      put:vi.fn(async(ref:{realm:string;kind:'knowledge-file';referenceId:string},body:Buffer)=>({...ref,objectId:'11111111-2222-4333-8444-555555555555',objectKey:`${ref.realm}/managed-content/v1/11111111-2222-4333-8444-555555555555/${'a'.repeat(64)}`,sha256:'a'.repeat(64),byteSize:body.length})),
+      abandon:vi.fn().mockResolvedValue(true),candidates:vi.fn().mockResolvedValue([]),collect:vi.fn(),
+    }}
+  }
+  it('显式托管能力与事务Provider配对，成功结果不泄露对象地址',async()=>{
+    const knowledge=Object.assign(manager(),{managedContentTransactions:true as const}),objects=managedObjects()
+    knowledge.createLibraryFile.mockImplementation(async uploaded=>{knowledge.getLibraryFile.mockResolvedValue({...uploaded,revision:1})})
+    const result=await invoke('POST','/lumo/api/knowledge/library/files',knowledge,Buffer.from('managed source'),objects)
+    expect(result.status).toBe(201)
+    expect(objects.putContent).not.toHaveBeenCalled()
+    expect(objects.managedContent.put).toHaveBeenCalledWith(expect.objectContaining({realm:'realm-a',kind:'knowledge-file',referenceId:expect.stringMatching(/^file-/u)}),expect.any(Buffer),expect.stringContaining('text/plain'))
+    expect(knowledge.createLibraryFile).toHaveBeenCalledWith(expect.objectContaining({objectKey:expect.stringContaining('/managed-content/v1/')}),{roles:['viewer'],isAdmin:false})
+    expect(objects.managedContent.abandon).not.toHaveBeenCalled()
+    expect((result.body as {file:object}).file).not.toHaveProperty('objectKey')
+  })
+  it('资料元数据被拒绝时补偿上传保留，不调用原始删除',async()=>{
+    const knowledge=Object.assign(manager(),{managedContentTransactions:true as const}),objects=managedObjects()
+    knowledge.createLibraryFile.mockRejectedValue(forbidden('上传期间撤权'))
+    expect((await invoke('POST','/lumo/api/knowledge/library/files',knowledge,Buffer.from('managed source'),objects)).status).toBe(403)
+    expect(objects.managedContent.abandon).toHaveBeenCalledExactlyOnceWith(objects.managedContent.put.mock.calls[0]![0])
+    expect(knowledge.removeLibraryFile).not.toHaveBeenCalled()
+  })
+  it('来源写入失败时先事务清理资料，再尝试释放未提交上传保留',async()=>{
+    const knowledge=Object.assign(manager(),{managedContentTransactions:true as const}),objects=managedObjects()
+    knowledge.upsertSource.mockRejectedValue(new Error('index unavailable'))
+    expect((await invoke('POST','/lumo/api/knowledge/library/files',knowledge,Buffer.from('managed source'),objects)).status).toBe(502)
+    expect(knowledge.removeLibraryFile).toHaveBeenCalledOnce()
+    expect(objects.managedContent.abandon).toHaveBeenCalledOnce()
+    expect(knowledge.removeLibraryFile.mock.invocationCallOrder[0]).toBeLessThan(objects.managedContent.abandon.mock.invocationCallOrder[0]!)
+  })
+  it('旧Provider缺少原子引用能力时拒绝托管上传，不静默回退共享content',async()=>{
+    const objects=managedObjects()
+    expect((await invoke('POST','/lumo/api/knowledge/library/files',manager(),Buffer.from('managed source'),objects)).status).toBe(501)
+    expect(objects.managedContent.put).not.toHaveBeenCalled();expect(objects.putContent).not.toHaveBeenCalled()
+  })
+})

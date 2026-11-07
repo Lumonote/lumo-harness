@@ -127,6 +127,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/session-controls", s.handleControls)
 	mux.HandleFunc("/v1/session-owners", s.handleSessionOwners)
 	mux.HandleFunc("/v1/session-owners/", s.handleSessionOwners)
+	mux.HandleFunc("GET /v1/session-execution/nodes/{nodeID}", s.handleExecutionNode)
+	mux.HandleFunc("POST /v1/session-execution/nodes/{nodeID}/{operation}", s.handleExecutionNode)
+	mux.HandleFunc("POST /v1/session-execution/sessions/{ref}/{operation}", s.handleExecutionLease)
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {

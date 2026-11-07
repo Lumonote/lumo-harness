@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	authcrypto "github.com/lumo-harness/platform/governance/internal/auth"
+	bg "github.com/lumo-harness/platform/governance/internal/breakglass"
 	"github.com/lumo-harness/platform/governance/internal/device"
 	"github.com/lumo-harness/platform/governance/internal/domain"
 	"github.com/lumo-harness/platform/governance/internal/readiness"
@@ -215,6 +216,11 @@ func main() {
 		Service: "governance", Logger: log, Depends: heartbeat.PgDependency(pool),
 	})
 
+	recoveryProvider, err := bg.ParseProviderConfig(os.Getenv("LUMO_RECOVERY_PROVIDER_ID"), os.Getenv("LUMO_RECOVERY_PROVIDER_URL"), os.Getenv("LUMO_RECOVERY_PROVIDER_TOKEN"), os.Getenv("LUMO_RECOVERY_RECEIPT_KEY"), os.Getenv("LUMO_RECOVERY_OPERATIONS"), os.Getenv("LUMO_RECOVERY_TARGET_SCOPES"))
+	if err != nil {
+		log.Error("invalid recovery provider configuration", "error", err)
+		os.Exit(2)
+	}
 	srv, err := server.New(st, server.Config{
 		DeploymentMode:      mode,
 		ClusterStatus:       *clusterStatus,
@@ -225,6 +231,7 @@ func main() {
 		BotTeamsURL:         os.Getenv("LUMO_BOT_TEAMS_URL"),
 		CollaboratorURL:     os.Getenv("LUMO_COLLABORATOR_URL"),
 		PermissionPolicyURL: os.Getenv("LUMO_GOVERNANCE_POLICY_URL"),
+		RecoveryProvider:    recoveryProvider,
 		AuthMaxAttempts:     envInt("LUMO_AUTH_MAX_ATTEMPTS", 5),
 		AuthLockFor:         envSeconds("LUMO_AUTH_LOCK_SECONDS", 300),
 		AuthSessionTTL:      envSeconds("LUMO_AUTH_SESSION_TTL_SECONDS", 86400),

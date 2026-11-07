@@ -566,6 +566,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if _, err := tx.Exec(ctx, rolePolicyDDL); err != nil {
 		return fmt.Errorf("initialize role policies: %w", err)
 	}
+	if _, err := tx.Exec(ctx, recoveryDDL); err != nil {
+		return fmt.Errorf("initialize recovery workflow: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit governance schema initialization: %w", err)
 	}

@@ -33,6 +33,8 @@ import { assertLocalStoragePath, resolveDeploymentProfile, withClusterStatus } f
 import { FAKE_IP_PROVIDER_ID } from '@lumo/web-fetch-fakeip'
 import { superagentProfileOverlay } from './superagent.ts'
 import { validateSessionKnowledge } from '../../../dsh-plugins/user-auth/src/session-knowledge.ts'
+import { SessionModelPolicy, type SessionModelConfiguration } from '../../../dsh-plugins/user-auth/src/session-model-policy.ts'
+import { managedContentSettings } from './managed-content-config.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const packagedRuntimeRoot = process.env['LUMO_RUNTIME_ROOT']
@@ -165,6 +167,10 @@ if (userSessionExecution !== undefined) {
     || (userSessionExecution as { projectId: string }).projectId !== projectID) throw new Error('LUMO_USER_SESSION_EXECUTION requires a fixed authority/node/project/workspace/provider/model and the deployment project')
   if (deployment.mode === 'local' || !isWebProfile) throw new Error('Dynamic user Sessions require an authenticated server Web profile')
   validateSessionKnowledge((userSessionExecution as { knowledge?: unknown }).knowledge, platformRealm)
+  new SessionModelPolicy(userSessionExecution as SessionModelConfiguration)
+  if ((userSessionExecution as { routing?: { nodeIdFromEnvironment?: boolean } }).routing?.nodeIdFromEnvironment) {
+    ;(userSessionExecution as { nodeId: string }).nodeId = jobControlNodeId
+  }
 }
 const threadExecution: unknown = process.env['LUMO_THREAD_EXECUTION'] ? JSON.parse(process.env['LUMO_THREAD_EXECUTION']) : undefined
 if (threadExecution !== undefined && (typeof threadExecution !== 'object' || threadExecution === null || Array.isArray(threadExecution))) {
@@ -406,6 +412,7 @@ ${threadExecution ? `        threadExecution: ${JSON.stringify(threadExecution)}
 `
 
 // 平台插件 patch（官方 patch 语法：insert 数组 = 追加条目）
+const managedContent=localMode?undefined:managedContentSettings(process.env,`minio:${minioEndpoint}:${minioPort}/${minioBucket}`)
 writeFileSync(
   patchPath,
   `${localMode ? `# Local desktop shape: SQLite only. No PostgreSQL, Redis, MinIO, RocketMQ or Nacos.
@@ -444,6 +451,14 @@ ${localMode ? localStorageRows(dshProfile, sqlitePath) + localVaultRows(sqlitePa
         accessKey: ${JSON.stringify(minioAccessKey)}
         secretKey: ${JSON.stringify(minioSecretKey)}
         bucket: ${JSON.stringify(minioBucket)}
+        managedContent:
+          connectionString: ${JSON.stringify(pgDSN)}
+          storageId: ${JSON.stringify(managedContent!.storageId)}
+          retentionMs: ${managedContent!.retentionMs}
+          graceMs: ${managedContent!.graceMs}
+          deleteEnabled: ${managedContent!.deleteEnabled}
+          ioTimeoutMs: ${managedContent!.ioTimeoutMs}
+          gcIntervalMs: ${managedContent!.gcIntervalMs}
         realm: ${JSON.stringify(platformRealm)}
     - id: lumo-attachments
       name: ${JSON.stringify(attachmentsEntry)}
@@ -610,7 +625,7 @@ ${isWebProfile ? `${localMode ? '' : `    - id: lumo-user-auth
         realm: ${JSON.stringify(platformRealm)}
         projectId: ${JSON.stringify(projectID)}
         identityAssertionSecret: ${JSON.stringify(identityAssertionSecret)}
-${userSessionExecution ? `        sessionTransport: ${JSON.stringify(userSessionExecution)}\n` : ''}        timeoutMs: ${integerEnv('LUMO_AUTH_TIMEOUT_MS', 5000)}
+${userSessionExecution ? `        sessionTransport: ${JSON.stringify(userSessionExecution)}\n        sessionWriterHolder: ${JSON.stringify(nodeHolder)}\n` : ''}        timeoutMs: ${integerEnv('LUMO_AUTH_TIMEOUT_MS', 5000)}
 `}
     - id: lumo-platform-ui
       name: ${JSON.stringify(platformUiEntry)}

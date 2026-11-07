@@ -6,6 +6,13 @@
  * 绝不静默降级成本地文件——那是第二条真相源。
  */
 import * as Minio from 'minio'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import * as http from 'node:http'
+import * as https from 'node:https'
+import type { Readable } from 'node:stream'
+import { isManagedContentKey } from '../../../shared/seam-contracts/managed-content.ts'
+import { PgManagedContentStore, type ManagedContentConfig } from './managed-content.ts'
+import { boundedObjectOperation,objectTransferSignal,ObjectUploadStream } from './stream-transfer.ts'
 
 import {
   capabilityUnavailable,
@@ -18,6 +25,7 @@ import {
   type ObjectStat,
   type ObjectStoreSeam,
   type StoredObject,
+  type StoredObjectStream,
 } from '../../../shared/seam-contracts/object-store.ts'
 
 export interface MinioStoreOptions {
@@ -28,6 +36,7 @@ export interface MinioStoreOptions {
   secretKey: string
   bucket: string
   region?: string
+  managedContent?: ManagedContentConfig
 }
 
 /** S3/MinIO 错误码形态（SDK 抛的错带 code 字段；连接错误带 node 错误码）。 */
@@ -56,10 +65,12 @@ function isNotFound(err: unknown): boolean {
 }
 
 export class MinioObjectStore implements ObjectStoreSeam {
+  readonly managedContent: PgManagedContentStore | undefined
   private client: Minio.Client
   private bucket: string
   /** init 幂等标志：桶存在性只在首次 ensure。 */
   private ensured: Promise<void> | undefined
+  private readonly streamScope = new AsyncLocalStorage<AbortSignal>()
 
   constructor(opts: MinioStoreOptions) {
     this.client = new Minio.Client({
@@ -69,8 +80,21 @@ export class MinioObjectStore implements ObjectStoreSeam {
       accessKey: opts.accessKey,
       secretKey: opts.secretKey,
       region: opts.region,
+      // Keep streamed transfers bounded independently of file size.
+      partSize: 8 * 1024 * 1024,
+      // The SDK's public transport option delegates to native HTTP. Native
+      // AbortSignal destroys the request/socket, so bounding a Promise cannot
+      // leave an unbounded collection of outstanding multipart requests.
+      transport: {request: ((options:http.RequestOptions,callback?:(response:http.IncomingMessage)=>void)=>{
+        const transport=opts.useSSL?https:http
+        return transport.request({...options,signal:this.streamScope.getStore()??objectTransferSignal()},callback)
+      }) as typeof http.request},
     })
     this.bucket = opts.bucket
+    this.managedContent=opts.managedContent ? new PgManagedContentStore(opts.managedContent,{
+      put:(realm,key,body,contentType)=>this.write(realm,key,body,contentType),
+      delete:(realm,key)=>this.remove(realm,key),
+    }):undefined
   }
 
   /** 幂等建桶（dev 拓扑允许服务先于运维建桶）。 */
@@ -89,6 +113,10 @@ export class MinioObjectStore implements ObjectStoreSeam {
   }
 
   async put(realm: string, key: string, body: Buffer | string, contentType?: string): Promise<void> {
+    if (isManagedContentKey(key)) throw invalid('Managed content writes require the durable lifecycle seam')
+    return this.write(realm,key,body,contentType)
+  }
+  private async write(realm: string,key: string,body: Buffer|string,contentType?:string):Promise<void> {
     const full = safeJoin(realm, key)
     const buf = typeof body === 'string' ? Buffer.from(body, 'utf8') : body
     try {
@@ -104,6 +132,51 @@ export class MinioObjectStore implements ObjectStoreSeam {
     const relative = contentKeyOf(body)
     await this.put(realm, relative, body, contentType)
     return joinRealmKey(realm, relative)
+  }
+
+  async putStream(realm:string,key:string,body:AsyncIterable<Uint8Array>,byteSize:number,contentType?:string,signal?:AbortSignal):Promise<void> {
+    if(isManagedContentKey(key))throw invalid('Managed content writes require the durable lifecycle seam')
+    if(!Number.isSafeInteger(byteSize)||byteSize<0)throw invalid('Stream byte size must be a nonnegative safe integer')
+    const active=objectTransferSignal(signal)
+    active.throwIfAborted()
+    const full=safeJoin(realm,key)
+    let count=0
+    const source=new ObjectUploadStream((async function*(){
+      for await(const chunk of body){active.throwIfAborted();if(!(chunk instanceof Uint8Array))throw invalid('Object stream must contain byte chunks');count+=chunk.byteLength;if(count>byteSize)throw invalid('Object stream exceeds its declared size');yield chunk}
+      if(count!==byteSize)throw invalid('Object stream does not match its declared size')
+    })(),active)
+    try{
+      await boundedObjectOperation(this.streamScope.run(active,()=>this.init()),active);active.throwIfAborted()
+      // MinIO short-circuits size=0 without consuming its input. Verify EOF
+      // ourselves so an invalid nonempty source cannot be accepted as empty.
+      if(byteSize===0)for await(const _chunk of source){ /* size guard rejects every nonempty chunk */ }
+      await boundedObjectOperation(this.streamScope.run(active,()=>this.client.putObject(this.bucket,full,byteSize===0?Buffer.alloc(0):source,byteSize,contentType?{'Content-Type':contentType}:undefined)),active)
+      active.throwIfAborted()
+      if(count!==byteSize)throw invalid('Object stream does not match its declared size')
+    }catch(error){active.throwIfAborted();throw wrap(error,'Streaming object write failed')}
+    finally{source.destroy()}
+  }
+
+  async getStream(realm:string,key:string,signal?:AbortSignal):Promise<StoredObjectStream|undefined> {
+    const active=objectTransferSignal(signal)
+    active.throwIfAborted()
+    const full=safeJoin(realm,key)
+    try{
+      await boundedObjectOperation(this.streamScope.run(active,()=>this.init()),active);active.throwIfAborted()
+      const stat=await boundedObjectOperation(this.streamScope.run(active,()=>this.client.statObject(this.bucket,full)),active);active.throwIfAborted()
+      const client=this.client,bucket=this.bucket,scope=this.streamScope
+      const body=(async function*(){
+        active.throwIfAborted()
+        let source:Readable
+        try{source=await boundedObjectOperation(scope.run(active,()=>client.getObject(bucket,full)),active,late=>late.destroy())}
+        catch(error){active.throwIfAborted();throw wrap(error,'Streaming object read failed')}
+        const abort=()=>source.destroy(active.reason instanceof Error?active.reason:new Error('Object stream cancelled'))
+        source.on('error',()=>{});active.addEventListener('abort',abort,{once:true})
+        if(active.aborted)abort()
+        try{for await(const chunk of source){active.throwIfAborted();yield new Uint8Array(chunk as Buffer)}}catch(error){active.throwIfAborted();throw wrap(error,'Streaming object read failed')}finally{active.removeEventListener('abort',abort);source.destroy()}
+      })()
+      return {body,bytes:stat.size,contentType:stat.metaData?.['content-type']??stat.metaData?.['Content-Type']}
+    }catch(error){active.throwIfAborted();if(isNotFound(error))return undefined;throw wrap(error,'Streaming object read failed')}
   }
 
   async get(realm: string, key: string): Promise<StoredObject | undefined> {
@@ -125,6 +198,10 @@ export class MinioObjectStore implements ObjectStoreSeam {
   }
 
   async delete(realm: string, key: string): Promise<void> {
+    if (isManagedContentKey(key)) throw invalid('Managed content deletion requires the durable lifecycle collector')
+    return this.remove(realm,key)
+  }
+  private async remove(realm: string,key: string):Promise<void> {
     const full = safeJoin(realm, key)
     try {
       await this.init()
