@@ -68,7 +68,8 @@ jobs:
       # lib/types 不存在，平台 typecheck 会全线 TS2307。上游 master 重构期
       # `pnpm run build` 的 tsdown 主机面是坏的（见 dsh-overrides/prepare-runtime.mjs），
       # 与桌面构建复用同一入口：先生成 typert remote 类型，再以 8 GiB 堆编 host，
-      # 最后合成 lib 入口。不能直接 tsc：全新克隆尚无 gitignored 的 */remote 投影。
+      # 最后合成 lib 入口，并编译当前宿主/libc 的原生 flock addon。
+      # 不能直接 tsc：全新克隆尚无 gitignored 的 */remote 投影和 system.node。
       - name: Build upstream dsh host outputs
         run: node dsh-overrides/build-host.mjs ../deepseek-harness
 

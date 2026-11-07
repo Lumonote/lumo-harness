@@ -81,7 +81,7 @@ fs.appendFileSync(path.join(root, 'tsc-runs'), 'x')
 /**
  * 形似 dsh 的 native 工作区：平台包目录名是 `<platform>-<arch>`（与上游
  * native/system/packages/ 一致，npm 包名才带 node-addon-system- 前缀），外加一个
- * 假 tsx —— 像 build.ts 那样把宿主 addon 落到 <平台包>/bin/system.node。
+ * 假 tsx —— 像 build.ts 那样按 manifest 把宿主/libc addon 落盘。
  * 假脚本用 process.getBuiltinModule 取 fs/path（CJS/ESM 都可用，不赌 Node 对无扩展名
  * 文件的模块判定），路径按 cwd 推（prepare-runtime 就是以源树根为 cwd 调它）。
  */
@@ -89,17 +89,21 @@ function fakeNativeDsh(label: string): { root: string; counter: string; bin: str
   const root = mkdtempSync(resolve(tmpdir(), `lumo-native-${label}-`))
   temporaries.push(root)
   const host = `${process.platform}-${process.arch}`
+  const libc = process.platform === 'linux'
+    ? ((process.report!.getReport() as { header: { glibcVersionRuntime?: string } }).header.glibcVersionRuntime ? 'glibc' : 'musl')
+    : undefined
+  const addonPath = libc === undefined ? 'bin/system.node' : `bin/${libc}/system.node`
   const counter = resolve(root, 'tsx-runs')
-  const bin = resolve(root, 'native', 'system', 'packages', host, 'bin', 'system.node')
+  const bin = resolve(root, 'native', 'system', 'packages', host, addonPath)
   write(root, 'package.json', '{"name":"fake-dsh","type":"module"}\n')
   write(root, `native/system/packages/${host}/prebuilds.json`,
-    `{"platform":"${host}","binaries":[{"tool":"flock","kind":"node-api","napi":8,"path":"bin/system.node"}]}\n`)
+    JSON.stringify({ platform: host, binaries: [{ tool: 'flock', kind: 'node-api', napi: 8, libc, path: addonPath }] }))
   write(root, 'node_modules/.bin/tsx', `#!${process.execPath}
 const fs = process.getBuiltinModule('node:fs')
 const path = process.getBuiltinModule('node:path')
-const bin = path.join(process.cwd(), 'native', 'system', 'packages', process.platform + '-' + process.arch, 'bin')
-fs.mkdirSync(bin, { recursive: true })
-fs.writeFileSync(path.join(bin, 'system.node'), 'fake-flock-binding')
+const bin = path.resolve(process.cwd(), ${JSON.stringify(`native/system/packages/${host}/${addonPath}`)})
+fs.mkdirSync(path.dirname(bin), { recursive: true })
+fs.writeFileSync(bin, 'fake-flock-binding')
 fs.appendFileSync(path.join(process.cwd(), 'tsx-runs'), 'x')
 `)
   chmodSync(resolve(root, 'node_modules', '.bin', 'tsx'), 0o755)
@@ -143,7 +147,7 @@ describe('ensureNativeAddonsBuilt', () => {
     expect(existsSync(bin)).toBe(true)
   })
 
-  posixOnly('bin/ 已存在时不重复编译', () => {
+  posixOnly('宿主 addon 非空且已存在时不重复编译', () => {
     const { root, counter, bin } = fakeNativeDsh('host-addon-idempotent')
     mkdirSync(dirname(bin), { recursive: true })
     writeFileSync(bin, 'already-built')
@@ -152,6 +156,39 @@ describe('ensureNativeAddonsBuilt', () => {
 
     expect(existsSync(counter)).toBe(false)
     expect(readFileSync(bin, 'utf8')).toBe('already-built')
+  })
+
+  posixOnly('仅有 bin/ 目录或空 addon 时仍需编译', () => {
+    const { root, counter, bin } = fakeNativeDsh('host-addon-empty')
+    mkdirSync(dirname(bin), { recursive: true })
+    writeFileSync(bin, '')
+
+    ensureNativeAddonsBuilt(root)
+
+    expect(readFileSync(counter, 'utf8')).toHaveLength(1)
+    expect(readFileSync(bin, 'utf8')).toBe('fake-flock-binding')
+  })
+
+  posixOnly('manifest 未声明宿主 addon 时硬失败', () => {
+    const { root, counter } = fakeNativeDsh('host-addon-manifest')
+    write(root, `native/system/packages/${process.platform}-${process.arch}/prebuilds.json`, JSON.stringify({
+      platform: `${process.platform}-${process.arch}`,
+      binaries: [{ tool: 'landlock-run', kind: 'static-musl', path: 'bin/landlock-run' }],
+    }))
+
+    expect(() => ensureNativeAddonsBuilt(root)).toThrow(/未声明宿主/)
+    expect(existsSync(counter)).toBe(false)
+  })
+
+  posixOnly('manifest 的 addon 路径不能逃出 bin/', () => {
+    const { root, counter } = fakeNativeDsh('host-addon-path')
+    const manifestPath = `native/system/packages/${process.platform}-${process.arch}/prebuilds.json`
+    const manifest = JSON.parse(readFileSync(resolve(root, manifestPath), 'utf8'))
+    manifest.binaries[0].path = '../system.node'
+    write(root, manifestPath, JSON.stringify(manifest))
+
+    expect(() => ensureNativeAddonsBuilt(root)).toThrow(/addon path 必须位于/)
+    expect(existsSync(counter)).toBe(false)
   })
 
   posixOnly('旧上游没有 native/system 工作区时跳过，不抛错', () => {

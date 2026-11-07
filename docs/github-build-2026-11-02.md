@@ -35,3 +35,11 @@ RocketMQ 门禁已在运行 `41405260712` 远端通过；下一项集群探针�
 同次桌面日志已完成 DSH Host/Client 构建及 386 包回拷，随后仅在 Lumo UI 报错：上游 InputState 新增 sending，但本地桥类型复制了旧 phase 联合。桥实际只读取 draft，发送及状态判断由上游 inputActions 完成；现用公开 slot 合同的 Pick<input, 'draft'> 定义消费面，避免未消费的枚举字段再次随上游变化而中断构建。
 
 同次 `production-gates` 的 RocketMQ 与集群探针均已通过，剩余失败位于 Corepack pin 门禁：工作流直接执行 git 模式为 100644 的 Python 文件，触发 permission denied；平台 build.sh 已使用 python3 调用同一脚本。CI 现与其保持一致，经 python3 执行检查通过，三个 install 与两个运行入口均固定 pnpm 11.7.0。
+
+## 2026-11-07：平台 CI 缺少原生文件锁模块
+
+`platform-ci` 运行 [42374380844](https://github.com/Lumonote/lumo-harness/actions/runs/42374380844)，提交 `0b932dd`，失败于 Unit tests；其余 Go 与生产门禁 job 均通过。用户日志中的 35 条失败分布在 7 个团队执行、动态 owner 和附件/知识库测试文件，涉及 JSONL 持久化时缺少 `native/system/packages/linux-x64/bin/glibc/system.node`。原生 flock 延迟加载，因此 import 成功或 host TypeScript 构建成功不能证明持久化可用。
+
+上游测试脚本在 Vitest 前执行 `build:native-system`，平台测试直接调用 Vitest，没有经过该步骤。共享的 `build-host.mjs` 现依次准备 Typert/host/lib、通过官方 `build.ts --host-addon-only` 补齐宿主 addon、构建 PTC worker；平台 CI 和集群验收均消费此入口。原有桌面准备入口也复用增强后的检查：从 `prebuilds.json` 选择当前平台与 libc 的 Node-API 文件，校验文件非空，并在编译后再次检查，避免已有 Landlock、另一种 libc 产物或空文件造成误判。Windows 保持原有非 flock 路径。
+
+回归证据：真实构建入口测试修复前 4 失败、2 通过，修复后 6 项全通过；本机完整平台单测 1819 通过、0 失败、313 跳过（未配置数据库等外部依赖的现有门控），类型检查与实际 host 构建通过。Docker Debian 12 / Node 24 的 Linux arm64 环境先复现缺件，再由官方脚本编译真实 addon，验证独占锁、第二 fd 的 EAGAIN，以及关闭首 fd 后重获锁。Linux x64 路径有入口回归覆盖；远端 x64 实际结果以修复提交对应的 Actions 为准。上游源码与锁文件保持干净。

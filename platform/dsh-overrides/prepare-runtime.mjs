@@ -14,7 +14,7 @@ import {
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { dirname, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { applyLumoDshOverrides, overriddenPackageDirectories } from './apply.mjs'
 import { assertPristineProductSource, git } from './assert-pristine.mjs'
@@ -31,7 +31,8 @@ const scriptRoot = dirname(fileURLToPath(import.meta.url))
 // package.json + prebuilds.json。运行期 flock 懒加载才 require 该文件，表现为打包
 // app 平时正常、发消息（会话加锁）即报 "Cannot find module .../bin/system.node"。
 // 与上游 AGENTS.md 的口径一致（仓库测试只编 host addon）：宿主平台包缺 bin 时先编
-// 一次；全部已存在的 bin/ 再投影进快照并纳入指纹，重编后二进制一变快照自动重建。
+// 一次；检查 manifest 中当前宿主/libc 的实际 addon（仅有 bin/ 不代表已构建）。
+// 全部已存在的 bin/ 再投影进快照并纳入指纹，重编后二进制一变快照自动重建。
 // 源树里的平台目录名是 `<platform>-<arch>`（native/system/packages/darwin-x64），带
 // node-addon-system- 前缀的是 npm 包名；build.ts 按目录名遍历，两者不可混用。
 // 曾按 npm 包名拼源树路径，existsSync 恒假 → 编译被静默跳过，上面的症状就是这么漏出去的。
@@ -52,19 +53,47 @@ export function ensureNativeAddonsBuilt(sourceRoot) {
     throw new Error(`Lumo DSH staging: ${hostPackage} 不存在（宿主平台包目录名应为 ${directoryName}）；上游 native/system 目录布局变了`)
   }
   const binDirectory = resolve(hostPackage, 'bin')
-  if (existsSync(binDirectory)) return
+  const manifest = JSON.parse(readFileSync(resolve(hostPackage, 'prebuilds.json'), 'utf8'))
+  // Match native/system/scripts/build.ts and the runtime loader: glibc and musl
+  // have separate bindings, and landlock-run alone cannot satisfy flock.
+  const libc = process.platform === 'linux'
+    ? (process.report.getReport().header.glibcVersionRuntime ? 'glibc' : 'musl')
+    : undefined
+  if (manifest?.platform !== directoryName || !Array.isArray(manifest.binaries)) {
+    throw new Error(`Lumo DSH staging: ${hostPackage}/prebuilds.json 与宿主平台 ${directoryName} 不匹配`)
+  }
+  const binaries = manifest.binaries.filter((binary) => binary?.kind === 'node-api' && binary.libc === libc)
+  if (binaries.length === 0) {
+    throw new Error(`Lumo DSH staging: ${hostPackage}/prebuilds.json 未声明宿主 ${libc ?? directoryName} 的 Node-API addon`)
+  }
+  const addonPaths = binaries.map((binary) => {
+    if (typeof binary.path !== 'string') throw new Error(`Lumo DSH staging: ${hostPackage}/prebuilds.json addon path 无效`)
+    const addon = resolve(hostPackage, binary.path)
+    const withinBin = relative(binDirectory, addon)
+    if (withinBin === '' || withinBin === '..' || withinBin.startsWith(`..${sep}`) || isAbsolute(withinBin)) {
+      throw new Error(`Lumo DSH staging: addon path 必须位于 ${binDirectory} 内：${binary.path}`)
+    }
+    return addon
+  })
+  const missingAddons = () => addonPaths.filter((addon) => {
+    if (!existsSync(addon)) return true
+    const stat = lstatSync(addon)
+    return !stat.isFile() || stat.size === 0
+  })
+  if (missingAddons().length === 0) return
   const tsx = resolve(sourceRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'tsx.cmd' : 'tsx')
   if (!existsSync(tsx)) {
-    throw new Error('Lumo DSH staging: native/system 平台包缺 bin/ 且源树无 tsx，请先在 deepseek-harness 执行 pnpm build:native-system')
+    throw new Error(`Lumo DSH staging: 缺少宿主 native addon (${missingAddons().join(', ')}) 且源树无 tsx，请先在 deepseek-harness 执行 pnpm build:native-system`)
   }
   const result = spawnSync(tsx, ['native/system/scripts/build.ts', '--host-addon-only'], { cwd: sourceRoot, stdio: 'inherit' })
   if (result.error !== undefined) throw result.error
   if (result.status !== 0) {
     throw new Error(`Lumo DSH staging: 构建宿主 native addon 失败（${String(result.status ?? result.signal)}）`)
   }
-  // build.ts 成功却没落盘 = 上游产物路径变了，投影进快照的仍是空 bin/。
-  if (!existsSync(binDirectory)) {
-    throw new Error(`Lumo DSH staging: build.ts 执行成功但 ${binDirectory} 仍不存在；上游 native addon 产物路径变了`)
+  // Exit 0 is insufficient: a partial bin/ may contain only another libc's addon.
+  const missing = missingAddons()
+  if (missing.length > 0) {
+    throw new Error(`Lumo DSH staging: build.ts 执行成功但宿主 native addon 仍缺失或为空：${missing.join(', ')}`)
   }
 }
 

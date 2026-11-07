@@ -2,7 +2,7 @@ import { resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { assertPristineProductSource } from './assert-pristine.mjs'
-import { ensureLibEntriesReexport } from './prepare-runtime.mjs'
+import { ensureLibEntriesReexport, ensureNativeAddonsBuilt } from './prepare-runtime.mjs'
 
 // CI and desktop builds must share prerequisite ordering and heap limits.
 // This helper generates Typert remote faces before tsc, then synthesizes lib
@@ -10,6 +10,9 @@ import { ensureLibEntriesReexport } from './prepare-runtime.mjs'
 const sourceRoot = resolve(process.argv[2] ?? '../deepseek-harness')
 assertPristineProductSource(sourceRoot)
 ensureLibEntriesReexport(sourceRoot)
+// Upstream tests bootstrap the host flock addon before loading JSONL sessions.
+// Platform Vitest bypasses that script, so its shared host build must do it too.
+ensureNativeAddonsBuilt(sourceRoot)
 // PTC's process.js is an executable entry, renamed from process-entry.js by
 // its package config. A generic re-export of types/process.js only loads the
 // implementation and exits without opening the control channel. Build this
