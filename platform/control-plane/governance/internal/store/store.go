@@ -454,11 +454,8 @@ CREATE INDEX IF NOT EXISTS governance_agent_presets_project_idx
   ON governance_agent_presets (realm, project_id, status, name);
 
 ALTER TABLE governance_agent_presets ADD COLUMN IF NOT EXISTS output_profile TEXT NOT NULL DEFAULT 'platform-closed-text-v1';
-DO $$ BEGIN
- IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='governance_agent_presets_output_profile_check' AND conrelid='governance_agent_presets'::regclass) THEN
- ALTER TABLE governance_agent_presets ADD CONSTRAINT governance_agent_presets_output_profile_check CHECK(output_profile IN ('platform-closed-text-v1','platform-closed-text-files-v1'));
- END IF;
-END $$;
+ALTER TABLE governance_agent_presets DROP CONSTRAINT IF EXISTS governance_agent_presets_output_profile_check;
+ALTER TABLE governance_agent_presets ADD CONSTRAINT governance_agent_presets_output_profile_check CHECK(output_profile IN ('platform-closed-text-v1','platform-closed-text-files-v1','platform-closed-repository-v1'));
 
 CREATE TABLE IF NOT EXISTS governance_dispatch_outcomes (
   id          TEXT PRIMARY KEY,
@@ -560,6 +557,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if _, err := tx.Exec(ctx, runFilesDDL); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, runRepositoryDDL); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, taskResultsDDL); err != nil {
 		return fmt.Errorf("initialize task results: %w", err)
 	}
@@ -577,6 +577,9 @@ func (s *Store) Init(ctx context.Context) error {
 	}
 	if _, err := tx.Exec(ctx, botAuthorizationDDL); err != nil {
 		return fmt.Errorf("initialize Bot authorization: %w", err)
+	}
+	if _, err := tx.Exec(ctx, remoteComputerDDL); err != nil {
+		return fmt.Errorf("initialize remote computer requests: %w", err)
 	}
 	if _, err := tx.Exec(ctx, rolePolicyDDL); err != nil {
 		return fmt.Errorf("initialize role policies: %w", err)

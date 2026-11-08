@@ -3,9 +3,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore, FileAttachmentRef, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { boundedJSON, type SessionExecutionRuntime } from '../../../shared/session-execution.ts'
-import { SESSION_ATTACHMENT_MAX_BYTES, sessionAttachmentID, type SessionAttachmentConfig, type SessionAttachmentReceipt, type SessionAttachmentUpload, type SessionAttachmentDownload } from '../../../shared/seam-contracts/session-attachments.ts'
+import { SESSION_ATTACHMENT_DOCUMENT_TYPES, SESSION_ATTACHMENT_MAX_BYTES, sessionAttachmentID, type SessionAttachmentConfig, type SessionAttachmentReceipt, type SessionAttachmentUpload, type SessionAttachmentDownload } from '../../../shared/seam-contracts/session-attachments.ts'
 import type { Principal } from './client.ts'
 import { SessionRequestError, sessionUpstreamError } from './session-request-errors.ts'
+import { extractDocumentPreview, isDocumentMediaType, validateDocumentEnvelope } from './session-document.ts'
 
 export const USER_SESSION_ATTACHMENT_TOOL = 'user_attachment_read'
 const textTypes = new Set(['text/plain','text/markdown','text/csv','application/json'])
@@ -37,7 +38,7 @@ export function attachmentName(value: unknown): string {
 export function attachmentMediaType(value: unknown): string {
   if(typeof value!=='string')throw new SessionRequestError('session_attachment_unsupported')
   const mime=value.toLowerCase()
-  if(!textTypes.has(mime)&&!imageTypes.has(mime))throw new SessionRequestError('session_attachment_unsupported')
+  if(!textTypes.has(mime)&&!imageTypes.has(mime)&&!isDocumentMediaType(mime))throw new SessionRequestError('session_attachment_unsupported')
   return mime
 }
 export async function attachmentBytes(source: AsyncIterable<Uint8Array>, max: number, signal: AbortSignal): Promise<Uint8Array> {
@@ -51,12 +52,13 @@ export function attachmentText(bytes:Uint8Array):string{try{const text=new TextD
 function publicReceipt(r:StoredReceipt):SessionAttachmentReceipt{return {receipt_id:r.receipt_id,kind:r.kind,name:r.name,media_type:r.media_type,bytes:r.bytes,sha256:r.sha256,created_at:r.created_at}}
 export function parsePublicAttachmentReceipt(value:unknown):SessionAttachmentReceipt {
  const r=value as SessionAttachmentReceipt
- if(!r||typeof r!=='object'||Array.isArray(r)||!sessionAttachmentID.test(r.receipt_id)||!['text','image'].includes(r.kind)||typeof r.name!=='string'||attachmentName(r.name)!==r.name||typeof r.media_type!=='string'||attachmentMediaType(r.media_type)!==r.media_type||r.kind==='text'&&r.media_type!=='text/plain'||r.kind==='image'&&!imageTypes.has(r.media_type)||!Number.isSafeInteger(r.bytes)||r.bytes<1||r.bytes>SESSION_ATTACHMENT_MAX_BYTES||!/^[a-f0-9]{64}$/u.test(r.sha256)||typeof r.created_at!=='string'||!Number.isFinite(Date.parse(r.created_at)))throw new Error('Invalid public attachment receipt')
+ if(!r||typeof r!=='object'||Array.isArray(r)||!sessionAttachmentID.test(r.receipt_id)||!['text','image','document'].includes(r.kind)||typeof r.name!=='string'||attachmentName(r.name)!==r.name||typeof r.media_type!=='string'||attachmentMediaType(r.media_type)!==r.media_type||r.kind==='text'&&r.media_type!=='text/plain'||r.kind==='image'&&!imageTypes.has(r.media_type)||r.kind==='document'&&!Object.entries(SESSION_ATTACHMENT_DOCUMENT_TYPES).some(([ext,mime])=>r.name.toLowerCase().endsWith(ext)&&r.media_type===mime)||!Number.isSafeInteger(r.bytes)||r.bytes<1||r.bytes>SESSION_ATTACHMENT_MAX_BYTES||!/^[a-f0-9]{64}$/u.test(r.sha256)||typeof r.created_at!=='string'||!Number.isFinite(Date.parse(r.created_at)))throw new Error('Invalid public attachment receipt')
  return {receipt_id:r.receipt_id,kind:r.kind,name:r.name,media_type:r.media_type,bytes:r.bytes,sha256:r.sha256,created_at:r.created_at}
 }
-function receipt(value:unknown):StoredReceipt{
+function receipt(value:unknown,realm:string):StoredReceipt{
   const r=value as StoredReceipt
-  if(!r||!sessionAttachmentID.test(r.receipt_id)||!['text','image'].includes(r.kind)||typeof r.name!=='string'||typeof r.media_type!=='string'||!Number.isSafeInteger(r.bytes)||r.bytes<1||r.bytes>SESSION_ATTACHMENT_MAX_BYTES||!/^[a-f0-9]{64}$/u.test(r.sha256)||!r.native_ref||r.native_ref.bytes!==r.bytes||typeof r.native_ref.attachmentId!=='string')throw new Error('Invalid persistent attachment receipt')
+  parsePublicAttachmentReceipt(r)
+  if(!r.native_ref||r.native_ref.bytes!==r.bytes||r.native_ref.name!==r.name||r.native_ref.attachmentId!==realm+'/'+(r.kind==='image'?'content':'file-content')+'/'+r.sha256)throw new Error('Invalid persistent attachment receipt')
   return r
 }
 export function attachmentReferences(events:readonly SessionEvent[]):string[]{
@@ -74,7 +76,7 @@ export class OwnedSessionAttachments {
   let response:Response
   try{response=await this.fetcher(this.authorityURL.replace(/\/+$/u,'')+'/v1/session-attachments/'+encodeURIComponent(ref),{method:'POST',redirect:'error',signal:AbortSignal.any([this.runtime.signal,AbortSignal.timeout(5000)]),headers:{authorization:'Bearer '+this.token,'content-type':'application/json'},body:JSON.stringify({...proof,owner_user_id:principal.user_id,operation,...fields})})}catch{throw new SessionRequestError('session_attachment_unavailable')}
   if(!response.ok)throw await sessionUpstreamError(response,'attachment')
-  try{const value=await boundedJSON(response,256*1024);if(!Array.isArray(value.receipts)||value.receipts.length>100)throw new Error('Invalid authority response');return value.receipts.map(receipt)}catch{throw new SessionRequestError('session_attachment_unavailable')}
+  try{const value=await boundedJSON(response,256*1024);if(!Array.isArray(value.receipts)||value.receipts.length>100)throw new Error('Invalid authority response');return value.receipts.map(value=>receipt(value,this.runtime.realm))}catch{throw new SessionRequestError('session_attachment_unavailable')}
  }
  private async storage<T>(read:()=>Promise<T>,signal:AbortSignal):Promise<T>{try{return await read()}catch(error){signal.throwIfAborted();if(error instanceof SessionRequestError)throw error;throw new SessionRequestError('session_attachment_unavailable')}}
  async get(principal:Principal,ref:string,id:unknown):Promise<StoredReceipt>{if(!sessionAttachmentID.test(String(id)))throw new Error('A server attachment receipt is required');const rows=await this.call(principal,ref,'get',{receipt_id:id});if(rows.length!==1)throw new Error('Attachment receipt unavailable');return rows[0]!}
@@ -85,11 +87,16 @@ export class OwnedSessionAttachments {
    await authorize();const name=attachmentName(metadata.name),mime=attachmentMediaType(metadata.mediaType)
    const data=await attachmentBytes(source,Math.min(this.config.maxUploadBytes??SESSION_ATTACHMENT_MAX_BYTES,textTypes.has(mime)?this.config.maxTextBytes??1024*1024:SESSION_ATTACHMENT_MAX_BYTES),active)
    let native:FileAttachmentRef|ImageAttachmentRef
-   if(textTypes.has(mime)){attachmentText(data);native=await this.storage(()=>abortable(this.store.saveFileStream({data:(async function*(){yield data})(),name,signal:active}),active),active)}
+   if(textTypes.has(mime)||isDocumentMediaType(mime)){
+    if(isDocumentMediaType(mime))await extractDocumentPreview(name,mime,data,active);else attachmentText(data)
+    await authorize();active.throwIfAborted()
+    native=await this.storage(()=>abortable(this.store.saveFileStream({data:(async function*(){yield data})(),name,signal:active}),active),active)
+    if(native.bytes!==data.length||native.name!==name||native.attachmentId!==this.runtime.realm+'/file-content/'+createHash('sha256').update(data).digest('hex'))throw new SessionRequestError('session_attachment_unavailable')
+   }
    else native=(await this.storage(()=>abortable(this.store.saveImages([{data,mediaType:mime as ImageMediaType,name}]),active),active))[0]!
    if(native.bytes>(this.config.maxUploadBytes??SESSION_ATTACHMENT_MAX_BYTES))throw new SessionRequestError('session_attachment_too_large')
    await authorize();active.throwIfAborted()
-   const rows=await this.call(principal,ref,'create',{receipt:{kind:textTypes.has(mime)?'text':'image',name:native.name??name,media_type:textTypes.has(mime)?'text/plain':(native as ImageAttachmentRef).mediaType,bytes:native.bytes,sha256:native.attachmentId.split('/').at(-1),native_ref:native}})
+   const rows=await this.call(principal,ref,'create',{receipt:{kind:textTypes.has(mime)?'text':isDocumentMediaType(mime)?'document':'image',name:native.name??name,media_type:textTypes.has(mime)?'text/plain':isDocumentMediaType(mime)?mime:(native as ImageAttachmentRef).mediaType,bytes:native.bytes,sha256:native.attachmentId.split('/').at(-1),native_ref:native}})
    await authorize();return publicReceipt(rows[0]!)
   }finally{this.transfers--}
  }
@@ -98,8 +105,9 @@ export class OwnedSessionAttachments {
   const active=AbortSignal.any([signal,this.runtime.signal,AbortSignal.timeout(30_000)])
   try{await authorize();const r=await this.get(principal,ref,id);let data:Uint8Array
    if(r.kind==='image')data=(await this.storage(()=>abortable(this.store.readImage(r.native_ref as ImageAttachmentRef,active),active),active)).data
-   else data=await this.storage(()=>attachmentBytes(this.store.readFileStream(r.native_ref as FileAttachmentRef,active),this.config.maxTextBytes??1024*1024,active),active)
+   else data=await this.storage(()=>attachmentBytes(this.store.readFileStream(r.native_ref as FileAttachmentRef,active),r.kind==='text'?this.config.maxTextBytes??1024*1024:this.config.maxUploadBytes??SESSION_ATTACHMENT_MAX_BYTES,active),active)
    if(data.length!==r.bytes||createHash('sha256').update(data).digest('hex')!==r.sha256)throw new SessionRequestError('session_attachment_unavailable');if(r.kind==='text')attachmentText(data)
+   if(r.kind==='document')validateDocumentEnvelope(r.name,r.media_type,data)
    await authorize();active.throwIfAborted();return {data,name:r.name,mediaType:r.media_type}
   }finally{this.transfers--}
  }
@@ -110,19 +118,21 @@ export class OwnedSessionAttachments {
    if(part.type==='text'&&typeof part.text==='string'&&!part.text.includes('[lumo-attachment:')&&Object.keys(part).every(k=>['type','text'].includes(k))){result.push({type:'text',text:part.text});continue}
    if(part.type!=='attachment'||typeof part.receipt_id!=='string'||Object.keys(part).some(k=>!['type','receipt_id'].includes(k))||seen.has(part.receipt_id)||seen.size>=(this.config.maxPerMessage??4))throw new Error('Message attachments require unique server receipts')
    seen.add(part.receipt_id);await authorize();const r=await this.get(principal,ref,part.receipt_id)
-   result.push({type:'text',text:'\n[lumo-attachment:'+r.receipt_id+'] '+r.name+' ('+r.media_type+', '+r.bytes+' bytes)'+(r.kind==='text'?' — use user_attachment_read with this receipt_id to read the attached UTF-8 text.':'')+'\n'})
+   result.push({type:'text',text:'\n[lumo-attachment:'+r.receipt_id+'] '+r.name+' ('+r.media_type+', '+r.bytes+' bytes)'+(r.kind==='text'?' — use user_attachment_read with this receipt_id to read the attached UTF-8 text.':r.kind==='document'?' — use user_attachment_read with this receipt_id for a bounded extracted text preview. It does not prove the complete document was read; inspect coverage warnings.':'')+'\n'})
    if(r.kind==='image'){const binary=await this.download(principal,ref,r.receipt_id,signal,authorize);result.push({type:'image',mediaType:r.media_type,name:r.name,data:Buffer.from(binary.data).toString('base64')})}
   }
   await authorize();return result
  }
  async inherit(principal:Principal,ref:string,parent:string,events:readonly SessionEvent[]):Promise<void>{await this.call(principal,ref,'inherit',{source_session:parent,receipt_ids:attachmentReferences(events)})}
  install(agent:Agent,ref:string,currentPrincipal:()=>Promise<Principal>):void{
-  agent.ctx.tools.register({name:USER_SESSION_ATTACHMENT_TOOL,description:'只读读取本会话已发送的 UTF-8 文本附件。仅接受消息中的服务器 receipt_id，分页返回。',parameters:{type:'object',additionalProperties:false,required:['receipt_id'],properties:{receipt_id:{type:'string',pattern:'^att_[a-f0-9]{48}$'},offset:{type:'integer',minimum:0,maximum:1048576},limit:{type:'integer',minimum:1,maximum:32000}}},output:{schema:{type:'object',required:['text','offset','next_offset','total_chars'],properties:{text:{type:'string'},offset:{type:'integer'},next_offset:{type:'integer'},total_chars:{type:'integer'}}},render:(_a,v)=>[{type:'text',text:JSON.stringify(v)}]},execute:async(args,exec)=>{
+  agent.ctx.tools.register({name:USER_SESSION_ATTACHMENT_TOOL,description:'只读读取本会话已发送的文本附件，或 PDF/DOCX/XLSX/PPTX 的有界文字预览。文档始终不是全文证明，必须查看 extraction 警告；仅接受服务器 receipt_id，分页返回。',parameters:{type:'object',additionalProperties:false,required:['receipt_id'],properties:{receipt_id:{type:'string',pattern:'^att_[a-f0-9]{48}$'},offset:{type:'integer',minimum:0,maximum:1048576},limit:{type:'integer',minimum:1,maximum:32000}}},output:{schema:{type:'object',required:['text','offset','next_offset','total_chars'],properties:{text:{type:'string'},offset:{type:'integer'},next_offset:{type:'integer'},total_chars:{type:'integer'},extraction:{type:'object'}}},render:(_a,v)=>[{type:'text',text:JSON.stringify(v)}]},execute:async(args,exec)=>{
    if(exec.agent!==agent||!args||typeof args!=='object'||Array.isArray(args))throw new Error('Exact owned Session and receipt required');const input=args as Record<string,unknown>
    if(Object.keys(input).some(k=>!['receipt_id','offset','limit'].includes(k))||typeof input.receipt_id!=='string'||!sessionAttachmentID.test(input.receipt_id)||input.offset!==undefined&&(!Number.isSafeInteger(input.offset)||Number(input.offset)<0||Number(input.offset)>1048576)||input.limit!==undefined&&(!Number.isSafeInteger(input.limit)||Number(input.limit)<1||Number(input.limit)>32000))throw new Error('Invalid attachment text read')
    if(!attachmentReferences(agent.session.snapshotEvents()).includes(input.receipt_id))throw new Error('Attachment must be sent in this Session before model access')
-   const principal=await currentPrincipal();const r=await this.get(principal,ref,input.receipt_id);if(r.kind!=='text')throw new Error('This tool reads only UTF-8 text; images use native image content')
-   const binary=await this.download(principal,ref,r.receipt_id,exec.signal,async()=>{await currentPrincipal()});const text=attachmentText(binary.data),offset=Number(input.offset??0),limit=Number(input.limit??16000);if(offset>text.length)throw new Error('Offset exceeds attachment length');const end=Math.min(text.length,offset+limit);await currentPrincipal();return {text:text.slice(offset,end),offset,next_offset:end<text.length?end:-1,total_chars:text.length}
+   const principal=await currentPrincipal();const r=await this.get(principal,ref,input.receipt_id);if(r.kind==='image')throw new Error('This tool reads text or document previews; images use native image content')
+   const binary=await this.download(principal,ref,r.receipt_id,exec.signal,async()=>{await currentPrincipal()})
+   const preview=r.kind==='document'?await extractDocumentPreview(r.name,r.media_type,binary.data,AbortSignal.any([exec.signal,this.runtime.signal])):undefined
+   const text=preview?.text??attachmentText(binary.data),offset=Number(input.offset??0),limit=Number(input.limit??16000);if(offset>text.length)throw new Error('Offset exceeds attachment length');const end=Math.min(text.length,offset+limit);await currentPrincipal();const extraction=preview?{format:preview.format,scope:preview.scope,document_complete:preview.document_complete,truncated:preview.truncated,units_read:preview.units_read,total_units:preview.total_units,warnings:preview.warnings}:undefined;return {text:text.slice(offset,end),offset,next_offset:end<text.length?end:-1,total_chars:text.length,...(extraction?{extraction}:{})}
   }})
  }
 }

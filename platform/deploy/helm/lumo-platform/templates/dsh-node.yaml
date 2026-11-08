@@ -390,6 +390,19 @@ spec:
 {{- end }}
 {{- end }}
 {{- if .Values.dshWeb.enabled }}
+{{- with .Values.dshWeb.userSessionExecution.migration }}
+{{- $session := $.Values.dshWeb.userSessionExecution }}
+{{- $routing := $session.routing | default dict }}
+{{- if or (lt (int $.Values.dshWeb.replicas) 2) (lt (len ($routing.routes | default dict)) 2) (not $routing.nodeIdFromEnvironment) (ne $.Values.dshWeb.workloadKind "StatefulSet") (not $.Values.dshWeb.spool.persistence.enabled) (not $.Values.dshWeb.harness.persistence.enabled) }}
+{{- fail "Session migration requires at least two stable StatefulSet nodes with distinct trusted routes and independent persistent spool/home volumes" }}
+{{- end }}
+{{- if or $session.connectors (not $.Values.objectStore.enabled) (not (index $.Values.services "session-control").enabled) (not $.Values.services.governance.enabled) }}
+{{- fail "Session migration requires shared objectStore, session-control, Governance and a Session profile without connectors" }}
+{{- end }}
+{{- if or (not (regexMatch "^/var/lib/lumo/session-spool/[^/]+(/[^/]+)*$" $session.workspaceRoot)) (regexMatch "(^|/)\\.{1,2}(/|$)" $session.workspaceRoot) }}
+{{- fail "Session migration workspaceRoot must be a dedicated directory inside the persistent /var/lib/lumo/session-spool volume" }}
+{{- end }}
+{{- end }}
 {{- if and .Values.dshWeb.userSessionExecution (ne (int .Values.dshWeb.replicas) 1) }}
 {{- $routing := .Values.dshWeb.userSessionExecution.routing | default dict }}
 {{- if or (not $routing.nodeIdFromEnvironment) (ne .Values.dshWeb.workloadKind "StatefulSet") (not .Values.dshWeb.spool.persistence.enabled) (not .Values.dshWeb.harness.persistence.enabled) }}

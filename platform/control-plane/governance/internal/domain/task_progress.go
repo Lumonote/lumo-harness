@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // TaskProgress is an attributed checkpoint, not an execution receipt or an
@@ -101,6 +102,83 @@ type WorkforceProgressSummary struct {
 	Stale          int `json:"stale"`
 	AwaitingReview int `json:"awaiting_review"`
 	Accepted       int `json:"accepted"`
+	AtRisk         int `json:"at_risk"`
+}
+
+// Search and risk predicates apply to the complete authorized scope before
+// pagination. Checkpoints describe progress, never business acceptance.
+type WorkforceProgressFilter struct {
+	Query      string `json:"q"`
+	Risk       string `json:"risk"`
+	WorkerKind string `json:"worker_kind"`
+}
+
+func (f *WorkforceProgressFilter) Normalize() {
+	f.Query = strings.ToLower(strings.TrimSpace(f.Query))
+	if f.Risk == "" {
+		f.Risk = "all"
+	}
+	if f.WorkerKind == "" {
+		f.WorkerKind = "all"
+	}
+}
+
+func (f WorkforceProgressFilter) Validate() error {
+	if len([]rune(f.Query)) > 200 || strings.IndexFunc(f.Query, unicode.IsControl) >= 0 {
+		return fmt.Errorf("q must be at most 200 characters without control characters")
+	}
+	switch f.Risk {
+	case "all", "blocked", "overdue", "stale", "awaiting_review", "at_risk", "active", "accepted":
+	default:
+		return fmt.Errorf("unknown workforce risk filter")
+	}
+	switch f.WorkerKind {
+	case "all", "employee", "agent", "unassigned":
+	default:
+		return fmt.Errorf("unknown workforce worker_kind")
+	}
+	return nil
+}
+
+func WorkforceWorkerKind(task DelegatedTask) string {
+	if strings.HasPrefix(task.AssigneeWorkerID, "agent:") {
+		return "agent"
+	}
+	if task.AssigneeUserID != "" || strings.HasPrefix(task.AssigneeWorkerID, "user:") {
+		return "employee"
+	}
+	return "unassigned"
+}
+
+func (f WorkforceProgressFilter) Matches(item WorkforceProgressItem) bool {
+	if f.WorkerKind != "all" && WorkforceWorkerKind(item.Task) != f.WorkerKind {
+		return false
+	}
+	match := true
+	switch f.Risk {
+	case "blocked":
+		match = item.Health.Blocked
+	case "overdue":
+		match = item.Health.Overdue
+	case "stale":
+		match = item.Health.Stale
+	case "awaiting_review":
+		match = item.Health.AwaitingReview
+	case "at_risk":
+		match = item.Task.BusinessState != BusinessDone && item.Task.BusinessState != BusinessArchived && item.Progress != nil && item.Progress.Status == "at_risk"
+	case "active":
+		match = DelegationStateActive(item.Task.State)
+	case "accepted":
+		match = item.Task.BusinessState == BusinessDone
+	}
+	if !match {
+		return false
+	}
+	search := []string{item.Task.ID, item.Task.Title, item.Task.AssigneeName, item.Task.AssigneeUserID, item.Task.AssigneeWorkerID}
+	if item.Progress != nil {
+		search = append(search, item.Progress.Summary, item.Progress.NextStep, item.Progress.BlockedReason)
+	}
+	return f.Query == "" || strings.Contains(strings.ToLower(strings.Join(search, "\n")), f.Query)
 }
 
 func ProgressHealth(task DelegatedTask, run *TaskRun, progress *TaskProgress, now time.Time) TaskProgressHealth {
@@ -146,6 +224,9 @@ func SummarizeWorkforce(items []WorkforceProgressItem) WorkforceProgressSummary 
 		}
 		if item.Task.BusinessState == BusinessDone {
 			out.Accepted++
+		}
+		if item.Task.BusinessState != BusinessDone && item.Task.BusinessState != BusinessArchived && item.Progress != nil && item.Progress.Status == "at_risk" {
+			out.AtRisk++
 		}
 	}
 	return out

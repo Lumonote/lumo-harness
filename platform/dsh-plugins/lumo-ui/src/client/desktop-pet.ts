@@ -1,4 +1,6 @@
 /** Desktop requests use public Workspace, Session and file-upload services. */
+import { desktopPetReceiptClient } from './desktop-pet-ledger.ts'
+import type { DesktopPetReceipt, DesktopPetReceiptClient, DesktopPetReceiptUpdate, DesktopPetUploadReceipt } from '../desktop-pet-receipt-types.ts'
 export interface DesktopPetAttachment { name: string; mimeType: string; base64: string }
 export interface DesktopPetRequest { id: string; target: 'chat' | 'tasks' | 'home'; draft: string; workspaceId?: string; attachments?: DesktopPetAttachment[]; expiresAt?: number }
 export interface DesktopPetResult { state: 'pending' | 'accepted' | 'rejected'; error?: string; sessionId?: string; retryable?: boolean; phase?: 'preparing' | 'submitting' }
@@ -27,6 +29,8 @@ export interface DesktopSessionSummary {
   retainedBy?: Readonly<Record<string, number | undefined>>
 }
 export interface DesktopPetServices {
+  /** Tests may inject a receipt transport; production always uses the authenticated Host. */
+  receipts?: DesktopPetReceiptClient
   sessions: {
     list: { getSnapshot(): { phase: string; ids?: readonly string[]; byId: Readonly<Record<string, DesktopSessionSummary | undefined>> }; subscribe?(listener: () => void): () => void }
     create(options: { workspaceId: string }): Promise<string>
@@ -49,7 +53,7 @@ const SERVICES = Symbol.for('@lumo/desktop-pet/services')
 const LEDGER = Symbol.for('@lumo/desktop-pet/requests')
 interface SurfaceRegistration { open(target: 'tasks' | 'home'): void }
 interface ServiceState { current?: DesktopPetServices; listeners: Set<() => void> }
-interface RequestEntry { fingerprint: Promise<string>; result: DesktopPetResult; controller: AbortController; sessionId?: string; creating?: Promise<string>; submitting: boolean; uploads: { receiptId: string; file?: Record<string, unknown> }[]; verification?: { result: DesktopPetResult; cancelled?: boolean } }
+interface RequestEntry { fingerprint: Promise<string>; owner: string; receipt?: DesktopPetReceipt; reloadReceipt?: boolean; claiming?: Promise<{ record: DesktopPetReceipt; acquired: boolean }>; writing?: Promise<unknown>; result: DesktopPetResult; controller: AbortController; sessionId?: string; creating?: Promise<string>; submitting: boolean; uploads: DesktopPetUploadReceipt[]; verification?: { result: DesktopPetResult; cancelled?: boolean } }
 interface RequestLedger { results: Map<string, RequestEntry>; cancelledIds: Set<string> }
 type DesktopWindow = Window & { __LUMO_DESKTOP__?: boolean; __lumoDesktopPet?: DesktopPetBridge; [SURFACE]?: SurfaceRegistration; [OWNER]?: () => void; [SERVICES]?: ServiceState; [LEDGER]?: RequestLedger }
 const RETAINED_RESULTS = 64
@@ -129,9 +133,29 @@ export function installDesktopPetBridge(view: Window, services: DesktopPetServic
   const state = serviceState(view); state.current = services; state.listeners.forEach(listener => listener())
   const ledger = desktop[LEDGER] ??= { results: new Map(), cancelledIds: new Set() }
   const { results, cancelledIds } = ledger
+  const receipts = services.receipts ?? desktopPetReceiptClient(view)
   let disposed = false
   const unknown = (): DesktopPetResult => ({ state: 'rejected', error: '桌宠请求已过期，请重新操作。' })
   const snapshot = (entry: RequestEntry): DesktopPetResult => ({ ...(entry.verification?.result ?? entry.result), ...(entry.sessionId ? { sessionId: entry.sessionId } : {}) })
+  const uncertain = (entry: RequestEntry): void => {
+    const location = entry.sessionId ? `请打开原对话 ${entry.sessionId} 核对。` : '请在工作台核对已创建的对话。'
+    entry.result = { state: 'rejected', retryable: false, ...(entry.sessionId ? { sessionId: entry.sessionId } : {}), error: `发送回执未确认，${location}为避免重复任务，本次请求不会自动重发。` }
+  }
+  const persist = (entry: RequestEntry, patch: Pick<DesktopPetReceiptUpdate, 'phase'> & Partial<DesktopPetReceiptUpdate>): Promise<void> => {
+    const writing = (entry.writing ?? Promise.resolve()).catch(() => {}).then(async () => {
+      const record = entry.receipt
+      if (!record) throw Error('桌宠发送记录未就绪。')
+      try { entry.receipt = await receipts.update({ id: record.id, digest: record.digest, owner: entry.owner, revision: record.revision, ...patch }) }
+      catch (error) {
+        // A preparation write may have committed despite its missing reply.
+        // Only a new authoritative claim can recover its revision/uploads.
+        if (record.phase === 'preparing' && patch.phase === 'preparing') entry.reloadReceipt = true
+        throw error
+      }
+    })
+    entry.writing = writing
+    return writing
+  }
   async function perform(entry: RequestEntry, request: DesktopPetRequest, controller: AbortController): Promise<void> {
     const signal = controller.signal
     const ensureActive = (): void => {
@@ -139,7 +163,7 @@ export function installDesktopPetBridge(view: Window, services: DesktopPetServic
       if (entry.controller !== controller) throw Error('请求已被后续重试替代。')
       if (request.expiresAt !== undefined && Date.now() >= request.expiresAt) throw Error('桌宠请求已超时，内容已保留，请重试。')
     }
-    await entry.fingerprint
+    const digest = await entry.fingerprint
     ensureActive()
     if (request.target !== 'chat') {
       const surface = desktop[SURFACE]
@@ -150,10 +174,45 @@ export function installDesktopPetBridge(view: Window, services: DesktopPetServic
     const hasContent = request.draft.trim() !== '' || (request.attachments?.length ?? 0) > 0
     if (!hasContent && !desktop[SURFACE]) throw Error('工作台界面尚未就绪，请稍后重试。')
     if ((request.attachments?.length ?? 0) > 0 && !services.fileUpload) throw Error('附件上传服务尚未就绪，请稍后重试。')
+    if (entry.reloadReceipt) {
+      await entry.writing?.catch(() => {})
+      ensureActive()
+      delete entry.receipt; delete entry.claiming; delete entry.reloadReceipt
+    }
+    if (!entry.receipt) {
+      entry.claiming ??= receipts.claim({ id: request.id, digest, workspaceId, owner: entry.owner })
+      let claim: Awaited<ReturnType<DesktopPetReceiptClient['claim']>>
+      const claiming = entry.claiming
+      try { claim = await claiming }
+      catch (error) { if (entry.claiming === claiming) delete entry.claiming; throw error }
+      entry.receipt = claim.record
+      if (claim.record.sessionId) entry.sessionId = claim.record.sessionId
+      else delete entry.sessionId
+      entry.uploads = claim.record.uploads
+      if (claim.record.phase === 'accepted') { entry.result = { state: 'accepted', ...(entry.sessionId ? { sessionId: entry.sessionId } : {}) }; return }
+      if (!claim.acquired) {
+        if (claim.record.phase === 'preparing') entry.result = { state: 'rejected', retryable: true, error: '另一个窗口正在准备此请求，请稍后重试。' }
+        else uncertain(entry)
+        // A non-owner cannot retain a handle and bypass the next claim.
+        delete entry.receipt; delete entry.claiming
+        return
+      }
+    }
+    if ((entry.receipt.phase === 'creating' && !entry.creating) || entry.receipt.phase === 'submitting') { uncertain(entry); return }
+    ensureActive()
     const navigation = hasContent ? undefined : services.layout.beginNavigation()
     // A pre-submit retry keeps the created Session and any completed upload receipts.
     if (!entry.sessionId) {
-      entry.creating ??= services.sessions.create({ workspaceId })
+      entry.creating ??= (async () => {
+        // A restart between create and its response must never create another Session.
+        await persist(entry, { phase: 'creating' })
+        let id: string
+        try { id = await services.sessions.create({ workspaceId: entry.receipt!.workspaceId }) }
+        catch (failure) { uncertain(entry); throw failure }
+        entry.sessionId = id
+        await persist(entry, { phase: 'preparing', sessionId: id })
+        return id
+      })()
       const creating = entry.creating
       try { entry.sessionId = await creating }
       finally { if (entry.creating === creating) delete entry.creating }
@@ -167,7 +226,7 @@ export function installDesktopPetBridge(view: Window, services: DesktopPetServic
       const binding = services.sessions.binding(id)
       if (!binding) throw Error('新对话未能就绪，请重试。')
       if (!hasContent) {
-        services.uiWorkspace.openSession(id); desktop[SURFACE]!.open('home'); return
+        services.uiWorkspace.openSession(id); desktop[SURFACE]!.open('home'); await persist(entry, { phase: 'accepted' }); return
       }
       const session = binding.session
       if (!session || typeof session.prompt !== 'function' || typeof session.beginSubmission !== 'function') throw Error('对话发送服务尚未就绪，请稍后重试。')
@@ -181,10 +240,17 @@ export function installDesktopPetBridge(view: Window, services: DesktopPetServic
           : await services.fileUpload!.upload(id, bytes, attachment.name, signal)
         ensureActive()
         if (!result.ok || typeof result.value?.receiptId !== 'string' || !result.value.receiptId) throw Error(result.error?.message ?? `附件 ${attachment.name} 上传失败。`)
-        entry.uploads.push({ receiptId: result.value.receiptId, ...(result.value.file ? { file: result.value.file } : {}) })
+        const file = result.value.file
+        const metadata = file && typeof file['attachmentId'] === 'string' && typeof file['name'] === 'string' && Number.isSafeInteger(file['bytes'])
+          ? { attachmentId: file['attachmentId'], name: file['name'], bytes: file['bytes'] as number } : undefined
+        entry.uploads.push({ receiptId: result.value.receiptId, ...(metadata ? { file: metadata } : {}) })
+        await persist(entry, { phase: 'preparing', uploads: entry.uploads })
       }
       ensureActive()
-      const accepted = (): void => { if (entry.controller === controller) entry.result = { state: 'accepted', sessionId: id } }
+      let accepting: Promise<void> | undefined
+      const accepted = (): void => {
+        accepting ??= persist(entry, { phase: 'accepted' }).then(() => { entry.result = { state: 'accepted', sessionId: id } }, () => { uncertain(entry) })
+      }
       const isAccepted = (): boolean => entry.result.state === 'accepted'
       const previewUrls: string[] = []
       const retirePreviews = (): void => { for (const url of previewUrls.splice(0)) URL.revokeObjectURL(url) }
@@ -206,24 +272,37 @@ export function installDesktopPetBridge(view: Window, services: DesktopPetServic
       // open after Inbox acceptance, so release raw IPC bytes before awaiting it.
       request.attachments = []
       entry.submitting = true; entry.result = { state: 'pending', phase: 'submitting', sessionId: id }
+      let dispatched = false
       try {
+        // Durably fence the request before the first RPC byte can leave this view.
+        await persist(entry, { phase: 'submitting', hostRequestId: submission.requestId })
         // Once dispatched there is no cancellation signal: a timed-out native UI
         // must query this same request, never abandon a potentially accepted send.
+        dispatched = true
         const result = await session.prompt(parts, 'queue', undefined, submission.requestId)
+        if (accepting) { await accepting; return }
         if (isAccepted()) return
         if (!result.ok) {
           // The official gateway folds transport failures into ok:false with
           // gateway/* codes. Only identified admission rejections are safe to retry.
           if (!definitePromptRejections.has(result.error?.code ?? '')) throw Error('无法确认宿主回执。')
-          entry.submitting = false; submission.abandon()
+          submission.abandon()
+          await persist(entry, { phase: 'preparing', failure: 'admission-rejected' })
+          entry.submitting = false
           throw Error(result.error?.message ?? '消息未被接收，请重试。')
         }
-        accepted()
+        accepted(); await accepting
       } catch (failure) {
+        if (accepting) { await accepting; return }
         if (isAccepted()) return
+        if (!dispatched) {
+          // The durable fence failed before any Host RPC. Remove the optimistic
+          // item; an uncertain storage receipt still cannot authorize a resend.
+          try { submission.abandon() } catch { /* Preserve the durable no-replay decision even if view cleanup fails. */ }
+        }
         retirePreviews()
         if (entry.submitting) {
-          entry.result = { state: 'rejected', sessionId: id, retryable: false, error: '发送回执未确认，请在对应对话中核对。为避免重复任务，本次请求不会自动重发。' }
+          uncertain(entry)
           return
         }
         throw failure
@@ -236,8 +315,15 @@ export function installDesktopPetBridge(view: Window, services: DesktopPetServic
     delete entry.verification
     void perform(entry, request, controller).then(() => {
       if (entry.controller === controller && entry.result.state === 'pending' && !controller.signal.aborted) entry.result = { state: 'accepted', ...(entry.sessionId ? { sessionId: entry.sessionId } : {}) }
-    }, reason => {
-      if (entry.controller === controller && entry.result.state === 'pending' && !controller.signal.aborted) entry.result = { state: 'rejected', retryable: true, error: reason instanceof Error ? reason.message : '工作台未能接收请求。' }
+    }, async reason => {
+      if (entry.controller === controller && entry.result.state === 'pending' && !controller.signal.aborted) {
+        if (entry.receipt?.phase === 'creating' || entry.receipt?.phase === 'submitting') { uncertain(entry); return }
+        if (entry.receipt) {
+          try { await persist(entry, { phase: 'preparing', failure: 'preparation-failed' }) }
+          catch { /* No effect is dispatched without a durable phase. A later CAS still fails closed. */ }
+        }
+        if (entry.controller === controller && !controller.signal.aborted) entry.result = { state: 'rejected', retryable: true, error: reason instanceof Error ? reason.message : '工作台未能接收请求。' }
+      }
     })
   }
   const pending = (): boolean => [...results.values()].some(entry => entry.result.state === 'pending' || entry.verification?.result.state === 'pending')
@@ -281,7 +367,7 @@ export function installDesktopPetBridge(view: Window, services: DesktopPetServic
       for (const [id, entry] of results) { if (results.size < RETAINED_RESULTS) break; if (snapshot(entry).state !== 'pending' && entry.result.state !== 'pending' && !entry.submitting) { results.delete(id); cancelledIds.add(id) } }
       if (cancelledIds.size > RETAINED_RESULTS) cancelledIds.delete(cancelledIds.values().next().value!)
       if (results.size >= RETAINED_RESULTS) return { accepted: false, error: '仍有桌宠请求等待宿主确认，请稍后重试。' }
-      const entry: RequestEntry = { fingerprint: fingerprint(view, request), result: { state: 'pending' }, controller: new AbortController(), submitting: false, uploads: [] }
+      const entry: RequestEntry = { fingerprint: fingerprint(view, request), owner: view.crypto.randomUUID(), result: { state: 'pending' }, controller: new AbortController(), submitting: false, uploads: [] }
       results.set(request.id, entry); start(entry, request)
       return { accepted: true }
     },

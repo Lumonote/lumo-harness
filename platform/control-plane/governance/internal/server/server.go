@@ -57,6 +57,7 @@ type Config struct {
 	WebAuthn      authcrypto.WebAuthnConfig
 	OIDC          authcrypto.OIDCConfig
 	DeviceGateway *device.Gateway
+	RemoteComputerUse bool
 }
 
 // clusterRetryAfter is the Retry-After advertised when the cluster is declared
@@ -112,10 +113,13 @@ func New(st *store.Store, cfg Config, log *slog.Logger) (*Server, error) {
 			st.SetOIDCProvider(cfg.OIDC.Issuer, cfg.OIDC.Realm)
 		}
 	}
-	return &Server{store: st, cfg: cfg, log: log}, nil
+	server := &Server{store: st, cfg: cfg, log: log}
+	if cfg.RemoteComputerUse && cfg.DeviceGateway != nil { cfg.DeviceGateway.SetRemoteComputerAuthorizer(server.authorizeRemoteComputer) }
+	return server, nil
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
+	s.registerRemoteComputerRoutes(mux)
 	s.registerUserSecurityRoutes(mux)
 	mux.HandleFunc("GET /v1/storage/quota", s.storageQuota)
 	mux.HandleFunc("PUT /v1/storage/quota", s.storageQuota)
@@ -198,6 +202,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/tasks/{taskID}/runs/{runID}/artifacts", s.taskArtifacts)
 	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/artifacts", s.taskArtifacts)
 	mux.HandleFunc("PUT /v1/tasks/{taskID}/runs/{runID}/artifacts/{artifactID}/complete", s.completeTaskArtifact)
+	mux.HandleFunc("DELETE /v1/tasks/{taskID}/runs/{runID}/artifacts/{artifactID}", s.withdrawTaskArtifact)
 	mux.HandleFunc("GET /v1/tasks/{taskID}/runs/{runID}/artifacts/{artifactID}/storage", s.taskArtifactStorage)
 	mux.HandleFunc("POST /v1/tasks/{taskID}/runs", s.createTaskRun)
 	mux.HandleFunc("PATCH /v1/tasks/{taskID}/runs/{runID}", s.updateTaskRun)

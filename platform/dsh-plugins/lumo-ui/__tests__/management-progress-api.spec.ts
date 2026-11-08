@@ -43,6 +43,11 @@ it('rejects traversal and unsupported mutations', async () => {
  expect((await invoke('POST', '/lumo/api/workforce/progress', {})).status).toBe(405)
  expect((await invoke('PATCH', '/lumo/api/projects/directory', {})).status).toBe(405); expect(fetch).not.toHaveBeenCalled()
 })
+it('forwards bounded workforce filters and duplicate values for server validation', async () => {
+ const fetch = vi.fn().mockResolvedValue(new Response('{"items":[]}')); vi.stubGlobal('fetch', fetch)
+ await invoke('GET', '/lumo/api/workforce/progress?q=Alice&q=Bob&risk=blocked&worker_kind=agent&scope=all&realm=forged')
+ expect(fetch.mock.calls[0]![0]).toBe('http://governance.test/v1/workforce/progress?scope=all&q=Alice&q=Bob&risk=blocked&worker_kind=agent')
+})
 it('reads an authorized task outside the currently loaded directory page', async () => {
  const fetch = vi.fn().mockResolvedValue(new Response('{"id":"t-2"}')); vi.stubGlobal('fetch', fetch)
  expect(await invoke('GET', '/lumo/api/delegations/t-2?realm=forged')).toEqual({ status: 200, body: { id: 't-2' } }); expect(fetch.mock.calls[0]![0]).toBe('http://governance.test/v1/delegations/t-2')

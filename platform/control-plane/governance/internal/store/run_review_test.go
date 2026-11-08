@@ -159,6 +159,7 @@ func TestRunReviewRejectsStaleRejectedAndUnboundOutput(t *testing.T) {
 func TestRunReviewUnknownImpactAndManifestCannotBeExpanded(t *testing.T) {
 	s := taskTestStore(t)
 	ctx := context.Background()
+	grantReviewArtifactWriter(t, s)
 	unknown := seedReviewExecution(t, s, "external", "external-agent", "model-a", false)
 	snapshot := prepareReviewExecution(t, s, unknown, "model-a")
 	if snapshot.Snapshot.OutputProfile != "unknown" {
@@ -173,7 +174,7 @@ func TestRunReviewUnknownImpactAndManifestCannotBeExpanded(t *testing.T) {
 	}
 	closed := seedReviewExecution(t, s, "closed", "closed-agent", "model-a", true)
 	prepareReviewExecution(t, s, closed, "model-a")
-	if _, err := s.ReserveTaskArtifact(ctx, domain.TaskArtifact{ID: "late-artifact", Realm: "realm", TaskID: closed.TaskID, RunID: closed.RunID, Name: "unreviewed", CreatedBy: "employee"}); !errors.Is(err, ErrConflict) {
+	if _, err := s.ReserveTaskArtifact(ctx, domain.TaskArtifact{ID: "late-artifact", Realm: "realm", TaskID: closed.TaskID, RunID: closed.RunID, Name: "unreviewed", CreatedBy: "employee"}, false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("late artifact expanded sealed output set: %v", err)
 	}
 	closed.Output = json.RawMessage(`[{"type":"image","text":"unobserved"}]`)
@@ -422,7 +423,9 @@ func TestRunReviewReplacementCannotEraseUnknownHistoricalImpact(t *testing.T) {
 				recordReviewExecution(t, s, old)
 			}
 			if tc.artifact {
-				if _, err := s.ReserveTaskArtifact(ctx, domain.TaskArtifact{ID: "historical-file", Realm: "realm", TaskID: old.TaskID, RunID: old.RunID, Name: "unproven historical delivery", CreatedBy: "employee"}); err != nil {
+				// Historical data predates the active-run upload gate. Recreate it
+				// directly rather than granting new uploads into terminal evidence.
+				if _, err := s.pool.Exec(ctx, `INSERT INTO governance_task_artifacts(id,realm,task_id,run_id,name,content_type,created_by,status)VALUES('historical-file','realm',$1,$2,'unproven historical delivery','text/plain','employee','pending')`, old.TaskID, old.RunID); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -468,7 +471,7 @@ func TestRunReviewUnexecutedFailureDoesNotBlockAndClosedTaskCannotGainArtifacts(
 	if completed, err := s.TransitionBusinessTask(ctx, "realm", task.ID, "complete", "manager", passingGate()); err != nil || completed.BusinessState != domain.BusinessDone {
 		t.Fatalf("unexecuted assignment blocked replacement: %+v %v", completed, err)
 	}
-	if _, err := s.ReserveTaskArtifact(ctx, domain.TaskArtifact{ID: "post-acceptance-file", Realm: "realm", TaskID: task.ID, RunID: old.ID, Name: "late unreviewed output", CreatedBy: "employee"}); !errors.Is(err, ErrConflict) {
+	if _, err := s.ReserveTaskArtifact(ctx, domain.TaskArtifact{ID: "post-acceptance-file", Realm: "realm", TaskID: task.ID, RunID: old.ID, Name: "late unreviewed output", CreatedBy: "employee"}, false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("accepted task gained output through an old Run: %v", err)
 	}
 }
@@ -476,11 +479,12 @@ func TestRunReviewUnexecutedFailureDoesNotBlockAndClosedTaskCannotGainArtifacts(
 func TestRunReviewAnyUploadedArtifactInvalidatesTextOnlyAcceptance(t *testing.T) {
 	s := taskTestStore(t)
 	ctx := context.Background()
+	grantReviewArtifactWriter(t, s)
 	old := seedReviewExecution(t, s, "producer", "producer-agent", "model-a", true)
 	prepareReviewExecution(t, s, old, "model-a")
 	recordReviewExecution(t, s, old)
 	latest := approvedReplacementRun(t, s, old.TaskID)
-	if _, err := s.ReserveTaskArtifact(ctx, domain.TaskArtifact{ID: "forbidden-upload", Realm: "realm", TaskID: old.TaskID, RunID: latest.RunID, Name: "unreviewed file", CreatedBy: "employee"}); !errors.Is(err, ErrConflict) {
+	if _, err := s.ReserveTaskArtifact(ctx, domain.TaskArtifact{ID: "forbidden-upload", Realm: "realm", TaskID: old.TaskID, RunID: latest.RunID, Name: "unreviewed file", CreatedBy: "employee"}, false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("prepared closed Run accepted an upload: %v", err)
 	}
 	for _, runID := range []string{old.RunID, latest.RunID} {
@@ -495,5 +499,16 @@ func TestRunReviewAnyUploadedArtifactInvalidatesTextOnlyAcceptance(t *testing.T)
 		if _, err := s.pool.Exec(ctx, `DELETE FROM governance_task_artifacts WHERE id='uncovered-file'`); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// The upload assertions must reach the sealed-output check as a currently
+// authorized contributor; a missing role would only test an earlier refusal.
+func grantReviewArtifactWriter(t *testing.T, s *Store) {
+	t.Helper()
+	if _, err := s.pool.Exec(context.Background(), `INSERT INTO governance_roles(realm,id,name,status)VALUES('realm','review-artifact-writer','Review artifact writer','active');
+ INSERT INTO governance_role_permissions(realm,role_id,action,effect)VALUES('realm','review-artifact-writer','task:delegate','allow');
+ INSERT INTO governance_user_roles(realm,user_id,role_id,granted_by)VALUES('realm','employee','review-artifact-writer','manager')`); err != nil {
+		t.Fatal(err)
 	}
 }

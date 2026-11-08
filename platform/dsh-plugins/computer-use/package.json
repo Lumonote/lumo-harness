@@ -4,21 +4,25 @@
   "license": "MIT",
   "private": true,
   "type": "module",
-  "exports": { ".": { "types": "./src/index.ts", "import": "./src/index.ts", "default": "./src/index.ts" } },
+  "exports": { ".": { "types": "./src/index.ts", "import": "./src/index.ts", "default": "./src/index.ts" }, "./windows": { "types": "./src/windows.ts", "import": "./src/windows.ts", "default": "./src/windows.ts" }, "./windows-registry": { "types": "./src/windows-registry.ts", "import": "./src/windows-registry.ts", "default": "./src/windows-registry.ts" }, "./remote": { "types": "./src/remote.ts", "import": "./src/remote.ts", "default": "./src/remote.ts" } },
+
   "engines": { "node": "^22.19.0 || >=24.0.0" },
   "dependencies": {
     "@deepseek-ai/cordis": "link:../../../deepseek-harness/vendor/cordis",
     "@deepseek-ai/dsh-agent": "link:../../../deepseek-harness/packages/core/agent",
     "@deepseek-ai/dsh-atomic-write": "link:../../../deepseek-harness/packages/util/atomic-write",
+    "@deepseek-ai/dsh-computer-use": "link:../../../deepseek-harness/packages/computer-use/computer-use",
+    "@deepseek-ai/dsh-mcp-client": "link:../../../deepseek-harness/packages/mcp/mcp-client",
+    "@deepseek-ai/dsh-llm": "link:../../../deepseek-harness/packages/llm/llm",
     "@deepseek-ai/dsh-session": "link:../../../deepseek-harness/packages/core/session",
     "@deepseek-ai/dsh-tools": "link:../../../deepseek-harness/packages/core/tools",
+    "@deepseek-ai/dsh-system-prompt": "link:../../../deepseek-harness/packages/core/system-prompt",
+    "@trycua/cua-driver": "0.28.0",
     "@deepseek-ai/schemastery": "link:../../../deepseek-harness/vendor/schemastery"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-agent-loop": "link:../../../deepseek-harness/packages/core/agent-loop",
     "@deepseek-ai/dsh-agent-loop-testkit": "link:../../../deepseek-harness/packages/test-support/agent-loop-testkit",
-    "@deepseek-ai/dsh-llm": "link:../../../deepseek-harness/packages/llm/llm",
-    "@deepseek-ai/dsh-system-prompt": "link:../../../deepseek-harness/packages/core/system-prompt",
     "@deepseek-ai/dsh-tool-executor-native": "link:../../../deepseek-harness/packages/core/tool-executor-native",
     "@deepseek-ai/dsh-tool-testkit": "link:../../../deepseek-harness/packages/test-support/tool-testkit"
   }

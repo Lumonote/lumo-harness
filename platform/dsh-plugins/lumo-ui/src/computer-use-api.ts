@@ -56,7 +56,7 @@ export function computerUseHandler(ctx: ServiceContext, local: boolean, platform
   // Compare after body transfer: a stop must invalidate an earlier enable even
   // when that enable's request body arrives after the stop has completed.
   let controlRevision = 0
-  const nativeSupport = platform === 'darwin' && Number.parseInt(systemRelease.split('.')[0] ?? '', 10) >= 23
+  const macNativeSupport = platform === 'darwin' && Number.parseInt(systemRelease.split('.')[0] ?? '', 10) >= 23
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if (!local) { json(res, 404, { error: 'computer_use_local_only' }); return }
     const connection = ctx.get('connection') as BrowserConnection | undefined
@@ -100,7 +100,9 @@ export function computerUseHandler(ctx: ServiceContext, local: boolean, platform
     }
     // Provider identity is passive metadata. Reading the page never starts the native helper.
     const provider = (ctx.get('computerUse') as { providerName?: string } | undefined)?.providerName ?? null
-    if (action === 'enable' && (!nativeSupport || provider !== 'dsh-cua')) {
+    const windowsReady = platform === 'win32' && provider === 'lumo-cua-windows' && (ctx.get('lumoWindowsComputerUse') as { available?: boolean } | undefined)?.available === true
+    const nativeSupport = macNativeSupport || windowsReady
+    if (action === 'enable' && !(macNativeSupport && provider === 'dsh-cua') && !windowsReady) {
       json(res, 409, { error: 'computer_use_provider_unavailable' }); return
     }
     try {

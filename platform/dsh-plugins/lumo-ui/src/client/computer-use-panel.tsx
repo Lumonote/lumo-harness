@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from '
 import type { ComputerUseStatus } from '../computer-use-api.ts'
 import { getComputerUseServices, subscribeComputerUseServices, type ComputerUseClientServices } from './computer-use-services.ts'
 import './computer-use-panel.css'
+import { RemoteComputerPanel } from './remote-computer-panel.tsx'
 
 const EMPTY_SESSIONS: ReturnType<ComputerUseClientServices['sessions']['list']['getSnapshot']> = { phase: 'pending', byId: {} }
 const PHASES = { disabled: '已关闭', ready: '等待当前对话调用', running: '正在操作电脑', stopping: '正在停止，等待已发出的操作结束' }
@@ -18,7 +19,7 @@ function failure(code: string): string {
   if (code === 'session_required') return '当前对话尚未就绪，请返回对话后重试。'
   if (code === 'same_origin_required') return '页面来源校验失败，请从桌面端重新打开此页面。'
   if (code === 'computer_use_unavailable') return '电脑操作服务尚未就绪，请稍后重试。'
-  if (code === 'computer_use_provider_unavailable') return '请在 macOS 14 及以上系统中启用官方 Computer Use 插件后重试。'
+  if (code === 'computer_use_provider_unavailable') return '本机电脑操作驱动尚未就绪，请检查插件状态后重试。'
   if (code === 'computer_use_control_conflict') return '电脑操作授权已更新，请刷新状态后重新授权。'
   if (code === 'computer_use_invalid_status') return '电脑操作状态响应无效，请重新读取后再授权。'
   return '暂时无法同步电脑操作状态，请重试。'
@@ -120,7 +121,7 @@ function ScopedComputerUsePanel({ services, selectedId, selectedTitle, onClose }
   }
   const stopping = snapshot?.phase === 'stopping'
   const busy = pending === 'enable' || pending === 'stop'
-  const providerReady = snapshot?.nativeSupport === true && snapshot.provider === 'dsh-cua'
+  const providerReady = snapshot?.nativeSupport === true && ((snapshot.platform === 'darwin' && snapshot.provider === 'dsh-cua') || (snapshot.platform === 'win32' && snapshot.provider === 'lumo-cua-windows'))
   const canEnable = verified && providerReady && selectedId !== undefined && session(selectedId) && !stopping && !busy
   const alreadyAuthorized = snapshot?.enabled === true && snapshot.authorizedSessionId === selectedId
   const events = snapshot?.events.slice(-50).reverse() ?? []
@@ -133,7 +134,8 @@ function ScopedComputerUsePanel({ services, selectedId, selectedTitle, onClose }
       <div className="lumo-computer-actions"><button type="button" className="lumo-button" disabled={!canEnable || alreadyAuthorized} onClick={() => { if (canEnable && !alreadyAuthorized) void refresh('enable', selectedId, snapshot?.controlRevision) }}>{pending === 'enable' ? '正在授权…' : alreadyAuthorized ? '当前对话已获授权' : '允许当前对话操作电脑'}</button><button type="button" className="lumo-secondary lumo-computer-stop" disabled={snapshot === undefined || pending === 'stop' || stopping} onClick={() => { void refresh('stop') }}>{stopping || pending === 'stop' ? '正在停止…' : '立即停止'}</button></div>
       <p className="lumo-computer-note">授权仅适用于上方对话；停止后需重新授权。停止会阻止后续调用，并等待已发出的操作退出。</p>
     </section>
-    <section className="lumo-computer-setup" aria-labelledby="lumo-computer-setup"><div><h2 id="lumo-computer-setup">启用操作能力</h2><p>{snapshot?.nativeSupport === false ? '此功能需要 macOS 14 及以上，当前系统暂不可用。' : '需要 macOS 14 及以上。在插件 → 更多 → Computer Use 中启用插件，调用模式选择 PTC。首次使用时按系统提示授予辅助功能和屏幕录制权限。'}</p><p>返回已授权对话描述任务即可。应用的访问范围由 Computer Use 授权界面管理。</p></div><button type="button" className="lumo-secondary" disabled={services === undefined} onClick={openPlugins}>前往插件</button></section>
+    <section className="lumo-computer-setup" aria-labelledby="lumo-computer-setup"><div><h2 id="lumo-computer-setup">启用操作能力</h2><p>{snapshot?.platform === 'win32' ? 'Windows 需要在已登录的交互桌面启用本机驱动，再授权当前对话。目标应用应以普通用户权限运行；UAC 安全桌面和管理员窗口不在授权范围内。驱动清理异常后需重启桌面端。' : snapshot?.nativeSupport === false ? '此系统尚无已验证的电脑操作驱动。macOS 需要 14 及以上版本。' : '需要 macOS 14 及以上。在插件 → 更多 → Computer Use 中启用插件，调用模式选择 PTC。首次使用时按系统提示授予辅助功能和屏幕录制权限。'}</p><p>返回已授权对话描述任务即可。应用的访问范围由 Computer Use 授权界面管理。</p></div><button type="button" className="lumo-secondary" disabled={services === undefined} onClick={openPlugins}>前往插件</button></section>
+    <RemoteComputerPanel />
     <section className="lumo-computer-events" aria-labelledby="lumo-computer-events"><header><h2 id="lumo-computer-events">最近操作</h2><span>最多显示 50 条</span></header>{events.length === 0 ? <p className="lumo-computer-empty">暂无电脑操作记录。</p> : <ol>{events.map(event => <li key={event.id} data-state={event.state}><time dateTime={new Date(event.at).toISOString()}>{time(event.at)}</time><div><strong>{event.method ?? event.tool}</strong><span>{event.sessionId}</span>{event.code ? <code>{event.code}</code> : null}</div><span>{STATES[event.state]}</span></li>)}</ol>}</section>
   </section>
 }

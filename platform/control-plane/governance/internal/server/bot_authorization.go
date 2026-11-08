@@ -102,7 +102,7 @@ func (s *Server) manageBotGrant(w http.ResponseWriter, r *http.Request) {
 	var grant store.BotGrant
 	var err error
 	if req.Status == "revoked" {
-		previous, e := s.store.BotGrant(r.Context(), c.realm, r.PathValue("channel"), r.PathValue("subject"), req.TeamID, req.ProjectID, req.AgentID)
+		previous, e := s.store.BotCapabilityGrant(r.Context(), c.realm, r.PathValue("channel"), r.PathValue("subject"), req.TeamID, req.ProjectID, req.AgentID, req.Capability)
 		if e != nil {
 			s.respondStoreError(w, e)
 			return
@@ -169,7 +169,7 @@ func (s *Server) runtimeBotAuthorization(w http.ResponseWriter, r *http.Request)
 	deny := func() {
 		writeError(w, 403, "bot_authorization_denied", "current sender, Flow author, team, project and Agent grant are required")
 	}
-	if req.Channel == "" || req.Subject == "" || req.Sender == "" || req.BindingRevision < 1 || req.GrantRevision < 1 || req.FlowID == "" || req.FlowVersion < 1 || req.NodeID == "" || req.Capability != "delegation.create" {
+	if req.Channel == "" || req.Subject == "" || req.Sender == "" || req.BindingRevision < 1 || req.GrantRevision < 1 || req.FlowID == "" || req.FlowVersion < 1 || req.NodeID == "" || (req.Capability != "delegation.create" && req.Capability != "computer-use.request") {
 		deny()
 		return
 	}
@@ -178,7 +178,7 @@ func (s *Server) runtimeBotAuthorization(w http.ResponseWriter, r *http.Request)
 		deny()
 		return
 	}
-	grant, err := s.store.BotGrant(r.Context(), realm, req.Channel, req.Subject, req.TeamID, req.ProjectID, req.AgentID)
+	grant, err := s.store.BotCapabilityGrant(r.Context(), realm, req.Channel, req.Subject, req.TeamID, req.ProjectID, req.AgentID, req.Capability)
 	if err != nil || grant.Status != "active" || grant.Revision != req.GrantRevision || grant.Captain != req.Captain || grant.SubjectUserID != mapping.UserID || grant.SubjectRevision != mapping.Revision {
 		deny()
 		return

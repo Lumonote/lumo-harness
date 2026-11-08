@@ -1,0 +1,9 @@
+[package]
+name = "lumo-cua-supervisor"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "lumo-cua-supervisor"
+path = "windows-supervisor.rs"

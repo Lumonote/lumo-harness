@@ -93,6 +93,16 @@ describe('serializeSegment / parseSegment —— 往返与损坏检测', () => {
     const back = parseSegment('s1', serializeSegment([r]))
     expect(back[0]!.payload).toEqual(r.payload)
   })
+  it('拒绝异会话、重复序号，以及与持久元数据不符的范围和条数', () => {
+    expect(() => parseSegment('other-session', serializeSegment([rec(1)]))).toThrow(SegmentCorruptError)
+    expect(() => parseSegment('s1', serializeSegment([rec(1), rec(1)]))).toThrow(SegmentCorruptError)
+    const bytes = serializeSegment([rec(1), rec(3)])
+    const meta = { sessionRef: 's1', startSeq: 1, endSeq: 3, sha256: sha256Of(bytes), bytes: bytes.length, items: 2, archivedAt: 0 }
+    expect(parseSegment('s1', bytes, meta)).toHaveLength(2)
+    for (const changed of [{items: 3}, {startSeq: 0}, {endSeq: 4}, {sessionRef: 'other'}]) {
+      expect(() => parseSegment('s1', bytes, {...meta, ...changed})).toThrow(SegmentCorruptError)
+    }
+  })
 })
 
 describe('retentionOf —— 保留期三分', () => {

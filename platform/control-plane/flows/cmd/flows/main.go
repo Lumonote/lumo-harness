@@ -80,7 +80,8 @@ func main() {
 
 	bus := trigger.New()
 	flowEngine := engine.New(engine.RuntimeConfig{
-		LLMURL: os.Getenv("LUMO_LLM_GATEWAY_URL"), ConnectorURL: os.Getenv("LUMO_CONNECTOR_GATEWAY_URL"),
+		RemoteComputerUse: os.Getenv("LUMO_REMOTE_COMPUTER_USE") == "true",
+		LLMURL:            os.Getenv("LUMO_LLM_GATEWAY_URL"), ConnectorURL: os.Getenv("LUMO_CONNECTOR_GATEWAY_URL"),
 		KnowledgeURL: os.Getenv("LUMO_KNOWLEDGE_SEAM_URL"),
 		// 决策固化算子（§24.4 第 5 条）的上游。未配置即该算子 unavailable，用它的流程
 		// 连发布都过不去（ValidateDefinition 拒绝）——默认关闭落在配置上，不落在默认频率上。

@@ -286,6 +286,20 @@ function tablesIn(ddl: string): string[] {
  */
 const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequisites?: DdlSource | DdlSource[] }> = [
   {
+    label: '受控仓库快照与发布回执（Go governance ↔ 迁移 040）',
+    a: { files: [`${MIGRATION_DIR}/040_governance_controlled_repository.sql`] },
+    b: { files: ['control-plane/governance/internal/store/run_repository.go'], constName: 'runRepositoryDDL' },
+    prerequisites: [
+      { files: ['control-plane/governance/internal/store/store.go'], constName: 'DDL' },
+      { files: ['control-plane/governance/internal/store/run_review.go'], constName: 'runReviewDDL' },
+    ],
+  },
+  {
+    label: '冷日志归档退役记录与冻结计划（TS archiver ↔ 迁移 039/042）',
+    a: { files: ['dsh-plugins/session-log/src/cold-log.ts'], constName: 'ARCHIVE_DDL' },
+    b: { files: [`${MIGRATION_DIR}/039_cold_archive_retirement.sql`, `${MIGRATION_DIR}/042_cold_archive_plans.sql`] },
+  },
+  {
     label: '任务进度检查点（Go governance ↔ 迁移 033）',
     a: { files: [`${MIGRATION_DIR}/033_task_progress.sql`] },
     b: { files: ['control-plane/governance/internal/store/task_progress.go'], constName: 'taskProgressDDL' },
@@ -316,10 +330,19 @@ const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequis
     b: { files: ['control-plane/connector-gateway/internal/owned/store.go'], constName: 'DDL' },
   },
   {
-    label: '动态 Session attachment receipts（Go session-control ↔ 迁移 028）',
-    a: { files: [`${MIGRATION_DIR}/028_session_attachment_receipts.sql`] },
+    label: '动态 Session attachment receipts（Go session-control ↔ 迁移 028/035）',
+    a: { files: [`${MIGRATION_DIR}/028_session_attachment_receipts.sql`, `${MIGRATION_DIR}/035_session_document_attachments.sql`] },
     b: { files: ['control-plane/session-control/internal/store/session_attachments.go'], constName: 'sessionAttachmentDDL' },
     prerequisites: { files: ['control-plane/session-control/internal/store/session_owners.go'], constName: 'sessionOwnerDDL' },
+  },
+  {
+    label: '远程电脑操作本机批准与回执（Go governance ↔ 迁移 041）',
+    a: { files: [`${MIGRATION_DIR}/041_remote_computer_requests.sql`] },
+    b: { files: ['control-plane/governance/internal/store/remote_computer.go'], constName: 'remoteComputerDDL' },
+    prerequisites: [
+      { files: ['control-plane/governance/internal/store/store.go'], constName: 'DDL' },
+      { files: ['control-plane/governance/internal/store/bot_authorization.go'], constName: 'botAuthorizationDDL' },
+    ],
   },
   {
     label: '动态 Session execution fencing（Go session-control ↔ 迁移 027）',
@@ -328,9 +351,18 @@ const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequis
     prerequisites: { files: ['control-plane/session-control/internal/store/session_owners.go'], constName: 'sessionOwnerDDL' },
   },
   {
-    label: 'managed content lifecycle（共享事务契约 ↔ 迁移 025）',
+    label: '动态 Session explicit migration receipts（Go session-control ↔ 迁移 038）',
+    a: { files: [`${MIGRATION_DIR}/038_session_migrations.sql`] },
+    b: { files: ['control-plane/session-control/internal/store/session_migrations.go'], constName: 'sessionMigrationDDL' },
+    prerequisites: [
+      { files: ['control-plane/session-control/internal/store/session_owners.go'], constName: 'sessionOwnerDDL' },
+      { files: ['control-plane/session-control/internal/store/session_execution.go'], constName: 'sessionExecutionDDL' },
+    ],
+  },
+  {
+    label: 'managed content lifecycle（共享事务契约 ↔ 迁移 025/036）',
     a: { files: ['shared/managed-content.ts'], constName: 'MANAGED_CONTENT_DDL' },
-    b: { files: [`${MIGRATION_DIR}/025_managed_content_lifecycle.sql`] },
+    b: { files: [`${MIGRATION_DIR}/025_managed_content_lifecycle.sql`, `${MIGRATION_DIR}/036_managed_task_artifacts.sql`] },
   },
   {
     label: '持久恢复双人审批（Go Governance ↔ 迁移 026）',
@@ -580,7 +612,18 @@ function targetTables(stmt: string): string[] {
  * version. Keep migration history intact and require the final replacement.
  */
 function currentMigrationStatements(entries: Array<{ file: string; stmt: string }>) {
-  const checkKey = (stmt: string) => /^ALTER TABLE ([A-Za-z_][A-Za-z0-9_]*) ADD CONSTRAINT ([A-Za-z_][A-Za-z0-9_]*) CHECK\s*\(/iu.exec(stmt)?.slice(1).map(s => s.toLowerCase()).join('.')
+  const directCheckKey = (stmt: string) => /^ALTER TABLE ([A-Za-z_][A-Za-z0-9_]*) ADD CONSTRAINT ([A-Za-z_][A-Za-z0-9_]*) CHECK\s*\(/iu.exec(stmt)?.slice(1).map(s => s.toLowerCase()).join('.')
+  const checkKey = (stmt: string) => {
+    const direct = directCheckKey(stmt)
+    if (direct) return direct
+    // Historical 029 conditionally added its CHECK in a single-purpose DO.
+    // Only this exact wrapper can be superseded: a DO containing other writes
+    // must still be present in every startup that declares its target tables.
+    const conditional = /^DO \$\$ BEGIN IF NOT EXISTS\(SELECT 1 FROM pg_constraint WHERE conname='([A-Za-z_][A-Za-z0-9_]*)' AND conrelid='([A-Za-z_][A-Za-z0-9_]*)'::regclass\) THEN (ALTER TABLE [^;]+); END IF; END \$\$$/iu.exec(stmt)
+    if (!conditional) return undefined
+    const inner = directCheckKey(conditional[3]!)
+    return inner === `${conditional[2]}.${conditional[1]}`.toLowerCase() ? inner : undefined
+  }
   const replacements = new Map<string, number>()
   entries.forEach(({ stmt }, index) => {
     const key = checkKey(stmt)
@@ -617,6 +660,13 @@ describe('迁移 ↔ 服务 DDL 收敛（常跑，不依赖 DSN）', () => {
     expect(currentMigrationStatements([old, entry('ALTER TABLE audit DROP CONSTRAINT IF EXISTS unrelated'), next])).toHaveLength(3)
     const unique = entry('ALTER TABLE audit ADD CONSTRAINT events UNIQUE (event)')
     expect(currentMigrationStatements([unique, drop, next])).toEqual([unique, drop, next])
+    const conditional = entry("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conname='events' AND conrelid='audit'::regclass) THEN ALTER TABLE audit ADD CONSTRAINT events CHECK (event IN ('old')); END IF; END $$")
+    expect(currentMigrationStatements([conditional, drop, next])).toEqual([drop, next])
+    expect(currentMigrationStatements([conditional, next])).toEqual([conditional, next])
+    const withWrite = entry(conditional.stmt.replace('END $$', "UPDATE audit SET event='old'; END $$"))
+    expect(currentMigrationStatements([withWrite, drop, next])).toEqual([withWrite, drop, next])
+    const mismatched = entry(conditional.stmt.replace("conrelid='audit'", "conrelid='other'"))
+    expect(currentMigrationStatements([mismatched, drop, next])).toEqual([mismatched, drop, next])
   })
   it('保留带内部语句和引号分号的 DO 块，并检查每一张写入表', () => {
     const block = "DO $upgrade$ BEGIN UPDATE state SET reason = 'operator''s; reason'; UPDATE audit SET outcome = 'applied'; END $upgrade$"

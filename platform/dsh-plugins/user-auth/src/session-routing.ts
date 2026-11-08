@@ -6,9 +6,10 @@ import type { Principal } from './client.ts'
 import type { AuthenticatedSessionTransport, SessionAuthority, SessionTransportConfig } from './session-transport.ts'
 import { SessionModelPolicyError } from './session-model-policy.ts'
 import { SessionRequestError, sessionUpstreamError, publicSessionRequestError } from './session-request-errors.ts'
+import { SessionMigrationClient, SessionMigrationError, migrationActions } from './session-migration.ts'
 
 const streams = new Set(['follow','observeState','observeEvent','observeProjections'])
-const unary = new Set(['fork','state','wait','events','page','projections','rename','prompt','cancel','updateQueue','models','selectModel','interactionList','interactionAnswer'])
+const unary = new Set(['fork','state','wait','events','page','projections','rename','prompt','cancel','updateQueue','models','selectModel','interactionList','interactionAnswer','checkpoint','recover'])
 export const SESSION_RUNTIME_PATH = '/lumo/runtime/session'
 /** Origins are deployment configuration, never browser input or registration
  * data. A current authority fact must agree with the pinned origin as well. */
@@ -39,6 +40,7 @@ export function routeSessionTransport(local: AuthenticatedSessionTransport,confi
   if(!runtime) throw new Error('Session routing requires persistent execution fencing')
   const owners=new SessionOwnerClient(config.authorityUrl,token,fetcher)
   const executions=new SessionExecutionClient(config.authorityUrl,token,fetcher)
+  const migrations=new SessionMigrationClient(config.authorityUrl,token,fetcher)
   const destination=async(node:ExecutionNode):Promise<void>=>{
     await runtime.check()
     const current=await executions.node(realm,config.nodeId,config.projectId)
@@ -51,10 +53,21 @@ export function routeSessionTransport(local: AuthenticatedSessionTransport,confi
     await authority();await authorizeProject(principal)
     const owner=await owners.get(realm,refOf(request))
     if(owner.state!=='active'||owner.owner_user_id!==principal.user_id||owner.project_id!==config.projectId) throw new SessionExecutionFencedError()
-    if(owner.node_id===config.nodeId) return undefined
-    const origin=routes.get(owner.node_id)
+    if(config.migration&&action!=='recover') {
+      const receipt=await migrations.get(realm,owner.session_ref,undefined,signal)
+      if(receipt?.state==='checkpointed')throw new SessionMigrationError('session_migration_frozen')
+    }
+    let destinationNode=owner.node_id
+    if(action==='recover') {
+      if(!config.migration||typeof request.migrationId!=='string')throw new SessionMigrationError('session_migration_invalid')
+      const receipt=await migrations.get(realm,owner.session_ref,request.migrationId,signal)
+      if(!receipt||receipt.realm!==realm||receipt.owner_user_id!==principal.user_id||receipt.project_id!==config.projectId)throw new SessionMigrationError('session_migration_invalid')
+      destinationNode=receipt.target_node_id
+    }
+    if(destinationNode===config.nodeId) return undefined
+    const origin=routes.get(destinationNode)
     if(!origin) throw new SessionExecutionFencedError()
-    const node=await executions.node(realm,owner.node_id,config.projectId)
+    const node=await executions.node(realm,destinationNode,config.projectId)
     if(node.endpoint!==origin) throw new SessionExecutionFencedError()
     // No Cookie, browser headers, redirect, caller URL or caller principal is
     // forwarded. Only this exact configured origin receives the credential.
@@ -65,12 +78,13 @@ export function routeSessionTransport(local: AuthenticatedSessionTransport,confi
       if(action==='selectModel'&&response.status===409&&(code==='session_model_changed'||code==='session_model_busy'))throw new SessionModelPolicyError(code,'Refresh the current model selection')
       const failure=publicSessionRequestError(code,response.status,response.headers.get('retry-after'))
       if(failure)throw failure
+      if(typeof code==='string'&&['session_migration_busy','session_migration_frozen','session_migration_unavailable','session_migration_invalid','session_migration_unknown'].includes(code))throw new SessionMigrationError(code as ConstructorParameters<typeof SessionMigrationError>[0])
       throw new SessionExecutionFencedError()
     }
     return response
   }
-  const withAuthority=async<T>(authority:SessionAuthority|undefined,signal:AbortSignal,run:(signal:AbortSignal)=>Promise<T>):Promise<T>=>{
-    const cancel=new AbortController(); const combined=AbortSignal.any([signal,cancel.signal,AbortSignal.timeout(35_000),...(runtime.signal?[runtime.signal]:[])])
+  const withAuthority=async<T>(authority:SessionAuthority|undefined,signal:AbortSignal,run:(signal:AbortSignal)=>Promise<T>,timeout=35_000):Promise<T>=>{
+    const cancel=new AbortController(); const combined=AbortSignal.any([signal,cancel.signal,AbortSignal.timeout(timeout),...(runtime.signal?[runtime.signal]:[])])
     let checking=false
     const timer=setInterval(()=>{if(!checking){checking=true;void authority?.().catch(()=>cancel.abort()).finally(()=>{checking=false})}},1000);timer.unref()
     try{return await run(combined)}finally{clearInterval(timer);cancel.abort()}
@@ -129,6 +143,7 @@ export function routeSessionTransport(local: AuthenticatedSessionTransport,confi
       },
     }:{}),
     async execute(principal,action,request,signal,authority){
+      if(action==='migrationStatus')return local.execute(principal,action,request,signal,authority)
       if(action==='create') return local.execute(principal,action,request,signal,authority)
       if(action==='list'){
         if(principal.realm!==realm||Object.keys(request).some(k=>k!=='after')||request.after!==undefined&&typeof request.after!=='string')throw new Error('Invalid Session project list')
@@ -143,7 +158,7 @@ export function routeSessionTransport(local: AuthenticatedSessionTransport,confi
         const result=await boundedJSON(response,4*1024*1024)
         await authority?.();await authorizeProject(principal);active.throwIfAborted()
         return result
-      })
+      },migrationActions.has(action)?120_000:35_000)
     },
     async stream(principal,action,request,signal,authority){
       if(!streams.has(action))throw new Error('Unsupported routed Session stream')

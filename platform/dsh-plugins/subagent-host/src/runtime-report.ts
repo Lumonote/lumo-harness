@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { assertExecutionPreset, assertWorkerBinding, type ExecutionPreset, type WorkerBinding } from './worker-binding.ts'
 import { loadPromptReference, type PromptSource } from './prompt-source.ts'
+import type { RepositorySource } from './controlled-repository.ts'
 
 export interface RuntimeReportConfig {
   governanceUrl: string
@@ -10,6 +11,7 @@ export interface RuntimeReportConfig {
   binding: WorkerBinding
   capacity: number
   promptSource?: PromptSource
+  repositorySource?: RepositorySource
 }
 
 /** Start only after the execution listener is accepting requests. */

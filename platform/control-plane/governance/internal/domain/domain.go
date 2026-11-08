@@ -441,7 +441,7 @@ func (p AgentPreset) Valid() bool {
 	if !ProvenOutputProfile(p.OutputProfile) {
 		return false
 	}
-	if p.OutputProfile == ClosedTextFilesOutputProfile && (len(p.ConnectorIDs) > 0 || len(p.KnowledgeSpaceIDs) > 0 || p.SystemPromptRef != "") {
+	if (p.OutputProfile == ClosedTextFilesOutputProfile || p.OutputProfile == ClosedRepositoryOutputProfile) && (len(p.ConnectorIDs) > 0 || len(p.KnowledgeSpaceIDs) > 0 || p.SystemPromptRef != "") {
 		return false
 	}
 	if len([]rune(p.ID)) > 128 || len([]rune(p.Name)) > 160 || len([]rune(p.Version)) > 64 || len([]rune(p.Provider)) > 128 || len([]rune(p.ModelRef)) > 256 {

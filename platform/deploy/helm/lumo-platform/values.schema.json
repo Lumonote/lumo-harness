@@ -18,6 +18,7 @@
     "governance": {
       "type": "object",
       "properties": {
+        "remoteComputerUse": { "type": "boolean" },
         "recoveryProvider": {
           "type": "object",
           "additionalProperties": false,
@@ -361,6 +362,10 @@
             "transportSecurity": { "enum": ["tls", "mesh-mtls", "development"] },
             "routes": { "type": "object", "minProperties": 1, "maxProperties": 100, "additionalProperties": { "type": "string", "pattern": "^https?://[^/\\s?#@]+/?$" } }
           }
+        },
+        "migration": {
+          "type": "object", "additionalProperties": false, "required": ["enabled"],
+          "properties": { "enabled": { "const": true } }
         },
         "attachments": {
           "type": "object", "additionalProperties": false, "required": ["realm"],

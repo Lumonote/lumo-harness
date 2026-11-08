@@ -39,7 +39,7 @@ export interface ArchivedSegment {
   sessionRef: string
   startSeq: number
   endSeq: number
-  /** 段对象键（经 joinRealmKey 派生，含 realm 前缀） */
+  /** 持久归档对象键，含 realm 前缀。新托管归档使用 managed-content/v1。 */
   objectKey: string
   sha256: string
   bytes: number
@@ -148,10 +148,11 @@ export function parseSegment(
         `行非合法 JSON：${error instanceof Error ? error.message : String(error)} -> ${raw.slice(0, 80)}`,
       )
     }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new SegmentCorruptError(sessionRef, '记录必须为 JSON 对象')
     const rec = parsed as Partial<LogRecord>
     if (
-      typeof rec.sessionRef !== 'string' || typeof rec.seq !== 'number'
-      || typeof rec.type !== 'string' || typeof rec.time !== 'number'
+      rec.sessionRef !== sessionRef || !Number.isSafeInteger(rec.seq) || Number(rec.seq) < 0
+      || typeof rec.type !== 'string' || typeof rec.time !== 'number' || !Number.isFinite(rec.time)
     ) {
       throw new SegmentCorruptError(sessionRef, `记录形状非法：${raw.slice(0, 120)}`)
     }
@@ -160,9 +161,13 @@ export function parseSegment(
   // 顺序必须与段区间一致：非单调 = 序列化错了或数据被改
   const sorted = [...records].sort((a, b) => a.seq - b.seq)
   for (let i = 0; i < records.length; i++) {
-    if (records[i]!.seq !== sorted[i]!.seq) {
+    if (records[i]!.seq !== sorted[i]!.seq || i > 0 && records[i]!.seq <= records[i - 1]!.seq) {
       throw new SegmentCorruptError(sessionRef, '段内记录 seq 非单调（顺序被破坏）')
     }
+  }
+  if (expected && (expected.sessionRef !== sessionRef || records.length !== expected.items
+    || records[0]?.seq !== expected.startSeq || records.at(-1)?.seq !== expected.endSeq)) {
+    throw new SegmentCorruptError(sessionRef, '段范围、条数或所属会话与持久元数据不符')
   }
   return records
 }
@@ -193,7 +198,8 @@ export interface ColdLogSeam {
   /** 已归档段的保留期集合（查 PG `session_log_archive`）。 */
   list(sessionRef?: string): Promise<ArchivedSegment[]>
   /**
-   * 过期清理：把超过保留期的段对象从 MinIO 删除并清 PG 归档行。
+   * 过期归档退役：托管对象同事务释放引用，物理删除仍遵守 GC 保留期和显式开关。
+   * 旧归档按原协议删除对象；两者均保留 PG 退役记录，禁止后台重新归档同范围。
    * 返回被清理的段。
    */
   sweep(now: number, coldRetentionMs: number): Promise<ArchivedSegment[]>

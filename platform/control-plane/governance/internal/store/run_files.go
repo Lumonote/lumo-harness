@@ -59,7 +59,7 @@ func (s *Store) controlledResultFiles(ctx context.Context, realm, taskID, runID 
 	if err = json.Unmarshal(raw, &manifest); err != nil {
 		return nil, err
 	}
-	if manifest.Scope != domain.ClosedTextFilesOutputProfile || verifyManifestDigest(manifest, digest) != nil {
+	if (manifest.Scope != domain.ClosedTextFilesOutputProfile && manifest.Scope != domain.ClosedRepositoryOutputProfile) || verifyManifestDigest(manifest, digest) != nil {
 		return nil, ErrConflict
 	}
 	if err = verifyRunBlobSetTx(ctx, tx, realm, runID, manifest); err != nil {
@@ -124,7 +124,8 @@ func verifyRunBlobSetTx(ctx context.Context, tx pgx.Tx, realm, runID string, man
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM governance_run_file_blobs WHERE realm=$1 AND run_id=$2`, realm, runID).Scan(&count); err != nil {
 		return err
 	}
-	if count != len(manifest.Files) || (manifest.Scope == domain.ClosedTextFilesOutputProfile && count == 0) || (manifest.Scope != domain.ClosedTextFilesOutputProfile && count != 0) {
+	filesProfile := manifest.Scope == domain.ClosedTextFilesOutputProfile || manifest.Scope == domain.ClosedRepositoryOutputProfile
+	if count != len(manifest.Files) || (filesProfile && count == 0) || (!filesProfile && count != 0) {
 		return fmt.Errorf("%w: controlled output file set is incomplete or unregistered", ErrConflict)
 	}
 	seen := map[string]bool{}
@@ -137,7 +138,7 @@ func verifyRunBlobSetTx(ctx context.Context, tx pgx.Tx, realm, runID string, man
 			return err
 		}
 	}
-	return nil
+	return verifyRepositorySetTx(ctx, tx, realm, runID, manifest)
 }
 
 const currentReviewReaderSQL = `SELECT r.task_id FROM governance_task_runs r
@@ -178,7 +179,7 @@ func (s *Store) ReadRunReviewFile(ctx context.Context, realm, reviewRunID, nodeI
 	if err != nil {
 		return out, err
 	}
-	if review == nil || review.Manifest.Scope != domain.ClosedTextFilesOutputProfile {
+	if review == nil || (review.Manifest.Scope != domain.ClosedTextFilesOutputProfile && review.Manifest.Scope != domain.ClosedRepositoryOutputProfile) {
 		return out, ErrForbidden
 	}
 	reviewer, err := executionSnapshotTx(ctx, tx, realm, reviewRunID)

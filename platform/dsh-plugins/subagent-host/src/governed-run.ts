@@ -13,6 +13,7 @@ import { prepareGovernedRun, type PreparedRun } from './run-review.ts'
 import { readChildResult } from './tturn.ts'
 import { CLOSED_FILES_PROFILE,CONTROLLED_FILE_TOOL,ControlledFiles } from './controlled-files.ts'
 import { GovernedProgressReporter } from './task-progress.ts'
+import { CLOSED_REPOSITORY_PROFILE,ControlledRepository,REPOSITORY_TOOLS } from './controlled-repository.ts'
 
 /** One explicitly scoped text turn. No host tools or parent cwd/model/policy
  * are inherited from the dispatch payload. The existing process plugins retain
@@ -28,6 +29,7 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
   let connectorBound = false
   let releaseMeter: (() => void) | undefined
   let files:ControlledFiles|undefined
+  let repository:ControlledRepository|undefined
   try {
     if (execution.cancelled) return { ...result, state: 'CANCELLED', summary: 'Task cancelled before execution' }
     assertExecutionPreset(binding, execution.task.realm, execution.preset)
@@ -115,7 +117,10 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
     signal.throwIfAborted()
     const closedText = prepared?.snapshot.output_profile === 'platform-closed-text-v1'
     const closedFiles=prepared?.snapshot.output_profile===CLOSED_FILES_PROFILE
-    if ((closedText||closedFiles) && (spaces.length || connectorIds.length || referencedPrompt)) throw new Error('Closed execution cannot mount external capabilities')
+    const closedRepository=prepared?.snapshot.output_profile===CLOSED_REPOSITORY_PROFILE
+    if(closedRepository){if(execution.preset.output_profile!==CLOSED_REPOSITORY_PROFILE||!prepared.repository_snapshot||prepared.review)throw new Error('Repository execution requires its deployment-approved base snapshot');repository=new ControlledRepository(prepared.repository_snapshot)}
+    if(execution.preset.output_profile===CLOSED_REPOSITORY_PROFILE&&!closedRepository)throw new Error('Repository execution was not prepared by the authority')
+    if ((closedText||closedFiles||closedRepository) && (spaces.length || connectorIds.length || referencedPrompt)) throw new Error('Closed execution cannot mount external capabilities')
     if(execution.preset.output_profile===CLOSED_FILES_PROFILE&&!closedFiles)throw new Error('Controlled file execution requires the authority profile before Agent creation')
     if(closedFiles){if(execution.preset.output_profile!==CLOSED_FILES_PROFILE||prepared?.review)throw new Error('Controlled file profile differs from its trusted producer preset');files=new ControlledFiles()}
     if(prepared?.review?.manifest.files?.length&&(!prepared.review.read_files||prepared.review.read_files.length!==prepared.review.manifest.files.length||prepared.reviewFileReceipts?.length!==prepared.review.manifest.files.length))throw new Error('Independent reviewer must read every complete file before execution')
@@ -129,7 +134,8 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
       agentOptions: { provider: binding.provider, model: binding.model },
       setup(childCtx) {
         files?.install(childCtx,execution.sessionRef)
-        if (progress && !closedText && !closedFiles) progress.install(childCtx, signal)
+        repository?.install(childCtx,execution.sessionRef)
+        if (progress && !closedText && !closedFiles&&!closedRepository) progress.install(childCtx, signal)
         // 工具白名单：默认全拒，只放行预设列出的知识空间与连接器对应的工具。
         //
         // `restrict` 对不认识的名字会抛错；上面的 scope 检查保证对应插件已经挂载，
@@ -140,6 +146,8 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
         ] })
         if (closedText) childCtx.tools.guard(() => 'Closed text execution does not grant tool access')
         if(closedFiles)childCtx.tools.guard(exec=>exec.name===CONTROLLED_FILE_TOOL?undefined:'Controlled file execution only permits its immutable text generation tool')
+        if(closedRepository)childCtx.tools.guard(exec=>REPOSITORY_TOOLS.includes(exec.name as typeof REPOSITORY_TOOLS[number])?undefined:'Repository execution only grants bounded private snapshot reads and writes')
+        if(repository)childCtx.systemPrompt.context({name:'lumo:controlled-repository',order:125,text:`Modify only this private in-memory snapshot using ${REPOSITORY_TOOLS.join(' and ')}. Approved repository ${repository.snapshot.repository}, immutable base ${repository.snapshot.base_commit}, paths: ${JSON.stringify(repository.snapshot.files.map(file=>file.path))}. Read each file before editing and provide the current SHA256 with complete replacement text, at most 3 KiB per file. Live files, shell, network, hidden paths, new files and deletion are unavailable. The authority enumerates every change and generates the exact before/after/diff for independent review. Finish with a text summary; no code executes and no PR is created during this run.`})
         if(closedFiles)childCtx.systemPrompt.context({name:'lumo:controlled-file-delivery',order:125,
           text:`This execution requires at least one actual file deliverable. Before completing, call ${CONTROLLED_FILE_TOOL} successfully for every file you deliver, passing its complete UTF-8 text. Each file must contain 1..32768 UTF-8 bytes (32 KiB); at most 16 files and 256 KiB total are allowed. Use unique safe ASCII leaf filenames ending in .txt, .md, .csv or .json, with the matching media_type; JSON files must contain valid JSON. Paths, URLs, existing host files and overwriting a name are unavailable. Finish with a text summary naming the files actually generated. Describing a file, claiming it exists, or returning a file list in the final text does not create a deliverable; only successful ${CONTROLLED_FILE_TOOL} calls count.`})
         if (prepared?.review) childCtx.systemPrompt.context({name: 'lumo:independent-review', order: 130,
@@ -168,8 +176,9 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
     result.summary = [...text.join('\n')].slice(0, 16000).join('')
     if (body.output?.length) result.output = body.output
     if(files){result.files=files.seal();if(result.state==='COMPLETED'&&!result.files.length){result.state='FAILED';result.summary='Agent completed without a controlled file deliverable'}}
+    if(repository)result.repository_files=repository.seal()
     if(prepared?.reviewFileReceipts?.length)result.review_file_receipts=prepared.reviewFileReceipts.map(read=>({...read}))
-    if ((closedText||closedFiles) && body.output?.some(block => !block || typeof block !== 'object' || !('type' in block) || block.type !== 'text' || !('text' in block) || typeof block.text !== 'string' || Object.keys(block).some(k => !['type', 'text'].includes(k)))) {
+    if ((closedText||closedFiles||closedRepository) && body.output?.some(block => !block || typeof block !== 'object' || !('type' in block) || block.type !== 'text' || !('text' in block) || typeof block.text !== 'string' || Object.keys(block).some(k => !['type', 'text'].includes(k)))) {
       result.state = 'FAILED'; result.summary = 'Closed text execution produced unsupported output'; delete result.output
     }
     if (!result.summary) result.summary = `Agent stopped: ${body.stopReason ?? 'error'}`
@@ -190,6 +199,7 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
     return { ...result, state: signal.aborted ? 'CANCELLED' : 'FAILED', summary: signal.aborted ? 'Execution cancelled or timed out' : 'Agent execution failed; inspect its session log' }
   } finally {
     files?.seal()
+    repository?.seal()
     // Keep tool scopes until the child has stopped. Clearing first would turn an
     // in-flight connector call into an ordinary, unrestricted session call.
     let disposed = true

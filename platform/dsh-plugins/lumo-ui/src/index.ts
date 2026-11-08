@@ -16,11 +16,14 @@ import { collaborationThreads, type AgentThreadReader, type FleetControl } from 
 import { lumoBootThemeInjection } from './boot-theme.ts'
 import { registerDesktopHandoff } from './desktop-handoff.ts'
 import { registerComputerUseRoutes } from './computer-use-api.ts'
+import { registerRemoteComputerRoutes } from './remote-computer-api.ts'
+import { registerDesktopPetReceiptRoutes } from './desktop-pet-receipts.ts'
 import { discoverSkillDemos, resolveSkillDemoAsset, type SkillDemo } from './skill-demos.ts'
 import { allowedAssetUrl, createUpstreamDemoService, type GallerySkill, type UpstreamDemoService } from './upstream-demos.ts'
 import { loadCatalog, installItem, searchCatalog, type SkillHubConfig, type SkillHubKind } from './skillhub.ts'
 import { registerSkillHubRuntime, type SkillHubRuntime } from './skillhub-runtime.ts'
 import { LocalAssetError, LocalAssetStore } from './local-assets.ts'
+import {publishReviewedRepository,type RepositoryPublicationPermit} from './repository-publication.ts'
 
 interface ProjectBudgetService {
   readProjectBudget(input: { realm: string; projectId: string; actorUserId: string }): Promise<unknown>
@@ -77,7 +80,7 @@ interface LibraryFileInfo {
 
 /** Host-side structural projection: the UI only reserves or compensates an
  * upload. Pin/release and collection remain outside this package boundary. */
-interface ManagedContentReference { realm: string; kind: 'knowledge-file'; referenceId: string }
+interface ManagedContentReference { realm: string; kind: 'knowledge-file' | 'task-artifact'; referenceId: string }
 interface ManagedContentUploadService {
   put(reference: ManagedContentReference, body: Buffer | string, contentType?: string): Promise<{ objectKey: string }>
   abandon(reference: ManagedContentReference): Promise<boolean>
@@ -1901,7 +1904,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     if (req.method !== 'GET') { writeJson(res, 405, { error: 'method not allowed' }); return }
     const params = new URLSearchParams()
     const incoming = new URL(req.url ?? '/', 'http://lumo.local').searchParams
-    for (const key of ['scope', 'limit', 'cursor']) for (const value of incoming.getAll(key)) params.append(key, value)
+    for (const key of ['scope', 'limit', 'cursor', 'q', 'risk', 'worker_kind']) for (const value of incoming.getAll(key)) params.append(key, value)
     writeUpstream(res, await upstream(config, identity, 'governance', `/v1/workforce/progress?${params}`, req)); return
   }
   const taskProgress = pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/progress$/u)
@@ -1963,6 +1966,25 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     return
   }
 
+  const repositoryPublication=pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/runs\/([^/]+)\/repository-publication$/u)
+  if(repositoryPublication){
+    if(req.method!=='POST'){writeJson(res,405,{error:'method_not_allowed'});return}
+    if(!requireClusterReady(config,res))return
+    const task=safeID(repositoryPublication[1]),run=safeRunID(repositoryPublication[2]);if(!task||!run){writeJson(res,400,{error:'invalid_task_run'});return}
+    const target=`/v1/tasks/${encodeURIComponent(task)}/runs/${encodeURIComponent(run)}/repository-publication`
+    const authority=await upstream(config,identity,'governance',target,req,'POST',Buffer.from('{}'),'application/json')
+    if(!authority.ok){writeUpstream(res,authority);return}
+    try{
+      const permit=authority.data as RepositoryPublicationPermit
+      const claim=await upstream(config,identity,'governance',`${target}/${encodeURIComponent(permit.id)}/claim`,req,'POST',Buffer.from(JSON.stringify({manifest_digest:permit.manifest_digest})),'application/json')
+      if(!claim.ok){writeUpstream(res,claim);return}
+      const published=await publishReviewedRepository(claim.data as RepositoryPublicationPermit,(operation,path,body)=>invokeGitConnector(config,identity,req,'github',operation,path,undefined,body))
+      const completed=await upstream(config,identity,'governance',`${target}/${encodeURIComponent(permit.id)}/complete`,req,'PUT',Buffer.from(JSON.stringify({manifest_digest:published.manifest_digest,url:published.url})),'application/json')
+      if(!completed.ok){writeJson(res,502,{error:'草稿已创建，治理确认待核对；请查看任务审计，避免重复发布',url:published.url});return}
+      writeJson(res,201,published)
+    }catch{writeJson(res,409,{error:'受控仓库发布未完成：基础提交可能已变化或授权不可用。请核对任务审计和已创建的分支；不会自动重试或合并。'})}
+    return
+  }
   const taskArtifacts = pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/runs\/([^/]+)\/artifacts(?:\/([^/]+)(?:\/(content|publish))?)?$/u)
   if (taskArtifacts !== null) {
     const taskID = safeID(taskArtifacts[1]); const runID = safeRunID(taskArtifacts[2])
@@ -1974,7 +1996,8 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       writeUpstream(res, await upstream(config, identity, 'governance', collectionPath, req)); return
     }
     if (artifactID === undefined && req.method === 'POST') {
-      if (objectStore === undefined) { writeJson(res, 503, { error: '对象存储未装配，无法保存任务产物' }); return }
+      if (objectStore?.managedContent === undefined) { writeJson(res, 503, { error: '托管对象存储未装配，无法保存任务产物' }); return }
+      let managedReservation: ManagedContentReference | undefined
       try {
         const filename = safeUploadFilename(typeof req.headers['x-lumo-file-name'] === 'string' ? req.headers['x-lumo-file-name'] : undefined)
         const rawType = typeof req.headers['content-type'] === 'string' ? req.headers['content-type'].split(';', 1)[0]!.trim().toLowerCase() : ''
@@ -1985,14 +2008,20 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
         if (!reservation.ok) { writeUpstream(res, reservation); return }
         const reserved = reservation.data as { id?: unknown }
         if (typeof reserved?.id !== 'string') { writeJson(res, 502, { error: '治理服务未返回产物记录 ID' }); return }
-        const fullKey = await objectStore.putContent(identity.realm, body, contentType)
-        const storageKey = fullKey.startsWith(`${identity.realm}/`) ? fullKey.slice(identity.realm.length + 1) : fullKey
+        managedReservation = {realm:identity.realm,kind:'task-artifact',referenceId:reserved.id}
+        const storageKey = (await objectStore.managedContent.put(managedReservation, body, contentType)).objectKey
         const sha256 = createHash('sha256').update(body).digest('hex')
         const completion = await upstream(config, identity, 'governance', `${collectionPath}/${encodeURIComponent(reserved.id)}/complete`, req, 'PUT', Buffer.from(JSON.stringify({ storage_key: storageKey, sha256, size_bytes: body.length })), 'application/json')
+        if(!completion.ok)await objectStore.managedContent.abandon(managedReservation).catch(()=>{})
         writeUpstream(res, completion)
       } catch (error) {
-        writeJson(res, error instanceof RangeError ? 413 : error instanceof TypeError ? 400 : 503, { error: error instanceof Error ? error.message : '任务产物上传失败' })
+        if(managedReservation)await objectStore.managedContent.abandon(managedReservation).catch(()=>{})
+        writeJson(res, error instanceof RangeError ? 413 : error instanceof TypeError ? 400 : 503, { error: error instanceof RangeError ? '任务产物超过上传大小限制' : error instanceof TypeError ? '任务产物文件名或类型无效' : '任务产物上传失败，请稍后重试' })
       }
+      return
+    }
+    if(artifactID!==undefined && action===undefined && req.method==='DELETE'){
+      try{writeUpstream(res,await upstream(config,identity,'governance',`${collectionPath}/${encodeURIComponent(artifactID)}`,req,'DELETE',await readBody(req)))}catch{writeJson(res,400,{error:'撤回产物请求无效'})}
       return
     }
     if (artifactID !== undefined && action === 'content' && req.method === 'GET') {
@@ -2001,7 +2030,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       if (!storedRef.ok) { writeUpstream(res, storedRef); return }
       const ref = storedRef.data as { storage_key?: unknown; sha256?: unknown; size_bytes?: unknown; name?: unknown; content_type?: unknown }
       if (typeof ref.storage_key !== 'string' || typeof ref.sha256 !== 'string' || typeof ref.size_bytes !== 'number') { writeJson(res, 502, { error: '治理服务返回了无效的产物引用' }); return }
-      const stored = await objectStore.get(identity.realm, ref.storage_key)
+      const stored = await objectStore.get(identity.realm, ref.storage_key.startsWith(`${identity.realm}/`) ? ref.storage_key.slice(identity.realm.length+1) : ref.storage_key)
       if (stored === undefined) { writeJson(res, 404, { error: '任务产物对象不存在' }); return }
       const digest = createHash('sha256').update(stored.body).digest('hex')
       if (stored.body.length !== ref.size_bytes || digest !== ref.sha256) { writeJson(res, 502, { error: '任务产物完整性校验失败' }); return }
@@ -2035,7 +2064,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
         const ref = storageResponse.data as { storage_key?: unknown; sha256?: unknown; size_bytes?: unknown; name?: unknown }
         if (typeof ref.storage_key !== 'string' || typeof ref.sha256 !== 'string' || typeof ref.size_bytes !== 'number') { writeJson(res, 502, { error: '治理服务返回了无效的产物引用' }); return }
         if (ref.size_bytes > TASK_ARTIFACT_GIT_LIMIT) { writeJson(res, 413, { error: `通过连接器 API 发布的单个文件上限为 ${TASK_ARTIFACT_GIT_LIMIT / 1024} KiB；产物仍可下载使用` }); return }
-        const stored = await objectStore.get(identity.realm, ref.storage_key)
+        const stored = await objectStore.get(identity.realm, ref.storage_key.startsWith(`${identity.realm}/`) ? ref.storage_key.slice(identity.realm.length+1) : ref.storage_key)
         if (stored === undefined) { writeJson(res, 404, { error: '任务产物对象不存在' }); return }
         const digest = createHash('sha256').update(stored.body).digest('hex')
         if (stored.body.length !== ref.size_bytes || digest !== ref.sha256) { writeJson(res, 502, { error: '任务产物完整性校验失败' }); return }
@@ -2579,6 +2608,8 @@ function ops(_req: IncomingMessage, res: ServerResponse): void { res.writeHead(3
 export function apply(ctx: Context, config: Config): void {
   assertIdentityConfiguration(config)
   registerComputerUseRoutes(ctx, config.deploymentMode === 'local')
+  registerRemoteComputerRoutes(ctx, config.deploymentMode === 'local')
+  registerDesktopPetReceiptRoutes(ctx, config.deploymentMode === 'local')
   let skillhubRuntime: SkillHubRuntime | undefined
   if (config.deploymentMode === 'local') {
     ctx.inject(['skills'], (skillsCtx) => {

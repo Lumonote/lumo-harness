@@ -240,6 +240,7 @@ func main() {
 		WebAuthn:            webauthnConfig,
 		OIDC:                oidcConfig,
 		DeviceGateway:       deviceGateway,
+		RemoteComputerUse:   os.Getenv("LUMO_REMOTE_COMPUTER_USE") == "true",
 	}, log)
 	if err != nil {
 		log.Error("initialize governance server", "err", err)

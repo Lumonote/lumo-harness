@@ -10,8 +10,9 @@ interface ProgressView { current_run_id: string; revision: number; progress: Pro
 interface WorkforceTask { id: string; title: string; state: string; assignee_name?: string; assignee_user_id?: string; assignee_worker_id?: string; project_id?: string }
 interface WorkforceItem { task: WorkforceTask; run?: { id: string; state: string }; progress?: ProgressRecord; health: { blocked: boolean; overdue: boolean; stale: boolean; awaiting_review: boolean } }
 interface WorkforcePage {
-  items: WorkforceItem[]; summary: { total: number; active: number; blocked: number; overdue: number; stale: number; awaiting_review: number; accepted: number }
-  summary_scope: 'page'; next_cursor?: string
+  items: WorkforceItem[]; summary: { total: number; active: number; blocked: number; overdue: number; stale: number; awaiting_review: number; accepted: number; at_risk?: number }
+  summary_scope: 'page' | 'filtered_scope'; next_cursor?: string
+  by_worker_kind?: Record<'employee' | 'agent' | 'unassigned', { total: number }>
 }
 const statusLabels = { on_track: '按计划推进', at_risk: '存在风险', blocked: '需要协助' }
 const healthLabels = { blocked: '阻塞', overdue: '逾期', stale: '待更新', awaiting_review: '待验收' }
@@ -33,10 +34,15 @@ function validView(value: ProgressView, taskID: string): boolean {
     (value.progress === null || (validProgress(value.progress) && value.progress.task_id === taskID && value.progress.run_id === value.current_run_id))
 }
 function validPage(value: WorkforcePage): boolean {
-  return value !== null && typeof value === 'object' && value.summary_scope === 'page' &&
+  return value !== null && typeof value === 'object' && ['page', 'filtered_scope'].includes(value.summary_scope) &&
     (value.next_cursor === undefined || typeof value.next_cursor === 'string') &&
     value.summary !== null && typeof value.summary === 'object' &&
-    ['total', 'active', 'blocked', 'overdue', 'stale', 'awaiting_review', 'accepted'].every(key => Number.isSafeInteger(value.summary[key as keyof WorkforcePage['summary']]) && value.summary[key as keyof WorkforcePage['summary']] >= 0) &&
+    ['total', 'active', 'blocked', 'overdue', 'stale', 'awaiting_review', 'accepted'].every(key => { const count = value.summary[key as keyof WorkforcePage['summary']]; return Number.isSafeInteger(count) && count! >= 0 }) &&
+    (value.summary_scope === 'page' || Number.isSafeInteger(value.summary.at_risk) && value.summary.at_risk! >= 0) &&
+    (value.by_worker_kind === undefined || ['employee', 'agent', 'unassigned'].every(key => {
+      const group = value.by_worker_kind?.[key as keyof NonNullable<WorkforcePage['by_worker_kind']>]
+      return group && Number.isSafeInteger(group.total) && group.total >= 0
+    })) &&
     Array.isArray(value.items) && value.items.every(item => item?.task && typeof item.task.id === 'string' && typeof item.task.title === 'string' && typeof item.task.state === 'string' &&
       item.health && ['blocked', 'overdue', 'stale', 'awaiting_review'].every(key => typeof item.health[key as keyof WorkforceItem['health']] === 'boolean') &&
       (item.run === undefined || (typeof item.run.id === 'string' && typeof item.run.state === 'string')) &&
@@ -159,6 +165,8 @@ export function WorkforceProgressPanel({ request, onOpen }: { request: Request; 
   const [page, setPage] = useState<WorkforcePage | null>(null)
   const [filter, setFilter] = useState('all')
   const [query, setQuery] = useState('')
+  const [appliedQuery, setAppliedQuery] = useState('')
+  const [workerKind, setWorkerKind] = useState('all')
   const [selected, setSelected] = useState('')
   const [editingTask, setEditingTask] = useState(false)
   const editingTaskRef = useRef(false)
@@ -177,33 +185,41 @@ export function WorkforceProgressPanel({ request, onOpen }: { request: Request; 
     const generation = ++sequence.current
     inflight.current = true; setLoading(true)
     try {
-      const value = await request<WorkforcePage>(`/lumo/api/workforce/progress?${new URLSearchParams({ scope, limit: '50', cursor })}`)
+      const value = await request<WorkforcePage>(`/lumo/api/workforce/progress?${new URLSearchParams({ scope, limit: '50', cursor, q: appliedQuery, risk: filter, worker_kind: workerKind })}`)
       if (generation !== sequence.current) return
       if (!validPage(value)) throw new Error('团队进度响应无效，请重新读取。')
       setPage(value); setError(''); setSynced(new Date().toLocaleTimeString('zh-CN'))
     } catch (reason) { if (generation === sequence.current) { setError(reasonText(reason)); setPage(null) } }
     finally { if (generation === sequence.current) { setLoading(false); inflight.current = false } }
-  }, [request, scope, cursor])
+  }, [request, scope, cursor, appliedQuery, filter, workerKind])
   useEffect(() => {
     setPage(null); setSelected(''); void load()
     const timer = window.setInterval(() => { if (!inflight.current && !editingTaskRef.current && document.visibilityState !== 'hidden') void load() }, 30000)
     return () => { ++sequence.current; window.clearInterval(timer) }
   }, [load])
   const admin = roles.some(role => ['platform_admin', 'realm_admin', 'admin'].includes(role))
-  const items = (page?.items ?? []).filter(item => (filter === 'all' || (filter === 'at_risk' ? item.progress?.status === 'at_risk' : item.health[filter as keyof WorkforceItem['health']])) && `${item.task.title} ${item.task.assignee_name ?? ''} ${item.task.assignee_user_id ?? ''} ${item.task.assignee_worker_id ?? ''} ${item.progress?.summary ?? ''}`.toLowerCase().includes(query.trim().toLowerCase()))
+  const completeScope = page?.summary_scope === 'filtered_scope'
+  const items = completeScope ? page.items : (page?.items ?? []).filter(item => (filter === 'all' || (filter === 'at_risk' ? item.progress?.status === 'at_risk' : item.health[filter as keyof WorkforceItem['health']])) && `${item.task.title} ${item.task.assignee_name ?? ''} ${item.task.assignee_user_id ?? ''} ${item.task.assignee_worker_id ?? ''} ${item.progress?.summary ?? ''}`.toLowerCase().includes(appliedQuery.toLowerCase()))
   return <section className="lumo-section lumo-workforce-progress" aria-label="员工与智能体进度" aria-busy={loading}>
     <div className="lumo-section-title"><div><b>员工与智能体进度</b><span>{synced ? `同步于 ${synced} · 每 30 秒更新` : '正在读取任务进度'}</span></div><button type="button" className="lumo-button lumo-secondary" disabled={loading || editingTask} onClick={() => void load()}>刷新看板</button></div>
-    <div className="lumo-workforce-toolbar"><label>任务范围<select disabled={editingTask} value={scope} onChange={e => { setScope(e.target.value); setCursors(['']) }}><option value="mine">与我相关</option>{admin || roles.includes('dept_manager') ? <option value="department">我的部门</option> : null}{admin ? <option value="all">全组织</option> : null}</select></label><label>当前页搜索<input type="search" disabled={editingTask} placeholder="任务、员工或智能体" value={query} onChange={e => setQuery(e.target.value)} /></label><label>关注状态<select disabled={editingTask} value={filter} onChange={e => setFilter(e.target.value)}><option value="all">全部</option>{Object.entries(healthLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}<option value="at_risk">存在风险</option></select></label></div>
+    <form className="lumo-workforce-toolbar" onSubmit={event => { event.preventDefault(); if (!editingTask) { setAppliedQuery(query.trim()); setCursors(['']) } }}>
+      <label>任务范围<select disabled={editingTask} value={scope} onChange={e => { setScope(e.target.value); setCursors(['']) }}><option value="mine">与我相关</option>{admin || roles.includes('dept_manager') ? <option value="department">我的部门</option> : null}{admin ? <option value="all">全组织</option> : null}</select></label>
+      <label>搜索任务与负责人<input type="search" maxLength={200} disabled={editingTask} placeholder="任务、员工、Agent 或进展" value={query} onChange={e => setQuery(e.target.value)} /></label>
+      <label>关注状态<select disabled={editingTask} value={filter} onChange={e => { setFilter(e.target.value); setCursors(['']) }}><option value="all">全部</option>{Object.entries(healthLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}<option value="at_risk">存在风险</option><option value="active">进行中</option><option value="accepted">已验收</option></select></label>
+      <label>负责人类型<select disabled={editingTask} value={workerKind} onChange={e => { setWorkerKind(e.target.value); setCursors(['']) }}><option value="all">员工与 Agent</option><option value="employee">员工</option><option value="agent">Agent</option><option value="unassigned">未分派</option></select></label>
+      <button type="submit" className="lumo-button lumo-secondary" disabled={editingTask || loading}>搜索</button>
+    </form>
     {error ? <div role="alert" className="lumo-cluster-feedback error">{error}</div> : null}
     {page ? <>
-      <div className="lumo-workforce-metrics" aria-label="当前页任务统计">{([['total', '可见任务'], ['active', '进行中'], ['blocked', '阻塞'], ['overdue', '逾期'], ['stale', '待更新'], ['awaiting_review', '待验收']] as const).map(([key, label]) => <div key={key}><span>{label}</span><b>{page.summary[key]}</b></div>)}</div>
-      <p className="lumo-workforce-note">{editingTask ? '正在编辑进度，已暂停看板刷新与切换；保存或取消后恢复。' : ''}统计与筛选仅覆盖当前页有权查看的任务。阶段百分比由参与者或智能体汇报，交付完成以验收结果为准。</p>
+      <div className="lumo-workforce-metrics" aria-label={completeScope ? '筛选范围任务统计' : '当前页任务统计'}>{([['total', '可见任务'], ['active', '进行中'], ['blocked', '阻塞'], ['overdue', '逾期'], ['at_risk', '有风险'], ['stale', '待更新'], ['awaiting_review', '待验收']] as const).map(([key, label]) => <div key={key}><span>{label}</span><b>{page.summary[key] ?? 0}</b></div>)}</div>
+      {completeScope && page.by_worker_kind ? <div className="lumo-workforce-kinds" aria-label="负责人任务分布"><span>员工任务 <b>{page.by_worker_kind.employee.total}</b></span><span>Agent 任务 <b>{page.by_worker_kind.agent.total}</b></span><span>未分派 <b>{page.by_worker_kind.unassigned.total}</b></span></div> : null}
+      <p className="lumo-workforce-note">{editingTask ? '正在编辑进度，已暂停看板刷新与切换；保存或取消后恢复。' : ''}{completeScope ? '统计与搜索覆盖当前筛选下全部有权查看的任务，翻页不改变统计范围。' : '当前控制面仅提供页内统计；统计与筛选仅覆盖当前页有权查看的任务。'}阶段百分比由参与者或智能体汇报，交付完成以验收结果为准。</p>
       <div className="lumo-workforce-list">{items.map(item => <article key={item.task.id} className={item.health.blocked || item.health.overdue ? 'attention' : ''}>
         <header><div><b>{item.task.title}</b><small>{item.task.assignee_name || item.task.assignee_worker_id || item.task.assignee_user_id || '待分派'} · {taskStates[item.task.state] ?? item.task.state}</small></div><div className="lumo-workforce-badges">{Object.entries(healthLabels).filter(([key]) => item.health[key as keyof WorkforceItem['health']]).map(([key, label]) => <span key={key}>{label}</span>)}{item.progress?.status === 'at_risk' ? <span>存在风险</span> : null}</div></header>
         <ProgressBar progress={item.progress} /><p>{item.progress?.summary || '等待首次进度汇报'}</p>{item.progress?.blocked_reason ? <p className="lumo-progress-blocker">{item.progress.blocked_reason}</p> : null}{item.progress?.next_step ? <p><strong>下一步</strong> {item.progress.next_step}</p> : null}
         <footer><small>{item.progress ? `更新 ${dateLabel(item.progress.updated_at)}` : '尚未更新'}{item.progress?.due_at ? ` · 截止 ${dateLabel(item.progress.due_at)}` : ''}</small><div><button type="button" className="lumo-button lumo-secondary" disabled={editingTask} onClick={() => setSelected(selected === item.task.id ? '' : item.task.id)}>{selected === item.task.id ? '收起进度' : '查看与汇报'}</button>{onOpen ? <button type="button" className="lumo-button lumo-secondary" disabled={editingTask} onClick={() => onOpen(item.task.id)}>协作与运行</button> : null}</div></footer>
       </article>)}</div>
-      {!items.length ? <p className="lumo-inline-empty">当前页没有符合条件的任务。{page.next_cursor ? '仍可继续查看下一页。' : ''}</p> : null}
+      {!items.length ? <p className="lumo-inline-empty">{completeScope ? '当前筛选下没有更多任务。' : '当前页没有符合条件的任务。'}{page.next_cursor ? '仍可继续查看下一页。' : ''}</p> : null}
       <nav className="lumo-workforce-pages" aria-label="任务进度分页"><button type="button" className="lumo-button lumo-secondary" disabled={loading || editingTask || cursors.length === 1} onClick={() => setCursors(values => values.slice(0, -1))}>上一页</button><span>第 {cursors.length} 页 · {items.length} / {page.items.length} 项</span><button type="button" className="lumo-button lumo-secondary" disabled={loading || editingTask || !page.next_cursor} onClick={() => { if (page.next_cursor) setCursors(values => [...values, page.next_cursor!]) }}>下一页</button></nav>
       {selected && page.items.some(item => item.task.id === selected) ? <TaskProgressPanel key={selected} request={request} taskID={selected} onEditingChange={trackEditing} onSaved={() => void load()} /> : null}
     </> : null}

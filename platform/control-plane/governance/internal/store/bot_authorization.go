@@ -20,7 +20,10 @@ CREATE TABLE IF NOT EXISTS governance_bot_grants (
  project_id TEXT NOT NULL, agent_id TEXT NOT NULL, capability TEXT NOT NULL CHECK(capability='delegation.create'),
  status TEXT NOT NULL CHECK(status IN ('active','revoked')), revision BIGINT NOT NULL DEFAULT 1,
  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(realm,channel,subject,team_id,project_id,agent_id,capability)
-);`
+);
+ALTER TABLE governance_bot_grants DROP CONSTRAINT IF EXISTS governance_bot_grants_capability_check;
+ALTER TABLE governance_bot_grants ADD CONSTRAINT governance_bot_grants_capability_check CHECK(capability IN ('delegation.create','computer-use.request'));
+`
 
 type BotSubject struct {
 	Realm    string `json:"realm"`
@@ -67,7 +70,7 @@ func (s *Store) UpsertBotGrant(ctx context.Context, value BotGrant) (BotGrant, e
 			return BotGrant{}, fmt.Errorf("invalid Bot team grant")
 		}
 	}
-	if value.Capability != "delegation.create" || value.SubjectRevision < 1 || value.PresetRevision < 1 || (value.Status != "active" && value.Status != "revoked") {
+	if (value.Capability != "delegation.create" && value.Capability != "computer-use.request") || value.SubjectRevision < 1 || value.PresetRevision < 1 || (value.Status != "active" && value.Status != "revoked") {
 		return BotGrant{}, fmt.Errorf("invalid Bot capability")
 	}
 	err := s.pool.QueryRow(ctx, `INSERT INTO governance_bot_grants(realm,channel,subject,team_id,captain_session_ref,team_revision,team_owner_user_id,project_id,agent_id,capability,status,subject_user_id,subject_revision,preset_revision)
@@ -78,9 +81,12 @@ func (s *Store) UpsertBotGrant(ctx context.Context, value BotGrant) (BotGrant, e
 	return value, err
 }
 func (s *Store) BotGrant(ctx context.Context, realm, channel, subject, team, project, agent string) (BotGrant, error) {
+	return s.BotCapabilityGrant(ctx, realm, channel, subject, team, project, agent, "delegation.create")
+}
+func (s *Store) BotCapabilityGrant(ctx context.Context, realm, channel, subject, team, project, agent, capability string) (BotGrant, error) {
 	var value BotGrant
 	err := s.pool.QueryRow(ctx, `SELECT realm,channel,subject,team_id,captain_session_ref,team_revision,team_owner_user_id,project_id,agent_id,capability,status,revision,subject_user_id,subject_revision,preset_revision
-	 FROM governance_bot_grants WHERE realm=$1 AND channel=$2 AND subject=$3 AND team_id=$4 AND project_id=$5 AND agent_id=$6 AND capability='delegation.create'`, realm, channel, subject, team, project, agent).
+	 FROM governance_bot_grants WHERE realm=$1 AND channel=$2 AND subject=$3 AND team_id=$4 AND project_id=$5 AND agent_id=$6 AND capability=$7`, realm, channel, subject, team, project, agent, capability).
 		Scan(&value.Realm, &value.Channel, &value.Subject, &value.TeamID, &value.Captain, &value.TeamRevision, &value.TeamOwner, &value.ProjectID, &value.AgentID, &value.Capability, &value.Status, &value.Revision, &value.SubjectUserID, &value.SubjectRevision, &value.PresetRevision)
 	return value, err
 }

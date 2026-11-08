@@ -54,8 +54,29 @@ it('paginates authorized scope and clears data after permission rejection', asyn
  render(<WorkforceProgressPanel request={request} />); await screen.findByText('合同审查'); expect(screen.getByText(/统计与筛选仅覆盖当前页/)).toBeDefined()
  fireEvent.click(screen.getByRole('button', { name: '下一页' })); await screen.findByText('第 2 页 · 0 / 0 项')
  fireEvent.change(screen.getByLabelText('任务范围'), { target: { value: 'all' } }); await screen.findByText('第 1 页 · 1 / 1 项')
- expect(request).toHaveBeenLastCalledWith('/lumo/api/workforce/progress?scope=all&limit=50&cursor=')
+ expect(request).toHaveBeenLastCalledWith('/lumo/api/workforce/progress?scope=all&limit=50&cursor=&q=&risk=all&worker_kind=all')
  request.mockRejectedValueOnce(new Error('forbidden')); fireEvent.click(screen.getByRole('button', { name: '刷新看板' })); await screen.findByRole('alert'); expect(screen.queryByText('合同审查')).toBeNull()
+})
+
+it('uses server filters across pages and preserves full authorized totals', async () => {
+ const full = { ...page, summary_scope: 'filtered_scope', summary: { ...page.summary, total: 125, active: 110, at_risk: 5 }, by_worker_kind: { employee: { total: 100 }, agent: { total: 25 }, unassigned: { total: 0 } }, next_cursor: 'second' }
+ const request = vi.fn().mockImplementation((path: string) => Promise.resolve(path === '/auth/account' ? { roles: ['realm_admin'] } : path.includes('cursor=second') ? { ...full, items: [], next_cursor: '' } : full))
+ render(<WorkforceProgressPanel request={request} />)
+ await screen.findByText('合同审查')
+ expect(screen.getByLabelText('筛选范围任务统计').textContent).toContain('125')
+ expect(screen.getByLabelText('负责人任务分布').textContent).toContain('Agent 任务 25')
+ fireEvent.click(screen.getByRole('button', { name: '下一页' })); await screen.findByText('第 2 页 · 0 / 0 项')
+ expect(screen.getByLabelText('筛选范围任务统计').textContent).toContain('125')
+ fireEvent.change(screen.getByLabelText('搜索任务与负责人'), { target: { value: '小林' } })
+ fireEvent.click(screen.getByRole('button', { name: '搜索' })); await screen.findByText('第 1 页 · 1 / 1 项')
+ expect(request).toHaveBeenLastCalledWith('/lumo/api/workforce/progress?scope=mine&limit=50&cursor=&q=%E5%B0%8F%E6%9E%97&risk=all&worker_kind=all')
+ fireEvent.change(screen.getByLabelText('关注状态'), { target: { value: 'at_risk' } })
+ await vi.waitFor(() => expect(request).toHaveBeenLastCalledWith(expect.stringContaining('risk=at_risk')))
+ fireEvent.change(screen.getByLabelText('负责人类型'), { target: { value: 'agent' } })
+ await vi.waitFor(() => expect(request).toHaveBeenLastCalledWith(expect.stringContaining('worker_kind=agent')))
+ // A response is already filtered by the server; the client must not hide a
+ // row solely because its own incomplete snapshot disagrees with that filter.
+ expect(await screen.findByText('合同审查')).toBeDefined()
 })
 
 it('reports malformed successful responses without crashing either panel', async () => {

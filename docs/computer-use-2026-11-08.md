@@ -10,13 +10,15 @@
 4. 在对话里说明任务。首次操作时按官方界面完成 macOS 系统权限和逐应用授权。
 5. 「立即停止」立即拒绝新的电脑操作并取消当前动作；正在结束的 Provider 返回前，面板保持停止中。
 
+以上为 macOS 官方扩展的使用路径。Windows 本地 Web profile 通过 `LUMO_WINDOWS_CUA=1` 显式加载独立 Provider，再在同一面板授权当前会话；SDK、Job supervisor、工具目录和实机验收步骤见[Windows 插件说明](../platform/dsh-plugins/computer-use/README.md)。Linux 不提供本机输入驱动。
+
 仅打开控制面板不会启动原生辅助程序或触发系统权限。模型配置继续使用原生 DSH 配置；此功能不另存 API Key、不替换供应商协议，也不自动切换默认 Agent 预设。
 
 ## 实现与边界
 
 | 层 | 实现 | 边界 |
 | --- | --- | --- |
-| 桌面观察与输入 | 官方 `@deepseek-ai/dsh-experimental-cua-macos` | 当前官方原生 Provider 支持 macOS 14 及以上；其他系统明确显示不可用 |
+| 桌面观察与输入 | macOS 使用官方 `@deepseek-ai/dsh-experimental-cua-macos`；Windows 可显式加载隔离 SDK Provider | macOS 14 及以上；Windows 需 `LUMO_WINDOWS_CUA=1`、目标原生包和 supervisor，尚待实机验收；Linux 不提供本机输入 |
 | 工具、应用授权和截图验证 | 官方 `cua` 工具与 `cuaAccess` | 保留 OS 权限、逐应用 consent、快照过期与坐标验证 |
 | 本机协调 | `@lumo/computer-use` / `lumoComputerUse` | 仅 Local Desktop 装配；Standalone/Cluster 不暴露服务器桌面 |
 | 控制入口 | 本地工作台「电脑操作」 | 读取真实前台会话，显示授权归属、占用、正在结束的动作和最近事件 |
@@ -31,7 +33,7 @@
 
 租约结束以公开 Session 事件中的真实 `turn/end` 为准；`agent/turn-stopping` 可被追加引导延长，不在这一阶段提前解锁。原生对话取消、模型异常和轮次结束都会关闭本轮租约；取消时等待进行中的调用返回后释放。
 
-授权请求携带最近状态中的 `controlRevision`，成功授权或停止都会推进版本。停止可覆盖页面上尚未完成的授权请求；先发出、晚到达的旧授权不能在停止后重新开启桌面控制。后台缺少官方 macOS Provider 时拒绝授权，但保留停止入口。
+授权请求携带最近状态中的 `controlRevision`，成功授权或停止都会推进版本。停止可覆盖页面上尚未完成的授权请求；先发出、晚到达的旧授权不能在停止后重新开启桌面控制。后台缺少当前平台的 Provider 时拒绝授权，但保留停止入口。
 
 协调日志保留最近 100 条内存元数据：会话/调用标识、工具、已知方法、时间和结果代码；不复制截图、输入文本、剪贴板内容或原始错误文本。上游对话仍按其自身规则保留工具执行轨迹。
 
@@ -43,7 +45,7 @@
 
 默认使用 ad-hoc 签名。正式签名可设置 `LUMO_CUA_SIGNING_IDENTITY`，以及可选的绝对路径 `LUMO_CUA_SIGNING_KEYCHAIN`。这不等于完成 Developer ID 公证；正式发布仍需完整签名、公证及安装后系统权限验收。`runtime-manifest.json` 的 `computerUse` 字段记录目标、签名类型、摘要和可重定位执行文件路径。
 
-macOS 构建机需要 Xcode/Swift 工具链和 Python 3。Windows 构建跳过 Swift helper，manifest 记录 `macOS-only`。
+macOS 构建机需要 Xcode/Swift 工具链和 Python 3。Windows 构建跳过 Swift helper，改为构建目标架构的 Rust Job Object supervisor，并校验固定版本 SDK 的 DLL/Node addon PE 架构、supervisor 摘要和 receipt；manifest 的可重定位路径统一使用 `/`。缺目标原生依赖或编译失败会阻止安装包构建。
 
 ## 验证范围
 
@@ -59,6 +61,12 @@ macOS 构建机需要 Xcode/Swift 工具链和 Python 3。Windows 构建跳过 S
 
 ## 后续设备与 Bot 接入
 
-现有集群桌面设备的 `execute_task → runner socket → task_result` 通道与本机 Computer Use 属于不同契约。Bot 当前可投递给 Agent，但不能据此推导已获设备所有者授权。远程接入还需要明确设备选择、设备所有者授权、Agent 委派范围、跨设备执行回执及故障后人工确认；本次没有把远程 Bot 自动接到用户桌面。
+现有 `execute_task → runner socket → task_result` 保留自己的执行契约。新增远程电脑请求使用独立不可变计划、设备权威 lease 与本机 owner 逐次批准；Bot 身份不替代本机批准。批准只给指定空闲 Session 追加一次有界任务，限制 observe/interact 工具能力，持续重验设备权威，原生完成清理后上报回执。计划摘要不匹配、权限撤回、外来引导消息或过期均停止；结果未知和重启不重放。显式配置与限制见 [插件说明](../platform/dsh-plugins/computer-use/README.md#远程请求与本机逐次批准)。
 
 桌面设备通道已支持取消与重启恢复；runner 对端实现、EOF 边界和 30 秒期限仍见 [桌面设备文档](./desktop-devices.md)。
+
+## 2026-11-09 批准并发与取消收尾
+
+本机 broker 在等待远端批准回执前先保留全局批准位，防止不同请求同时通过空闲检查。等待期间撤销、卸载、立即停止或本机授权变更均令旧批准失效；已确认的远端批准转为 cancel，再解除本机等待，不启动 Agent。控制版本覆盖“原来已经关闭，再次点击停止”的情况，避免仅检查 disabled 状态漏掉停止意图。
+
+本批定向 TypeScript/打包测试为 9 文件、56 PASS、0 FAIL、0 SKIP；平台 `tsc -b --noEmit` 通过。Registry computerbridge 与 desktop-agent 在 macOS 合计 17 PASS、0 FAIL、0 SKIP 的 race 测试通过（包括真实 Unix socket runner）；报告为 `/private/tmp/lumo-desktop-agent-race-unsandboxed-20261109.jsonl`。补齐公开依赖后，完整 desktop-agent 本机构建及 Windows amd64/arm64 交叉构建均通过，computerbridge 两种 Windows 架构的测试二进制也完成交叉编译。真实 Windows Job Object 测试在 macOS 上明确跳过，不作为 Windows 实机通过证据。

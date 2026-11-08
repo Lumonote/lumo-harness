@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,13 +21,27 @@ import { SessionMeterRegistry } from '../../../shared/seam-contracts/meter-attri
 import type { SessionOwner } from '../../../shared/session-owners.ts'
 import type { Principal } from '../src/client.ts'
 import { createSessionTransport } from '../src/session-transport.ts'
-import { attachmentBytes, attachmentMediaType, attachmentName, attachmentReferences, attachmentText, USER_SESSION_ATTACHMENT_TOOL, validateSessionAttachments } from '../src/session-attachments.ts'
+import { attachmentBytes, attachmentMediaType, attachmentName, attachmentReferences, attachmentText, parsePublicAttachmentReceipt, USER_SESSION_ATTACHMENT_TOOL, validateSessionAttachments } from '../src/session-attachments.ts'
+import { SESSION_ATTACHMENT_DOCUMENT_TYPES } from '../../../shared/seam-contracts/session-attachments.ts'
 
 const closers:Array<()=>Promise<unknown>>=[]
 afterEach(async()=>{for(const close of closers.splice(0).reverse())await close()})
 const alice:Principal={realm:'r',user_id:'alice',username:'alice',display_name:'Alice',roles:['viewer'],session_expires_at:'2099-01-01'}
 const signal=new AbortController().signal
 const source=(value:string|Uint8Array)=>(async function*(){yield typeof value==='string'?Buffer.from(value):value})()
+function wordDocument(text:string):Buffer {
+ const script=String.raw`import io,sys,zipfile
+from xml.sax.saxutils import escape
+body=escape(sys.argv[1]);out=io.BytesIO()
+with zipfile.ZipFile(out,'w') as z:
+ z.writestr('[Content_Types].xml','<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+ z.writestr('_rels/.rels','<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>')
+ z.writestr('word/document.xml','<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>'+body+'</w:t></w:r></w:p></w:body></w:document>')
+sys.stdout.buffer.write(out.getvalue())`
+ const result=spawnSync(process.env['LUMO_PPT_PYTHON']||(process.platform==='win32'?'python':'python3'),['-I','-c',script,text],{timeout:5000,maxBuffer:2*1024*1024})
+ if(result.error||result.status!==0)throw result.error??Error(result.stderr.toString())
+ return result.stdout
+}
 
 async function storage(){
  const temp=await realpath(await mkdtemp(join(tmpdir(),'owned-attachments-')));closers.push(()=>rm(temp,{recursive:true,force:true}))
@@ -35,12 +50,12 @@ async function storage(){
 type Storage=Awaited<ReturnType<typeof storage>>
 async function fixture(durable:Storage,enabled=true){
  const ctx=new Context();let alive=true;const dispose=async()=>{if(alive){alive=false;await ctx.fiber.dispose()}};closers.push(dispose)
- const requests:GenerateOptions[]=[];let revoked=false,nextCall:{name:string;args:object;before?:()=>void}|undefined,onRead:(()=>void)|undefined
+ const requests:GenerateOptions[]=[];let revoked=false,projectRevoked=false,executionRevoked=false,nextCall:{name:string;args:object;before?:()=>void}|undefined,onRead:(()=>void)|undefined,onSave:((ref:{attachmentId:string;name:string;bytes:number})=>void)|undefined
  const authority=Object.assign(async()=>{if(revoked)throw Error('revoked');return {...alice,roles:[...alice.roles]}},{credential:'login-secret'})
  const fetcher=async(url:string|URL|Request,init?:RequestInit)=>{
   const path=new URL(String(url)).pathname,body=init?.body?JSON.parse(String(init.body)):{}
   if(path.includes('/session-execution/nodes/'))return new Response(JSON.stringify({node:{...body,fence:1,expires_at:'2099-01-01'}}))
-  if(path.includes('/session-execution/sessions/'))return new Response(JSON.stringify({lease:{...body,session_ref:path.split('/')[4],node_fence:1,fencing_token:1,expires_at:'2099-01-01'}}))
+  if(path.includes('/session-execution/sessions/'))return executionRevoked?new Response('{}',{status:409}):new Response(JSON.stringify({lease:{...body,session_ref:path.split('/')[4],node_fence:1,fencing_token:1,expires_at:'2099-01-01'}}))
   if(path.startsWith('/v1/session-attachments/')){
    const ref=path.split('/')[3]!,owner=durable.owners.get(ref)
    if(!owner||owner.owner_user_id!==body.owner_user_id||owner.realm!==body.realm||owner.project_id!==body.project_id)return new Response('{}',{status:404})
@@ -55,7 +70,7 @@ async function fixture(durable:Storage,enabled=true){
  ctx.llm.registerAdapter(['mock'],new(class extends LlmAdapter{override async*stream(options:GenerateOptions):AsyncIterable<StreamChunk>{requests.push(options);const call=nextCall;nextCall=undefined;if(call){call.before?.();const id=ToolCallId('read-'+requests.length),args=JSON.stringify(call.args);yield {type:'tool-call-delta',index:0,id,name:call.name,argumentsDelta:args};yield {type:'block-end',index:0,block:{type:'tool-call',id,name:call.name,arguments:args}};yield {type:'finish',reason:{kind:'tool-calls'}}}else{yield {type:'text-delta',index:0,text:'Answer'};yield {type:'finish',reason:{kind:'stop'}}}}})())
  await ctx.plugin(RemoteAccess);await ctx.plugin(Gateway)
  ctx.provide('connection',{createPeer:options=>new Peer(ctx,options)} as never);ctx.provide('meteringScope',new SessionMeterRegistry());ctx.provide('agentDefaultModel',{currentSelection:()=>({provider:'mock',model:'mock'}),saveSelection:async()=>{}} as never)
- const save=(data:Uint8Array,name:string,image=false)=>{const sha=createHash('sha256').update(data).digest('hex'),attachmentId='r/'+(image?'content':'file-content')+'/'+sha;durable.files.set(attachmentId,data);return {attachmentId,name,bytes:data.length,...(image?{mediaType:'image/png',width:1,height:1}:{})}}
+ const save=(data:Uint8Array,name:string,image=false)=>{const sha=createHash('sha256').update(data).digest('hex'),attachmentId='r/'+(image?'content':'file-content')+'/'+sha;durable.files.set(attachmentId,data);const ref={attachmentId,name,bytes:data.length,...(image?{mediaType:'image/png',width:1,height:1}:{})};onSave?.(ref);return ref}
  ctx.provide('attachments',{
   imageLimits:{maxImageBytes:8388608,maxImagesPerMessage:4,maxMessageImageBytes:33554432,maxImagePixels:1000,maxImageDimension:1000,mediaTypes:['image/png']},
   saveFileStream:async(input:{data:AsyncIterable<Uint8Array>;name:string;signal:AbortSignal})=>save(await attachmentBytes(input.data,1048576,input.signal),input.name),
@@ -69,12 +84,12 @@ async function fixture(durable:Storage,enabled=true){
  const part=z.union([z.object({type:z.literal('text'),text:z.string()}),z.object({type:z.literal('image'),mediaType:z.string(),data:z.string(),name:z.string().optional()})]);const schema=z.object({sessionId:z.string(),requestId:z.string(),content:z.array(part),mode:z.literal('queue')})
  ctx.typert.register({package:'@lumo/owned-attachment-test',face:'host',schemas:[],model:{services:[],events:[],objects:[]},invocations:[{id:'@lumo/owned-attachment-test#session/prompt',service:'sessionController',namespace:'session',method:'prompt',invocation:{kind:'direct'},parameters:[{name:'request',wire:'request',source:'json',codec:{mode:'strict',typeSymbol:'@lumo/owned#Prompt',create:()=>schema}}],cancellation:{parameter:'signal'},result:{mode:'strict',typeSymbol:'@lumo/owned#Result',create:()=>z.object({accepted:z.literal(true)})}}]})
  const config={authorityUrl:'http://owner',nodeId:'n',projectId:'p',workspaceRoot:join(durable.temp,'workspaces'),provider:'mock',model:'mock',...(enabled?{attachments:{realm:'r'}}:{})}
- const transport=createSessionTransport(ctx,config,'service-secret',async()=>{if(revoked)throw Error('revoked')},fetcher,{realm:'r',writerHolder:'writer',endpoint:''})
+ const transport=createSessionTransport(ctx,config,'service-secret',async()=>{if(revoked||projectRevoked)throw Error('revoked')},fetcher,{realm:'r',writerHolder:'writer',endpoint:''})
  const create=async()=>(await transport.execute(alice,'create',{},signal,authority) as {sessionId:string}).sessionId
  const upload=async(ref:string,text:string|Uint8Array,name='notes.txt',mime='text/plain')=>transport.uploadAttachment!(alice,ref,{name,mediaType:mime},source(text),signal,authority)
  let promptID=0
  const send=async(ref:string,content:unknown[],call?:{name:string;args:object;before?:()=>void})=>{nextCall=call;await transport.execute(alice,'prompt',{sessionId:ref,requestId:'prompt-'+(++promptID)+'-'+Date.now(),content,mode:'queue'},signal,authority);await ctx.agents.get(SessionId(ref))!.whenIdle();await ctx.sessionPersistence.flush()}
- return {ctx,transport,authority,create,upload,send,requests,dispose,revoke:()=>{revoked=true},onRead:(cb:()=>void)=>{onRead=cb},events:(id:string)=>ctx.agents.get(SessionId(id))!.session.snapshotEvents()}
+ return {ctx,transport,authority,create,upload,send,requests,dispose,revoke:()=>{revoked=true},revokeProject:()=>{projectRevoked=true},revokeExecution:()=>{executionRevoked=true},onRead:(cb:()=>void)=>{onRead=cb},onSave:(cb:typeof onSave)=>{onSave=cb},events:(id:string)=>ctx.agents.get(SessionId(id))!.session.snapshotEvents()}
 }
 
 describe('owned attachment receipt application with real AgentLoop and JSONL restart',()=>{
@@ -99,6 +114,49 @@ describe('owned attachment receipt application with real AgentLoop and JSONL res
   expect(d.inherited.at(-1)).toEqual([sent.receipt_id]);expect(d.receipts.has(fork.sessionId+':'+unsent.receipt_id)).toBe(false)
   await resumed.send(fork.sessionId,[{type:'text',text:'read inherited file'}],{name:USER_SESSION_ATTACHMENT_TOOL,args:{receipt_id:sent.receipt_id}})
   expect(JSON.stringify(resumed.events(fork.sessionId))).toContain('SENT-PERSISTED')
+ })
+ it('reads a sent Office receipt through the actual AgentLoop tool, with bounded preview metadata and durable inheritance',async()=>{
+  const d=await storage(),f=await fixture(d),id=await f.create(),bytes=wordDocument('Owned confidential document 中文')
+  const r=await f.upload(id,bytes,'report.docx',SESSION_ATTACHMENT_DOCUMENT_TYPES['.docx'])
+  expect(r).toMatchObject({kind:'document',media_type:SESSION_ATTACHMENT_DOCUMENT_TYPES['.docx'],bytes:bytes.length})
+  expect(r).not.toHaveProperty('native_ref')
+  await f.send(id,[{type:'text',text:'unsent documents must stay private'}],{name:USER_SESSION_ATTACHMENT_TOOL,args:{receipt_id:r.receipt_id}})
+  expect(JSON.stringify(f.events(id))).not.toContain('Owned confidential document')
+  await f.send(id,[{type:'attachment',receipt_id:r.receipt_id}],{name:USER_SESSION_ATTACHMENT_TOOL,args:{receipt_id:r.receipt_id,limit:32000}})
+  const events=JSON.stringify(f.events(id));expect(events).toContain('Owned confidential document');expect(events).toContain('document_complete');expect(events).toContain('bounded-text-preview')
+  const downloaded=await f.transport.readAttachment!(alice,id,r.receipt_id,signal,f.authority);expect(Buffer.from(downloaded.data)).toEqual(bytes)
+  await f.dispose();const resumed=await fixture(d)
+  const fork=await resumed.transport.execute(alice,'fork',{sessionId:id},signal,resumed.authority) as {sessionId:string}
+  expect(d.inherited.at(-1)).toEqual([r.receipt_id])
+  await resumed.send(fork.sessionId,[{type:'text',text:'read the inherited document'}],{name:USER_SESSION_ATTACHMENT_TOOL,args:{receipt_id:r.receipt_id}})
+  expect(JSON.stringify(resumed.events(fork.sessionId))).toContain('Owned confidential document')
+ })
+ it('checks document ownership and hashes, suppressing read output when the current owner is revoked',async()=>{
+  const d=await storage(),f=await fixture(d),id=await f.create(),r=await f.upload(id,wordDocument('Document-REVOKED-secret'),'report.docx',SESSION_ATTACHMENT_DOCUMENT_TYPES['.docx'])
+  await expect(f.transport.readAttachment!({...alice,user_id:'bob'},id,r.receipt_id,signal,f.authority)).rejects.toThrow('ownership')
+  const key='r/file-content/'+r.sha256,original=d.files.get(key)!
+  d.files.set(key,wordDocument('Document-CORRUPT-secret'))
+  await expect(f.transport.readAttachment!(alice,id,r.receipt_id,signal,f.authority)).rejects.toThrow('integrity')
+  d.files.set(key,original);f.onRead(f.revoke)
+  await f.send(id,[{type:'attachment',receipt_id:r.receipt_id}],{name:USER_SESSION_ATTACHMENT_TOOL,args:{receipt_id:r.receipt_id}})
+  expect(JSON.stringify(f.events(id))).not.toContain('Document-REVOKED-secret')
+ })
+ it.each(['project','owner','execution'] as const)('reauthorizes the current %s after reading immutable document bytes',async boundary=>{
+  const d=await storage(),f=await fixture(d),id=await f.create(),r=await f.upload(id,wordDocument('Document-boundary-secret'),'report.docx',SESSION_ATTACHMENT_DOCUMENT_TYPES['.docx'])
+  f.onRead(()=>{if(boundary==='project')f.revokeProject();else if(boundary==='execution')f.revokeExecution();else d.owners.get(id)!.owner_user_id='bob'})
+  await f.send(id,[{type:'attachment',receipt_id:r.receipt_id}],{name:USER_SESSION_ATTACHMENT_TOOL,args:{receipt_id:r.receipt_id}})
+  expect(JSON.stringify(f.events(id))).not.toContain('Document-boundary-secret')
+ })
+ it('rejects invalid document envelopes before writing a storage object or receipt',async()=>{
+  const d=await storage(),f=await fixture(d),id=await f.create()
+  await expect(f.upload(id,wordDocument('type mismatch'),'report.xlsx',SESSION_ATTACHMENT_DOCUMENT_TYPES['.xlsx'])).rejects.toThrow('supported')
+  expect(d.files.size).toBe(0);expect(d.receipts.size).toBe(0)
+ })
+ it.each(['hash','realm','size','name'] as const)('refuses to create a receipt if immutable storage changes the document %s',async boundary=>{
+  const d=await storage(),f=await fixture(d),id=await f.create()
+  f.onSave(ref=>{if(boundary==='hash')ref.attachmentId='r/file-content/'+'a'.repeat(64);else if(boundary==='realm')ref.attachmentId=ref.attachmentId.replace(/^r\//u,'other/');else if(boundary==='size')ref.bytes++;else ref.name='changed.docx'})
+  await expect(f.upload(id,wordDocument('Original immutable content'),'report.docx',SESSION_ATTACHMENT_DOCUMENT_TYPES['.docx'])).rejects.toThrow('integrity')
+  expect(d.receipts.size).toBe(0)
  })
  it('suppresses in-flight text after revocation and rejects arbitrary file references and marker forgery',async()=>{
   const d=await storage(),f=await fixture(d),id=await f.create(),r=await f.upload(id,'REVOKED-SECRET')
@@ -153,6 +211,11 @@ describe('bounded attachment parsing',()=>{
   const id='att_'+'a'.repeat(48),other='att_'+'b'.repeat(48)
   const refs=attachmentReferences([{type:'assistant/message',data:{message:{content:[{type:'text',text:'[lumo-attachment:'+other+']'}]}}},{type:'user/message',data:{content:[{type:'text',text:'[lumo-attachment:'+id+']'}]}}] as never)
   expect(refs).toEqual([id])
+ })
+ it('rejects document receipts whose names do not match their declared document type',()=>{
+  const receipt={receipt_id:'att_'+'a'.repeat(48),kind:'document',name:'report.docx',media_type:SESSION_ATTACHMENT_DOCUMENT_TYPES['.docx'],bytes:10,sha256:'a'.repeat(64),created_at:'2026-11-07T00:00:00Z'}
+  expect(parsePublicAttachmentReceipt(receipt)).toMatchObject(receipt)
+  for(const name of ['report.xlsx','report.txt','report.docx.exe'])expect(()=>parsePublicAttachmentReceipt({...receipt,name})).toThrow()
  })
 })
 

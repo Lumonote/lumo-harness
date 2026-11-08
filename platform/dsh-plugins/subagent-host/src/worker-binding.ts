@@ -18,7 +18,7 @@ export interface ExecutionPreset {
   provider: string
   model_ref: string
   system_prompt_ref?: string
-  output_profile?: 'platform-closed-text-v1'|'platform-closed-text-files-v1'
+  output_profile?: 'platform-closed-text-v1'|'platform-closed-text-files-v1'|'platform-closed-repository-v1'
   connector_ids: string[]
   knowledge_space_ids: string[]
   max_concurrency: number
@@ -50,8 +50,8 @@ export function assertExecutionPreset(binding: WorkerBinding, realm: string, pre
       preset.provider !== binding.provider || preset.model_ref !== binding.model || preset.status !== 'active') {
     throw new Error('worker preset does not match the installed execution identity or revision')
   }
-  if(preset.output_profile!==undefined&&!['platform-closed-text-v1','platform-closed-text-files-v1'].includes(preset.output_profile)
-    ||preset.output_profile==='platform-closed-text-files-v1'&&(preset.connector_ids.length>0||preset.knowledge_space_ids.length>0||Boolean(preset.system_prompt_ref))){throw new Error('Controlled file execution cannot grant external capabilities')}
+  if(preset.output_profile!==undefined&&!['platform-closed-text-v1','platform-closed-text-files-v1','platform-closed-repository-v1'].includes(preset.output_profile)
+    ||['platform-closed-text-files-v1','platform-closed-repository-v1'].includes(preset.output_profile??'')&&(preset.connector_ids.length>0||preset.knowledge_space_ids.length>0||Boolean(preset.system_prompt_ref))){throw new Error('Controlled file execution cannot grant external capabilities')}
   // 连接器在执行前由 connectorScope 核对固定身份和可见目录，调用时按 sessionRef 再拦。
   // 引用只允许作为查找键；执行和心跳都须另行确认节点上的受保护文件。
   if ((preset.system_prompt_ref !== undefined && preset.system_prompt_ref !== '' &&

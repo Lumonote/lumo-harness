@@ -33,6 +33,7 @@ export interface GovernedResult {
   output?: unknown
   files?: import('./controlled-files.ts').ControlledTextFile[]
   review_file_receipts?: {id:string;receipt:string}[]
+  repository_files?:{path:string;text:string}[]
 }
 
 // This consumer deliberately shares the cluster PostgreSQL database with

@@ -41,7 +41,11 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject }
 }
 export type DesktopWorkflowLock = (filename: string, operation: () => Promise<void>, signal: AbortSignal) => Promise<void>
-interface CoordinatorDependencies { now?: () => number; lock?: DesktopWorkflowLock }
+interface CoordinatorDependencies {
+  now?: () => number
+  lock?: DesktopWorkflowLock
+  supportsIsolatedWindowsTool?(name: string): boolean
+}
 interface Lease {
   agent: ComputerUseAgent
   sessionId: string
@@ -55,6 +59,8 @@ interface Lease {
   lastActivityAt: number
   closing: boolean
   turnEnded: boolean
+  tool: string
+  draining: boolean
   callers: Map<AbortSignal, () => void>
   timer?: ReturnType<typeof setTimeout>
 }
@@ -65,7 +71,7 @@ const METHODS = new Set(['getCapabilities', 'listApps', 'findApps', 'getApp', 'a
 
 /** Browser providers have independent ownership rules and are not implicitly desktop drivers. */
 export function isComputerUseTool(name: string): boolean {
-  return name === 'cua' || /^cua_driver_native__[A-Za-z0-9_-]+$/u.test(name) || /^mcp__cua-driver-mcp__[A-Za-z0-9_-]+$/u.test(name)
+  return name === 'cua' || /^lumo_cua_windows__[A-Za-z0-9_-]+$/u.test(name) || /^cua_driver_native__[A-Za-z0-9_-]+$/u.test(name) || /^mcp__cua-driver-mcp__[A-Za-z0-9_-]+$/u.test(name)
 }
 
 /** Same-user, same-host processes share this path across profiles and application versions. */
@@ -105,6 +111,8 @@ export class ComputerUseCoordinator {
   private readonly turnAgents = new WeakMap<object, { agent: ComputerUseAgent; turn: number | undefined }>()
   private readonly now: () => number
   private readonly lock: DesktopWorkflowLock
+  private readonly supportsIsolatedWindowsTool: (name: string) => boolean
+  private windowsCleanup?: () => Promise<void>
   readonly idleLeaseMs: number
   readonly lockFile: string
 
@@ -115,6 +123,7 @@ export class ComputerUseCoordinator {
     if (!isAbsolute(this.lockFile) || this.lockFile.includes('\0')) throw Error('INVALID_DESKTOP_LOCK_PATH')
     this.now = dependencies.now ?? Date.now
     this.lock = dependencies.lock ?? holdDesktopWorkflowLock
+    this.supportsIsolatedWindowsTool = dependencies.supportsIsolatedWindowsTool ?? (() => false)
   }
 
   snapshot(): ComputerUseSnapshot {
@@ -142,6 +151,13 @@ export class ComputerUseCoordinator {
     return this.snapshot()
   }
 
+  /** Retain cleanup even while Cordis withdraws a provider's service during unload. */
+  bindWindowsCleanup(cleanup: () => Promise<void>): () => void {
+    if (this.windowsCleanup !== undefined) throw Error('COMPUTER_USE_WINDOWS_PROVIDER_ALREADY_BOUND')
+    this.windowsCleanup = cleanup
+    return () => { if (this.windowsCleanup === cleanup) delete this.windowsCleanup }
+  }
+
   /** Final monotonic guard covers native and nested PTC calls without rewriting their arguments. */
   guard(execution: ComputerUseExecution): string | undefined {
     if (!isComputerUseTool(execution.name)) return undefined
@@ -156,7 +172,7 @@ export class ComputerUseCoordinator {
     if (sessionId(execution) !== this.authorizedSessionId) return 'COMPUTER_USE_SESSION_NOT_AUTHORIZED'
     // These transports can settle cancellation before their native/remote work is quiet.
     // Recognize them so a configuration change cannot bypass the desktop guard.
-    if (execution.name !== 'cua') return 'COMPUTER_USE_PROVIDER_NOT_SUPPORTED'
+    if (execution.name !== 'cua' && !this.supportsIsolatedWindowsTool(execution.name)) return 'COMPUTER_USE_PROVIDER_NOT_SUPPORTED'
     if (this.expired.has(execution.agent)) return 'COMPUTER_USE_LEASE_EXPIRED'
     if (this.owner?.closing) return this.drainingPreviousTurn(execution) ? undefined : 'COMPUTER_USE_STOPPING'
     if (this.owner && this.owner.agent !== execution.agent) return 'COMPUTER_USE_BUSY'
@@ -214,7 +230,18 @@ export class ComputerUseCoordinator {
     lease.closing = true
     if (lease.timer !== undefined) clearTimeout(lease.timer)
     lease.controller.abort(new ComputerUseDenied(code))
-    if (lease.inFlight === 0) lease.release.resolve()
+    // Persistent providers can still own a native process when no call is in
+    // flight. Join that generation before another process can acquire the lock.
+    lease.draining = true
+    try {
+      const cleanup = lease.tool.startsWith('lumo_cua_windows__') ? this.windowsCleanup?.() : undefined
+      if (cleanup === undefined) lease.draining = false
+      else void cleanup.then(() => {
+        lease.draining = false
+        if (lease.inFlight === 0) lease.release.resolve()
+      }, () => { /* Unconfirmed cleanup retains the desktop lease until Host restart. */ })
+    } catch { /* A failed cleanup initiation cannot attest backend silence. */ }
+    if (lease.inFlight === 0 && !lease.draining) lease.release.resolve()
   }
 
   private claim(execution: ComputerUseExecution): Lease {
@@ -222,7 +249,7 @@ export class ComputerUseCoordinator {
     const startedAt = this.now()
     const lease: Lease = { agent: execution.agent!, sessionId: sessionId(execution)!, turn: this.turns.get(execution.agent!.session), controller: new AbortController(),
       ready: deferred<void>(), release: deferred<void>(), settled: Promise.resolve(), inFlight: 0,
-      startedAt, lastActivityAt: startedAt, closing: false, turnEnded: false, callers: new Map() }
+      startedAt, lastActivityAt: startedAt, closing: false, turnEnded: false, tool: execution.name, draining: false, callers: new Map() }
     // Synchronous assignment precedes all awaits, including filesystem lock acquisition.
     this.owner = lease
     this.turnAgents.set(lease.agent.session, { agent: lease.agent, turn: lease.turn })
@@ -280,7 +307,7 @@ export class ComputerUseCoordinator {
       throw error
     } finally {
       lease.inFlight--
-      if (lease.closing && lease.inFlight === 0) lease.release.resolve()
+      if (lease.closing && lease.inFlight === 0 && !lease.draining) lease.release.resolve()
       else if (!lease.closing) this.refresh(lease)
     }
   }

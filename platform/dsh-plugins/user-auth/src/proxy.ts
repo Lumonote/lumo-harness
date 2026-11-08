@@ -10,6 +10,7 @@ import { GovernanceApiError, GovernanceAuthClient, type Principal } from './clie
 import { ownedChatHtml, ownedChatScript } from './owned-chat.ts'
 import type { AuthenticatedSessionTransport } from './session-transport.ts'
 import { SESSION_RUNTIME_PATH } from './session-routing.ts'
+import { SessionMigrationError } from './session-migration.ts'
 import type { ExecutionNode } from '../../../shared/session-execution.ts'
 import { AUTHENTICATED_APP_HOME } from './app-home.ts'
 import { loginPage, loginScript, resolveLoginTheme, type LoginPageOptions } from './html.ts'
@@ -387,6 +388,12 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
       // The internal request contains a credential: never log the request,
       // downstream error text, or reflect remote response bodies.
       options.logger.warn('lumo-user-auth: owned Session request denied')
+      if(error instanceof SessionMigrationError){
+        const status=error.code==='session_migration_unavailable'?503:error.code==='session_migration_unknown'?502:error.code==='session_migration_invalid'?422:409
+        if(!res.headersSent)writeJson(res,status,{error:error.code,retryable:false,status_action:'migrationStatus'})
+        else res.destroy()
+        return
+      }
       if(error instanceof SessionRequestError){
         if(!res.headersSent){if(error.retryAfter)res.setHeader('Retry-After',String(error.retryAfter));writeJson(res,error.status,{error:error.code,retryable:error.retryable})}else res.destroy()
         return

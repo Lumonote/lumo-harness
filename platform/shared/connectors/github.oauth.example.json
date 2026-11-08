@@ -21,6 +21,9 @@
   },
   "operations": {
     "get_ref": { "name": "get_ref", "method": "GET", "path": "/repos/{owner}/{repo}/git/ref/{ref}", "write": false, "sensitivity": "low", "maxResponseBytes": 1048576 },
+    "get_commit": { "name": "get_commit", "method": "GET", "path": "/repos/{owner}/{repo}/git/commits/{commit_sha}", "write": false, "sensitivity": "low", "maxResponseBytes": 1048576 },
+    "create_tree": { "name": "create_tree", "method": "POST", "path": "/repos/{owner}/{repo}/git/trees", "write": true, "sensitivity": "normal", "maxResponseBytes": 1048576 },
+    "create_commit": { "name": "create_commit", "method": "POST", "path": "/repos/{owner}/{repo}/git/commits", "write": true, "sensitivity": "normal", "maxResponseBytes": 1048576 },
     "create_ref": { "name": "create_ref", "method": "POST", "path": "/repos/{owner}/{repo}/git/refs", "write": true, "sensitivity": "normal", "maxResponseBytes": 1048576 },
     "put_file": { "name": "put_file", "method": "PUT", "path": "/repos/{owner}/{repo}/contents/{path}", "write": true, "sensitivity": "normal", "maxResponseBytes": 1048576 },
     "create_pull_request": { "name": "create_pull_request", "method": "POST", "path": "/repos/{owner}/{repo}/pulls", "write": true, "sensitivity": "normal", "maxResponseBytes": 1048576 }

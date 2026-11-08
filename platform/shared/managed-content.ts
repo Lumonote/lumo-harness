@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS managed_content_objects (
   object_key TEXT NOT NULL,
   sha256 TEXT NOT NULL CHECK (sha256 ~ '^[a-f0-9]{64}$'),
   byte_size BIGINT NOT NULL CHECK (byte_size >= 0),
-  reservation_kind TEXT NOT NULL CHECK (reservation_kind='knowledge-file'),
+  reservation_kind TEXT NOT NULL CHECK (reservation_kind IN ('knowledge-file','task-artifact','cold-log-segment')),
   reservation_id TEXT NOT NULL,
   reservation_active BOOLEAN NOT NULL DEFAULT true,
   state TEXT NOT NULL DEFAULT 'uploading' CHECK (state IN ('uploading','ready','deleting','deleted')),
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS managed_content_objects (
 );
 CREATE TABLE IF NOT EXISTS managed_content_references (
   realm TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind='knowledge-file'),
+  kind TEXT NOT NULL CHECK (kind IN ('knowledge-file','task-artifact','cold-log-segment')),
   reference_id TEXT NOT NULL,
   object_id UUID NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -39,12 +39,16 @@ CREATE TABLE IF NOT EXISTS managed_content_references (
 );
 CREATE INDEX IF NOT EXISTS managed_content_live_references ON managed_content_references(realm,object_id) WHERE released_at IS NULL;
 CREATE INDEX IF NOT EXISTS managed_content_gc ON managed_content_objects(realm,state,collect_after) WHERE reservation_active=false;
+ALTER TABLE managed_content_objects DROP CONSTRAINT IF EXISTS managed_content_objects_reservation_kind_check;
+ALTER TABLE managed_content_objects ADD CONSTRAINT managed_content_objects_reservation_kind_check CHECK(reservation_kind IN ('knowledge-file','task-artifact','cold-log-segment'));
+ALTER TABLE managed_content_references DROP CONSTRAINT IF EXISTS managed_content_references_kind_check;
+ALTER TABLE managed_content_references ADD CONSTRAINT managed_content_references_kind_check CHECK(kind IN ('knowledge-file','task-artifact','cold-log-segment'));
 `
 
 export interface ContentTransaction {
   query(sql: string, parameters?: unknown[]): Promise<{ rows: Array<Record<string, unknown>>; rowCount?: number | null }>
 }
-interface Reference { realm: string; kind: 'knowledge-file'; referenceId: string; objectKey: string; sha256: string; byteSize: number }
+interface Reference { realm: string; kind: 'knowledge-file' | 'task-artifact' | 'cold-log-segment'; referenceId: string; objectKey: string; sha256: string; byteSize: number }
 export async function pinManagedContent(tx: ContentTransaction, ref: Reference): Promise<void> {
   if (!isManagedContentKey(ref.objectKey)) return
   const key = parseManagedContentKey(ref.realm, ref.objectKey)

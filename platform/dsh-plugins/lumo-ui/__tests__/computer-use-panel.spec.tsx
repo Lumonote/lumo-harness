@@ -6,6 +6,10 @@ import { ComputerUsePanel } from '../src/client/computer-use-panel.tsx'
 import { installComputerUseServices, type ComputerUseClientServices } from '../src/client/computer-use-services.ts'
 import type { ComputerUseStatus } from '../src/computer-use-api.ts'
 
+// This suite exercises local session controls. The remote request component
+// has its own contract suite and the combined URL-dispatch integration suite.
+vi.mock('../src/client/remote-computer-panel.tsx', () => ({ RemoteComputerPanel: () => null }))
+
 const disabled: ComputerUseStatus = { enabled: false, phase: 'disabled', authorizedSessionId: null, ownerSessionId: null, startedAt: null, lastActivityAt: null, inFlight: 0, events: [], provider: 'dsh-cua', platform: 'darwin', nativeSupport: true, controlRevision: 0 }
 const ready: ComputerUseStatus = { ...disabled, enabled: true, phase: 'ready', authorizedSessionId: 'session-1', controlRevision: 1 }
 const disposers: Array<() => void> = []
@@ -169,11 +173,20 @@ describe('computer operation panel', () => {
     expect((screen.getByRole('button', { name: '允许当前对话操作电脑' }) as HTMLButtonElement).disabled).toBe(true)
     expect(test.fetchMock).toHaveBeenCalledTimes(2)
   })
-  it('reports unsupported Windows truthfully and never offers OS authorization', async () => {
+  it('keeps an unavailable Windows driver disabled and explains its interactive desktop boundary', async () => {
     mount({ ...disabled, platform: 'win32', nativeSupport: false })
-    expect(await screen.findByText(/此功能需要 macOS 14 及以上，当前系统暂不可用/)).toBeTruthy()
+    expect(await screen.findByText(/Windows 需要在已登录的交互桌面/)).toBeTruthy()
     expect((screen.getByRole('button', { name: '允许当前对话操作电脑' }) as HTMLButtonElement).disabled).toBe(true)
     expect(screen.queryByRole('button', { name: /授予.*权限/ })).toBeNull()
+  })
+  it('allows the isolated Windows provider while refusing a raw native driver', async () => {
+    mount({ ...disabled, platform: 'win32', provider: 'lumo-cua-windows', nativeSupport: true })
+    await settled()
+    expect((screen.getByRole('button', { name: '允许当前对话操作电脑' }) as HTMLButtonElement).disabled).toBe(false)
+    cleanup()
+    mount({ ...disabled, platform: 'win32', provider: 'cua-driver-native', nativeSupport: true })
+    await settled()
+    expect((screen.getByRole('button', { name: '允许当前对话操作电脑' }) as HTMLButtonElement).disabled).toBe(true)
   })
   it('does not claim a registered unsupported driver is usable', async () => {
     mount({ ...disabled, provider: 'mcp' })

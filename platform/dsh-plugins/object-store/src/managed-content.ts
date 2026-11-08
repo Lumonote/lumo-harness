@@ -22,7 +22,7 @@ export interface ManagedContentBackend {
   delete(realm: string, relativeKey: string): Promise<void>
 }
 function validateReference(ref: ManagedContentReference): void {
-  if (!validRealmKey(ref.realm) || ref.kind !== 'knowledge-file' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/u.test(ref.referenceId)) throw new TypeError('Invalid managed content reservation')
+  if (!validRealmKey(ref.realm) || !['knowledge-file','task-artifact','cold-log-segment'].includes(ref.kind) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/u.test(ref.referenceId)) throw new TypeError('Invalid managed content reservation')
 }
 function duration(value: number | undefined, fallback: number, maximum: number): number {
   const result = value ?? fallback
@@ -36,7 +36,7 @@ async function deadline<T>(work: Promise<T>, ms: number): Promise<T> {
 }
 interface ObjectRow {
   realm: string; object_id: string; storage_id:string; object_key: string; sha256: string; byte_size: string; state: string
-  reservation_active: boolean; reservation_kind: 'knowledge-file'; reservation_id: string; revision: string
+  reservation_active: boolean; reservation_kind: 'knowledge-file' | 'task-artifact' | 'cold-log-segment'; reservation_id: string; revision: string
 }
 
 /** PG is the only lifecycle truth. MinIO deletion starts only AFTER a durable

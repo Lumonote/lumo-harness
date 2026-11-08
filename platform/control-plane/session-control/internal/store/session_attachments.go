@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -16,11 +17,13 @@ import (
 const sessionAttachmentDDL = `
 CREATE TABLE IF NOT EXISTS session_attachment_receipts (
  realm TEXT NOT NULL,session_ref TEXT NOT NULL REFERENCES session_owners(session_ref),receipt_id TEXT NOT NULL,
- owner_user_id TEXT NOT NULL,project_id TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('text','image')),
+ owner_user_id TEXT NOT NULL,project_id TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('text','image','document')),
  name TEXT NOT NULL,media_type TEXT NOT NULL,bytes BIGINT NOT NULL CHECK(bytes>0 AND bytes<=8388608),
  sha256 TEXT NOT NULL,native_ref JSONB NOT NULL,inherited_from_session TEXT NOT NULL DEFAULT '',
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),PRIMARY KEY(realm,session_ref,receipt_id)
 );
+ALTER TABLE session_attachment_receipts DROP CONSTRAINT IF EXISTS session_attachment_receipts_kind_check;
+ALTER TABLE session_attachment_receipts ADD CONSTRAINT session_attachment_receipts_kind_check CHECK(kind IN ('text','image','document'));
 `
 
 var attachmentID = regexp.MustCompile(`^att_[a-f0-9]{48}$`)
@@ -65,6 +68,16 @@ func validAttachmentReceipt(realm string, r AttachmentReceipt) bool {
 	}
 	if r.Kind == "text" {
 		return r.MediaType == "text/plain" && r.Bytes <= 1024*1024 && r.NativeRef.AttachmentID == realm+"/file-content/"+r.SHA256 && r.NativeRef.MediaType == "" && r.NativeRef.Width == 0 && r.NativeRef.Height == 0 && r.NativeRef.OriginalDimensions == nil
+	}
+	if r.Kind == "document" {
+		types := map[string]string{
+			".pdf":  "application/pdf",
+			".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		}
+		expected, ok := types[strings.ToLower(path.Ext(r.Name))]
+		return ok && r.MediaType == expected && r.NativeRef.AttachmentID == realm+"/file-content/"+r.SHA256 && r.NativeRef.MediaType == "" && r.NativeRef.Width == 0 && r.NativeRef.Height == 0 && r.NativeRef.OriginalDimensions == nil
 	}
 	if r.Kind != "image" || r.NativeRef.AttachmentID != realm+"/content/"+r.SHA256 || r.NativeRef.MediaType != r.MediaType || r.NativeRef.Width < 1 || r.NativeRef.Height < 1 || r.NativeRef.Width > 8192 || r.NativeRef.Height > 8192 || int64(r.NativeRef.Width)*int64(r.NativeRef.Height) > 64000000 {
 		return false

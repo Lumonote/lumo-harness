@@ -2,7 +2,7 @@ import { boundedJSON } from '../../../shared/session-execution.ts'
 
 const failures = {
   session_attachment_invalid: [400, 'Attachment filename or binary metadata is invalid', false],
-  session_attachment_unsupported: [415, 'Only supported safe UTF-8 text and image media types are accepted', false],
+  session_attachment_unsupported: [415, 'Only supported safe UTF-8 text, images and bounded PDF/Office documents are accepted', false],
   session_attachment_too_large: [413, 'Attachment exceeds the upload byte limit', false],
   session_attachment_busy: [429, 'Attachment transfer capacity reached', true],
   session_attachment_denied: [403, 'Attachment ownership or execution lease is unavailable', false],

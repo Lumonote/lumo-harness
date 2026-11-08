@@ -19,14 +19,20 @@ declare module '@deepseek-ai/cordis' { interface Context { lumoComputerUse: Lumo
 
 /** Human-facing runtime controls. Enabling never grants OS permissions or application consent. */
 export class LumoComputerUseService extends Service {
+  private revision = 0
   constructor(ctx: Context, readonly coordinator: ComputerUseCoordinator) { super(ctx, 'lumoComputerUse') }
+  get controlRevision(): number { return this.revision }
   snapshot(): ComputerUseSnapshot { return this.coordinator.snapshot() }
-  enable(sessionId: string): ComputerUseSnapshot { return this.coordinator.enable(sessionId) }
-  stop(): ComputerUseSnapshot { return this.coordinator.stop() }
+  enable(sessionId: string): ComputerUseSnapshot { const snapshot = this.coordinator.enable(sessionId); this.revision++; return snapshot }
+  stop(): ComputerUseSnapshot { const snapshot = this.coordinator.stop(); this.revision++; return snapshot }
+  bindWindowsCleanup(cleanup: () => Promise<void>): () => void { return this.coordinator.bindWindowsCleanup(cleanup) }
 }
 
 export function apply(ctx: Context, config: ComputerUseConfig): void {
-  const coordinator = new ComputerUseCoordinator(config)
+  const coordinator = new ComputerUseCoordinator(config, { supportsIsolatedWindowsTool: name =>
+    /^lumo_cua_windows__[A-Za-z0-9_-]+$/u.test(name)
+    && (ctx.get('computerUse') as { providerName?: string } | undefined)?.providerName === 'lumo-cua-windows'
+    && (ctx.get('lumoWindowsComputerUse') as { available?: boolean } | undefined)?.available === true })
   new LumoComputerUseService(ctx, coordinator)
   ctx.effect(function* () {
     yield ctx.tools.guard(execution => coordinator.guard(execution))

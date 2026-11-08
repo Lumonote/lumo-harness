@@ -40,6 +40,31 @@ async function fixture(config:Partial<ManagedContentConfig>={}) {
 }
 
 describe('managed content lifecycle with real PostgreSQL and MinIO',()=>{
+  live('retains task artifacts while pinned and collects only their released managed objects',async()=>{
+    const f=await fixture(),ref={realm:f.realm,kind:'task-artifact' as const,referenceId:`artifact-${randomUUID()}`}
+    const receipt=await f.lifecycle.put(ref,'task artifact bytes','application/pdf')
+    const tx=await f.db.connect()
+    try{
+      await tx.query('BEGIN')
+      await pinManagedContent(tx,{...ref,objectKey:receipt.objectKey,sha256:receipt.sha256,byteSize:receipt.byteSize})
+      await tx.query('COMMIT')
+      expect(await f.lifecycle.abandon(ref)).toBe(false)
+      expect(await f.other({deleteEnabled:true}).collect(f.realm)).toMatchObject({candidates:0,deleted:0})
+      expect((await f.objects.get(f.realm,f.relative(receipt)))?.body.toString()).toBe('task artifact bytes')
+      await tx.query('BEGIN')
+      await releaseManagedContent(tx,{...ref,objectKey:receipt.objectKey})
+      await tx.query('ROLLBACK')
+      expect(await f.lifecycle.candidates(f.realm)).toEqual([])
+      await tx.query('BEGIN')
+      await releaseManagedContent(tx,{...ref,objectKey:receipt.objectKey})
+      await tx.query('COMMIT')
+      expect(await f.other({deleteEnabled:true}).collect(f.realm)).toMatchObject({candidates:1,deleted:1,failed:0})
+      expect(await f.objects.get(f.realm,f.relative(receipt))).toBeUndefined()
+      await tx.query('BEGIN')
+      await expect(pinManagedContent(tx,{...ref,objectKey:receipt.objectKey,sha256:receipt.sha256,byteSize:receipt.byteSize})).rejects.toThrow('not ready')
+      await tx.query('ROLLBACK')
+    }finally{await tx.query('ROLLBACK');tx.release()}
+  })
   live('pins knowledge files atomically, supports shared references and keeps physical deletion off by default',async()=>{
     const f=await fixture(),receipt=await f.put()
     expect(await f.lifecycle.candidates(f.realm)).toEqual([])

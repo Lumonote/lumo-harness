@@ -241,6 +241,14 @@ func (s *Store) TaskProgress(ctx context.Context, realm, taskID string) (domain.
 // TaskProgressItems only receives task IDs already authorized by the caller.
 // It batches current runs and their latest checkpoints without historical blobs.
 func (s *Store) TaskProgressItems(ctx context.Context, realm string, tasks []domain.DelegatedTask) ([]domain.WorkforceProgressItem, error) {
+	return taskProgressItems(ctx, s.pool, realm, tasks, time.Now().UTC())
+}
+
+type progressQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func taskProgressItems(ctx context.Context, query progressQuerier, realm string, tasks []domain.DelegatedTask, now time.Time) ([]domain.WorkforceProgressItem, error) {
 	out := make([]domain.WorkforceProgressItem, len(tasks))
 	ids := make([]string, len(tasks))
 	indices := make(map[string]int, len(tasks))
@@ -249,7 +257,7 @@ func (s *Store) TaskProgressItems(ctx context.Context, realm string, tasks []dom
 		ids[i] = task.ID
 		indices[task.ID] = i
 	}
-	rows, err := s.pool.Query(ctx, `SELECT row_to_json(r),p.payload FROM (
+	rows, err := query.Query(ctx, `SELECT row_to_json(r),p.payload FROM (
 	  SELECT DISTINCT ON(task_id) * FROM governance_task_runs WHERE realm=$1 AND task_id=ANY($2) ORDER BY task_id,attempt DESC
 	) r LEFT JOIN LATERAL (SELECT payload FROM governance_task_progress p WHERE p.realm=r.realm AND p.task_id=r.task_id AND p.run_id=r.id ORDER BY revision DESC LIMIT 1) p ON true`, realm, ids)
 	if err != nil {
@@ -278,7 +286,6 @@ func (s *Store) TaskProgressItems(ctx context.Context, realm string, tasks []dom
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC()
 	for i := range out {
 		out[i].Health = domain.ProgressHealth(out[i].Task, out[i].Run, out[i].Progress, now)
 	}

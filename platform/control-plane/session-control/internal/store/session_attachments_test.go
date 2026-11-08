@@ -32,6 +32,64 @@ func attachmentFixture(t *testing.T) (*Store, SessionOwner, AttachmentRequest) {
 func textAttachment() *AttachmentReceipt {
 	return &AttachmentReceipt{Kind: "text", Name: "notes.txt", MediaType: "text/plain", Bytes: 5, SHA256: strings.Repeat("a", 64), NativeRef: AttachmentNativeRef{AttachmentID: "r/file-content/" + strings.Repeat("a", 64), Name: "notes.txt", Bytes: 5}}
 }
+
+func TestDocumentAttachmentReceiptValidation(t *testing.T) {
+	for extension, mediaType := range map[string]string{
+		".pdf":  "application/pdf",
+		".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+	} {
+		t.Run(extension, func(t *testing.T) {
+			r := *textAttachment()
+			r.Kind, r.Name, r.MediaType = "document", "report"+extension, mediaType
+			r.NativeRef.Name = r.Name
+			if !validAttachmentReceipt("r", r) {
+				t.Fatal("valid document rejected")
+			}
+			bad := r
+			bad.MediaType = "application/octet-stream"
+			if validAttachmentReceipt("r", bad) {
+				t.Fatal("unknown MIME accepted")
+			}
+			bad = r
+			bad.Name = "report.txt"
+			bad.NativeRef.Name = bad.Name
+			if validAttachmentReceipt("r", bad) {
+				t.Fatal("extension mismatch accepted")
+			}
+			bad = r
+			bad.NativeRef.AttachmentID = "other/file-content/" + r.SHA256
+			if validAttachmentReceipt("r", bad) {
+				t.Fatal("cross realm accepted")
+			}
+			bad = r
+			bad.NativeRef.Width = 1
+			if validAttachmentReceipt("r", bad) {
+				t.Fatal("image fields accepted for document")
+			}
+		})
+	}
+}
+
+func TestDocumentAttachmentPersistsAcrossStoreRestart(t *testing.T) {
+	s, owner, request := attachmentFixture(t)
+	request.Operation = "create"
+	request.Receipt = textAttachment()
+	request.Receipt.Kind = "document"
+	request.Receipt.Name = "report.PDF"
+	request.Receipt.NativeRef.Name = request.Receipt.Name
+	request.Receipt.MediaType = "application/pdf"
+	items, err := s.SessionAttachments(context.Background(), owner.SessionRef, request)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("create: %+v %v", items, err)
+	}
+	request.Operation, request.ReceiptID, request.Receipt = "get", items[0].ReceiptID, nil
+	items, err = New(s.pool).SessionAttachments(context.Background(), owner.SessionRef, request)
+	if err != nil || len(items) != 1 || items[0].Kind != "document" || items[0].MediaType != "application/pdf" {
+		t.Fatalf("restart: %+v %v", items, err)
+	}
+}
 func TestAttachmentReceiptsPersistAndFenceEveryAccess(t *testing.T) {
 	s, o, in := attachmentFixture(t)
 	ctx := context.Background()

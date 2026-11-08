@@ -473,6 +473,7 @@ type message struct {
 	Arch          string          `json:"arch,omitempty"`
 }
 type options struct {
+	computerHostFile                                                                                         string
 	gateway, realm, nodeID, stateDir, installDir, caFile, codeFile, clientVersion, allowed, taskRunnerSocket string
 	trustFile, shapeJSON                                                                                     string
 	shape                                                                                                    plan.Shape
@@ -500,8 +501,12 @@ func run() error {
 	flag.StringVar(&o.clientVersion, "client-version", "0.1.0", "client version approved in device policy")
 	flag.StringVar(&o.allowed, "allow-runtime-digests", "", "explicit local consent: comma-separated exact manifest digests permitted to execute")
 	flag.StringVar(&o.taskRunnerSocket, "task-runner-socket", "", "optional absolute mode-0600 Unix socket for the provisioned task runner")
+	flag.StringVar(&o.computerHostFile, "computer-host-file", "", "optional private local computer-use Host discovery file; requires a local human decision for each request")
 	flag.DurationVar(&o.maxRuntime, "max-runtime", time.Minute, "maximum lifetime of a locally approved process (up to 5m)")
 	flag.Parse()
+	if o.computerHostFile != "" && !filepath.IsAbs(o.computerHostFile) {
+		return errors.New("desktop-agent: computer Host discovery requires an absolute private path")
+	}
 	if !filepath.IsAbs(o.trustFile) {
 		return errors.New("desktop-agent: -trust-file is required")
 	}
@@ -788,6 +793,11 @@ func connect(parent context.Context, o options, id identity) error {
 	}
 	defer httpClient.CloseIdleConnections()
 	installer := provisioner.New(o.gateway+"/device/registry", o.installDir)
+	closeComputerBridge, err := startComputerLeaseBridge(ctx, o, httpClient)
+	if err != nil {
+		return err
+	}
+	defer closeComputerBridge()
 	installer.Client = httpClient
 	installer.TrustFile = o.trustFile
 	var writeMu, snapshotMu sync.Mutex
@@ -986,6 +996,11 @@ func connect(parent context.Context, o options, id identity) error {
 				accepted := false
 				if cmd.ExpiresAt.After(time.Now()) && cmd.Revision == revision && desired != nil {
 					switch cmd.Action {
+					case "computer_use_request", "computer_use_revoke":
+						if deliverComputerCommand(ctx, o, cmd) == nil {
+							result.State = "completed"
+							result.Result = json.RawMessage(`{"accepted":true}`)
+						}
 					case "execute_task":
 						// A device that cannot run tasks must refuse the assignment
 						// rather than accept and then report FAILED. Acceptance is

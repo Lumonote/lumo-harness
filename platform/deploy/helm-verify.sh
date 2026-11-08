@@ -190,6 +190,23 @@ if render_ok "base profile" "$default_render"; then
   fi
 fi
 
+remote_computer_workloads=$(printf '%s\n' 'lumo-platform-flows' 'lumo-platform-governance')
+for profile in base cluster; do
+  flags=(-f "$chart_dir/values.yaml")
+  [[ "$profile" == base ]] || flags+=(-f "$cluster_profile")
+  for enabled in false true; do
+    remote_render="$report_dir/remote-computer-$profile-$enabled.yaml"
+    if render_ok "$profile remote computer requests $enabled" "$remote_render" "${flags[@]}" --set governance.remoteComputerUse="$enabled"; then
+      actual=$(workloads_with_env_value "$remote_render" LUMO_REMOTE_COMPUTER_USE "$enabled")
+      if [[ "$actual" == "$remote_computer_workloads" ]]; then
+        pass "$profile remote computer opt-in reaches both Flow producer and Governance"
+      else
+        fail "$profile remote computer opt-in reaches [$actual], expected [$remote_computer_workloads]"
+      fi
+    fi
+  done
+done
+
 if render_ok "cluster profile" "$cluster_render" -f "$cluster_profile"; then
   check_no_empty_secret_names "cluster profile" "$cluster_render"
   check_secret_references_resolve "cluster profile" "$cluster_render" "$cluster_operator_secrets"
@@ -678,6 +695,33 @@ render_rejected "dynamic Session mesh mTLS without a configured mesh" \
   -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" \
   --set dshWeb.userSessionExecution.routing.transportSecurity=mesh-mtls --set serviceMesh.istio.enabled=false
 
+# Migration requires an explicit shared checkpoint store and durable workspaces,
+# even when an operator scales the Web replica count back down to one.
+cat >"$report_dir/dynamic-migration.yaml" <<'YAML'
+objectStore:
+  enabled: true
+  endpoint: minio.example
+  credentialsSecret: lumo-migration-objects
+dshWeb:
+  userSessionExecution:
+    workspaceRoot: /var/lib/lumo/session-spool/user-sessions
+    migration: {enabled: true}
+YAML
+render_ok "explicit Session migration with shared objects and independent durable nodes" \
+  "$report_dir/dynamic-migration-render.yaml" -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-migration.yaml"
+render_rejected "Session migration without shared object storage" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-migration.yaml" --set objectStore.enabled=false
+render_rejected "Session migration with only one Web node" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-migration.yaml" --set dshWeb.replicas=1
+render_rejected "Session migration with an ephemeral workspace" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-migration.yaml" --set dshWeb.userSessionExecution.workspaceRoot=/srv/sessions
+render_rejected "Session migration escaping the persistent workspace volume" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-migration.yaml" --set dshWeb.userSessionExecution.workspaceRoot=/var/lib/lumo/session-spool/../sessions
+render_rejected "Session migration with an ambiguous disabled object" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-migration.yaml" --set dshWeb.userSessionExecution.migration.enabled=false
+render_rejected "Session migration without session-control" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-migration.yaml" --set services.session-control.enabled=false
+
 # Attachment application policy stays opt-in and cannot widen its bounded realm.
 cat >"$report_dir/dynamic-attachments.yaml" <<'YAML'
 dshWeb:
@@ -718,6 +762,8 @@ dshWeb:
 YAML
 render_ok "owned Session connectors with exact matching deployment grants" \
   "$report_dir/dynamic-connectors-render.yaml" -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-connectors.yaml"
+render_rejected "Session migration with external connector effects" \
+  -f "$cluster_profile" -f "$report_dir/dynamic-session.yaml" -f "$report_dir/dynamic-migration.yaml" -f "$report_dir/dynamic-connectors.yaml"
 if grep -q 'LUMO_OWNED_SESSION_CONNECTORS' "$default_render"; then
   fail "owned Session connectors must remain disabled in the base profile"
 else

@@ -57,6 +57,7 @@ type Gateway struct {
 	issuerPEM   string
 	client      *http.Client
 	connections sync.Map
+	remoteComputer RemoteComputerAuthorizer
 }
 
 func New(options Options) (*Gateway, error) {
@@ -110,6 +111,7 @@ func (g *Gateway) Serve(ctx context.Context) error {
 	mux.HandleFunc("GET /device/connect", g.connect)
 	mux.HandleFunc("POST /device/registry/v1/plan", g.plan)
 	mux.HandleFunc("GET /device/registry/v1/blobs/{digest}", g.blob)
+	mux.HandleFunc("POST /device/computer-use/{requestID}/lease", g.remoteComputerLease)
 	server := &http.Server{Addr: g.options.Listen, Handler: mux, TLSConfig: g.tls, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 45 * time.Second, MaxHeaderBytes: 16 << 10}
 	go g.dispatchTasks(ctx)
 	go func() {

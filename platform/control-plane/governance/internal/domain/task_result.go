@@ -19,8 +19,11 @@ type TaskResult struct {
 	Summary            string               `json:"summary"`
 	Output             json.RawMessage      `json:"output,omitempty"`
 	Files              []RunTextFile        `json:"files,omitempty"`
+	RepositoryFiles    []RepositoryFile     `json:"repository_files,omitempty"`
 	ReviewFileReceipts []RunFileReadReceipt `json:"review_file_receipts,omitempty"`
 	CreatedAt          time.Time            `json:"created_at"`
+	ReviewScope        string               `json:"review_scope,omitempty"`
+	ManifestDigest     string               `json:"manifest_digest,omitempty"`
 }
 
 func (r TaskResult) Validate() error {
@@ -37,6 +40,14 @@ func (r TaskResult) Validate() error {
 	if len(r.Files) > 0 {
 		if err := ValidateRunTextFiles(r.Files); err != nil {
 			return err
+		}
+	}
+	if len(r.RepositoryFiles) > 0 {
+		if err := ValidateRepositoryFiles(r.RepositoryFiles); err != nil {
+			return err
+		}
+		if len(r.Files) > 0 {
+			return fmt.Errorf("repository output cannot select generated review files")
 		}
 	}
 	if len(r.ReviewFileReceipts) > MaxRunTextFiles {

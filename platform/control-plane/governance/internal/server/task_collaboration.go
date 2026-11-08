@@ -78,6 +78,23 @@ func (s *Server) taskArtifacts(w http.ResponseWriter, r *http.Request) {
 			s.respondStoreError(w, err)
 			return
 		}
+		mutable, err := s.store.TaskArtifactWithdrawalAvailable(r.Context(), c.realm, task.ID, runID)
+		if err != nil {
+			s.respondStoreError(w, err)
+			return
+		}
+		contributor := isRealmAdmin(c)
+		if !contributor {
+			access, err := s.store.TaskAccess(r.Context(), c.realm, task.ID, c.userID)
+			if err != nil {
+				s.respondStoreError(w, err)
+				return
+			}
+			contributor = access == "contributor"
+		}
+		for i := range items {
+			items[i].CanWithdraw = mutable && contributor && (isRealmAdmin(c) || task.RequesterUserID == c.userID || items[i].CreatedBy == c.userID)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"artifacts": items})
 		return
 	}
@@ -95,7 +112,7 @@ func (s *Server) taskArtifacts(w http.ResponseWriter, r *http.Request) {
 	artifact, err := s.store.ReserveTaskArtifact(r.Context(), domain.TaskArtifact{
 		ID: newID("artifact"), Realm: c.realm, TaskID: task.ID, RunID: runID,
 		Name: req.Name, ContentType: req.ContentType, CreatedBy: c.userID,
-	})
+	}, isRealmAdmin(c))
 	if err != nil {
 		s.respondStoreError(w, err)
 		return
@@ -122,12 +139,37 @@ func (s *Server) completeTaskArtifact(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	artifact, err := s.store.CompleteTaskArtifact(r.Context(), c.realm, r.PathValue("taskID"), r.PathValue("runID"), r.PathValue("artifactID"), req.StorageKey, req.SHA256, req.SizeBytes)
+	artifact, err := s.store.CompleteTaskArtifact(r.Context(), c.realm, r.PathValue("taskID"), r.PathValue("runID"), r.PathValue("artifactID"), req.StorageKey, req.SHA256, req.SizeBytes, c.userID, isRealmAdmin(c))
 	if err != nil {
 		s.respondStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, artifact)
+}
+
+func (s *Server) withdrawTaskArtifact(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCluster(w) {
+		return
+	}
+	c, ok := s.caller(w, r)
+	if !ok || !s.requireDelegationAuthority(w, r, c) {
+		return
+	}
+	if _, ok = s.taskParticipant(w, r, c); !ok {
+		return
+	}
+	var req struct {
+		Reason         string `json:"reason"`
+		ExpectedSHA256 string `json:"expected_sha256"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := s.store.WithdrawTaskArtifact(r.Context(), c.realm, r.PathValue("taskID"), r.PathValue("runID"), r.PathValue("artifactID"), c.userID, req.Reason, req.ExpectedSHA256, isRealmAdmin(c)); err != nil {
+		s.respondStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"withdrawn": true})
 }
 
 // taskArtifactStorage is only used by the Lumo host while streaming an

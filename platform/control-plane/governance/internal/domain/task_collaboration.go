@@ -31,4 +31,5 @@ type TaskArtifact struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	ReadyAt     *time.Time `json:"ready_at,omitempty"`
 	StorageKey  string     `json:"-"`
+	CanWithdraw bool       `json:"can_withdraw"`
 }

@@ -152,15 +152,30 @@ importers:
       '@deepseek-ai/dsh-atomic-write':
         specifier: link:../../../deepseek-harness/packages/util/atomic-write
         version: link:../../../deepseek-harness/packages/util/atomic-write
+      '@deepseek-ai/dsh-computer-use':
+        specifier: link:../../../deepseek-harness/packages/computer-use/computer-use
+        version: link:../../../deepseek-harness/packages/computer-use/computer-use
+      '@deepseek-ai/dsh-llm':
+        specifier: link:../../../deepseek-harness/packages/llm/llm
+        version: link:../../../deepseek-harness/packages/llm/llm
+      '@deepseek-ai/dsh-mcp-client':
+        specifier: link:../../../deepseek-harness/packages/mcp/mcp-client
+        version: link:../../../deepseek-harness/packages/mcp/mcp-client
       '@deepseek-ai/dsh-session':
         specifier: link:../../../deepseek-harness/packages/core/session
         version: link:../../../deepseek-harness/packages/core/session
+      '@deepseek-ai/dsh-system-prompt':
+        specifier: link:../../../deepseek-harness/packages/core/system-prompt
+        version: link:../../../deepseek-harness/packages/core/system-prompt
       '@deepseek-ai/dsh-tools':
         specifier: link:../../../deepseek-harness/packages/core/tools
         version: link:../../../deepseek-harness/packages/core/tools
       '@deepseek-ai/schemastery':
         specifier: link:../../../deepseek-harness/vendor/schemastery
         version: link:../../../deepseek-harness/vendor/schemastery
+      '@trycua/cua-driver':
+        specifier: 0.28.0
+        version: 0.28.0
     devDependencies:
       '@deepseek-ai/dsh-agent-loop':
         specifier: link:../../../deepseek-harness/packages/core/agent-loop
@@ -168,12 +183,6 @@ importers:
       '@deepseek-ai/dsh-agent-loop-testkit':
         specifier: link:../../../deepseek-harness/packages/test-support/agent-loop-testkit
         version: link:../../../deepseek-harness/packages/test-support/agent-loop-testkit
-      '@deepseek-ai/dsh-llm':
-        specifier: link:../../../deepseek-harness/packages/llm/llm
-        version: link:../../../deepseek-harness/packages/llm/llm
-      '@deepseek-ai/dsh-system-prompt':
-        specifier: link:../../../deepseek-harness/packages/core/system-prompt
-        version: link:../../../deepseek-harness/packages/core/system-prompt
       '@deepseek-ai/dsh-tool-executor-native':
         specifier: link:../../../deepseek-harness/packages/core/tool-executor-native
         version: link:../../../deepseek-harness/packages/core/tool-executor-native
@@ -295,6 +304,9 @@ importers:
       '@deepseek-ai/cordis':
         specifier: link:../../../deepseek-harness/vendor/cordis
         version: link:../../../deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-atomic-write':
+        specifier: link:../../../deepseek-harness/packages/util/atomic-write
+        version: link:../../../deepseek-harness/packages/util/atomic-write
       '@deepseek-ai/dsh-client-ui-conversation':
         specifier: link:../../../deepseek-harness/packages/client/ui-conversation
         version: link:../../../deepseek-harness/packages/client/ui-conversation
@@ -671,6 +683,9 @@ importers:
       '@deepseek-ai/dsh-attachment':
         specifier: link:../../../deepseek-harness/packages/attachment/attachment
         version: link:../../../deepseek-harness/packages/attachment/attachment
+      '@deepseek-ai/dsh-atomic-write':
+        specifier: link:../../../deepseek-harness/packages/util/atomic-write
+        version: link:../../../deepseek-harness/packages/util/atomic-write
       '@deepseek-ai/dsh-host-webserver':
         specifier: link:../../../deepseek-harness/packages/host/webserver
         version: link:../../../deepseek-harness/packages/host/webserver
@@ -2559,6 +2574,41 @@ packages:
 
   '@tokenizer/token@0.3.0':
     resolution: {integrity: sha512-OvjF+z51L3ov0OyAU0duzsYuvO01PH7x4t6DJx+guahgTnBHkhJdG7soQeTSFLWN3efnHyibZ4Z8l2EuWwJN3A==}
+
+  '@trycua/cua-driver-darwin-arm64@0.28.0':
+    resolution: {integrity: sha512-T6xvOlCph5uropetrH6tNTvg5ipN9FUzV1n28gNJ1LYoNT3fsqnQUpCRMavlAui/zYkyMqCMaBUqBcfZLA+SnA==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@trycua/cua-driver-darwin-x64@0.28.0':
+    resolution: {integrity: sha512-8lBtyiTfMOGmEklNY4GHu5SedfxYbg43FjLpPUmKLSVF98+opyQ1bsyI7A7VlfUBW4hdwEBDLtzZnpZqepN9ZA==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@trycua/cua-driver-linux-arm64-gnu@0.28.0':
+    resolution: {integrity: sha512-/sDRM2vUQUA5FY3y3VAOxe0I5U1UHfhDUY3EfvGhASrHteefMVh+Wo8teebcto5TgVjiw4P41YdoTFBFWR3w4g==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@trycua/cua-driver-linux-x64-gnu@0.28.0':
+    resolution: {integrity: sha512-2rEldOcNy+CT7re2pnIEfMW1c4wCoaLqhv8hoqBRK5gHn3UJTJPaxvo35tKSuIJAAQ/GMawCHCl9WvjY+W2ysw==}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@trycua/cua-driver-win32-arm64-msvc@0.28.0':
+    resolution: {integrity: sha512-7cbX5v7xyCdGK3KuwPbMKlIuIUjKkKFuGgdPsCl7qZHLv+PQC5f7FrDFl8hFG3YNKvjoyan5ufus0AoTCcmp5w==}
+    cpu: [arm64]
+    os: [win32]
+
+  '@trycua/cua-driver-win32-x64-msvc@0.28.0':
+    resolution: {integrity: sha512-tTWcGIGUCZ/k+mbcdh/4VmehsELp12M/tUj59XQSW97lFwrMSSIUypZ84LAEO+CEBdK9NQBRKO2pMBTH6aakEQ==}
+    cpu: [x64]
+    os: [win32]
+
+  '@trycua/cua-driver@0.28.0':
+    resolution: {integrity: sha512-n3ArFsQ9RzNQIiYpHJEjTGLIPPpnqXDJRp0sevRcrRThAG3H2Fh/gWooEb9k4ba3rNSAohUoPiG/EbdKLF1WRw==}
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -6537,6 +6587,36 @@ snapshots:
 
   '@tokenizer/token@0.3.0':
     optional: true
+
+  '@trycua/cua-driver-darwin-arm64@0.28.0':
+    optional: true
+
+  '@trycua/cua-driver-darwin-x64@0.28.0':
+    optional: true
+
+  '@trycua/cua-driver-linux-arm64-gnu@0.28.0':
+    optional: true
+
+  '@trycua/cua-driver-linux-x64-gnu@0.28.0':
+    optional: true
+
+  '@trycua/cua-driver-win32-arm64-msvc@0.28.0':
+    optional: true
+
+  '@trycua/cua-driver-win32-x64-msvc@0.28.0':
+    optional: true
+
+  '@trycua/cua-driver@0.28.0':
+    dependencies:
+      '@ubjs/core': 0.31.0-3
+      '@ubjs/node': 0.31.0-3
+    optionalDependencies:
+      '@trycua/cua-driver-darwin-arm64': 0.28.0
+      '@trycua/cua-driver-darwin-x64': 0.28.0
+      '@trycua/cua-driver-linux-arm64-gnu': 0.28.0
+      '@trycua/cua-driver-linux-x64-gnu': 0.28.0
+      '@trycua/cua-driver-win32-arm64-msvc': 0.28.0
+      '@trycua/cua-driver-win32-x64-msvc': 0.28.0
 
   '@types/chai@5.2.3':
     dependencies:

@@ -109,6 +109,17 @@ describe('local computer controls', () => {
     expect(test.service.enable).toHaveBeenCalledOnce()
     expect(await test.call('/stop', 'POST', {})).toMatchObject({ status: 200, body: { enabled: false, controlRevision: 3 } })
   })
+  it('admits only an available isolated Windows worker and preserves stop during quarantine', async () => {
+    const test = fixture('win32')
+    test.services['computerUse'] = { providerName: 'lumo-cua-windows' }
+    expect((await test.call('/enable', 'POST', { sessionId: 'session-1', controlRevision: 0 })).status).toBe(409)
+    test.services['lumoWindowsComputerUse'] = { available: true }
+    expect(await test.call('/enable', 'POST', { sessionId: 'session-1', controlRevision: 0 })).toMatchObject({ status: 200, body: { provider: 'lumo-cua-windows', nativeSupport: true } })
+    test.services['lumoWindowsComputerUse'] = { available: false }
+    expect(await test.call()).toMatchObject({ status: 200, body: { nativeSupport: false } })
+    expect((await test.call('/enable', 'POST', { sessionId: 'session-1', controlRevision: 1 })).status).toBe(409)
+    expect((await test.call('/stop', 'POST', {})).status).toBe(200)
+  })
   it('requires an explicit valid revision and refuses unknown authorization fields', async () => {
     const test = fixture()
     for (const controlRevision of [undefined, -1, 1.5, '0', null, Number.MAX_SAFE_INTEGER + 1]) {

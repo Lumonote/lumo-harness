@@ -132,6 +132,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/session-execution/nodes/{nodeID}", s.handleExecutionNode)
 	mux.HandleFunc("POST /v1/session-execution/nodes/{nodeID}/{operation}", s.handleExecutionNode)
 	mux.HandleFunc("POST /v1/session-execution/sessions/{ref}/{operation}", s.handleExecutionLease)
+	mux.HandleFunc("GET /v1/session-migrations/{ref}", s.handleSessionMigration)
+	mux.HandleFunc("POST /v1/session-migrations/{ref}/checkpoint", s.handleSessionMigration)
+	mux.HandleFunc("POST /v1/session-migrations/{ref}/{migrationID}/activate", s.handleSessionMigration)
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {

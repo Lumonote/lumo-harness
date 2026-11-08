@@ -108,6 +108,8 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $.Values.production.databaseSecret | quote }}, key: REGISTRY_PG_DSN, optional: false } }
             {{- end }}
             {{- if eq $name "flows" }}
+            - name: LUMO_REMOTE_COMPUTER_USE
+              value: {{ $.Values.governance.remoteComputerUse | quote }}
             {{- range $env, $service := dict "LUMO_LLM_GATEWAY_URL" "llm-gateway" "LUMO_CONNECTOR_GATEWAY_URL" "connector-gateway" "LUMO_PROJECTS_URL" "projects" "LUMO_GOVERNANCE_URL" "governance" }}
             {{- $target := index $.Values.services $service }}
             {{- if $target.enabled }}
@@ -190,6 +192,8 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $.Values.vault.tokenSecret }}, key: {{ $.Values.vault.tokenKey }}, optional: true } }
             {{- end }}
             {{- if eq $name "governance" }}
+            - name: LUMO_REMOTE_COMPUTER_USE
+              value: {{ $.Values.governance.remoteComputerUse | quote }}
             - name: LUMO_GOVERNANCE_POLICY_URL
               value: {{ $.Values.governance.permissionPolicyUrl | quote }}
             {{- if $.Values.governance.recoveryProvider.enabled }}

@@ -29,6 +29,7 @@ import { assertWindowsRuntimePaths, copyRuntimePackage, planRuntimePackages, res
 import { compilePackagedTypeScriptPlugin, packagedTypeScriptPluginDirectories } from './packaged-typescript.mjs'
 import { stageDshNode } from './stage-dsh-node.mjs'
 import { cuaProviderPackage, stageCuaHelper, verifyCuaHelper } from './cua-helper.mjs'
+import { stageWindowsCua, verifyWindowsCua } from './windows-cua.mjs'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(desktopRoot, '..', '..')
@@ -518,13 +519,15 @@ assertDshPackagesCameFromSnapshot()
 const runtimePackages = planRuntimePackages(modulesRoot, packageSources)
 for (const { root, destination, manifest } of runtimePackages) {
   copyRuntimePackage(root, destination, {
-    exclude: manifest.name === cuaProviderPackage ? [join('native', '.build'), join('native', 'bin')] : [],
+    exclude: manifest.name === cuaProviderPackage ? [join('native', '.build'), join('native', 'bin')]
+      : manifest.name === '@lumo/computer-use' ? [join('native', 'target'), join('native', 'bin')] : [],
   })
 }
 assertOverridesCameFromSnapshot()
 compilePackagedTypeScriptPlugins()
 const cuaPackageRoot = runtimePackages.find(({ manifest }) => manifest.name === cuaProviderPackage)?.destination
-const computerUse = stageCuaHelper({
+const windowsCuaPackageRoot = runtimePackages.find(({ manifest }) => manifest.name === '@lumo/computer-use')?.destination
+const computerUse = targetPlatform === 'win32' ? stageWindowsCua({ packageRoot: windowsCuaPackageRoot, targetArch, modulesRoot }) : stageCuaHelper({
   packageRoot: cuaPackageRoot,
   targetPlatform,
   targetArch,
@@ -545,7 +548,10 @@ const pptPython = bundlePptPython()
 const prunedBytes = pruneStagedRuntime()
 assertTargetNativePayload()
 // Bundle bytes are content-addressed and signed. Generic pruning must not alter them.
-if (computerUse.available) verifyCuaHelper({ packageRoot: cuaPackageRoot, targetArch })
+if (computerUse.available) {
+  if (targetPlatform === 'win32') verifyWindowsCua({ packageRoot: windowsCuaPackageRoot, targetArch, modulesRoot })
+  else verifyCuaHelper({ packageRoot: cuaPackageRoot, targetArch })
+}
 
 const runtimeNode = resolve(stagingRoot, targetPlatform === 'win32' ? 'node.exe' : 'node')
 const nodeSource = findPortableNode()

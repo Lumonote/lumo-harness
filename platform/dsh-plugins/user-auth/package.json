@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@deepseek-ai/cordis": "link:../../../deepseek-harness/vendor/cordis",
+    "@deepseek-ai/dsh-atomic-write": "link:../../../deepseek-harness/packages/util/atomic-write",
     "@deepseek-ai/dsh-host-webserver": "link:../../../deepseek-harness/packages/host/webserver",
     "@deepseek-ai/schemastery": "link:../../../deepseek-harness/vendor/schemastery",
     "tsx": "4.22.4",

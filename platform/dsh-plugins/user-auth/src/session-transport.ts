@@ -22,6 +22,7 @@ import { SessionModelPolicy, SessionTurnModelGuard, modelSelection, type Session
 import type { Principal } from './client.ts'
 import { installSessionKnowledge, USER_SESSION_KNOWLEDGE_TOOL, validateSessionKnowledge, type SessionKnowledgeConfig } from './session-knowledge.ts'
 import { SessionConnectorTools, USER_CONNECTOR_TOOLS, validateSessionConnectors, type SessionConnectorConfig } from './session-connectors.ts'
+import { OwnedSessionMigration, SessionMigrationError, migrationActions } from './session-migration.ts'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface PrincipalMap { 'lumo-user': { readonly kind: 'lumo-user'; readonly realm: string; readonly userId: string; readonly requestId: string } }
@@ -41,6 +42,9 @@ export interface SessionTransportConfig {
   knowledge?: SessionKnowledgeConfig
   attachments?: SessionAttachmentConfig
   connectors?: SessionConnectorConfig
+  /** Explicit bounded checkpoint/import; requires all nodes to mount the same
+   * absolute workspaceRoot. Connector effects are excluded from this profile. */
+  migration?: { enabled: true }
   routing?: { routes: Record<string, string>; transportSecurity: 'tls' | 'mesh-mtls' | 'development'; nodeIdFromEnvironment?: boolean }
 }
 export type SessionAuthority = (() => Promise<Principal | void>) & { credential?: string }
@@ -133,6 +137,20 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
     // checks this generation atomically, including writes queued before expiry.
     void Promise.allSettled([...handles].map(handle => handle.dispose()))
   }) : undefined
+  if (config.migration && !runtime) throw new Error('Session migration requires persistent execution fencing')
+  const migration = config.migration ? new OwnedSessionMigration(ctx, config, token, runtime!, persistence, {
+    async quiesce(ref, signal, run) {
+      const agent = await activeAgent(ref, signal)
+      if (agent.status !== 'idle' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new SessionMigrationError('session_migration_busy')
+      return agent.runMaintenance(async () => {
+        signal.throwIfAborted()
+        if (agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new SessionMigrationError('session_migration_busy')
+        return run()
+      })
+    },
+    async close(ref) { for (const handle of [...handles]) if (handle.agent.id === ref) { await handle.dispose(); handles.delete(handle) } },
+    async resume(principal, ref, signal) { await own(principal, ref); await activeAgent(ref, signal) },
+  }, authorizeProject, fetcher) : undefined
   const attachmentStore = config.attachments ? ctx.get('attachments') : undefined
   if (config.attachments && (!attachmentStore || !runtime)) throw new Error('Session attachments require immutable shared storage and persistent execution fencing')
   const attachments = config.attachments ? new OwnedSessionAttachments(attachmentStore!, config.attachments, runtime!, config.authorityUrl, token, fetcher) : undefined
@@ -193,7 +211,7 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
     agent.ctx.on('agent/pre-step', async ({ turn, modelSelection: selection }, next) => {
       const authority = authorities.get(owner.session_ref)
       if (!authority) return { kind: 'reject' }
-      try { turnModels.check(turn, selection); await runtime?.ensure(owner.session_ref); await authority(); return next() } catch { agent.cancel({ kind: 'parent' }); return { kind: 'reject' } }
+      try { migration?.assert(owner.session_ref); turnModels.check(turn, selection); await runtime?.ensure(owner.session_ref); await authority(); return next() } catch { agent.cancel({ kind: 'parent' }); return { kind: 'reject' } }
     })
     const release = meters.bind(owner.session_ref, { context: { userId: owner.owner_user_id, projectId: owner.project_id,
       agentId: 'lumo-user-session', componentId: 'user-auth', feature: 'session:text' }, traceId: `session:${owner.session_ref}`,
@@ -208,6 +226,7 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
   })
   ctx.effect(() => async () => { releasePolicy(); grants.clear(); known.clear(); pendingInputs.clear(); authorities.clear(); for (const timer of polls.values()) clearInterval(timer); polls.clear(); await Promise.allSettled([...handles].map(h => h.dispose())); await runtime?.dispose() }, 'lumo-user: Session transport')
   async function own(principal: Principal, ref: string): Promise<SessionOwner> {
+    migration?.assert(ref)
     const owner = await owners.get(principal.realm, ref)
     if (owner.state !== 'active' || owner.owner_user_id !== principal.user_id || owner.project_id !== config.projectId || owner.node_id !== config.nodeId) throw new Error('Session ownership does not authorize this user, project and node')
     await runtime?.ensure(ref)
@@ -274,8 +293,9 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
     ...(runtime ? { runtime } : {}),
     ...(attachments ? {
       async uploadAttachment(principal: Principal, ref: string, metadata: SessionAttachmentUpload, source: AsyncIterable<Uint8Array>, signal: AbortSignal, authority?: SessionAuthority) {
+        const leave = migration?.enter(ref)
         const authorize = async () => { signal.throwIfAborted(); if (!authority) throw new Error('Attachment upload requires current login'); await authority(); await authorizeProject(principal); await own(principal, ref) }
-        return attachments.upload(principal, ref, metadata, source, signal, authorize)
+        try { return await attachments.upload(principal, ref, metadata, source, signal, authorize) } finally { leave?.() }
       },
       async readAttachment(principal: Principal, ref: string, receiptID: string, signal: AbortSignal, authority?: SessionAuthority) {
         const authorize = async () => { signal.throwIfAborted(); if (!authority) throw new Error('Attachment read requires current login'); await authority(); await authorizeProject(principal); await own(principal, ref) }
@@ -283,6 +303,17 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
       },
     } : {}),
     async execute(principal, action, request, signal, authority) {
+      if (migrationActions.has(action)) {
+        if (!migration) throw new SessionMigrationError('session_migration_unavailable')
+        if (action === 'checkpoint') {
+          const ref = target(request), owner = await owners.get(principal.realm, ref)
+          if (owner.node_id !== config.nodeId || owner.project_id !== config.projectId || owner.owner_user_id !== principal.user_id || owner.state !== 'active') throw new SessionMigrationError('session_migration_invalid')
+          remember(ref, owner)
+        }
+        return migration.execute(principal, action, request, signal, authority)
+      }
+      const leave = migration && action !== 'create' && action !== 'list' ? migration.enter(target(request)) : undefined
+      try {
       if (execution && principal.realm !== execution.realm) throw new Error('Session Realm does not match this execution node')
       await authorizeProject(principal)
       await runtime?.check()
@@ -365,6 +396,7 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
         throw error
       }
       finally { await call.close() }
+      } finally { leave?.() }
     },
     async stream(principal, action, request, signal, authority) {
       await authorizeProject(principal)

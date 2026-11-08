@@ -93,5 +93,5 @@ func BuildRunTextFilesManifest(result TaskResult) (RunOutputManifest, string, er
 	return manifest, hex.EncodeToString(hash[:]), nil
 }
 func ProvenOutputProfile(profile string) bool {
-	return profile == ClosedTextOutputProfile || profile == ClosedTextFilesOutputProfile
+	return profile == ClosedTextOutputProfile || profile == ClosedTextFilesOutputProfile || profile == ClosedRepositoryOutputProfile
 }

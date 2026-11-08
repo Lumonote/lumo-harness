@@ -1,12 +1,16 @@
 .lumo-workforce-progress,.lumo-task-progress{min-width:0;box-sizing:border-box}
-.lumo-workforce-toolbar,.lumo-progress-form{display:grid;grid-template-columns:1fr 2fr 1fr;gap:14px;margin:18px 0}
+.lumo-workforce-toolbar,.lumo-progress-form{display:grid;gap:14px;margin:18px 0;align-items:end}
+.lumo-workforce-toolbar{grid-template-columns:minmax(110px,1fr) minmax(180px,2fr) minmax(110px,1fr) minmax(110px,1fr) auto}
+.lumo-progress-form{grid-template-columns:1fr 2fr 1fr}
 .lumo-workforce-toolbar label,.lumo-progress-form label{display:grid;gap:7px;font-size:12px;color:var(--lumo-muted)}
 .lumo-workforce-toolbar input,.lumo-workforce-toolbar select,.lumo-progress-form input,.lumo-progress-form select,.lumo-progress-form textarea{width:100%;min-width:0;box-sizing:border-box;border:1px solid var(--lumo-line);border-radius:9px;background:var(--lumo-panel);color:var(--lumo-ink);padding:9px 11px;font:inherit}
-.lumo-workforce-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:1px;background:var(--lumo-line);border:1px solid var(--lumo-line);border-radius:12px;overflow:hidden}
+.lumo-workforce-metrics{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:1px;background:var(--lumo-line);border:1px solid var(--lumo-line);border-radius:12px;overflow:hidden}
 .lumo-workforce-metrics>div{display:grid;gap:8px;padding:16px;background:var(--lumo-panel)}
 .lumo-workforce-metrics span,.lumo-workforce-note,.lumo-workforce-list small,.lumo-progress-details small,.lumo-progress-history small{color:var(--lumo-muted);font-size:12px}
 .lumo-workforce-metrics b{font-size:25px;font-variant-numeric:tabular-nums;font-weight:600}
 .lumo-workforce-note{line-height:1.7;margin:12px 0 20px}
+.lumo-workforce-kinds{display:flex;flex-wrap:wrap;gap:18px;padding:12px 2px 0;color:var(--lumo-muted);font-size:12px}
+.lumo-workforce-kinds b{font-variant-numeric:tabular-nums;margin-left:7px;color:var(--lumo-ink);font-weight:600}
 .lumo-workforce-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:14px}
 .lumo-workforce-list article{border:1px solid var(--lumo-line);border-radius:12px;padding:18px;background:var(--lumo-panel);display:flex;flex-direction:column;min-width:0}
 .lumo-workforce-list article.attention{border-inline-start:3px solid #c17c39}
@@ -40,4 +44,5 @@
 .lumo-progress-history li{border-inline-start:2px solid var(--lumo-line);padding:4px 0 14px 16px;overflow-wrap:anywhere}
 .lumo-progress-history li>div{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .lumo-progress-history b{font-size:12px}
-@media(max-width:680px){.lumo-workforce-toolbar,.lumo-progress-form{grid-template-columns:1fr}.lumo-workforce-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.lumo-workforce-metrics>div{padding:12px}.lumo-workforce-pages{justify-content:center}}
+@media(max-width:1050px){.lumo-workforce-toolbar{grid-template-columns:repeat(2,minmax(0,1fr))}.lumo-workforce-toolbar>button{justify-self:start}.lumo-workforce-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:680px){.lumo-workforce-toolbar,.lumo-progress-form{grid-template-columns:1fr}.lumo-workforce-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.lumo-workforce-metrics>div{padding:12px}.lumo-workforce-pages{justify-content:center}}

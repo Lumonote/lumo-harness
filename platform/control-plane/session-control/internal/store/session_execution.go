@@ -151,7 +151,7 @@ func (s *Store) SessionExecutionLease(ctx context.Context, ref string, in Execut
 		return ExecutionLease{}, err
 	}
 	var ownerOK bool
-	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM session_owners WHERE session_ref=$1 AND realm=$2 AND node_id=$3 AND project_id=$4 AND state IN ('reserved','active'))`, ref, in.Realm, in.NodeID, in.ProjectID).Scan(&ownerOK)
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM session_owners WHERE session_ref=$1 AND realm=$2 AND node_id=$3 AND project_id=$4 AND state IN ('reserved','active') AND NOT EXISTS(SELECT 1 FROM session_migrations WHERE session_ref=$1 AND state='checkpointed'))`, ref, in.Realm, in.NodeID, in.ProjectID).Scan(&ownerOK)
 	if err != nil {
 		return ExecutionLease{}, err
 	}

@@ -31,6 +31,11 @@ it('loads the shipped computer-use JavaScript and mounts its real Cordis service
     symlinkSync(installed!, link, process.platform === 'win32' ? 'junction' : 'dir')
   }
   expect(existsSync(join(destination, 'src'))).toBe(false)
+  expect(existsSync(join(destination, 'lib/windows-worker.js'))).toBe(true)
+  expect(existsSync(join(destination, 'lib/windows-runtime.js'))).toBe(true)
+  const manifest = JSON.parse(readFileSync(join(destination, 'package.json'), 'utf8'))
+  expect(manifest.exports['./windows'].import).toBe('./lib/windows.js')
+  expect(manifest.exports['./windows-registry'].import).toBe('./lib/windows-registry.js')
   const source = `
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
@@ -59,6 +64,8 @@ try {
   assert.equal(allowed, undefined)
   assert.equal(unrelated, 'COMPUTER_USE_SESSION_NOT_AUTHORIZED')
   console.log(JSON.stringify({ entry: import.meta.resolve('@lumo/computer-use'),
+    windowsEntry: import.meta.resolve('@lumo/computer-use/windows'),
+    registryEntry: import.meta.resolve('@lumo/computer-use/windows-registry'),
     phases: [initial.phase, enabled.phase, stopped.phase], disabled, unrelated, owner: stopped.ownerSessionId }))
 } finally { await ctx.fiber.dispose() }
 `
@@ -69,6 +76,8 @@ try {
   expect(child.status, child.stderr || child.error?.message).toBe(0)
   const result = JSON.parse(child.stdout)
   expect(fileURLToPath(result.entry)).toBe(join(destination, 'lib/index.js'))
+  expect(fileURLToPath(result.windowsEntry)).toBe(join(destination, 'lib/windows.js'))
+  expect(fileURLToPath(result.registryEntry)).toBe(join(destination, 'lib/windows-registry.js'))
   expect(result).toMatchObject({ phases: ['disabled', 'ready', 'disabled'],
     disabled: 'COMPUTER_USE_DISABLED', unrelated: 'COMPUTER_USE_SESSION_NOT_AUTHORIZED', owner: null })
 })

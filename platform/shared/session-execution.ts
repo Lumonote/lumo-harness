@@ -61,6 +61,7 @@ export class SessionExecutionRuntime {
   private ready?: Promise<void>
   private node?: ExecutionNode
   private leases = new Map<string, ExecutionLease>()
+  private retired = new Set<string>()
   private pending = new Map<string, Promise<void>>()
   private timer?: ReturnType<typeof setTimeout>
   private failed = false
@@ -100,7 +101,9 @@ export class SessionExecutionRuntime {
     await this.renewingNode
   }
   async ensure(ref: string): Promise<void> {
+    if (this.retired.has(ref)) throw new SessionExecutionFencedError()
     await this.start()
+    if (this.retired.has(ref)) throw new SessionExecutionFencedError()
     if (this.failed) throw new SessionExecutionFencedError()
     if (!this.leases.has(ref) && !this.pending.has(ref) && new Set([...this.leases.keys(), ...this.pending.keys()]).size >= 512) throw new Error('Session execution identity capacity reached')
     let current = this.pending.get(ref)
@@ -108,9 +111,10 @@ export class SessionExecutionRuntime {
       current = (async () => {
         const prior = this.leases.get(ref)
         const l = (await this.client.call(`/sessions/${encodeURIComponent(ref)}/${prior ? 'renew' : 'acquire'}`, { ...this.body(), writer_holder: this.writerHolder, fencing_token: prior?.fencing_token ?? 0 }, this.signal)).lease as ExecutionLease
+        if (this.retired.has(ref)) throw new SessionExecutionFencedError()
         if (this.failed || !l || l.session_ref !== ref || l.realm !== this.realm || l.node_id !== this.nodeId || l.project_id !== this.projectId || l.process_id !== this.processId || l.node_fence !== this.node?.fence || l.writer_holder !== this.writerHolder || !Number.isSafeInteger(l.fencing_token) || l.fencing_token < 1 || prior && prior.fencing_token !== l.fencing_token) this.fail()
         this.leases.set(ref, l)
-      })().catch(() => this.fail()).finally(() => { this.pending.delete(ref) })
+      })().catch(() => { if (this.retired.has(ref)) throw new SessionExecutionFencedError(); return this.fail() }).finally(() => { this.pending.delete(ref) })
       this.pending.set(ref, current)
     }
     await current
@@ -121,6 +125,16 @@ export class SessionExecutionRuntime {
     const lease = this.leases.get(ref)!
     return { ...this.body(), writer_holder: lease.writer_holder, fencing_token: lease.fencing_token }
   }
+  /** Retire one frozen Session permanently in this process. Other Sessions
+   * keep their node heartbeat; this identity can never reopen the old Agent. */
+  async retire(ref: string): Promise<void> {
+    this.retired.add(ref)
+    await this.pending.get(ref)?.catch(() => {})
+    this.leases.delete(ref)
+  }
+  /** Target-node capability used before a restored Session acquires ownership.
+   * This secret proof is internal and must never be returned to a browser. */
+  async nodeProof() { await this.check(); return { ...this.body(), writer_holder: this.writerHolder, fencing_token: 0 } }
   async check(): Promise<void> { await this.start(); try { await this.renewNode() } catch { this.fail() } }
   /** Public non-secret generation facts for independent service-side fencing. */
   async identity(ref:string): Promise<{node_id:string;process_id:string;node_fence:number;writer_holder:string;fencing_token:number}> {
@@ -142,7 +156,7 @@ export class SessionExecutionRuntime {
           if (!entry) return
           const [ref, observed] = entry
           if (this.leases.get(ref) !== observed) continue
-          await abortable(this.ensure(ref), active)
+          try { await abortable(this.ensure(ref), active) } catch (error) { if (!this.retired.has(ref)) throw error }
         }
       }))
     } catch { this.fail() }

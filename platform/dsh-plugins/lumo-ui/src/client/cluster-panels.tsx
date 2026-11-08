@@ -471,19 +471,20 @@ export interface AgentPreset {
 
 export const TEXT_OUTPUT_PROFILE = 'platform-closed-text-v1'
 export const FILES_OUTPUT_PROFILE = 'platform-closed-text-files-v1'
+export const REPOSITORY_OUTPUT_PROFILE='platform-closed-repository-v1'
 
 export function agentOutputProfileLabel(profile?: string): string {
   if (!profile || profile === TEXT_OUTPUT_PROFILE) return '纯文本'
-  return profile === FILES_OUTPUT_PROFILE ? '文本与受控文件' : `未知产出类型：${profile}`
+  return profile === FILES_OUTPUT_PROFILE ? '文本与受控文件' : profile===REPOSITORY_OUTPUT_PROFILE?'受控仓库修改':`未知产出类型：${profile}`
 }
 
 /** The API enforces this too; keeping the form intact lets the user resolve conflicts. */
 export function agentOutputProfileError(profile: string, resources: Pick<AgentPreset, 'system_prompt_ref' | 'connector_ids' | 'knowledge_space_ids'>, allowFiles = true): string {
-  if (profile !== TEXT_OUTPUT_PROFILE && profile !== FILES_OUTPUT_PROFILE) return '请选择受支持的产出类型。'
-  if (profile !== FILES_OUTPUT_PROFILE) return ''
-  if (!allowFiles) return '文本与受控文件需要已就绪的集群审核服务。'
+  if (![TEXT_OUTPUT_PROFILE,FILES_OUTPUT_PROFILE,REPOSITORY_OUTPUT_PROFILE].includes(profile)) return '请选择受支持的产出类型。'
+  if (profile ===TEXT_OUTPUT_PROFILE) return ''
+  if (!allowFiles) return `${agentOutputProfileLabel(profile)}需要已就绪的集群审核服务。`
   if (resources.system_prompt_ref?.trim() || resources.connector_ids.length || resources.knowledge_space_ids.length) {
-    return '文本与受控文件不能配置系统提示引用、连接器或知识空间。请先移除这些引用，或选择纯文本。'
+    return `${agentOutputProfileLabel(profile)}不能配置系统提示引用、连接器或知识空间。请先移除这些引用，或选择纯文本。`
   }
   return ''
 }
@@ -492,8 +493,9 @@ export function AgentOutputProfileField({ profile = TEXT_OUTPUT_PROFILE, allowFi
   return <label className="wide">产出类型<select name="output_profile" aria-label="产出类型" defaultValue={profile}>
     <option value={TEXT_OUTPUT_PROFILE}>纯文本</option>
     <option value={FILES_OUTPUT_PROFILE} disabled={!allowFiles}>文本与受控文件</option>
-    {profile !== TEXT_OUTPUT_PROFILE && profile !== FILES_OUTPUT_PROFILE ? <option value={profile} disabled>{agentOutputProfileLabel(profile)}</option> : null}
-  </select><small>{allowFiles ? '受控文件支持 TXT、Markdown、CSV 和 JSON；最多 16 个，单个 32 KiB，总计 256 KiB。此类型不支持系统提示引用、连接器或知识空间，文件需由独立审核 Agent 读取。' : '当前部署提供纯文本配置；文本文件产出需要已就绪的集群审核服务。'}</small></label>
+    <option value={REPOSITORY_OUTPUT_PROFILE} disabled={!allowFiles}>受控仓库修改</option>
+    {![TEXT_OUTPUT_PROFILE,FILES_OUTPUT_PROFILE,REPOSITORY_OUTPUT_PROFILE].includes(profile) ? <option value={profile} disabled>{agentOutputProfileLabel(profile)}</option> : null}
+  </select><small>{allowFiles ? '受控文件支持 TXT、Markdown、CSV 和 JSON；最多 16 个，单个 32 KiB，总计 256 KiB。受控仓库需由部署管理员预设仓库、基础提交和文件范围；最多 8 个已有 UTF-8 文件，单个 3 KiB。两种受控类型均不支持系统提示引用、连接器或知识空间，全部文件内容需由独立审核 Agent 读取。' : '当前部署提供纯文本配置；受控产出需要已就绪的集群审核服务。'}</small></label>
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +533,7 @@ export interface TaskResultFacts {
   task_id?: string; run_id: string; state: string; session_ref?: string; node_id?: string
   summary?: string; output?: unknown; created_at?: string
   files?: Array<{ name: string; media_type: string; text: string }>
+  review_scope?:string;manifest_digest?:string
 }
 export interface ChildTaskProgress { task: TaskIntentFacts; run?: TaskRunFacts; result?: TaskResultFacts }
 export interface TaskCollaborationSummary {
@@ -681,7 +684,7 @@ export function readTaskOutput(output: unknown): { present: boolean; text: strin
 }
 
 interface TaskCollaboratorFact { subject_type: 'user' | 'department'; subject_id: string; access: 'viewer' | 'contributor'; include_children?: boolean; created_by?: string }
-interface TaskArtifactFact { id: string; name: string; content_type: string; size_bytes: number; sha256: string; created_by: string; created_at: string }
+interface TaskArtifactFact { id: string; name: string; content_type: string; size_bytes: number; sha256: string; created_by: string; created_at: string; can_withdraw?: boolean }
 
 export function TaskCollaboratorsPanel({ request, taskID }: { request: Request; taskID: string }) {
   const [grants, setGrants] = useState<TaskCollaboratorFact[]>([])
@@ -751,6 +754,8 @@ function TaskArtifactsPanel({ request, taskID, runID }: { request: Request; task
   const [targetBranch, setTargetBranch] = useState('main')
   const [filePath, setFilePath] = useState('')
   const [publishID, setPublishID] = useState('')
+  const [withdrawID, setWithdrawID] = useState('')
+  const [withdrawReason, setWithdrawReason] = useState('')
   const [notice, setNotice] = useState('')
   const load = useCallback(async () => {
     try { const result = await request<{ artifacts?: TaskArtifactFact[] }>(`/lumo/api/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/artifacts`); setArtifacts(result.artifacts ?? []); setError('') }
@@ -781,9 +786,16 @@ function TaskArtifactsPanel({ request, taskID, runID }: { request: Request; task
     } catch (reason) { setError(message(reason)) }
     finally { setBusy(false) }
   }
+  const withdraw = async (event: FormEvent<HTMLFormElement>, artifact: TaskArtifactFact) => {
+    event.preventDefault(); setBusy(true); setError(''); setNotice('')
+    try {
+      await request(`/lumo/api/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/artifacts/${encodeURIComponent(artifact.id)}`,{method:'DELETE',body:JSON.stringify({reason:withdrawReason.trim(),expected_sha256:artifact.sha256})})
+      setWithdrawID('');setWithdrawReason('');setNotice(`已撤回「${artifact.name}」，记录保留在任务审计中。`);await load()
+    }catch(reason){setError(message(reason))}finally{setBusy(false)}
+  }
   return <div className="lumo-cluster-panel"><div className="lumo-section-title"><div><b>持久化产物</b><span>{artifacts.length} 个文件 · 存储在平台对象存储</span></div><label className="lumo-button lumo-secondary">{busy ? '处理中…' : '上传产物'}<input type="file" hidden disabled={busy} onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; void upload(file) }} /></label></div>
     <Feedback error={error} notice={notice} />
-    <div className="lumo-compact-list">{artifacts.length ? artifacts.map(artifact => <div key={artifact.id}><span><b>{artifact.name}</b><small>{artifact.content_type} · {(artifact.size_bytes / 1024).toFixed(1)} KiB · {artifact.sha256.slice(0, 12)}…</small></span><a className="lumo-button lumo-secondary" href={`/lumo/api/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/artifacts/${encodeURIComponent(artifact.id)}/content`}>下载</a><Button disabled={busy} onClick={() => { setPublishID(current => current === artifact.id ? '' : artifact.id); setFilePath(artifact.name) }}>发布到 Git</Button>{publishID === artifact.id ? <form className="lumo-governance-form lumo-cluster-form" onSubmit={event => void publish(event, artifact)}><label>平台<select value={provider} onChange={event => setProvider(event.target.value as 'github' | 'gitlab')}><option value="github">GitHub</option><option value="gitlab">GitLab</option></select></label><label>仓库（GitLab 可填 group/project）<input required value={repository} onChange={event => setRepository(event.target.value)} placeholder="org/repository" /></label><label>目标分支<input required value={targetBranch} onChange={event => setTargetBranch(event.target.value)} /></label><label>文件路径<input required value={filePath} onChange={event => setFilePath(event.target.value)} /></label><Button submit disabled={busy}>创建草稿 {provider === 'github' ? 'PR' : 'MR'}</Button></form> : null}</div>) : <p className="lumo-inline-empty">此执行记录还没有附件。上传后可跨用户查看、下载，并发布到个人授权的 GitHub/GitLab 账号。</p>}</div>
+    <div className="lumo-compact-list">{artifacts.length ? artifacts.map(artifact => <div key={artifact.id}><span><b>{artifact.name}</b><small>{artifact.content_type} · {(artifact.size_bytes / 1024).toFixed(1)} KiB · {artifact.sha256.slice(0, 12)}…</small></span><a className="lumo-button lumo-secondary" href={`/lumo/api/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/artifacts/${encodeURIComponent(artifact.id)}/content`}>下载</a><Button disabled={busy} onClick={() => { setPublishID(current => current === artifact.id ? '' : artifact.id); setFilePath(artifact.name) }}>发布到 Git</Button>{artifact.can_withdraw ? <Button danger disabled={busy} onClick={() => {setWithdrawID(current=>current===artifact.id?'':artifact.id);setWithdrawReason('')}}>撤回</Button> : null}{withdrawID===artifact.id ? <form className="lumo-governance-form lumo-cluster-form" onSubmit={event=>void withdraw(event,artifact)}><label>撤回原因<input required maxLength={500} value={withdrawReason} onChange={event=>setWithdrawReason(event.target.value)} placeholder="说明此文件不再用于协作的原因" /></label><Button submit danger disabled={busy||!withdrawReason.trim()}>确认撤回</Button><Button disabled={busy} onClick={()=>setWithdrawID('')}>取消</Button></form> : null}{publishID === artifact.id ? <form className="lumo-governance-form lumo-cluster-form" onSubmit={event => void publish(event, artifact)}><label>平台<select value={provider} onChange={event => setProvider(event.target.value as 'github' | 'gitlab')}><option value="github">GitHub</option><option value="gitlab">GitLab</option></select></label><label>仓库（GitLab 可填 group/project）<input required value={repository} onChange={event => setRepository(event.target.value)} placeholder="org/repository" /></label><label>目标分支<input required value={targetBranch} onChange={event => setTargetBranch(event.target.value)} /></label><label>文件路径<input required value={filePath} onChange={event => setFilePath(event.target.value)} /></label><Button submit disabled={busy}>创建草稿 {provider === 'github' ? 'PR' : 'MR'}</Button></form> : null}</div>) : <p className="lumo-inline-empty">此执行记录还没有附件。上传后可跨用户查看、下载，并发布到个人授权的 GitHub/GitLab 账号。</p>}</div>
     <small className="lumo-form-note">发布会创建新分支和草稿 PR/MR，不会自动合并。目标仓库访问权限来自当前用户关联的个人账号。</small>
   </div>
 }
@@ -792,10 +804,30 @@ export function TaskEvidencePanel({ taskID, request, runID, result, error, busy,
   taskID: string; request: Request; runID: string; result: TaskResultFacts | null; error: string; busy: boolean; label: (state: string) => string; close: () => void
 }) {
   const { present: hasOutput, text: output } = readTaskOutput(result?.output)
+  const[publicationBusy,setPublicationBusy]=useState(false),[publicationError,setPublicationError]=useState(''),[publicationURL,setPublicationURL]=useState('')
+  const publicationGeneration=useRef(0),publicationPending=useRef(false)
+  useEffect(()=>{publicationGeneration.current++;publicationPending.current=false;setPublicationBusy(false);setPublicationError('');setPublicationURL('');return()=>{publicationGeneration.current++}},[taskID,runID])
+  const publishRepository=async()=>{
+    if(publicationPending.current)return
+    const generation=publicationGeneration.current
+    publicationPending.current=true;setPublicationBusy(true);setPublicationError('')
+    try{
+      const value=await request<{url:string}>(`/lumo/api/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/repository-publication`,{method:'POST',body:'{}'})
+      if(generation===publicationGeneration.current)setPublicationURL(value.url)
+    }catch(reason){
+      if(generation===publicationGeneration.current){
+        setPublicationError(message(reason))
+        const body=reason instanceof Error&&'body' in reason?reason.body:undefined
+        const url=body&&typeof body==='object'&&'url' in body?body.url:undefined
+        if(typeof url==='string'&&/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/u.test(url))setPublicationURL(url)
+      }
+    }finally{if(generation===publicationGeneration.current){publicationPending.current=false;setPublicationBusy(false)}}
+  }
   return <div className="lumo-cluster-panel">
     <div className="lumo-section-title"><div><b>执行证据</b><span>{result ? `${label(result.state)} · ${result.run_id}` : runID}</span></div><Button onClick={close}>关闭证据</Button></div>
     {error ? <div className="lumo-cluster-feedback error" role="alert">{error}</div> : null}
     {busy ? <p className="lumo-inline-empty">正在读取结果全文。</p> : null}
+    {result?.review_scope===REPOSITORY_OUTPUT_PROFILE?<div className="lumo-cluster-feedback"><p>受控仓库变更 · {result.manifest_digest?.slice(0,12)}。独立审核通过后可创建草稿 PR。</p><Button disabled={publicationBusy||!!publicationURL} onClick={()=>void publishRepository()}>{publicationBusy?'正在发布…':'审核通过后发布草稿 PR'}</Button>{publicationError?<p role="alert">{publicationError}</p>:null}{publicationURL?<a href={publicationURL} target="_blank" rel="noreferrer">查看草稿 PR</a>:null}</div>:null}
     {result ? <>
       <div className="lumo-device-facts">
         <span><small>结果状态</small><b>{label(result.state)}</b></span>

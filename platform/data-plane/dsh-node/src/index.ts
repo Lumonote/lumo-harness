@@ -89,6 +89,11 @@ const patchPath = process.env['LUMO_PATCH_PATH']
   : resolve(here, '..', 'lumo.patch.yml')
 const deployment = withClusterStatus(resolveDeploymentProfile(), process.env['LUMO_CLUSTER_STATUS'])
 const localMode = deployment.mode === 'local'
+const remoteComputerEnabled = process.env['LUMO_REMOTE_COMPUTER_USE'] === 'true'
+const remoteComputerNode = process.env['LUMO_DEVICE_NODE_ID'] ?? ''
+const remoteComputerOwner = process.env['LUMO_DEVICE_OWNER_USER_ID'] ?? ''
+const remoteComputerBridgeFile = process.env['LUMO_DEVICE_BRIDGE_FILE'] ?? ''
+if (remoteComputerEnabled && (!localMode || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(remoteComputerNode) || !/^[^\s\u0000-\u001f\u007f]{1,256}$/u.test(remoteComputerOwner) || !remoteComputerBridgeFile)) throw Error('Remote computer requests require an explicit local device identity and private device bridge file')
 const sqlitePath = assertLocalStoragePath(process.env['LUMO_SQLITE_PATH'] ?? resolve(platformRoot, '.lumo', 'lumo.sqlite'))
 if (localMode) mkdirSync(dirname(sqlitePath), { recursive: true })
 
@@ -451,6 +456,25 @@ ${localMode ? localStorageRows(dshProfile, sqlitePath) + localVaultRows(sqlitePa
       inject: [tools]
       config:
         idleLeaseMs: 120000
+${remoteComputerEnabled && dshProfile === 'web' ? `    - id: lumo-remote-computer-use
+      name: '@lumo/computer-use/remote'
+      inject: [agents, agentLoop, tools, lumoComputerUse]
+      config:
+        enabled: true
+        realm: ${JSON.stringify(platformRealm)}
+        nodeId: ${JSON.stringify(remoteComputerNode)}
+        ownerUserId: ${JSON.stringify(remoteComputerOwner)}
+        ledgerDir: ${JSON.stringify(join(desktopStateDir, 'remote-computer', 'ledger'))}
+        hostFile: ${JSON.stringify(join(desktopStateDir, 'remote-computer', 'host.json'))}
+        bridgeFile: ${JSON.stringify(remoteComputerBridgeFile)}
+` : ''}
+${process.platform === 'win32' && dshProfile === 'web' ? `    - id: lumo-windows-computer-use-registry
+      name: '@lumo/computer-use/windows-registry'
+    - id: lumo-windows-computer-use-provider
+      name: '@lumo/computer-use/windows'
+      inject: [computerUse, tools, systemPrompt, lumoComputerUse]
+      disabled: ${process.env['LUMO_WINDOWS_CUA'] !== '1'}
+` : ''}
 ` : `    - id: lumo-object-store
       name: ${JSON.stringify(objectStoreEntry)}
       inject: []

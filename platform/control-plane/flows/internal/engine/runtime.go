@@ -22,11 +22,12 @@ type RuntimeConfig struct {
 	// ProjectsURL 是 projects 服务的基址，决策固化算子（§24.4 第 5 条）经它调那侧的
 	// 固化读面。未配置时该算子登记为 unavailable：**默认关闭**是设计要的取向
 	// （§16 R4 没有给频率默认值），而「关」的判据落在配置上，不落在某条默认 cron 上。
-	ProjectsURL    string
-	GovernanceURL  string
-	ControlToken   string
-	IdentitySecret string
-	Client         *http.Client
+	ProjectsURL       string
+	GovernanceURL     string
+	ControlToken      string
+	IdentitySecret    string
+	Client            *http.Client
+	RemoteComputerUse bool
 }
 
 type identityKey struct{}
@@ -77,6 +78,7 @@ func (e *Engine) registerRuntime(config RuntimeConfig) {
 		// 频率**（§16 R4：给一个编出来的默认值比留空更糟），不建自动化即关闭。
 		{[]string{"decisions.consolidate"}, config.ProjectsURL, "projects"},
 		{[]string{"delegation.create"}, config.GovernanceURL, "delegation"},
+		{[]string{"computer-use.request"}, config.GovernanceURL, "remote-computer"},
 	} {
 		for _, name := range spec.names {
 			e.Register(name, func(ctx context.Context, input any) (any, error) {
@@ -90,6 +92,8 @@ func (e *Engine) registerRuntime(config RuntimeConfig) {
 				e.unavailable[name] = "upstream URL is invalid"
 			case config.ControlToken == "":
 				e.unavailable[name] = "upstream authentication is not configured"
+			case spec.kind == "remote-computer" && !config.RemoteComputerUse:
+				e.unavailable[name] = "remote computer requests are explicitly disabled"
 			case spec.kind == "knowledge" && len(config.IdentitySecret) < 32:
 				e.unavailable[name] = "identity signing secret must contain at least 32 bytes"
 			}
@@ -110,6 +114,9 @@ func (config RuntimeConfig) invoke(ctx context.Context, kind, endpoint string, i
 		return nil, fmt.Errorf("flow execution identity is required")
 	}
 	node, _ := ctx.Value(nodeKey{}).(domain.FlowNode)
+	if kind == "remote-computer" {
+		return config.requestRemoteComputer(ctx, identity, node, input)
+	}
 	identity, err = config.authorizeBot(ctx, identity, node)
 	if err != nil {
 		return nil, err

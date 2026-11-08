@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/lumo-harness/platform/governance/internal/domain"
+	"github.com/lumo-harness/platform/governance/internal/store"
 )
 
 func (s *Server) taskProgress(w http.ResponseWriter, r *http.Request) {
@@ -70,8 +71,8 @@ func (s *Server) taskProgress(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
-// Workforce summaries contain only authorized rows from this page. They do not
-// imply realm-wide totals when a continuation cursor is present.
+// Workforce summaries cover every authorized row matching the filters, before
+// pagination. Snapshot rows and the same permission decisions feed both views.
 func (s *Server) workforceProgress(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCluster(w) {
 		return
@@ -79,6 +80,13 @@ func (s *Server) workforceProgress(w http.ResponseWriter, r *http.Request) {
 	c, ok := s.caller(w, r)
 	if !ok || !s.requireDelegationAuthority(w, r, c) {
 		return
+	}
+	allowedParameters := map[string]bool{"scope": true, "limit": true, "cursor": true, "q": true, "risk": true, "worker_kind": true}
+	for key, values := range r.URL.Query() {
+		if !allowedParameters[key] || len(values) != 1 {
+			writeError(w, http.StatusBadRequest, "invalid_filter", "unknown or repeated workforce parameter")
+			return
+		}
 	}
 	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
 	if scope == "" {
@@ -112,39 +120,34 @@ func (s *Server) workforceProgress(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = parsed
 	}
-	tasks, next, err := s.store.ListDelegationTasksPage(r.Context(), c.realm, c.userID, all, department, r.URL.Query().Get("cursor"), limit)
+	filter := domain.WorkforceProgressFilter{Query: r.URL.Query().Get("q"), Risk: r.URL.Query().Get("risk"), WorkerKind: r.URL.Query().Get("worker_kind")}
+	filter.Normalize()
+	after, encode, err := store.WorkforceProgressCursor(c.realm, c.userID, scope, filter, r.URL.Query().Get("cursor"))
 	if err != nil {
 		s.respondStoreError(w, err)
 		return
 	}
-	visible := make([]domain.DelegatedTask, 0, len(tasks))
-	for _, task := range tasks {
-		// A supervisory scope selects candidates; it does not grant a task ACL.
-		if !isRealmAdmin(c) {
-			access, err := s.store.TaskAccess(r.Context(), c.realm, task.ID, c.userID)
-			if err != nil {
-				s.respondStoreError(w, err)
-				return
-			}
-			if access == "" {
-				continue
-			}
+	items, err := s.store.WorkforceProgressSnapshot(r.Context(), c.realm, c.userID, all, department, isRealmAdmin(c))
+	if err != nil {
+		s.respondStoreError(w, err)
+		return
+	}
+	visible := make([]domain.WorkforceProgressItem, 0, len(items))
+	for _, item := range items {
+		if !filter.Matches(item) {
+			continue
 		}
+		task := item.Task
 		decision, err := s.permissionDecision(r.Context(), c, actionDelegate, domain.PermissionResource{Kind: "task", ID: task.ID, ProjectID: task.ProjectID})
 		if err != nil {
 			s.respondStoreError(w, err)
 			return
 		}
 		if decision.Allowed {
-			visible = append(visible, task)
+			visible = append(visible, item)
 		}
 	}
-	items, err := s.store.TaskProgressItems(r.Context(), c.realm, visible)
-	if err != nil {
-		s.respondStoreError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "summary": domain.SummarizeWorkforce(items), "summary_scope": "page", "next_cursor": next})
+	writeJSON(w, http.StatusOK, store.BuildWorkforceProgressPage(visible, filter, limit, after, encode))
 }
 
 func (s *Server) runtimeTaskProgress(w http.ResponseWriter, r *http.Request) {

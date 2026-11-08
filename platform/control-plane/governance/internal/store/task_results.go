@@ -49,10 +49,16 @@ CREATE TABLE IF NOT EXISTS governance_task_artifacts (
   created_by TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('pending','ready','failed')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  ready_at TIMESTAMPTZ
+  ready_at TIMESTAMPTZ,
+  revoked_at TIMESTAMPTZ,
+  revoked_by TEXT NOT NULL DEFAULT '',
+  revocation_reason TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS governance_task_artifacts_run_idx
   ON governance_task_artifacts(realm,task_id,run_id,created_at);
+ALTER TABLE governance_task_artifacts ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+ALTER TABLE governance_task_artifacts ADD COLUMN IF NOT EXISTS revoked_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE governance_task_artifacts ADD COLUMN IF NOT EXISTS revocation_reason TEXT NOT NULL DEFAULT '';
 `
 
 func scanTaskResult(row rowScanner) (domain.TaskResult, error) {
@@ -71,8 +77,12 @@ func (s *Store) GetTaskResult(ctx context.Context, realm, taskID, runID string) 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return result, ErrNotFound
 	}
-	if err == nil && result.State == domain.DelegationCompleted && len(result.Files) > 0 {
+	if err == nil && result.State == domain.DelegationCompleted && (len(result.Files) > 0 || len(result.RepositoryFiles) > 0) {
 		result.Files, err = s.controlledResultFiles(ctx, realm, taskID, runID)
+		result.RepositoryFiles = nil
+		if err == nil {
+			err = s.pool.QueryRow(ctx, `SELECT manifest->>'scope',digest FROM governance_run_output_manifests WHERE realm=$1 AND task_id=$2 AND run_id=$3`, realm, taskID, runID).Scan(&result.ReviewScope, &result.ManifestDigest)
+		}
 	}
 	return result, err
 }
@@ -108,7 +118,7 @@ func recordTaskResultTx(ctx context.Context, tx pgx.Tx, realm string, result *do
 	if err := result.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrBadRequest, err)
 	}
-	if (len(result.Files) > 0 || len(result.ReviewFileReceipts) > 0) && (len(trusted) == 0 || !trusted[0]) {
+	if (len(result.Files) > 0 || len(result.ReviewFileReceipts) > 0 || len(result.RepositoryFiles) > 0) && (len(trusted) == 0 || !trusted[0]) {
 		return fmt.Errorf("%w: controlled file evidence requires the authenticated executor", ErrForbidden)
 	}
 	// Timestamp belongs to the database; exclude it from replay equality.
@@ -119,6 +129,9 @@ func recordTaskResultTx(ctx context.Context, tx pgx.Tx, realm string, result *do
 	}
 	if len(result.Files) > 0 {
 		payload["files"] = result.Files
+	}
+	if len(result.RepositoryFiles) > 0 {
+		payload["repository_files"] = result.RepositoryFiles
 	}
 	if len(result.ReviewFileReceipts) > 0 {
 		payload["review_file_receipts"] = result.ReviewFileReceipts

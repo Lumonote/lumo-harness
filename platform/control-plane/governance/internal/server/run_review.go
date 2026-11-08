@@ -18,6 +18,9 @@ func (s *Server) registerRunReviewRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/runtime/task-runs/{runID}/review-files/{entryID}", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.readRunReviewFile)))
 	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/reviews", s.bindRunReview)
 	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/review-tasks", s.createRunReview)
+	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/repository-publication", s.authorizeRepositoryPublication)
+	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/repository-publication/{publicationID}/claim", s.claimRepositoryPublication)
+	mux.HandleFunc("PUT /v1/tasks/{taskID}/runs/{runID}/repository-publication/{publicationID}/complete", s.completeRepositoryPublication)
 }
 
 func (s *Server) readRunReviewFile(w http.ResponseWriter, r *http.Request) {
@@ -171,8 +174,12 @@ func (s *Server) createRunReview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"task": task, "run": run})
 }
 
-func decodeRunReview(w http.ResponseWriter, r *http.Request, target any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
+func decodeRunReview(w http.ResponseWriter, r *http.Request, target any, maximum ...int64) bool {
+	bound := int64(16 * 1024)
+	if len(maximum) > 0 {
+		bound = maximum[0]
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, bound)
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(target); err != nil {
@@ -196,7 +203,7 @@ func (s *Server) prepareRunExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req store.PrepareRunExecutionRequest
-	if !decodeRunReview(w, r, &req) {
+	if !decodeRunReview(w, r, &req, 128*1024) {
 		return
 	}
 	prepared, err := s.store.PrepareRunExecution(r.Context(), realm, r.PathValue("runID"), req)

@@ -148,6 +148,16 @@ export function compilePackagedTypeScriptPlugin({ typescript, packageName, packa
   if (manifest.exports?.['.'] !== undefined && typeof manifest.exports['.'] === 'object') {
     manifest.exports['.'] = { ...manifest.exports['.'], import: entry, default: entry }
   }
+  // Optional platform providers are explicit subpath entrypoints, with the same emitted boundary.
+  for (const [key, value] of Object.entries(manifest.exports ?? {})) {
+    if (key === '.' || value === null || typeof value !== 'object') continue
+    const source = value.import ?? value.default
+    if (typeof source !== 'string' || !source.startsWith('./src/')) continue
+    const output = outputs.get(resolve(packageRoot, source))
+    if (!output) throw new Error(`无法构建桌面 runtime：${packageName} 子入口 ${key} 未产出`)
+    const target = `./${relative(destination, output).split(sep).join('/')}`
+    manifest.exports[key] = { ...value, import: target, default: target }
+  }
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
   return emitted
 }

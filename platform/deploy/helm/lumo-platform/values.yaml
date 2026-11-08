@@ -92,6 +92,8 @@ connectorOAuth:
 # Example: [{realm: dev, project_id: demo, connector_id: issues, operation: create}]
 ownedSessionConnectors: []
 governance:
+  # Remote Bot requests also require per-request consent on the enrolled device.
+  remoteComputerUse: false
   botTeamsUrl: ""
   # Optional exact OPA boolean decision URL. Empty uses PostgreSQL role facts
   # locally; OPA receives the same facts and can only further restrict.
@@ -318,7 +320,10 @@ dshWeb:
   # {nodeIdFromEnvironment: true, transportSecurity: mesh-mtls,
   #  routes: {lumo-platform-dsh-web-0: http://<pod-0>:3080, ...}}
   # Each configured origin must identify exactly one stable node. Sessions
-  # remain bound to their original node and its disk; no automatic migration.
+  # remain bound to their current node and disk; no automatic migration.
+  # Optional migration: {enabled: true} adds explicit idle checkpoints/recovery.
+  # Requires at least two replicas, objectStore.enabled, no connectors, and a
+  # workspaceRoot under /var/lib/lumo/session-spool on each independent PVC.
   # Optional knowledge: {realm: dev, defaultTopK: 5, spaces: [space-id]} enables
   # only current-user published queries in this project; omit for text-only.
   # Optional attachments: {realm: dev, maxUploadBytes: 8388608, maxTextBytes: 1048576, maxPerMessage: 4}

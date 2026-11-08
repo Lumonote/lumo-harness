@@ -1,0 +1,43 @@
+name: Windows Computer Use lifecycle
+
+on:
+  push:
+    paths:
+      - 'platform/dsh-plugins/computer-use/**'
+      - 'platform/desktop/windows-cua.mjs'
+      - 'platform/desktop/__tests__/windows-supervisor.native.test.mjs'
+      - '.github/workflows/windows-cua.yml'
+  pull_request:
+    paths:
+      - 'platform/dsh-plugins/computer-use/**'
+      - 'platform/desktop/windows-cua.mjs'
+      - 'platform/desktop/__tests__/windows-supervisor.native.test.mjs'
+      - '.github/workflows/windows-cua.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-job-lifecycle:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc,aarch64-pc-windows-msvc
+      - name: Check x64 and ARM64 Win32 API definitions
+        shell: pwsh
+        run: |
+          cargo check --locked --offline --manifest-path platform/dsh-plugins/computer-use/native/Cargo.toml --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo check --locked --offline --manifest-path platform/dsh-plugins/computer-use/native/Cargo.toml --target aarch64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exercise real Job Object cleanup and Host death with fixture processes
+        run: node --test platform/desktop/__tests__/windows-supervisor.native.test.mjs
+      # A hosted runner passing process tests does not prove an interactive
+      # desktop, OS input, screenshot quality or model vision. Run the explicit
+      # native acceptance on a disposable, logged-in Windows desktop as documented.

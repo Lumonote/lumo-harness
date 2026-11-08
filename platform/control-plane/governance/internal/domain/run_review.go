@@ -39,12 +39,13 @@ type RunOutputEntry struct {
 }
 
 type RunOutputManifest struct {
-	Scope   string           `json:"scope"`
-	TaskID  string           `json:"task_id"`
-	RunID   string           `json:"run_id"`
-	Summary string           `json:"summary"`
-	Entries []RunOutputEntry `json:"entries"`
-	Files   []RunFileEntry   `json:"files,omitempty"`
+	Scope      string              `json:"scope"`
+	TaskID     string              `json:"task_id"`
+	RunID      string              `json:"run_id"`
+	Summary    string              `json:"summary"`
+	Entries    []RunOutputEntry    `json:"entries"`
+	Files      []RunFileEntry      `json:"files,omitempty"`
+	Repository *RepositoryIdentity `json:"repository,omitempty"`
 }
 
 // BuildRunOutputManifest enumerates the entire accepted output array; a model
@@ -90,8 +91,9 @@ type RunReviewContext struct {
 }
 
 type PreparedRunExecution struct {
-	Snapshot RunExecutionSnapshot `json:"snapshot"`
-	Review   *RunReviewContext    `json:"review,omitempty"`
+	Snapshot           RunExecutionSnapshot `json:"snapshot"`
+	Review             *RunReviewContext    `json:"review,omitempty"`
+	RepositorySnapshot *RepositorySnapshot  `json:"repository_snapshot,omitempty"`
 }
 
 // ReviewApproval reads the reviewer's immutable execution result, not a human

@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
-import { webcrypto } from 'node:crypto'
+import { randomUUID, webcrypto } from 'node:crypto'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DESKTOP_PET_ATTACHMENT_LIMITS, installDesktopPetBridge, registerDesktopPetSurface, type DesktopPetResult, type DesktopPetServices, type DesktopPetWorkspaceList } from '../src/client/desktop-pet.ts'
+import { DesktopPetReceiptStore } from '../src/desktop-pet-receipts.ts'
+import type { DesktopPetReceiptClient } from '../src/desktop-pet-receipt-types.ts'
 interface Bridge {
   open(value: unknown): { accepted: boolean; error?: string }
   result(id: string): DesktopPetResult
@@ -29,7 +33,14 @@ function deferred<T>() {
 async function finished(bridge: Bridge, id: string, state: DesktopPetResult['state'] = 'accepted') {
   await vi.waitFor(() => expect(bridge.result(id).state).toBe(state)); return bridge.result(id)
 }
-function mount(options: { surface?: boolean; create?: Promise<string>; ready?: Promise<unknown> } = {}) {
+function memoryReceipts() {
+  const stored = new Map<string, unknown>()
+  const unit = { loadAll: async () => ({ tables: { requests: Object.fromEntries(stored) }, global: null }), putRecord: vi.fn(async (_table: string, key: string, value: unknown) => { stored.set(key, structuredClone(value)) }), close: async () => {} }
+  const store = new DesktopPetReceiptStore(unit, randomUUID(), Date.now, join(tmpdir(), `lumo-pet-${randomUUID()}`))
+  const receipts: DesktopPetReceiptClient = { claim: input => store.claim('a'.repeat(64), input), update: input => store.update('a'.repeat(64), input) }
+  return { receipts, stored, unit }
+}
+function mount(options: { surface?: boolean; create?: Promise<string>; ready?: Promise<unknown>; receipts?: DesktopPetReceiptClient } = {}) {
   desktop.__LUMO_DESKTOP__ = true
   const navigation = new AbortController(); const surface = vi.fn(); const release = vi.fn(); const abandon = vi.fn()
   type Session = NonNullable<NonNullable<ReturnType<DesktopPetServices['sessions']['binding']>>['session']>
@@ -37,6 +48,7 @@ function mount(options: { surface?: boolean; create?: Promise<string>; ready?: P
   const beginSubmission = vi.fn<Session['beginSubmission']>().mockReturnValue({ requestId: 'host-request-id', abandon })
   const binding = { sessionId: 'new-session', session: { prompt, beginSubmission } }
   const services: DesktopPetServices = {
+    receipts: options.receipts ?? memoryReceipts().receipts,
     sessions: {
       list: { getSnapshot: () => ({ phase: 'ready', byId: { 'old-session': { updatedAt: 10, retainedBy: { mainView: 1 } }, 'other-session': { updatedAt: 20 } } }) },
       create: vi.fn(() => options.create ?? Promise.resolve('new-session')),
@@ -153,7 +165,8 @@ describe('桌宠宿主消息提交', () => {
     const receipt = deferred<{ ok: boolean }>(); const { bridge, prompt, beginSubmission } = mount(); prompt.mockReturnValue(receipt.promise)
     bridge.open({ id: 'admission', target: 'chat', draft: 'run', expiresAt: Date.now() + 3000 }); await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce())
     expect(bridge.cancel('admission')).toMatchObject({ state: 'pending', phase: 'submitting' }); beginSubmission.mock.calls[0]![0].onAccept()
-    expect(bridge.result('admission').state).toBe('accepted'); receipt.reject(Error('late network error'))
+    // Inbox acceptance is exposed after its durable receipt write, independently of the open prompt RPC.
+    await finished(bridge, 'admission'); receipt.reject(Error('late network error'))
     expect(await finished(bridge, 'admission')).toMatchObject({ sessionId: 'new-session' })
   })
   it('取消后立即重试与迟到创建共用会话，旧任务不会覆盖新状态', async () => {
@@ -201,6 +214,80 @@ describe('桌宠宿主消息提交', () => {
     const first = mount(); const request = { id: 'hot-reload', target: 'chat', draft: 'run' }; first.bridge.open(request); await finished(first.bridge, request.id)
     const second = mount(); first.dispose(); second.bridge.open(request); await finished(second.bridge, request.id)
     expect(first.prompt).toHaveBeenCalledOnce(); expect(second.prompt).not.toHaveBeenCalled(); expect(desktop.__lumoDesktopPet).toBe(second.bridge)
+  })
+  it('完整 WebView 重启仍复用 Host 已确认结果，不再创建或发送', async () => {
+    const persistence = memoryReceipts()
+    const first = mount({ receipts: persistence.receipts }); const request = { id: 'restart-accepted', target: 'chat', draft: 'run', attachments: [file] }
+    first.bridge.open(request); await finished(first.bridge, request.id); first.dispose()
+    Reflect.deleteProperty(window, Symbol.for('@lumo/desktop-pet/requests'))
+    const second = mount({ receipts: persistence.receipts }); second.bridge.open(request)
+    expect(await finished(second.bridge, request.id)).toMatchObject({ sessionId: 'new-session' })
+    expect(second.prompt).not.toHaveBeenCalled(); expect(second.services.sessions.create).not.toHaveBeenCalled()
+    expect(JSON.stringify([...persistence.stored.values()])).not.toContain(file.base64)
+    expect(JSON.stringify([...persistence.stored.values()])).not.toContain('"draft"')
+  })
+  it('重启后未知提交不重发，保留原会话入口；旧调用迟到确认仍能保存成功', async () => {
+    const persistence = memoryReceipts(); const response = deferred<{ ok: boolean }>()
+    const first = mount({ receipts: persistence.receipts }); first.prompt.mockReturnValue(response.promise)
+    const request = { id: 'restart-unknown', target: 'chat', draft: 'run' }; first.bridge.open(request)
+    await vi.waitFor(() => expect(first.prompt).toHaveBeenCalledOnce()); first.dispose()
+    Reflect.deleteProperty(window, Symbol.for('@lumo/desktop-pet/requests'))
+    const second = mount({ receipts: persistence.receipts }); second.bridge.open(request)
+    expect(await finished(second.bridge, request.id, 'rejected')).toMatchObject({ retryable: false, sessionId: 'new-session', error: expect.stringContaining('new-session') })
+    expect(second.prompt).not.toHaveBeenCalled(); expect(second.services.sessions.create).not.toHaveBeenCalled()
+    response.resolve({ ok: true }); await finished(first.bridge, request.id)
+    Reflect.deleteProperty(window, Symbol.for('@lumo/desktop-pet/requests'))
+    const third = mount({ receipts: persistence.receipts }); third.bridge.open(request); await finished(third.bridge, request.id)
+    expect(third.prompt).not.toHaveBeenCalled()
+  })
+  it('持久提交围栏失败时不调用 prompt，重试也不能越过失败', async () => {
+    const persistence = memoryReceipts()
+    const update = persistence.receipts.update
+    persistence.receipts.update = vi.fn(input => input.phase === 'submitting' ? Promise.reject(Error('disk unavailable')) : update(input))
+    const test = mount({ receipts: persistence.receipts }); const request = { id: 'write-failed', target: 'chat', draft: 'run' }
+    test.bridge.open(request); await finished(test.bridge, request.id, 'rejected')
+    test.bridge.open(request); await finished(test.bridge, request.id, 'rejected')
+    expect(test.prompt).not.toHaveBeenCalled(); expect(test.services.sessions.create).toHaveBeenCalledOnce()
+    expect(test.abandon).toHaveBeenCalledOnce()
+  })
+  it('最初回执读取暂时失败后可重新向 Host claim，不复用已拒绝的 Promise', async () => {
+    const persistence = memoryReceipts(), claim = persistence.receipts.claim
+    persistence.receipts.claim = vi.fn().mockRejectedValueOnce(Error('temporary storage outage')).mockImplementation(claim)
+    const test = mount({ receipts: persistence.receipts }), request = { id: 'claim-recovery', target: 'chat', draft: 'run' }
+    test.bridge.open(request); expect(await finished(test.bridge, request.id, 'rejected')).toMatchObject({ retryable: true })
+    expect(test.services.sessions.create).not.toHaveBeenCalled()
+    test.bridge.open(request); await finished(test.bridge, request.id)
+    expect(persistence.receipts.claim).toHaveBeenCalledTimes(2)
+    expect(test.services.sessions.create).toHaveBeenCalledOnce(); expect(test.prompt).toHaveBeenCalledOnce()
+  })
+  it.each([false, true])('准备元数据写入失败后重新读取真实 revision 和附件回执，提交结果未知=%s', async committed => {
+    const persistence = memoryReceipts(), update = persistence.receipts.update
+    let fail = true
+    persistence.receipts.update = vi.fn(async input => {
+      if (fail && input.phase === 'preparing' && input.uploads?.length) {
+        fail = false
+        if (committed) await update(input)
+        throw Error('preparation write response lost')
+      }
+      return update(input)
+    })
+    const test = mount({ receipts: persistence.receipts }), request = { id: 'preparation-recovery', target: 'chat', draft: 'run', attachments: [file] }
+    test.bridge.open(request); expect(await finished(test.bridge, request.id, 'rejected')).toMatchObject({ retryable: true })
+    expect(test.prompt).not.toHaveBeenCalled()
+    test.bridge.open(request); await finished(test.bridge, request.id)
+    expect(test.services.sessions.create).toHaveBeenCalledOnce()
+    expect(test.services.fileUpload!.upload).toHaveBeenCalledTimes(committed ? 1 : 2)
+    expect(test.prompt).toHaveBeenCalledExactlyOnceWith([{ type: 'file', receiptId: 'file-receipt' }, { type: 'text', text: 'run' }], 'queue', undefined, 'host-request-id')
+  })
+  it('生产默认 Host 记录接口不可用时不退回内存发送', async () => {
+    const test = mount(); delete test.services.receipts; test.dispose()
+    Reflect.deleteProperty(window, Symbol.for('@lumo/desktop-pet/requests'))
+    const fetch = vi.fn().mockResolvedValue({ ok: false, json: async () => ({ error: 'receipt_storage_unavailable' }) })
+    vi.stubGlobal('fetch', fetch)
+    installDesktopPetBridge(window, test.services); const bridge = desktop.__lumoDesktopPet!
+    bridge.open({ id: 'no-durable-store', target: 'chat', draft: 'run' }); await finished(bridge, 'no-durable-store', 'rejected')
+    expect(fetch).toHaveBeenCalledWith('/lumo/api/desktop-pet/receipts/claim', expect.objectContaining({ credentials: 'same-origin', cache: 'no-store' }))
+    expect(test.services.sessions.create).not.toHaveBeenCalled(); expect(test.prompt).not.toHaveBeenCalled()
   })
   it('导航需界面挂载，实际发送允许隐藏界面', async () => {
     const { bridge, services, surface } = mount(); bridge.open({ id: 'tasks', target: 'tasks', draft: '' }); await finished(bridge, 'tasks')

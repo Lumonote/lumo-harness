@@ -21,7 +21,7 @@ export function isManagedContentKey(key: string): boolean {
   return key.startsWith('managed-content/') || key.includes('/managed-content/')
 }
 export function contentDigest(body: Buffer | string): string { return createHash('sha256').update(body).digest('hex') }
-export interface ManagedContentReference { realm: string; kind: 'knowledge-file'; referenceId: string }
+export interface ManagedContentReference { realm: string; kind: 'knowledge-file' | 'task-artifact' | 'cold-log-segment'; referenceId: string }
 export interface ManagedContentReceipt extends ManagedContentReference { objectId: string; objectKey: string; sha256: string; byteSize: number }
 export interface ManagedContentCandidate {
   objectId: string; objectKey: string; state: 'ready' | 'deleting'; revision: number

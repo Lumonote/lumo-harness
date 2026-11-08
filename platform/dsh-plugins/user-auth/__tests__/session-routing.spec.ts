@@ -6,13 +6,14 @@ import type {SessionExecutionRuntime} from '../../../shared/session-execution.ts
 const alice={realm:'r',user_id:'alice',username:'alice',display_name:'Alice',roles:['operator'],session_expires_at:'2099-01-01'}
 const ref=`session-${'a'.repeat(32)}`
 const config:SessionTransportConfig={authorityUrl:'https://authority.example',nodeId:'node-a',projectId:'p',workspaceRoot:'/srv/sessions',provider:'mock',model:'mock',routing:{routes:{'node-a':'https://a.example','node-b':'https://b.example'},transportSecurity:'tls'}}
-function fixture(){
+function fixture(migrationEnabled=false){
   const node={realm:'r',node_id:'node-b',project_id:'p',process_id:'b-process',endpoint:'https://b.example',fence:7,expires_at:'2099-01-01'}
   const owner={session_ref:ref,realm:'r',owner_user_id:'alice',project_id:'p',node_id:'node-b',parent_session_ref:'',state:'active',created_at:'2026-11-07'}
+  const migration={id:'mig_'+'b'.repeat(48),session_ref:ref,realm:'r',owner_user_id:'alice',project_id:'p',source_node_id:'node-a',target_node_id:'node-b',source_process_id:'a-process',source_node_fence:1,source_fencing_token:2,snapshot_key:`session-migration/v1/${ref}/mig_${'b'.repeat(48)}/${'c'.repeat(64)}`,snapshot_sha256:'c'.repeat(64),snapshot_bytes:120,event_count:0,state:'checkpointed',created_at:'2026-11-08'}
   let response=()=>new Response(JSON.stringify({accepted:true}))
   const fetcher=vi.fn(async(url:string|URL|Request,init?:RequestInit)=>{
     const u=new URL(String(url))
-    if(u.hostname==='authority.example')return new Response(JSON.stringify(u.pathname.startsWith('/v1/session-owners')?{owner}:{node}))
+    if(u.hostname==='authority.example')return new Response(JSON.stringify(u.pathname.startsWith('/v1/session-owners')?{owner}:u.pathname.startsWith('/v1/session-migrations')?{migration}:{node}))
     expect(u.href).toBe('https://b.example'+SESSION_RUNTIME_PATH)
     expect(init?.redirect).toBe('error');expect(init?.headers).toEqual({authorization:'Bearer service-secret','content-type':'application/json'})
     const body=JSON.parse(String(init?.body));expect(body.credential).toBe('login-secret');expect(body.destination.process_id).toBe('b-process');expect(body).not.toHaveProperty('principal')
@@ -21,8 +22,8 @@ function fixture(){
   const runtimeAbort=new AbortController()
   const local:AuthenticatedSessionTransport={execute:vi.fn(async()=>({local:true})),stream:vi.fn(async()=>async function*(){yield {local:true}}()),runtime:{processId:'a-process',signal:runtimeAbort.signal,check:vi.fn(async()=>{})} as unknown as SessionExecutionRuntime}
   const authorize=vi.fn(async()=>{});const authority=Object.assign(vi.fn(async()=>alice),{credential:'login-secret'})
-  const transport=routeSessionTransport(local,config,'r','service-secret',authorize,fetcher as typeof fetch)
-  return {node,owner,fetcher,local,authorize,authority,transport,runtimeAbort,setResponse:(fn:typeof response)=>{response=fn}}
+  const transport=routeSessionTransport(local,{...config,...(migrationEnabled?{migration:{enabled:true as const}}:{})},'r','service-secret',authorize,fetcher as typeof fetch)
+  return {node,owner,migration,fetcher,local,authorize,authority,transport,runtimeAbort,setResponse:(fn:typeof response)=>{response=fn}}
 }
 describe('pinned current-node Session routing',()=>{
   it('routes an owned request to the current pinned process and revalidates both sides',async()=>{
@@ -30,6 +31,23 @@ describe('pinned current-node Session routing',()=>{
     await expect(f.transport.execute(alice,'prompt',{sessionId:ref,content:[{type:'text',text:'hi'}]},new AbortController().signal,f.authority)).resolves.toEqual({accepted:true})
     expect(f.local.execute).not.toHaveBeenCalled();expect(f.authority.mock.calls.length).toBeGreaterThanOrEqual(2)
     expect(f.fetcher.mock.calls.filter(([url])=>String(url).startsWith('https://b.example'))).toHaveLength(1)
+  })
+  it('reports a frozen checkpoint before trying to resolve its offline original node',async()=>{
+    const f=fixture(true)
+    await expect(f.transport.execute(alice,'events',{sessionId:ref},new AbortController().signal,f.authority)).rejects.toMatchObject({code:'session_migration_frozen'})
+    expect(f.fetcher.mock.calls.some(([url])=>String(url).includes('/session-execution/nodes/'))).toBe(false)
+    expect(f.fetcher.mock.calls.every(([url])=>String(url).startsWith('https://authority.example'))).toBe(true)
+  })
+  it('routes recovery to the checkpoint target while the recorded owner is still the source',async()=>{
+    const f=fixture(true);f.owner.node_id='node-a'
+    await expect(f.transport.execute(alice,'recover',{sessionId:ref,migrationId:f.migration.id},new AbortController().signal,f.authority)).resolves.toEqual({accepted:true})
+    expect(f.local.execute).not.toHaveBeenCalled()
+    expect(f.fetcher.mock.calls.filter(([url])=>String(url).startsWith('https://b.example'))).toHaveLength(1)
+  })
+  it('queries migration status locally without requiring a live source node',async()=>{
+    const f=fixture(true)
+    await expect(f.transport.execute(alice,'migrationStatus',{sessionId:ref},new AbortController().signal,f.authority)).resolves.toEqual({local:true})
+    expect(f.local.execute).toHaveBeenCalled();expect(f.fetcher).not.toHaveBeenCalled()
   })
   it.each(['foreign owner','foreign project','foreign Realm','unregistered node','changed endpoint'])('rejects %s before sending a credential',async kind=>{
     const f=fixture()
