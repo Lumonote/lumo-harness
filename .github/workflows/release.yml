@@ -101,6 +101,19 @@ jobs:
         shell: bash
         run: node platform/dsh-overrides/check-compatibility.mjs deepseek-harness
 
+      - name: Read source plugin runtime version
+        id: source-plugin-runtime
+        shell: bash
+        run: echo "node=$(node --version)" >> "$GITHUB_OUTPUT"
+
+      # 只缓存完整构建产物；不同系统/架构/Node/固定源码或构建器不得混用。
+      # 即使命中缓存，后续 prepare 仍检查 fingerprint 和必需文件。
+      - name: Cache source plugin builds
+        uses: actions/cache@v5
+        with:
+          path: platform/.build/source-plugins
+          key: source-plugins-${{ runner.os }}-${{ runner.arch }}-${{ steps.source-plugin-runtime.outputs.node }}-${{ hashFiles('platform/shared/manifests/plugin-baseline.manifest.json', 'platform/tools/prepare-source-plugins.mjs', 'platform/tools/source-plugin-fetch.mjs') }}
+
       - name: Build unpublished default plugins from pinned sources
         shell: bash
         run: node platform/tools/prepare-source-plugins.mjs

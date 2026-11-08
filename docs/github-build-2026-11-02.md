@@ -99,3 +99,13 @@ Windows 总构建入口和 `desktop:win` 现在共同调用 `desktop/build-windo
 启用官方 `bundle.useLocalToolsDir`，将工具保存在 Cargo 的 `target/.tauri/`；release 将该目录与 Rust 编译缓存分开，按 Windows 架构及实际 Tauri CLI 版本缓存。下载 URL、版本和摘要校验继续由官方 bundler 维护，没有第三方镜像或本地写死摘要。已核对与日志匹配的 bundler 2.10.4 源码：NSIS 缺件或版本不符时自动重建，插件摘要不符时重新下载，HTTP 失败不会落盘未经校验的工具。
 
 完整平台测试 2184 通过、0 失败、314 按既有门控跳过，类型检查通过。随后补充默认 spawn 的真实子进程回归，打包测试共 22 项通过：临时 PATH 含空格与特殊字符，真实 stdout/stderr 输出 504，验证编译一次、仅重试 bundle、参数及工作目录、目标环境和清理；未启动真实 Cargo 编译或网络请求。Windows 总入口 dry-run、Node/Shell 语法及工作流 YAML/Tauri JSON 解析通过。当前本机为 macOS，且 GitHub CLI 未登录，未触发远端 Windows release；完整安装包仍需对应 runner 验收。
+
+## 2026-11-08：Superagent 固定源码下载 DNS 失败
+
+后续 release 在 `prepare-source-plugins.mjs` 准备 `dsh-superagent@0.1.0` 时失败：Git fetch 返回 `Could not resolve host: github.com`，退出 128。Git 初始化分支的提示不是退出原因。此前该下载只有一次机会，完整产物缓存仅存在于本地工作区，新的 runner 每次都要重新获取源码。
+
+新增同步 `source-plugin-fetch.mjs`，仅对明确的 Git DNS、连接中断及临时 HTTP 故障做最多三次尝试，间隔 5 秒和 15 秒；每次保留原诊断，继续使用同一完整 SHA。HTTP/1.1 仅通过单次 Git 参数设置，不改用户配置。认证、缺失 ref、摘要问题、进程错误和中断直接失败，包安装及编译也不在重试范围。检出后新增 `rev-parse HEAD` 严格校验，再检查包名、版本和构建；失败清理暂存目录，不发布不完整产物或替换原有完整产物。
+
+release 新增完整源码插件产物缓存，key 包含系统、架构、实际完整 Node 版本，以及 baseline manifest、主构建器、新下载 helper 的 hash，不使用宽松 restore key。缓存命中也继续运行准备入口；内部 fingerprint 同时包含 helper 与运行平台信息，必需文件检查覆盖入口、清单、生产依赖及随包资源，缺件则重新构建。
+
+下载单测与真实子进程故障注入共 27 项通过；实际构建 CLI 的 8 项进程集成覆盖缓存零重复下载、四类缺件重建、helper 变更失效、错误 SHA 拒绝和编译失败保留旧产物。另在临时 checkout 使用新增入口从官方 GitHub 实际拉取成功，核对提交 `6337fc823ce20251c8de8085948165c81aaa701e`、包名和版本均与 pin 一致，未执行远端安装或构建脚本。完整平台测试 2220 通过、0 失败、314 按既有门控跳过，类型检查、Node 语法、diff 和工作流 YAML 检查通过；独立上游源码与锁文件保持干净。GitHub CLI 未登录，未触发远端 release 重跑。

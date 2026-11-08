@@ -3,16 +3,21 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { fetchPinnedCommit } from './source-plugin-fetch.mjs'
 
 const scriptPath = fileURLToPath(import.meta.url)
 
-function run(command, args, cwd) {
+function run(command, args, cwd, capture = false) {
   const result = spawnSync(command, args, {
-    cwd, stdio: 'inherit',
+    cwd, stdio: capture ? 'pipe' : 'inherit', encoding: 'utf8',
     ...(process.platform === 'win32' && /\.cmd$/i.test(command) ? { shell: true } : {}),
   })
   if (result.error) throw result.error
-  if (result.status !== 0) throw new Error(`source plugin: ${command} failed (${result.status ?? result.signal})`)
+  if (result.status !== 0) {
+    if (capture && result.stderr) process.stderr.write(result.stderr)
+    throw new Error(`source plugin: ${command} failed (${result.status ?? result.signal})`)
+  }
+  return result.stdout
 }
 
 /** Build unpublished baseline bundles at exact commits, outside the upstream DSH tree. */
@@ -28,9 +33,13 @@ export function prepareSourcePlugins(platformRoot, onlyName) {
     const target = resolve(parent, pin.name)
     // A builder change invalidates artifacts, including changes to files copied
     // into the distribution. Never treat a half-built checkout as ready.
-    const fingerprint = createHash('sha256').update(readFileSync(scriptPath)).update(JSON.stringify(pin)).digest('hex')
+    const fingerprint = createHash('sha256').update(readFileSync(scriptPath))
+      .update(readFileSync(new URL('./source-plugin-fetch.mjs', import.meta.url)))
+      .update(JSON.stringify([process.platform, process.arch, process.version, pin])).digest('hex')
     const marker = resolve(target, '.lumo-source-build')
-    const outputs = ['lib/index.js', 'lib/client.js', 'lib/github-watch.js', 'lib/feishu-watch.js', 'cordis.patch.yml']
+    const assets = ['lib', 'cordis.patch.yml', 'locale', 'README.md', 'LICENSE', 'prompts', 'skills']
+    const outputs = ['lib/index.js', 'lib/client.js', 'lib/github-watch.js', 'lib/feishu-watch.js',
+      ...assets, 'package.json', 'node_modules']
     if (existsSync(marker) && readFileSync(marker, 'utf8').trim() === fingerprint
       && outputs.every(file => existsSync(resolve(target, file)))) {
       roots.set(pin.name, target)
@@ -44,8 +53,10 @@ export function prepareSourcePlugins(platformRoot, onlyName) {
       console.log(`Building baseline ${pin.name}@${pin.version} from ${pin.source.repository}#${pin.source.commit}`)
       run('git', ['init', checkout], temporary)
       run('git', ['-C', checkout, 'remote', 'add', 'origin', pin.source.repository], temporary)
-      run('git', ['-C', checkout, 'fetch', '--depth', '1', 'origin', pin.source.commit], temporary)
+      fetchPinnedCommit(checkout, pin.source.commit)
       run('git', ['-C', checkout, 'checkout', '--detach', 'FETCH_HEAD'], temporary)
+      const actualCommit = run('git', ['-C', checkout, 'rev-parse', 'HEAD'], temporary, true).trim()
+      if (actualCommit !== pin.source.commit) throw new Error(`Source commit differs from baseline pin: ${pin.name} (${actualCommit})`)
       const pkg = JSON.parse(readFileSync(resolve(checkout, 'package.json'), 'utf8'))
       if (pkg.name !== pin.name || pkg.version !== pin.version) throw new Error(`Source manifest differs from baseline pin: ${pin.name}`)
       const corepack = process.platform === 'win32' ? 'corepack.cmd' : 'corepack'
@@ -59,7 +70,7 @@ export function prepareSourcePlugins(platformRoot, onlyName) {
       const entry = typeof tool.bin === 'string' ? tool.bin : tool.bin.tsdown
       run(process.execPath, [resolve(checkout, 'node_modules/tsdown', entry)], checkout)
       mkdirSync(distribution, { recursive: true })
-      for (const file of ['lib', 'cordis.patch.yml', 'locale', 'README.md', 'LICENSE', 'prompts', 'skills']) {
+      for (const file of assets) {
         cpSync(resolve(checkout, file), resolve(distribution, file), { recursive: true })
       }
       writeFileSync(resolve(distribution, 'package.json'), `${JSON.stringify({ ...pkg, lumoSource: pin.source }, null, 2)}\n`)
