@@ -23,10 +23,14 @@ use tauri::{
     AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 
+mod pet;
+
 const MAIN_WINDOW: &str = "main";
 const TRAY_ID: &str = "lumo-tray";
 const MENU_SHOW: &str = "show";
 const MENU_LOG: &str = "log";
+const MENU_PET_SHOW: &str = "pet-show";
+const MENU_PET_HIDE: &str = "pet-hide";
 const MENU_QUIT: &str = "quit";
 const DEFAULT_WEB_PORT: u16 = 3080;
 // 冷启动要加载 800+ 个包的模块图，慢机器上首启动可到 40 秒以上；30 秒的旧上限会把
@@ -484,7 +488,8 @@ fn boot_runtime_in_background(app: AppHandle) {
                 Ok(parsed) => {
                     log_stage(&app, "切换到工作台");
                     if let Some(window) = main_window(&app) {
-                        if let Err(error) = window.navigate(parsed) {
+                        pet::runtime_ready(&app, parsed.clone());
+                        if let Err(error) = window.navigate(parsed.clone()) {
                             Err(format!("无法打开本地 Web 地址：{error}"))
                         } else {
                             Ok(())
@@ -504,6 +509,7 @@ fn boot_runtime_in_background(app: AppHandle) {
 }
 
 fn report_boot_failure(app: &AppHandle, message: &str) {
+    pet::runtime_failed(app);
     kill_runtime(app);
     eprintln!("lumo-desktop: {message}");
     let log_path = app.state::<RuntimeLogPath>().0.display().to_string();
@@ -647,9 +653,13 @@ fn reveal_runtime_log(app: &AppHandle) {
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItemBuilder::with_id(MENU_SHOW, "显示 DeepSeek Harness").build(app)?;
     let log = MenuItemBuilder::with_id(MENU_LOG, "查看运行时日志").build(app)?;
+    let pet_show = MenuItemBuilder::with_id(MENU_PET_SHOW, "显示桌面伙伴").build(app)?;
+    let pet_hide = MenuItemBuilder::with_id(MENU_PET_HIDE, "隐藏桌面伙伴").build(app)?;
     let quit = MenuItemBuilder::with_id(MENU_QUIT, "退出 DeepSeek Harness").build(app)?;
     let menu = MenuBuilder::new(app)
         .item(&show)
+        .item(&pet_show)
+        .item(&pet_hide)
         .item(&log)
         .separator()
         .item(&quit)
@@ -665,6 +675,16 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_SHOW => show_main_window(app),
             MENU_LOG => reveal_runtime_log(app),
+            MENU_PET_SHOW => {
+                if let Err(error) = pet::show(app) {
+                    log_stage(app, &format!("无法显示桌宠：{error}"));
+                }
+            }
+            MENU_PET_HIDE => {
+                if let Err(error) = pet::hide(app) {
+                    log_stage(app, &format!("无法隐藏桌宠：{error}"));
+                }
+            }
             MENU_QUIT => {
                 kill_runtime(app);
                 app.exit(0);
@@ -678,6 +698,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 fn main() {
     let shell_started = Instant::now();
     let app = tauri::Builder::default()
+        .register_uri_scheme_protocol("lumo-pet", |_context, request| pet::asset(request))
         .setup(move |app| {
             let handle = app.handle().clone();
             let log_path = handle
@@ -697,6 +718,8 @@ fn main() {
             // 目前全是深色，所以窗口外观固定为 Dark，底色取默认主题 obsidian-signal 的
             // 基色 #0b0e11——启动页、切换到工作台之间以及窗口尺寸变化露出的边缘都不会
             // 再闪出系统浅灰标题栏。
+            let navigation_handle = handle.clone();
+            let popup_handle = handle.clone();
             WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("boot.html".into()))
                 .title("DeepSeek Harness")
                 .theme(Some(tauri::Theme::Dark))
@@ -705,8 +728,25 @@ fn main() {
                 .min_inner_size(980.0, 680.0)
                 .resizable(true)
                 .initialization_script(INTRINSIC_TO_STRING_SHIM)
+                .initialization_script("window.__LUMO_DESKTOP__ = true;")
+                .initialization_script(pet::EXTERNAL_LINKS_SCRIPT)
+                .on_navigation(move |url| {
+                    if pet::allow_main_navigation(&navigation_handle, url) {
+                        return true;
+                    }
+                    if let Err(error) = pet::handle_external_link_request(url) {
+                        log_stage(&navigation_handle, &error);
+                    }
+                    false
+                })
+                .on_new_window(move |url, features| {
+                    pet::open_workbench_popup(&popup_handle, url, features)
+                })
                 .build()?;
             log_stage(&handle, "主窗口已创建（启动页）");
+            if let Err(error) = pet::setup(&handle) {
+                log_stage(&handle, &format!("桌面伙伴未能创建：{error}"));
+            }
             if let Err(error) = build_tray(&handle) {
                 eprintln!("lumo-desktop: failed to create tray icon: {error}");
             }
@@ -716,7 +756,11 @@ fn main() {
         })
         .on_window_event(|window, event| {
             // 关闭主窗口就是退出应用；退出路径会杀掉它自己启动的 runtime 进程组。
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == pet::WINDOW {
+                    api.prevent_close();
+                    let _ = pet::hide(window.app_handle());
+                }
                 if window.label() == MAIN_WINDOW {
                     let app = window.app_handle();
                     log_stage(&app, "主窗口关闭，退出应用并清理 runtime");
@@ -725,14 +769,25 @@ fn main() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![open_runtime_log])
+        .invoke_handler(tauri::generate_handler![
+            open_runtime_log,
+            pet::pet_snapshot,
+            pet::pet_set_expanded,
+            pet::pet_start_drag,
+            pet::pet_hide,
+            pet::pet_set_preferences,
+            pet::pet_open_workbench
+        ])
         .build(tauri::generate_context!())
         .expect("error while building Lumo desktop");
 
     app.run(|app, event| match event {
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => show_main_window(app),
-        RunEvent::ExitRequested { .. } | RunEvent::Exit => kill_runtime(app),
+        RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+            let _ = pet::persist(app);
+            kill_runtime(app);
+        }
         _ => {}
     });
 }

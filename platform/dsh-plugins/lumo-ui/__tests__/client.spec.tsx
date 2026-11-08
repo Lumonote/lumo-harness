@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ComponentType } from 'react'
 import { webcrypto } from 'node:crypto'
@@ -249,6 +249,43 @@ describe('Lumo native Harness integration', () => {
   })
 
   afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+
+  it('桌面桥从真实 overlay 注册打开任务并返回对话，普通视图不创建任务', async () => {
+    const desktop = window as Window & { __LUMO_DESKTOP__?: boolean; __lumoDesktopPet?: { open(value: unknown): { accepted: boolean }; result(id: string): { state: string } } }
+    desktop.__LUMO_DESKTOP__ = true
+    const { context, registered } = createLumoContext()
+    const ctx = context as { get(name: string): unknown; effect(body: () => unknown): unknown }
+    const previousGet = ctx.get
+    const cleanups: Array<() => void> = []
+    const create = vi.fn()
+    const services: Record<string, unknown> = {
+      sessions: { create, list: { getSnapshot: () => sessionSnapshot } },
+      workspaces: { list: { getSnapshot: () => workspaceSnapshot } }, conversation: {}, uiWorkspace: {},
+      layout: { selectPanel: vi.fn() },
+    }
+    const sessionSnapshot = { phase: 'ready', ids: [], byId: {} }
+    const workspaceSnapshot = { phase: 'ready', items: [], archivedSessionIds: [] }
+    ctx.get = name => services[name] ?? previousGet(name)
+    ctx.effect = body => { const result = body(); if (typeof result === 'function') cleanups.push(result as () => void); return result }
+    try {
+      apply(context as never)
+      const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
+      render(<Overlay />)
+      const bridge = desktop.__lumoDesktopPet!
+      await act(async () => { expect(bridge.open({ id: 'pet-tasks', target: 'tasks', draft: '' }).accepted).toBe(true) })
+      expect(await screen.findByRole('dialog', { name: '本机对话任务' })).toBeTruthy()
+      expect(calls.some(call => call.includes('/lumo/api/collaboration/'))).toBe(false)
+      expect(bridge.result('pet-tasks').state).toBe('accepted')
+      await act(async () => { bridge.open({ id: 'pet-home', target: 'home', draft: '' }) })
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: '本机对话任务' })).toBeNull())
+      expect(bridge.result('pet-home').state).toBe('accepted')
+      expect(create).not.toHaveBeenCalled()
+    } finally {
+      cleanup()
+      for (const dispose of cleanups.reverse()) dispose()
+      delete desktop.__LUMO_DESKTOP__
+    }
+  })
 
   it('keeps only the primary server workspaces in product navigation', async () => {
     const registered = mountLumo()

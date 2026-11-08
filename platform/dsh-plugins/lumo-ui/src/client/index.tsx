@@ -44,6 +44,9 @@ import { RecoveryWorkflowPanel } from './recovery-workflow-panel.tsx'
 import { StorageQuotaPanel } from './storage-quota-panel.tsx'
 import { KnowledgeLibraryEditor, type LibraryEditorResource } from './knowledge-library-editor.tsx'
 import type { ThreadFacts } from './thread-board.ts'
+import { installDesktopPetBridge, registerDesktopPetSurface, type DesktopPetServices } from './desktop-pet.ts'
+import { DesktopPetTasks } from './desktop-pet-tasks.tsx'
+import { installAnchoredOverlayFallback } from './anchored-overlays.ts'
 
 // A desktop WebView can evaluate more than one copy of this bundle while the
 // native shell is recovering from a loader replay. Keep the root-scoped mount
@@ -4025,6 +4028,7 @@ export function LumoOverlay(_props: OverlayProps) {
   // now an on-demand operations workbench rather than a full-screen takeover.
   const [surface, setSurface] = useState<Surface | null>(() => querySurface())
   const [commandOpen, setCommandOpen] = useState(false)
+  const [desktopTasks, setDesktopTasks] = useState(false)
   const openerRef = useRef<HTMLElement | null>(null)
   const openedRef = useRef(surface !== null)
   const captureOpener = () => {
@@ -4034,29 +4038,34 @@ export function LumoOverlay(_props: OverlayProps) {
     openedRef.current = true
   }
   useEffect(() => {
-    if (surface !== null) return
+    if (surface !== null || desktopTasks) return
     if (openedRef.current && openerRef.current?.isConnected) openerRef.current.focus()
     openerRef.current = null
     openedRef.current = false
-  }, [surface])
+  }, [surface, desktopTasks])
   useEffect(() => {
-    const open = (event: Event) => { const next = (event as CustomEvent<Surface>).detail; captureOpener(); setSurface(next); setQuerySurface(next) }
-    const closeWorkbench = () => { setSurface(null); setQuerySurface(null) }
+    const open = (event: Event) => { const next = (event as CustomEvent<Surface>).detail; captureOpener(); setDesktopTasks(false); setSurface(next); setQuerySurface(next) }
+    const closeWorkbench = () => { setDesktopTasks(false); setSurface(null); setQuerySurface(null) }
     const key = (event: globalThis.KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
         captureOpener()
+        setDesktopTasks(false)
         setSurface(current => current ?? 'knowledge')
         setCommandOpen(current => !current)
-      } else if (event.key === 'Escape') { if (commandOpen) setCommandOpen(false); else { setSurface(null); setQuerySurface(null) } }
+      } else if (event.key === 'Escape') { if (commandOpen) setCommandOpen(false); else closeWorkbench() }
     }
     window.addEventListener(OPEN_EVENT, open); window.addEventListener(CLOSE_EVENT, closeWorkbench); window.addEventListener('keydown', key)
-    return () => { window.removeEventListener(OPEN_EVENT, open); window.removeEventListener(CLOSE_EVENT, closeWorkbench); window.removeEventListener('keydown', key) }
+    const stopPetSurface = registerDesktopPetSurface(window, target => {
+      window.dispatchEvent(new CustomEvent(CLOSE_EVENT))
+      if (target === 'tasks') { captureOpener(); setCommandOpen(false); setDesktopTasks(true) }
+    })
+    return () => { stopPetSurface(); window.removeEventListener(OPEN_EVENT, open); window.removeEventListener(CLOSE_EVENT, closeWorkbench); window.removeEventListener('keydown', key) }
   }, [commandOpen])
   const close = () => { setSurface(null); setQuerySurface(null) }
   const select = (next: Surface) => { setSurface(next); setQuerySurface(next) }
   const toggleCommand = () => setCommandOpen(current => !current)
-  return <ClickSpark>{surface === null ? null : <Workbench surface={surface} close={close} select={select} commandOpen={commandOpen} toggleCommand={toggleCommand} />}</ClickSpark>
+  return <ClickSpark>{desktopTasks ? <DesktopPetTasks onClose={() => window.dispatchEvent(new CustomEvent(CLOSE_EVENT))} /> : surface === null ? null : <Workbench surface={surface} close={close} select={select} commandOpen={commandOpen} toggleCommand={toggleCommand} />}</ClickSpark>
 }
 
 /** 原生 `/` 触发源的最小结构投影；同样不把 ui-input-trigger 的源码项目拉进本包。 */
@@ -4128,6 +4137,14 @@ export function apply(ctx: ClientContext): void {
   if (roots.has(root)) return
   roots.add(root)
   ctx.effect(() => () => { roots.delete(root) }, 'lumo-ui: singleton client mount')
+  if (typeof window !== 'undefined') ctx.effect(() => installAnchoredOverlayFallback(window), 'lumo-ui: CSS anchor compatibility')
+  if (typeof window !== 'undefined' && (window as Window & { __LUMO_DESKTOP__?: boolean }).__LUMO_DESKTOP__ === true) {
+    ctx.inject(['sessions', 'workspaces', 'conversation', 'uiWorkspace', 'layout'], (desktopCtx) => {
+      const services = Object.fromEntries(['sessions', 'workspaces', 'conversation', 'uiWorkspace', 'layout'].map(name => [name, desktopCtx.get(name)]))
+      if (Object.values(services).some(service => service === undefined)) return
+      desktopCtx.effect(() => installDesktopPetBridge(window, services as unknown as DesktopPetServices), 'lumo-ui: desktop pet handoff')
+    })
+  }
   installLumoThemes(ctx)
   ctx.slots.inject('sidebar.navigation', () => ctx.slots.register(
     { name: 'sidebar.navigation', id: 'lumo-navigation', order: 10, label: 'Lumo 功能菜单' },

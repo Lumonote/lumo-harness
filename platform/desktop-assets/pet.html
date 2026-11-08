@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>DeepSeek</title>
+  <link rel="stylesheet" href="pet.css">
+  <script type="module" src="pet.mjs"></script>
+</head>
+<body>
+  <main class="pet" data-pet-root data-runtime="starting" data-expanded="false">
+    <section class="assistant" id="assistant" aria-label="桌面快捷助手" hidden>
+      <header class="assistant-header">
+        <div class="identity"><img src="pet-whale.svg" alt="" width="28" height="23"><span>DeepSeek</span></div>
+        <button class="icon-button" id="collapse" type="button" aria-label="收起桌面助手" title="收起 · Esc"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m5 8 5 5 5-5"/></svg></button>
+      </header>
+      <div class="introduction"><h1>有个想法？<br>一起把它变成现实。</h1><p id="runtime-detail">正在连接本地工作台…</p></div>
+      <form id="quick-prompt">
+        <div class="composer"><label class="sr-only" for="draft">带到新对话的消息草稿</label><textarea id="draft" rows="2" maxlength="12000" aria-describedby="draft-count" placeholder="记下想法，或说说你想完成什么…"></textarea><div class="composer-footer"><span id="draft-count">草稿会带入工作台，由你确认发送</span><button id="send-draft" class="send-button" type="submit" aria-label="将草稿带到新对话" title="带到新对话 · ⌘ / Ctrl + Enter"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 15V5m-4 4 4-4 4 4"/></svg></button></div></div>
+      </form>
+      <nav class="quick-actions" aria-label="工作台快捷入口">
+        <button id="new-chat" type="button"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 5v10M5 10h10"/></svg><span>新建对话</span><span class="arrow" aria-hidden="true">↗</span></button>
+        <button id="view-tasks" type="button"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m4 6 1.5 1.5L8 5m2 1h6M4 11h3m3 0h6M4 15h3m3 0h6"/></svg><span>查看任务</span><span class="arrow" aria-hidden="true">↗</span></button>
+      </nav>
+      <p class="feedback" id="feedback" role="status" aria-live="polite"></p>
+      <div class="preferences" id="preferences" role="group" aria-label="桌宠偏好" hidden><label><span>始终置顶</span><input id="always-on-top" type="checkbox" role="switch"></label><label><span>启动时显示桌宠</span><input id="launch-on-start" type="checkbox" role="switch"></label></div>
+      <footer class="assistant-footer"><button id="open-home" type="button">打开工作台 <span aria-hidden="true">↗</span></button><div><button id="settings" class="icon-button" type="button" aria-label="桌宠设置" aria-controls="preferences" aria-expanded="false" title="桌宠设置"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m8 3-.5 2-2 .8-1.8-.5-1.5 2.6 1.4 1.4v2L2.2 13l1.5 2.6 1.8-.5 2 .8.5 2h3l.5-2 2-.8 1.8.5 1.5-2.6-1.4-1.4v-2l1.4-1.4-1.5-2.6-1.8.5-2-.8-.5-2H8Z"/><circle cx="9.5" cy="10.5" r="2.5"/></svg></button><button id="hide" class="icon-button" type="button" aria-label="暂时隐藏桌宠" title="暂时隐藏，可从托盘找回"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 10h10"/></svg></button><button id="open-log" type="button" hidden>查看日志</button></div></footer>
+    </section>
+    <div class="companion">
+      <button class="whale-button" id="whale" type="button" aria-label="打开助手，拖动可移动鲸鱼" aria-expanded="false" aria-controls="assistant" title="点击打开助手 · 拖动移动">
+        <canvas id="whale-canvas" class="ocean-stage" width="640" height="360" aria-hidden="true"></canvas><img class="whale-fallback" src="pet-whale.svg" alt="" draggable="false">
+      </button>
+      <span class="sr-only" id="compact-status" role="status" aria-live="polite"><span id="runtime-label">连接中</span></span>
+      <button id="jump" class="sea-touch" type="button" aria-label="播放鲸鱼跃海" title="点击重播鲸鱼跃海"></button>
+      <span id="play-feedback" class="sr-only" role="status" aria-live="polite"></span>
+    </div>
+  </main>
+</body>
+</html>
