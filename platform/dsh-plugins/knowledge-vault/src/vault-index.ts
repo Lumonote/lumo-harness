@@ -150,17 +150,20 @@ export class VaultIndex {
     return rows.map(row => this.toRecord(row))
   }
 
-  query(realm: string, userText: string, topK: number): VaultQueryHit[] {
+  query(realm: string, userText: string, topK: number, spaces?: readonly string[]): VaultQueryHit[] {
+    if (spaces !== undefined && (!Array.isArray(spaces) || spaces.length > 64 || spaces.some(space => typeof space !== 'string' || !space || space.length > 128 || space.trim() !== space || /[\x00-\x1f\x7f]/u.test(space)))) throw new TypeError('invalid knowledge spaces')
+    if (spaces?.length === 0) return []
     const terms = ftsTerms(userText)
     if (terms.length === 0) return []
     // trigram 窗口是 3 字：任一词不足 3 字时 MATCH 恒定 0，走 LIKE 兜底（子串语义，无相关性排序）。
-    if (terms.some(term => term.length < 3)) return this.likeQuery(realm, terms, topK)
+    if (terms.some(term => term.length < 3)) return this.likeQuery(realm, terms, topK, spaces)
     const match = ftsMatch(userText)
+    const spaceFilter = spaces === undefined ? '' : `AND EXISTS (SELECT 1 FROM knowledge_vault_sources source WHERE source.doc_id = knowledge_vault_fts.doc_id AND source.realm = knowledge_vault_fts.realm AND source.space IN (${spaces.map(() => '?').join(',')}))`
     const rows = this.db.prepare(`SELECT doc_id, source_version, text,
         bm25(knowledge_vault_fts) AS score
       FROM knowledge_vault_fts
-      WHERE realm = ? AND knowledge_vault_fts MATCH ?
-      ORDER BY score LIMIT ?`).all(realm, match, topK) as Array<Record<string, unknown>>
+      WHERE realm = ? AND knowledge_vault_fts MATCH ? ${spaceFilter}
+      ORDER BY score LIMIT ?`).all(realm, match, ...(spaces ?? []), topK) as Array<Record<string, unknown>>
     return rows.map(row => ({
       docId: String(row.doc_id),
       sourceVersion: Number(row.source_version),
@@ -170,9 +173,10 @@ export class VaultIndex {
   }
 
   /** 短词兜底：对 chunks_json（含正文的 JSON 文本）做逐词 LIKE。 */
-  private likeQuery(realm: string, terms: string[], topK: number): VaultQueryHit[] {
+  private likeQuery(realm: string, terms: string[], topK: number, spaces?: readonly string[]): VaultQueryHit[] {
     const where = ['realm = ?']
     const params: Array<string> = [realm]
+    if (spaces !== undefined) { where.push(`space IN (${spaces.map(() => '?').join(',')})`); params.push(...spaces) }
     for (const term of terms) {
       where.push("chunks_json LIKE '%' || ? || '%'")
       params.push(term)

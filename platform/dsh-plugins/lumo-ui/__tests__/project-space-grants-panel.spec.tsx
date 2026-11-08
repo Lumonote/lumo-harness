@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
+import { act, cleanup, fireEvent, render, screen } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
 import { afterEach, expect, it, vi } from 'vitest'
 import { ProjectSpaceGrantsPanel } from '../src/client/project-space-grants-panel.tsx'
 import { ProjectSpacesPanel } from '../src/client/project-resources-panel.tsx'
@@ -48,4 +48,54 @@ it('mounts permission controls only for the project owner and keeps archived gra
   fireEvent.click(screen.getByRole('button', { name: '管理授权 · 资料' }))
   await screen.findByText('读取 · 编辑')
   expect(screen.queryByRole('button', { name: '保存空间授权' })).toBeNull()
+})
+
+it('permits only revocation for a member removed while their grant is selected', async () => {
+  const request = vi.fn().mockResolvedValueOnce({ grants: [grant] }).mockResolvedValueOnce({ ...grant, permissions: [], revision: 5 })
+  const f = render(<ProjectSpaceGrantsPanel {...shared} request={request} />)
+  await screen.findByText('读取 · 编辑')
+  fireEvent.change(screen.getByRole('combobox', { name: '空间授权成员' }), { target: { value: 'bob' } })
+  f.rerender(<ProjectSpaceGrantsPanel {...shared} request={request} members={[shared.members[0]!]} />)
+  expect((screen.getByRole('button', { name: '保存空间授权' }) as HTMLButtonElement).disabled).toBe(true)
+  fireEvent.submit(screen.getByRole('combobox').closest('form')!)
+  expect(request).toHaveBeenCalledOnce()
+  fireEvent.click(screen.getByRole('button', { name: '撤回全部权限' }))
+  fireEvent.click(screen.getByRole('button', { name: '确认撤回授权' }))
+  await screen.findByText('空间授权已撤回。')
+  expect(JSON.parse(request.mock.calls[1]![1].body)).toEqual({ permissions: [], expectedRevision: 4 })
+  expect((screen.getByRole('button', { name: '撤回全部权限' }) as HTMLButtonElement).disabled).toBe(true)
+})
+
+it('isolates permissions and ignores a late mutation when switching spaces', async () => {
+  let finish!: (value: unknown) => void
+  const request = vi.fn().mockResolvedValueOnce({ grants: [grant] })
+    .mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    .mockResolvedValueOnce({ grants: [] })
+  const f = render(<ProjectSpaceGrantsPanel {...shared} request={request} />)
+  await screen.findByText('读取 · 编辑')
+  fireEvent.change(screen.getByRole('combobox'), { target: { value: 'bob' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存空间授权' }))
+  f.rerender(<ProjectSpaceGrantsPanel {...shared} request={request} spaceID="second" />)
+  await screen.findByText('尚未向成员授予此空间权限。')
+  await act(async () => finish({ ...grant, revision: 5 }))
+  expect(screen.queryByText('读取 · 编辑')).toBeNull()
+  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('')
+  expect(screen.queryByText('空间授权已保存。')).toBeNull()
+})
+
+it.each([{ grants: [null] }, { grants: [{ ...grant, permissions: null }] }, { grants: [grant, grant] }])('rejects malformed grants without crashing %j', async response => {
+  render(<ProjectSpaceGrantsPanel {...shared} request={vi.fn().mockResolvedValue(response)} />)
+  expect((await screen.findByRole('alert')).textContent).toContain('空间授权响应无效')
+  expect(screen.queryByRole('combobox')).toBeNull()
+})
+
+it('does not accept a save receipt for a different member', async () => {
+  const request = vi.fn().mockResolvedValueOnce({ grants: [grant] }).mockResolvedValueOnce({ ...grant, user_id: 'alice', revision: 5 })
+  render(<ProjectSpaceGrantsPanel {...shared} request={request} />)
+  await screen.findByText('读取 · 编辑')
+  fireEvent.change(screen.getByRole('combobox'), { target: { value: 'bob' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存空间授权' }))
+  expect((await screen.findByRole('alert')).textContent).toContain('保存回执无效')
+  expect(screen.queryByText('空间授权已保存。')).toBeNull()
+  expect((screen.getByRole('button', { name: '保存空间授权' }) as HTMLButtonElement).disabled).toBe(true)
 })

@@ -39,7 +39,7 @@ interface SessionLogQuerySeam {
 
 /** Read-only browser projection of the platform KnowledgeSeam. */
 interface KnowledgeQueryService {
-  query(request: { realm: string; roles: string[]; userId?: string; libraryAdmin?: boolean; text: string; topK: number; scope: 'published' | 'draft' }): Promise<Array<{ docId: string; sourceVersion: number; score: number; text: string }>>
+  query(request: { realm: string; roles: string[]; userId?: string; libraryAdmin?: boolean; text: string; topK: number; scope: 'published' | 'draft'; spaces?: readonly string[] }): Promise<Array<{ docId: string; sourceVersion: number; score: number; text: string }>>
 }
 
 interface KnowledgeLibraryManagerService {
@@ -1024,8 +1024,15 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       const body = await readJson(req)
       const text = typeof body['text'] === 'string' ? body['text'].trim() : ''
       if (text.length === 0 || text.length > 2_000) { writeJson(res, 400, { error: '检索问题长度应为 1–2000 字符' }); return }
+      const spaces = body['spaces']
+      // Space names are selectors, never identity or authorization. Vault folder
+      // names may be Unicode; validate bounds without narrowing them to ASCII IDs.
+      if (spaces !== undefined && (!Array.isArray(spaces) || spaces.length > 64
+        || spaces.some(space => typeof space !== 'string' || !space || space.length > 128 || space.trim() !== space || /[\x00-\x1f\x7f]/u.test(space)))) {
+        writeJson(res, 400, { error: 'spaces 应为最多 64 个有效空间名称；每项 1–128 字符且不含控制字符或首尾空白' }); return
+      }
       const requestedTopK = typeof body['topK'] === 'number' && Number.isInteger(body['topK']) ? body['topK'] : 8
-      const hits = await knowledge.query({ realm: identity.realm, roles: identity.roles, userId: identity.userId, libraryAdmin: isRealmAdmin(identity), text, topK: Math.min(Math.max(requestedTopK, 1), 20), scope: 'published' })
+      const hits = await knowledge.query({ realm: identity.realm, roles: identity.roles, userId: identity.userId, libraryAdmin: isRealmAdmin(identity), text, topK: Math.min(Math.max(requestedTopK, 1), 20), scope: 'published', ...(spaces === undefined ? {} : { spaces: [...new Set(spaces as string[])] }) })
       writeJson(res, 200, { query: text, scope: 'published', hits })
     } catch (error) {
       const status = knowledgeManagementStatus(error)

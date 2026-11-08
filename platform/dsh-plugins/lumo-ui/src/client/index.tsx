@@ -39,6 +39,7 @@ import { ProjectSettingsPanel } from './project-settings-panel.tsx'
 import { ProjectBudgetPanel } from './project-budget-panel.tsx'
 import { ProjectSpacesPanel, ProjectAutomationsPanel, ProjectArtifactsPanel, type ProjectResourceSpace, type ProjectResourceArtifact } from './project-resources-panel.tsx'
 import { TeamLauncher, type TeamCapabilities } from './team-launcher.tsx'
+import { OPERATIONS_TARGET_EVENT, PROJECTS_CHANGED_EVENT, queueOperationsTarget, takeOperationsTarget, type OperationsTarget } from './operations-navigation.ts'
 import { RunReviewPanel, type ReviewActor } from './run-review-panel.tsx'
 import { UserDirectoryPagination, userDirectoryURL } from './user-directory.tsx'
 import { DirectoryUserPicker } from './directory-user-picker.tsx'
@@ -598,6 +599,12 @@ function openSurface(surface: Surface): void {
   window.dispatchEvent(new CustomEvent<Surface>(OPEN_EVENT, { detail: surface }))
 }
 
+function openOperationsTarget(target: OperationsTarget): void {
+  queueOperationsTarget(target)
+  openSurface('operations')
+  window.dispatchEvent(new Event(OPERATIONS_TARGET_EVENT))
+}
+
 function Glyph({ surface }: { surface: Surface }) {
   const paths: Record<Surface, ReactNode> = {
     computer: <><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4m-1-12 4 3-3 1-1 3z" /></>,
@@ -688,18 +695,28 @@ function SidebarNavigation({ wide }: SidebarNavigationProps) {
   const [localMode, setLocalMode] = useState(false)
 
   useEffect(() => {
-    void api<{ projects: OverviewProject[]; deployment: DeploymentState }>('/lumo/api/overview')
+    let generation = 0
+    let active = true
+    const load = () => {
+      const reading = ++generation
+      void api<{ projects: OverviewProject[]; deployment: DeploymentState }>('/lumo/api/overview')
       .then(data => {
+        if (!active || reading !== generation) return
         setProjects(data.projects)
         setLocalMode(data.deployment.mode === 'local')
-        if (currentProjectId === '' && data.projects.length > 0) {
-          const first = data.projects[0]!.id
-          setCurrentProjectId(first)
-          localStorage.setItem('lumo:currentProjectId', first)
-        }
+        setCurrentProjectId(current => {
+          const next = data.projects.some(project => project.id === current) ? current : data.projects[0]?.id ?? ''
+          if (next) localStorage.setItem('lumo:currentProjectId', next)
+          else localStorage.removeItem('lumo:currentProjectId')
+          return next
+        })
       })
-      .catch(() => setProjects([]))
-  }, [currentProjectId])
+      .catch(() => { if (active && reading === generation) setProjects([]) })
+    }
+    load()
+    window.addEventListener(PROJECTS_CHANGED_EVENT, load)
+    return () => { active = false; generation++; window.removeEventListener(PROJECTS_CHANGED_EVENT, load) }
+  }, [])
   
   const currentProject = projects.find(p => p.id === currentProjectId) ?? projects[0]
   const selectProject = (id: string) => {
@@ -709,6 +726,7 @@ function SidebarNavigation({ wide }: SidebarNavigationProps) {
     // 选完把焦点还给触发器。不还的话焦点会掉到 body 上，键盘用户下一次 Tab 要从
     // 文档开头重新走过来——而他才刚用完这个按钮。
     projectTriggerRef.current?.focus()
+    openOperationsTarget({ kind: 'project', id })
   }
   // 打开项目菜单时：接管焦点，并支持上下选择 / Home / End / Esc / 点到别处关闭。
   // 这几条不是加分项：这个浮层盖住的正是下面那几行导航入口，而它先前**只能**靠再点一次
@@ -1194,6 +1212,21 @@ function parseKnowledgeChunks(value: string): Array<{ text: string; metadata: Re
   })
 }
 
+function validKnowledgeDoc(value: unknown, docId?: string): value is KnowledgeSource['doc'] {
+  if (!value || typeof value !== 'object') return false
+  const doc = value as KnowledgeSource['doc']
+  return typeof doc.docId === 'string' && doc.docId.length > 0 && (docId === undefined || doc.docId === docId)
+    && typeof doc.realm === 'string' && typeof doc.space === 'string' && typeof doc.title === 'string'
+    && typeof doc.embeddingModel === 'string' && Number.isSafeInteger(doc.sourceVersion) && doc.sourceVersion >= 1
+}
+
+function validKnowledgeSource(value: unknown, docId: string): value is KnowledgeSource {
+  if (!value || typeof value !== 'object') return false
+  const source = value as KnowledgeSource
+  return validKnowledgeDoc(source.doc, docId) && Array.isArray(source.chunks) && source.chunks.every(chunk =>
+    chunk && typeof chunk.text === 'string' && chunk.metadata !== null && typeof chunk.metadata === 'object' && !Array.isArray(chunk.metadata))
+}
+
 function flowVersionChanges(previous: FlowDefinition, current: FlowDefinition): string[] {
   const nodeMap = (definition: FlowDefinition) => new Map((definition.nodes ?? []).filter(node => node.id).map(node => [node.id!, node.operator ?? '']))
   const edgeSet = (definition: FlowDefinition) => new Set((definition.edges ?? []).filter(edge => edge.from && edge.to).map(edge => `${edge.from}→${edge.to}`))
@@ -1265,6 +1298,8 @@ export function KnowledgeSurface({ onClose }: { onClose: () => void }) {
   const [sourcesError, setSourcesError] = useState('')
   const [sourceBusy, setSourceBusy] = useState('')
   const [sourceNotice, setSourceNotice] = useState('')
+  const [sourceStale, setSourceStale] = useState(false)
+  const [sourceRemoval, setSourceRemoval] = useState<KnowledgeSource['doc'] | null>(null)
   const [loadedSource, setLoadedSource] = useState<KnowledgeSource | null>(null)
   const [sourceDocID, setSourceDocID] = useState('')
   const [sourceSpace, setSourceSpace] = useState('general')
@@ -1272,11 +1307,12 @@ export function KnowledgeSurface({ onClose }: { onClose: () => void }) {
   const [sourceChunks, setSourceChunks] = useState('[\n  {\n    "text": "",\n    "metadata": {}\n  }\n]')
   // 单机版 vault 知识源：undefined = 未装配（集群版）；null = 加载中；对象 = 运行态。
   const [vaultStatus, setVaultStatus] = useState<VaultStatusInfo | null | undefined>(null)
-  // 知识空间筛选（单机= vault 一级目录/标签；集群= 来源自身空间字段——不查询接口）。
+  // 空间只能收窄当前身份的检索范围；Provider 在 topK 之前过滤。
   const [activeSpace, setActiveSpace] = useState('')
   // 来源详情抽屉（getSource 全文预览 + 「打开原文」）。
   const [sourceDetail, setSourceDetail] = useState<KnowledgeSource | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState('')
   const [libraryFolders, setLibraryFolders] = useState<KnowledgeLibraryFolder[]>([])
   const [libraryFiles, setLibraryFiles] = useState<KnowledgeLibraryFile[]>([])
   const [libraryLoading, setLibraryLoading] = useState(true)
@@ -1295,6 +1331,9 @@ export function KnowledgeSurface({ onClose }: { onClose: () => void }) {
   const sourcesSequence = useRef(0)
   const detailSequence = useRef(0)
   const querySequence = useRef(0)
+  const sourceEditSequence = useRef(0)
+  const sourcePending = useRef(false)
+  const queryPending = useRef(false)
   const [previewFile, setPreviewFile] = useState<KnowledgeLibraryFile | null>(null)
   const [previewText, setPreviewText] = useState<string | null>(null)
   const [previewOfficeBytes, setPreviewOfficeBytes] = useState<{ kind: 'pdf' | 'xlsx'; data: Uint8Array<ArrayBuffer> } | null>(null)
@@ -1313,6 +1352,8 @@ export function KnowledgeSurface({ onClose }: { onClose: () => void }) {
     setSourcesLoading(true); setSourcesError('')
     try {
       const response = await api<KnowledgeSources>('/lumo/api/knowledge/sources')
+      if (!Array.isArray(response.sources) || !response.sources.every(source => validKnowledgeDoc(source)
+        && Number.isSafeInteger(source.chunkCount) && source.chunkCount >= 0)) throw new Error('来源目录响应无效，请重新读取。')
       if (sequence === sourcesSequence.current) setSources(response.sources)
     }
     catch (reason) { if (sequence === sourcesSequence.current) { setSources(null); setSourcesError(reason instanceof Error ? reason.message : String(reason)) } }
@@ -1347,87 +1388,156 @@ export function KnowledgeSurface({ onClose }: { onClose: () => void }) {
   }, [])
   useEffect(() => {
     void loadSources(); void loadVaultStatus(); void loadLibrary()
-    return () => { ++librarySequence.current; ++sourcesSequence.current; ++previewSequence.current; ++shareSequence.current; ++detailSequence.current; ++querySequence.current }
+    return () => { ++librarySequence.current; ++sourcesSequence.current; ++previewSequence.current; ++shareSequence.current; ++detailSequence.current; ++querySequence.current; ++sourceEditSequence.current; sourcePending.current = false; queryPending.current = false }
   }, [loadSources, loadVaultStatus, loadLibrary])
+  const clearKnowledgeQuery = () => {
+    ++querySequence.current; ++detailSequence.current; queryPending.current = false
+    setResult(null); setSelectedHit(null); setSourceDetail(null); setBusy(false); setDetailLoading(false); setDetailError(''); setError('')
+  }
+  const selectKnowledgeSpace = (space: string) => {
+    if (space === activeSpace) return
+    clearKnowledgeQuery(); setActiveSpace(space)
+  }
+  const selectKnowledgeHit = (hit: KnowledgeHit) => {
+    ++detailSequence.current
+    setSelectedHit(hit); setSourceDetail(null); setDetailLoading(false); setDetailError('')
+  }
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (queryPending.current) return
     const text = queryText.trim()
     if (!text) { setError('先输入要检索的问题。'); return }
     const sequence = ++querySequence.current
-    setBusy(true); setError(''); setSelectedHit(null)
+    queryPending.current = true; ++detailSequence.current
+    setBusy(true); setError(''); setResult(null); setSelectedHit(null); setSourceDetail(null); setDetailLoading(false); setDetailError('')
     try {
-      const response = await api<KnowledgeResult>('/lumo/api/knowledge/query', { method: 'POST', body: JSON.stringify({ text, topK: Number(topK) }) })
+      const response = await api<KnowledgeResult>('/lumo/api/knowledge/query', { method: 'POST', body: JSON.stringify({ text, topK: Number(topK), ...(activeSpace ? { spaces: [activeSpace] } : {}) }) })
+      if (!response || typeof response.query !== 'string' || response.scope !== 'published' || !Array.isArray(response.hits)
+        || !response.hits.every(hit => hit && typeof hit.docId === 'string' && typeof hit.text === 'string'
+          && Number.isFinite(hit.score) && Number.isSafeInteger(hit.sourceVersion) && hit.sourceVersion >= 1)) throw new Error('检索响应无效，请重新查询。')
       if (sequence === querySequence.current) setResult(response)
     }
     catch (reason) { if (sequence === querySequence.current) setError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { if (sequence === querySequence.current) setBusy(false) }
+    finally { if (sequence === querySequence.current) { queryPending.current = false; setBusy(false) } }
   }
   const useExample = (text: string) => { setQueryText(text); setError('') }
-  const resetSourceForm = () => {
+  const clearSourceDraft = () => {
     setLoadedSource(null); setSourceDocID(''); setSourceSpace('general'); setSourceTitle('')
     setSourceChunks('[\n  {\n    "text": "",\n    "metadata": {}\n  }\n]')
-    setSourceNotice(''); setSourcesError('')
+    setSourceNotice(''); setSourcesError(''); setSourceRemoval(null); setSourceStale(false)
+  }
+  const resetSourceForm = () => {
+    if (sourcePending.current) return
+    ++sourceEditSequence.current; setSourceBusy(''); clearSourceDraft()
   }
   const editSource = async (summary: KnowledgeSourceSummary) => {
+    if (sourcePending.current) return
+    const sequence = ++sourceEditSequence.current
+    setSourceRemoval(null)
     setSourceBusy(`load-${summary.docId}`); setSourcesError(''); setSourceNotice('')
     try {
       const response = await api<{ source: KnowledgeSource }>(`/lumo/api/knowledge/sources/${encodeURIComponent(summary.docId)}`)
+      if (sequence !== sourceEditSequence.current) return
+      if (!validKnowledgeSource(response.source, summary.docId)) throw new Error('来源响应无效，请重新读取。')
       const source = response.source
+      setSourceStale(false)
       setLoadedSource(source); setSourceDocID(source.doc.docId); setSourceSpace(source.doc.space)
       setSourceTitle(source.doc.title); setSourceChunks(JSON.stringify(source.chunks, null, 2))
-    } catch (reason) { setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setSourceBusy('') }
+    } catch (reason) { if (sequence === sourceEditSequence.current) { setSourceStale(true); setSourcesError(reason instanceof Error ? reason.message : String(reason)) } }
+    finally { if (sequence === sourceEditSequence.current) setSourceBusy('') }
   }
   const saveSource = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (sourcePending.current || sourceBusy !== '' || sourceStale) return
+    sourcePending.current = true
+    const sequence = ++sourceEditSequence.current
+    const docId = loadedSource?.doc.docId ?? sourceDocID.trim()
+    const previousVersion = loadedSource?.doc.sourceVersion ?? 0
+    let requestStarted = false
+    setSourceRemoval(null)
     setSourceBusy('save'); setSourcesError(''); setSourceNotice('')
     try {
       const chunks = parseKnowledgeChunks(sourceChunks)
       const existing = loadedSource !== null
       const path = existing ? `/lumo/api/knowledge/sources/${encodeURIComponent(loadedSource.doc.docId)}` : '/lumo/api/knowledge/sources'
-      const response = await api<{ source: KnowledgeSourceSummary }>(path, {
+      requestStarted = true
+      const response = await api<{ source: KnowledgeSourceSummary } | null>(path, {
         method: existing ? 'PUT' : 'POST',
         body: JSON.stringify({
           ...(existing ? {} : { docId: sourceDocID.trim() }), space: sourceSpace.trim(), title: sourceTitle.trim(), chunks,
           ...(existing ? { expectedSourceVersion: loadedSource.doc.sourceVersion } : {}),
         }),
       })
-      const summary = response.source
+      if (sequence !== sourceEditSequence.current) return
+      const summary = response?.source
+      if (!validKnowledgeDoc(summary, docId) || summary.sourceVersion <= previousVersion || (loadedSource && summary.realm !== loadedSource.doc.realm)) {
+        setSourceStale(true); throw new Error('保存回执无效，结果尚未确认；请重新读取来源后继续。')
+      }
       setLoadedSource({ doc: { docId: summary.docId, realm: summary.realm, space: summary.space, title: summary.title, sourceVersion: summary.sourceVersion, embeddingModel: summary.embeddingModel }, chunks })
       setSourceDocID(summary.docId); setSourceSpace(summary.space); setSourceTitle(summary.title)
       setSourceNotice(`已保存 ${summary.docId} 的 v${summary.sourceVersion}；源内容与向量投影已在同一事务中同步。`)
+      clearKnowledgeQuery()
       await loadSources()
-    } catch (reason) { setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setSourceBusy('') }
+    } catch (reason) {
+      if (sequence === sourceEditSequence.current) {
+        if (requestStarted && (!(reason instanceof ApiError) || [401, 403, 409].includes(reason.status) || reason.status >= 500)) setSourceStale(true)
+        setSourcesError(reason instanceof ApiError && reason.status === 409 ? '来源已被其他人更新，草稿已保留。请重新读取来源后继续。' : reason instanceof Error ? reason.message : String(reason))
+      }
+    }
+    finally { if (sequence === sourceEditSequence.current) { sourcePending.current = false; setSourceBusy('') } }
   }
   const removeSource = async () => {
-    if (loadedSource === null) return
+    if (sourceRemoval === null || sourcePending.current || sourceBusy !== '' || sourceStale) return
+    const target = sourceRemoval
+    sourcePending.current = true
+    const sequence = ++sourceEditSequence.current
     setSourceBusy('remove'); setSourcesError(''); setSourceNotice('')
     try {
-      await api(`/lumo/api/knowledge/sources/${encodeURIComponent(loadedSource.doc.docId)}`, { method: 'DELETE', body: JSON.stringify({ expectedSourceVersion: loadedSource.doc.sourceVersion }) })
-      const removedDocID = loadedSource.doc.docId
-      resetSourceForm(); setSourceNotice(`已删除 ${removedDocID}；其向量投影和图投影删除意图已同步写入。`)
+      const response = await api<{ docId: string; state: string } | null>(`/lumo/api/knowledge/sources/${encodeURIComponent(target.docId)}`, { method: 'DELETE', body: JSON.stringify({ expectedSourceVersion: target.sourceVersion }) })
+      if (sequence !== sourceEditSequence.current) return
+      if (response?.docId !== target.docId || response.state !== 'removed') throw new Error('删除回执无效，结果尚未确认；请重新读取来源后继续。')
+      const removedDocID = target.docId
+      clearSourceDraft(); setSourceNotice(`已删除 ${removedDocID}；其向量投影和图投影删除意图已同步写入。`)
+      clearKnowledgeQuery()
       await loadSources()
-    } catch (reason) { setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setSourceBusy('') }
+    } catch (reason) {
+      if (sequence === sourceEditSequence.current) {
+        setSourceRemoval(null)
+        if (!(reason instanceof ApiError) || [401, 403, 409].includes(reason.status) || reason.status >= 500) setSourceStale(true)
+        setSourcesError(reason instanceof Error ? reason.message : String(reason))
+      }
+    }
+    finally { if (sequence === sourceEditSequence.current) { sourcePending.current = false; setSourceBusy('') } }
   }
   const rebuildSources = async () => {
+    if (sourcePending.current || sourceBusy !== '') return
+    sourcePending.current = true
+    const sequence = ++sourceEditSequence.current
+    setSourceRemoval(null)
     setSourceBusy('rebuild'); setSourcesError(''); setSourceNotice('')
     try {
       await api('/lumo/api/knowledge/rebuild', { method: 'POST' })
+      if (sequence !== sourceEditSequence.current) return
       setSourceNotice('当前 realm 的来源已按保存版本完成安全回放；并发更新的来源不会被旧快照覆盖。')
+      clearKnowledgeQuery()
       await loadSources()
-    } catch (reason) { setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setSourceBusy('') }
+    } catch (reason) { if (sequence === sourceEditSequence.current) setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { if (sequence === sourceEditSequence.current) { sourcePending.current = false; setSourceBusy('') } }
   }
   const syncVault = async () => {
+    if (sourcePending.current || sourceBusy !== '') return
+    sourcePending.current = true
+    const sequence = ++sourceEditSequence.current
+    setSourceRemoval(null)
     setSourceBusy('vault-sync'); setSourcesError(''); setSourceNotice('')
     try {
       const outcome = await api<{ docs: number }>('/lumo/api/knowledge/vault/sync', { method: 'POST' })
+      if (sequence !== sourceEditSequence.current) return
       setSourceNotice(`已同步 ${outcome.docs} 个 vault 文档；关键词索引已重建。`)
+      clearKnowledgeQuery()
       await Promise.all([loadSources(), loadVaultStatus()])
-    } catch (reason) { setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setSourceBusy(''); }
+    } catch (reason) { if (sequence === sourceEditSequence.current) setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { if (sequence === sourceEditSequence.current) { sourcePending.current = false; setSourceBusy('') } }
   }
   const createLibraryFolder = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -1454,7 +1564,7 @@ export function KnowledgeSurface({ onClose }: { onClose: () => void }) {
         },
       })
       setLibraryNotice(response.indexed ? `已上传并加入向量与知识图谱索引：${response.file.filename}${entities.length ? `（${entities.length} 个实体标签）` : ''}` : `已保存 ${response.file.filename}，但当前格式没有生成可检索文本。`)
-      await loadLibrary()
+      await Promise.all([loadLibrary(), loadSources()])
     } catch (reason) { setLibraryError(reason instanceof Error ? reason.message : String(reason)) }
     finally { input.value = ''; libraryPending.current = false; setLibraryBusy(false) }
   }
@@ -1492,6 +1602,7 @@ export function KnowledgeSurface({ onClose }: { onClose: () => void }) {
         await api(`/lumo/api/knowledge/library/files/${encodeURIComponent(docId)}`, { method: 'DELETE', body: JSON.stringify({ expectedSha256: sha256, ...(revision === undefined ? {} : { expectedRevision: revision }) }) })
         closeLibraryPreview()
         ++querySequence.current; ++detailSequence.current
+        queryPending.current = false
         setBusy(false); setDetailLoading(false)
         setLibraryFiles(current => current.filter(file => file.docId !== docId))
         setResult(current => current ? { ...current, hits: current.hits.filter(hit => hit.docId !== docId) } : null)
@@ -1541,14 +1652,16 @@ export function KnowledgeSurface({ onClose }: { onClose: () => void }) {
   }
   const openSourceDetail = async (docId: string) => {
     const sequence = ++detailSequence.current
-    setDetailLoading(true); setSourceDetail(null)
+    setDetailLoading(true); setSourceDetail(null); setDetailError('')
     try {
       const response = await api<{ source: KnowledgeSource }>(`/lumo/api/knowledge/sources/${encodeURIComponent(docId)}`)
+      if (!validKnowledgeSource(response.source, docId)) throw new Error('来源响应无效，请重新读取。')
       if (sequence === detailSequence.current) setSourceDetail(response.source)
-    } catch (reason) { if (sequence === detailSequence.current) setSourcesError(reason instanceof Error ? reason.message : String(reason)) }
+    } catch (reason) { if (sequence === detailSequence.current) setDetailError(reason instanceof Error ? reason.message : String(reason)) }
     finally { if (sequence === detailSequence.current) setDetailLoading(false) }
   }
   const visibleSources = (sources ?? []).filter(source => activeSpace === '' || source.space === activeSpace)
+  const sourceWriting = sourceBusy !== '' && !sourceBusy.startsWith('load-')
   const activeLibraryFolder = libraryFolders.find(folder => folder.folderId === libraryFolderId)
   const visibleFolderIDs = new Set(libraryFolders.map(folder => folder.folderId))
   const activeLibraryChildren = libraryFolders.filter(folder => folder.parentId === libraryFolderId || (libraryFolderId === null && folder.parentId !== null && !visibleFolderIDs.has(folder.parentId)))
@@ -1567,7 +1680,7 @@ export function KnowledgeSurface({ onClose }: { onClose: () => void }) {
   })()
   return <div className="lumo-surface lumo-knowledge-surface">
     <WorkspaceHero surface="knowledge" onClose={onClose} statement="按领域查找、维护和核对资料。" description="从已发布内容开始检索；来源版本与索引维护在各自的工作区处理。">
-      <div className="lumo-workspace-status"><span>当前检索范围</span><b><i aria-hidden="true" />已发布知识</b><dl><div><dt>来源</dt><dd>{sources?.length ?? '—'}</dd></div><div><dt>检索方式</dt><dd className="lumo-knowledge-mode">{vaultStatus?.mode === 'keyword' ? '关键词' : vaultStatus ? '本地嵌入' : sources === null ? '待确认' : '语义'}</dd></div></dl><small>查询只读，结果保留来源 ID 与版本。</small></div>
+      <div className="lumo-workspace-status"><span>当前检索范围</span><b><i aria-hidden="true" />{activeSpace || '全部空间'}</b><dl><div><dt>来源</dt><dd>{sources?.length ?? '—'}</dd></div><div><dt>检索方式</dt><dd className="lumo-knowledge-mode">{vaultStatus?.mode === 'keyword' ? '关键词' : vaultStatus ? '本地嵌入' : sources === null ? '待确认' : '语义'}</dd></div></dl><small>查询只读，结果保留来源 ID 与版本。</small></div>
     </WorkspaceHero>
     <DomainTabs label="资料库领域" value={area} onChange={setArea} items={[
       { id: 'search', title: '查找资料', description: '提问、查看来源与版本' },
@@ -1583,27 +1696,28 @@ export function KnowledgeSurface({ onClose }: { onClose: () => void }) {
         ? <><span>检索档位：{vaultStatus.mode === 'keyword' ? '关键词（FTS5，零依赖）' : '本地嵌入'}</span><span>来源 {vaultStatus.docCount}</span><span>分块 {vaultStatus.chunkCount}</span><span>上次构建 {vaultStatus.lastSyncAt ? new Date(vaultStatus.lastSyncAt).toLocaleTimeString('zh-CN') : '尚未构建'}</span><span className="lumo-context-end">真相源：Obsidian vault</span></>
         : sources === null || sourcesLoading ? <span className="lumo-context-end">索引健康摘要需要管理权限</span> : <><span>引擎：{sources[0]?.embeddingModel ?? '未配置'}</span><span>来源 {sources.length}</span><span>总分块 {sources.reduce((sum, source) => sum + (Number.isFinite(source.chunkCount) ? source.chunkCount : 0), 0)}</span><span className="lumo-context-end">版本化真相源（MinIO/PG 权威）</span></>}
     </div>
-    <Section title="索引维护" meta={vaultStatus !== undefined && vaultStatus !== null ? '本机 vault 来源' : '当前 Realm 的来源索引'} actions={<span className="lumo-surface-actions">{vaultStatus !== undefined && vaultStatus !== null ? <BusyButton className="lumo-primary" busy={sourceBusy === 'vault-sync'} onClick={() => void syncVault()}>同步 vault</BusyButton> : <BusyButton className="lumo-primary" busy={sourceBusy === 'rebuild'} disabled={sources === null} onClick={() => void rebuildSources()}>重建当前 Realm</BusyButton>}<BusyButton className="lumo-secondary" busy={sourcesLoading} onClick={() => void loadSources()}>刷新来源状态</BusyButton></span>}>
+    <Section title="索引维护" meta={vaultStatus !== undefined && vaultStatus !== null ? '本机 vault 来源' : '当前 Realm 的来源索引'} actions={<span className="lumo-surface-actions">{vaultStatus !== undefined && vaultStatus !== null ? <BusyButton className="lumo-primary" busy={sourceBusy === 'vault-sync'} disabled={sourceBusy !== ''} onClick={() => void syncVault()}>同步 vault</BusyButton> : <BusyButton className="lumo-primary" busy={sourceBusy === 'rebuild'} disabled={sources === null || sourceBusy !== ''} onClick={() => void rebuildSources()}>重建当前 Realm</BusyButton>}<BusyButton className="lumo-secondary" busy={sourcesLoading} onClick={() => void loadSources()}>刷新来源状态</BusyButton></span>}>
       <p className="lumo-section-note">{vaultStatus !== undefined && vaultStatus !== null ? 'Obsidian vault 是原文来源。同步后更新检索索引；文档内容请在 Obsidian 中维护。' : '重建只从已保存的来源版本回放。当前身份或 Provider 不支持来源管理时，操作不可用。'}</p>
       {sourcesError ? <Notice error>{sourcesError}</Notice> : null}{sourceNotice ? <Notice>{sourceNotice}</Notice> : null}
     </Section>
     </> : null}
     {area === 'search' ? <>
-    {sources !== null ? <div className="lumo-space-filter"><button type="button" className={activeSpace === '' ? 'active' : ''} onClick={() => setActiveSpace('')}>全部空间</button>{Array.from(new Set(sources.map(source => source.space).filter(Boolean))).sort().map(space => <button type="button" key={space} className={activeSpace === space ? 'active' : ''} onClick={() => setActiveSpace(space)}>{space}</button>)}</div> : null}
+    {sources !== null ? <div className="lumo-space-filter"><button type="button" className={activeSpace === '' ? 'active' : ''} onClick={() => selectKnowledgeSpace('')}>全部空间</button>{Array.from(new Set(sources.map(source => source.space).filter(Boolean))).sort().map(space => <button type="button" key={space} className={activeSpace === space ? 'active' : ''} onClick={() => selectKnowledgeSpace(space)}>{space}</button>)}</div> : null}
     <div className="lumo-context-strip"><span><i className="lumo-live-dot" /> 当前身份可见</span><span>{vaultStatus !== undefined && vaultStatus !== null ? '关键词检索' : '语义召回'}</span><span>来源可追溯</span><span className="lumo-context-end">查询不会改变知识内容</span></div>
     <Section title="向知识空间提问" meta="只读查询 · 最多 20 个来源"><div className="lumo-search-layout"><form className="lumo-search-form" onSubmit={submit}><label><span>问题</span><textarea name="text" aria-label="向知识空间提问" value={queryText} maxLength={2000} rows={4} placeholder="例如：生产环境连接器的审批边界是什么？" onChange={event => setQueryText(event.target.value)} /></label><div className="lumo-search-controls"><label className="lumo-compact-field"><span>召回数</span><select name="topK" value={topK} onChange={event => setTopK(event.target.value)}><option value="5">5</option><option value="8">8</option><option value="12">12</option><option value="20">20</option></select></label><BusyButton type="submit" busy={busy} className="lumo-primary">检索知识</BusyButton></div></form><div className="lumo-example-queries"><span>可以从这些问题开始</span><button type="button" onClick={() => useExample('生产环境连接器的审批边界是什么？')}>连接器审批边界</button><button type="button" onClick={() => useExample('哪些角色可以发布工作流？')}>工作流发布角色</button><button type="button" onClick={() => useExample('如何处理跨 realm 的知识访问？')}>跨 realm 访问</button></div></div></Section>
     {error ? <Notice error>{error}</Notice> : null}
+    {detailError ? <Notice error>{detailError}</Notice> : null}
     <Section title="检索结果" meta={result === null ? '等待查询' : `${result.hits.length} 个来源片段`} actions={result ? <span className="lumo-query-summary">“{result.query}”</span> : null}>
-      {busy ? <div className="lumo-hit-list">{[0, 1, 2].map(index => <div className="lumo-skeleton-hit" key={index}><span /><b /><i /></div>)}</div> : result === null ? <div className="lumo-hero-empty"><Glyph surface="knowledge" /><b>知识结果会在这里展开</b><p>查询会带入当前会话 realm 与角色，只读已发布知识，并保留 docId、源版本和相关度。</p></div> : result.hits.length === 0 ? <Empty>没有命中可见的已发布知识。可以调整问题表达后重试。</Empty> : <div className="lumo-result-layout"><div className="lumo-hit-list">{result.hits.map((hit, index) => <SpotlightCard className={`lumo-hit ${selectedHit?.docId === hit.docId && selectedHit.sourceVersion === hit.sourceVersion ? 'selected' : ''}`} index={index} key={`${hit.docId}-${hit.sourceVersion}-${index}`} onClick={() => setSelectedHit(hit)}><div className="lumo-hit-meta"><span>{hit.docId} · v{hit.sourceVersion}</span><b>{Math.round(hit.score * 100)}%</b></div><p>{hit.text}</p><footer><span>来源版本 {hit.sourceVersion}</span><button type="button" className="lumo-quiet lumo-open-detail" onClick={() => void openSourceDetail(hit.docId)}>查看来源详情 ↗</button></footer></SpotlightCard>)}</div><aside className="lumo-inspector">{sourceDetail !== null || detailLoading ? <><span className="lumo-inspector-label">来源详情</span><h3>{detailLoading ? '加载中…' : sourceDetail?.doc.title ?? ''}</h3>{sourceDetail === null ? <p>正在读取来源全文。</p> : <><p>来源 ID {sourceDetail.doc.docId} · 空间 {sourceDetail.doc.space} · v{sourceDetail.doc.sourceVersion} · {sourceDetail.doc.embeddingModel} · {sourceDetail.chunks.length} 个分片</p><div className="lumo-detail-stack">{vaultStatus !== undefined && vaultStatus !== null ? <a className="lumo-open-original" href={obsidianOpenUri(vaultDisplayName(vaultStatus.vaultPath), decodeVaultDocId(sourceDetail.doc.docId))} onClick={event => { event.preventDefault(); try { window.open(obsidianOpenUri(vaultDisplayName(vaultStatus.vaultPath), decodeVaultDocId(sourceDetail.doc.docId)), '_self') } catch { /* obsidian:// 协议由系统处理 */ } }}>打开原文（Obsidian）↗</a> : <div><span>原文存储</span><b>MinIO / PG 权威副本（整篇预览）</b></div>}</div><div className="lumo-chunk-preview">{sourceDetail.chunks.map((chunk, index) => <div key={index}><b>{String(chunk.metadata['heading'] ?? `分块 ${index + 1}`)}</b><p>{chunk.text}</p></div>)}</div></>}</> : selectedHit ? <><span className="lumo-inspector-label">来源检查</span><h3>{selectedHit.docId}</h3><p>该片段来自已发布知识版本 {selectedHit.sourceVersion}，当前相关度为 {Math.round(selectedHit.score * 100)}%。</p><div className="lumo-detail-stack"><div><span>来源 ID</span><b>{selectedHit.docId}</b></div><div><span>源版本</span><b>v{selectedHit.sourceVersion}</b></div><div><span>相关度</span><b>{Math.round(selectedHit.score * 100)}%</b></div></div></> : <div className="lumo-inspector-empty"><span>选择一个来源片段</span><p>右侧会展示该片段的版本和相关度信息。</p></div>}</aside></div>}
+      {busy ? <div className="lumo-hit-list">{[0, 1, 2].map(index => <div className="lumo-skeleton-hit" key={index}><span /><b /><i /></div>)}</div> : result === null ? <div className="lumo-hero-empty"><Glyph surface="knowledge" /><b>知识结果会在这里展开</b><p>查询会带入当前会话 realm 与角色，只读已发布知识，并保留 docId、源版本和相关度。</p></div> : result.hits.length === 0 ? <Empty>没有命中可见的已发布知识。可以调整问题表达后重试。</Empty> : <div className="lumo-result-layout"><div className="lumo-hit-list">{result.hits.map((hit, index) => <SpotlightCard className={`lumo-hit ${selectedHit?.docId === hit.docId && selectedHit.sourceVersion === hit.sourceVersion ? 'selected' : ''}`} index={index} key={`${hit.docId}-${hit.sourceVersion}-${index}`} onClick={() => selectKnowledgeHit(hit)}><div className="lumo-hit-meta"><span>{hit.docId} · v{hit.sourceVersion}</span><b>{Math.round(hit.score * 100)}%</b></div><p>{hit.text}</p><footer><span>来源版本 {hit.sourceVersion}</span><button type="button" className="lumo-quiet lumo-open-detail" onClick={event => { event.stopPropagation(); setSelectedHit(hit); void openSourceDetail(hit.docId) }}>查看来源详情 ↗</button></footer></SpotlightCard>)}</div><aside className="lumo-inspector">{sourceDetail !== null || detailLoading ? <><span className="lumo-inspector-label">来源详情</span><h3>{detailLoading ? '加载中…' : sourceDetail?.doc.title ?? ''}</h3>{sourceDetail === null ? <p>正在读取来源全文。</p> : <><p>来源 ID {sourceDetail.doc.docId} · 空间 {sourceDetail.doc.space} · v{sourceDetail.doc.sourceVersion} · {sourceDetail.doc.embeddingModel} · {sourceDetail.chunks.length} 个分片</p><div className="lumo-detail-stack">{vaultStatus !== undefined && vaultStatus !== null ? <a className="lumo-open-original" href={obsidianOpenUri(vaultDisplayName(vaultStatus.vaultPath), decodeVaultDocId(sourceDetail.doc.docId))} onClick={event => { event.preventDefault(); try { window.open(obsidianOpenUri(vaultDisplayName(vaultStatus.vaultPath), decodeVaultDocId(sourceDetail.doc.docId)), '_self') } catch { /* obsidian:// 协议由系统处理 */ } }}>打开原文（Obsidian）↗</a> : <div><span>原文存储</span><b>MinIO / PG 权威副本（整篇预览）</b></div>}</div><div className="lumo-chunk-preview">{sourceDetail.chunks.map((chunk, index) => <div key={index}><b>{String(chunk.metadata['heading'] ?? `分块 ${index + 1}`)}</b><p>{chunk.text}</p></div>)}</div></>}</> : selectedHit ? <><span className="lumo-inspector-label">来源检查</span><h3>{selectedHit.docId}</h3><p>该片段来自已发布知识版本 {selectedHit.sourceVersion}，当前相关度为 {Math.round(selectedHit.score * 100)}%。</p><div className="lumo-detail-stack"><div><span>来源 ID</span><b>{selectedHit.docId}</b></div><div><span>源版本</span><b>v{selectedHit.sourceVersion}</b></div><div><span>相关度</span><b>{Math.round(selectedHit.score * 100)}%</b></div></div></> : <div className="lumo-inspector-empty"><span>选择一个来源片段</span><p>右侧会展示该片段的版本和相关度信息。</p></div>}</aside></div>}
     </Section>
     </> : null}
     {area === 'sources' ? <>
-    {sources !== null ? <div className="lumo-space-filter"><button type="button" className={activeSpace === '' ? 'active' : ''} onClick={() => setActiveSpace('')}>全部空间</button>{Array.from(new Set(sources.map(source => source.space).filter(Boolean))).sort().map(space => <button type="button" key={space} className={activeSpace === space ? 'active' : ''} onClick={() => setActiveSpace(space)}>{space}</button>)}</div> : null}
+    {sources !== null ? <div className="lumo-space-filter"><button type="button" className={activeSpace === '' ? 'active' : ''} onClick={() => selectKnowledgeSpace('')}>全部空间</button>{Array.from(new Set(sources.map(source => source.space).filter(Boolean))).sort().map(space => <button type="button" key={space} className={activeSpace === space ? 'active' : ''} onClick={() => selectKnowledgeSpace(space)}>{space}</button>)}</div> : null}
     <Section title="来源内容" meta={sources === null ? (sourcesLoading ? '正在确认管理权限与来源存储' : '当前身份或向量 Provider 不支持来源管理') : `${sources.length} 个来源 · ${vaultStatus !== undefined && vaultStatus !== null ? 'vault 只读索引' : '版本化来源'}`} actions={<BusyButton className="lumo-secondary" busy={sourcesLoading} onClick={() => void loadSources()}>刷新来源</BusyButton>}>
       <p className="lumo-section-note">{vaultStatus !== undefined && vaultStatus !== null ? '来源内容属于 Obsidian vault —— 本面板只读；新建/编辑/删除请在 Obsidian 插件「Lumo Vault Source」中操作，再点「同步 vault」。' : '来源内容、版本和向量投影由管理 API 一起写入；重建只从已保存来源回放，不会暴露 embedding 或索引参数。'}</p>
       {sourcesError ? <Notice error close={() => setSourcesError('')}>{sourcesError}</Notice> : null}
       {sourceNotice ? <Notice close={() => setSourceNotice('')}>{sourceNotice}</Notice> : null}
-      {sources === null ? <Empty>{sourcesLoading ? '正在读取来源目录。' : '仅 realm_admin、platform_admin 或 admin 可管理 PostgreSQL 来源；Milvus 投影模式会明确显示为不支持。'}</Empty> : <div className="lumo-governed-version-layout"><div className="lumo-table-list">{visibleSources.length ? visibleSources.map(source => <div key={source.docId} className={loadedSource?.doc.docId === source.docId ? 'selected' : ''}><span><b>{source.title}</b><small>{source.docId} · 空间 {source.space} · {source.chunkCount} 个分片 · {source.embeddingModel}</small></span><em>v{source.sourceVersion} · 已同步 · {formatSync(source.updatedAt)}</em><BusyButton className="lumo-small lumo-secondary" busy={sourceBusy === `load-${source.docId}`} onClick={() => (vaultStatus !== undefined && vaultStatus !== null ? void openSourceDetail(source.docId) : void editSource(source))}>{vaultStatus !== undefined && vaultStatus !== null ? '查看详情' : '查看 / 编辑'}</BusyButton></div>) : <Empty>还没有来源。新建一条来源后，系统会生成首个不可覆盖版本。</Empty>}</div>{vaultStatus !== undefined && vaultStatus !== null ? <div className="lumo-section-note">vault 模式只读：来源编辑由 Obsidian 插件负责；单机档位为“{vaultStatus.mode === 'keyword' ? '关键词' : '本地嵌入'}”检索。</div> : <form className="lumo-stacked-form lumo-version-form" onSubmit={saveSource}><div className="lumo-form-head"><b>{loadedSource ? `编辑 ${loadedSource.doc.docId} · v${loadedSource.doc.sourceVersion}` : '登记知识来源'}</b><button type="button" className="lumo-quiet" onClick={resetSourceForm}>新建来源</button></div><label><span>来源 ID</span><input aria-label="知识来源 ID" value={sourceDocID} disabled={loadedSource !== null} maxLength={128} required placeholder="例如：connector-policy" onChange={event => setSourceDocID(event.target.value)} /></label><label><span>知识空间</span><input aria-label="知识空间" value={sourceSpace} maxLength={128} required placeholder="例如：operations" onChange={event => setSourceSpace(event.target.value)} /></label><label><span>标题</span><input aria-label="知识来源标题" value={sourceTitle} maxLength={512} required placeholder="例如：生产连接器审批规范" onChange={event => setSourceTitle(event.target.value)} /></label><label><span>来源分片</span><textarea aria-label="来源分片 JSON" value={sourceChunks} rows={9} onChange={event => setSourceChunks(event.target.value)} /></label><small>每个分片包含 text 与 metadata；保存已有来源会创建下一个版本。并发更新会返回冲突，需重新加载后再提交。</small><div className="lumo-form-actions"><BusyButton type="submit" busy={sourceBusy === 'save'} className="lumo-primary">{loadedSource ? '保存新版本' : '登记来源'}</BusyButton>{loadedSource ? <BusyButton type="button" busy={sourceBusy === 'remove'} className="lumo-danger" onClick={() => void removeSource()}>删除来源</BusyButton> : null}</div></form>}</div>}
+      {sources === null ? <Empty>{sourcesLoading ? '正在读取来源目录。' : '仅 realm_admin、platform_admin 或 admin 可管理 PostgreSQL 来源；Milvus 投影模式会明确显示为不支持。'}</Empty> : <div className="lumo-governed-version-layout"><div className="lumo-table-list">{visibleSources.length ? visibleSources.map(source => <div key={source.docId} className={loadedSource?.doc.docId === source.docId ? 'selected' : ''}><span><b>{source.title}</b><small>{source.docId} · 空间 {source.space} · {source.chunkCount} 个分片 · {source.embeddingModel}</small></span><em>v{source.sourceVersion} · 已同步 · {formatSync(source.updatedAt)}</em><BusyButton className="lumo-small lumo-secondary" busy={sourceBusy === `load-${source.docId}`} disabled={sourceWriting} onClick={() => (vaultStatus !== undefined && vaultStatus !== null ? void openSourceDetail(source.docId) : void editSource(source))}>{vaultStatus !== undefined && vaultStatus !== null ? '查看详情' : '查看 / 编辑'}</BusyButton></div>) : <Empty>还没有来源。新建一条来源后，系统会生成首个不可覆盖版本。</Empty>}</div>{vaultStatus !== undefined && vaultStatus !== null ? <div className="lumo-vault-source-preview"><p className="lumo-section-note">文档内容请在 Obsidian 中维护，修改后同步到资料库。</p>{detailError ? <Notice error>{detailError}</Notice> : null}{detailLoading ? <Empty>正在读取来源全文。</Empty> : sourceDetail ? <section aria-label="来源全文预览"><h3>{sourceDetail.doc.title}</h3><p className="lumo-section-note">{sourceDetail.doc.space} · v{sourceDetail.doc.sourceVersion} · {sourceDetail.chunks.length} 个分片</p><div className="lumo-chunk-preview">{sourceDetail.chunks.map((chunk, index) => <div key={index}><b>{String(chunk.metadata['heading'] ?? `分块 ${index + 1}`)}</b><p>{chunk.text}</p></div>)}</div></section> : <Empty>选择一条来源查看全文。</Empty>}</div> : <form className="lumo-stacked-form lumo-version-form" onSubmit={saveSource}><div className="lumo-form-head"><b>{loadedSource ? `编辑 ${loadedSource.doc.docId} · v${loadedSource.doc.sourceVersion}` : '登记知识来源'}</b><button type="button" className="lumo-quiet" disabled={sourceWriting} onClick={resetSourceForm}>新建来源</button></div><fieldset className="lumo-source-fields" disabled={sourceBusy !== ''}><label><span>来源 ID</span><input aria-label="知识来源 ID" value={sourceDocID} disabled={loadedSource !== null} maxLength={128} required placeholder="例如：connector-policy" onChange={event => setSourceDocID(event.target.value)} /></label><label><span>知识空间</span><input aria-label="知识空间" value={sourceSpace} maxLength={128} required placeholder="例如：operations" onChange={event => setSourceSpace(event.target.value)} /></label><label><span>标题</span><input aria-label="知识来源标题" value={sourceTitle} maxLength={512} required placeholder="例如：生产连接器审批规范" onChange={event => setSourceTitle(event.target.value)} /></label><label><span>来源分片</span><textarea aria-label="来源分片 JSON" value={sourceChunks} rows={9} onChange={event => setSourceChunks(event.target.value)} /></label><small>每个分片包含 text 与 metadata；保存已有来源会创建下一个版本。并发更新会返回冲突，需重新加载后再提交。</small><div className="lumo-form-actions"><BusyButton type="submit" busy={sourceBusy === 'save'} disabled={sourceStale} className="lumo-primary">{loadedSource ? '保存新版本' : '登记来源'}</BusyButton>{loadedSource ? <BusyButton type="button" disabled={sourceStale} className="lumo-danger" onClick={() => setSourceRemoval({ ...loadedSource.doc })}>删除来源</BusyButton> : null}</div></fieldset>{sourceStale ? <p role="status">来源版本尚未确认，请从左侧重新读取来源后继续保存。</p> : null}{sourceRemoval ? <div role="alertdialog" aria-label="确认删除知识来源"><b>删除「{sourceRemoval.title}」的 v{sourceRemoval.sourceVersion}？</b><p>来源内容和检索投影将一并删除。</p><div className="lumo-form-actions"><BusyButton type="button" busy={sourceBusy === 'remove'} disabled={sourceStale} className="lumo-danger" onClick={() => void removeSource()}>确认删除来源</BusyButton><button type="button" className="lumo-secondary" disabled={sourceWriting} onClick={() => setSourceRemoval(null)}>取消</button></div></div> : null}</form>}</div>}
     </Section>
     </> : null}
     {area === 'files' ? <>
@@ -1614,8 +1728,7 @@ export function KnowledgeSurface({ onClose }: { onClose: () => void }) {
         request={api} resource={libraryEditing} folders={libraryFolders} onClose={() => setLibraryEditing(null)}
         onSaved={async () => {
           await loadLibrary(true)
-          ++querySequence.current; ++detailSequence.current
-          setResult(null); setSelectedHit(null); setSourceDetail(null); setBusy(false); setDetailLoading(false)
+          clearKnowledgeQuery()
           setLibraryNotice('资料名称和位置已更新。')
           await loadSources()
         }}
@@ -2967,7 +3080,7 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
       </div>
     </div>
 
-    {view === 'progress' ? <WorkforceProgressPanel request={api} /> : <div className={`lumo-collaboration-layout ${view === 'threads' ? 'solo' : ''}`}>
+    {view === 'progress' ? <WorkforceProgressPanel request={api} onOpen={id => openOperationsTarget({ kind: 'task', id })} /> : <div className={`lumo-collaboration-layout ${view === 'threads' ? 'solo' : ''}`}>
     <main className="lumo-collaboration-stage">
       <header className="lumo-collaboration-panel-head">
         <div><span>{viewMeta.eyebrow}</span><h2>{viewMeta.title}</h2><p>{viewMeta.description}</p></div>
@@ -3155,6 +3268,11 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
   const [profileTags, setProfileTags] = useState('')
   const [profileNotice, setProfileNotice] = useState('')
   const [profileBusy, setProfileBusy] = useState(false)
+  const profileReadEpoch = useRef(0)
+  const profileWriteEpoch = useRef(0)
+  const profilePending = useRef(false)
+  const [profileReady, setProfileReady] = useState(false)
+  const [profileRetry, setProfileRetry] = useState(0)
   const [delegationPreview, setDelegationPreview] = useState<DelegationPreview | null>(null)
   const taskDetailEpoch = useRef(0)
   const evidenceEpoch = useRef(0)
@@ -3177,9 +3295,17 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
   const [loading, setLoading] = useState(true)
   const [notice, setNotice] = useState('')
   const [dashboard, setDashboard] = useState<Dashboard | null>(null)
+  const projectDetailEpoch = useRef(0)
+  const dashboardReadEpoch = useRef(0)
+  const dashboardProjectID = useRef('')
+  const overviewEpoch = useRef(0)
   const [busy, setBusy] = useState('')
   const delegationFormRef = useRef<HTMLFormElement>(null)
   const pendingRequestKeys = useRef(new Map<string, string>())
+  const operationsPending = useRef(false)
+  const delegationPreviewEpoch = useRef(0)
+  const delegationPreviewInput = useRef('')
+  const previewPending = useRef(false)
   const createOnce = async <T,>(path: string, body: string): Promise<T> => {
     const scope = JSON.stringify([path, body])
     let key = pendingRequestKeys.current.get(scope)
@@ -3219,6 +3345,7 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
   }, [])
 
   const load = useCallback(async () => {
+    const generation = ++overviewEpoch.current
     setLoading(true)
     try {
       const [overview, governed, taskData, directoryData, presetResult, workerResult] = await Promise.all([
@@ -3232,25 +3359,47 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
 				.then(result => ({ workers: (result.workers ?? []).filter(worker => worker.worker_kind === 'agent'), error: '' }))
 				.catch(reason => ({ workers: [] as WorkerProfile[], error: reason instanceof Error ? reason.message : String(reason) })),
       ])
+		if (generation !== overviewEpoch.current) return
 		setData(overview); setGovernance(governed); setDelegations(taskData.data.tasks ?? []); setDirectory(directoryData.data.users ?? []); setDelegationError(taskData.error ?? ''); setDirectoryError(directoryData.error ?? ''); setAgentPresets(presetResult.presets); setAgentPresetError(presetResult.error); setAgentWorkers(workerResult.workers); setAgentRuntimeError(workerResult.error)
     }
-    catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) }
-    finally { setLoading(false) }
+    catch (reason) { if (generation === overviewEpoch.current) setNotice(reason instanceof Error ? reason.message : String(reason)) }
+    finally { if (generation === overviewEpoch.current) setLoading(false) }
   }, [])
-  useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 30_000); return () => window.clearInterval(timer) }, [load])
-  useEffect(() => { if (!profileUserID && directory[0]?.id) setProfileUserID(directory[0].id) }, [directory, profileUserID])
+  useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 30_000); return () => { window.clearInterval(timer); overviewEpoch.current++; projectDetailEpoch.current++; taskDetailEpoch.current++; evidenceEpoch.current++ } }, [load])
+  useEffect(() => { if (!directory.some(user => user.id === profileUserID)) setProfileUserID(directory[0]?.id ?? '') }, [directory, profileUserID])
   useEffect(() => {
-    if (!profileUserID) { setProfileTags(''); return }
-    let alive = true
+    const generation = ++profileReadEpoch.current
+    ++profileWriteEpoch.current; profilePending.current = false; setProfileBusy(false)
+    setProfileTags(''); setProfileNotice(''); setProfileReady(false)
+    if (!profileUserID) return
     void optionalApi<{ tags?: string[] }>(`/lumo/api/users/${encodeURIComponent(profileUserID)}/tags`, { tags: [] }).then(result => {
-		if (alive) { setProfileTags((result.data.tags ?? []).join(', ')); setProfileNotice(result.error ?? '') }
+      if (generation !== profileReadEpoch.current) return
+      const tags = result.data.tags === null ? [] : result.data.tags
+      const valid = result.state === 'ok' && Array.isArray(tags) && tags.every(tag => typeof tag === 'string')
+      setProfileTags(valid ? tags!.join(', ') : ''); setProfileReady(valid)
+      setProfileNotice(result.error ?? (valid ? '' : '人员标签响应不完整，请重新读取。'))
     })
-    return () => { alive = false }
-  }, [profileUserID])
-  const run = async <T,>(key: string, success: string, operation: () => Promise<T>): Promise<T | undefined> => { setBusy(key); try { const result = await operation(); setNotice(success); await load(); return result } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)); return undefined } finally { setBusy('') } }
-  const createProject = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = event.currentTarget; const name = String(new FormData(form).get('name') ?? '').trim(); if (!name) return; await run('project', `项目「${name}」已创建。`, () => api('/lumo/api/projects', { method: 'POST', body: JSON.stringify({ name }) })); form.reset() }
+    return () => { ++profileReadEpoch.current; ++profileWriteEpoch.current }
+  }, [profileUserID, profileRetry])
+  const run = async <T,>(key: string, success: string, operation: () => Promise<T>): Promise<T | undefined> => { if (operationsPending.current) return undefined; operationsPending.current = true; setBusy(key); try { const result = await operation(); setNotice(success); await load(); return result } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)); return undefined } finally { operationsPending.current = false; setBusy(current => current === key ? '' : current) } }
+  const createProject = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = event.currentTarget; const name = String(new FormData(form).get('name') ?? '').trim(); if (!name) return; const created = await run('project', `项目「${name}」已创建。`, () => api('/lumo/api/projects', { method: 'POST', body: JSON.stringify({ name }) })); if (created !== undefined) { form.reset(); window.dispatchEvent(new Event(PROJECTS_CHANGED_EVENT)) } }
   const createFlow = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = event.currentTarget; const fields = new FormData(form); const project = String(fields.get('project') ?? ''); const name = String(fields.get('name') ?? '').trim(); if (!project || !name) return; const created = await run('flow', `流程「${name}」已创建为草稿。`, () => api(`/lumo/api/projects/${encodeURIComponent(project)}/flows`, { method: 'POST', body: JSON.stringify({ name, definition: { nodes: [{ id: 'start', operator: 'identity' }], edges: [] } }) })); if (created !== undefined) form.reset() }
-  const openProject = async (project: Row) => { if (!project.id) return; setBusy(project.id); try { setDashboard(await api(`/lumo/api/projects/${encodeURIComponent(project.id)}/dashboard`)) } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy('') } }
+  const openProject = async (project: Row) => {
+    if (!project.id) return
+    const id = project.id
+    const generation = ++projectDetailEpoch.current
+    ++dashboardReadEpoch.current
+    dashboardProjectID.current = id
+    setDashboard(null); setBusy(id); setNotice('')
+    try {
+      const next = await api<Dashboard>(`/lumo/api/projects/${encodeURIComponent(id)}/dashboard`)
+      if (generation !== projectDetailEpoch.current) return
+      if (next?.project?.id !== id) throw new Error('项目详情与所选项目不一致，请重新读取。')
+      setDashboard(next)
+    } catch (reason) { if (generation === projectDetailEpoch.current) setNotice(reason instanceof Error ? reason.message : String(reason)) }
+    finally { if (generation === projectDetailEpoch.current) setBusy(current => current === id ? '' : current) }
+  }
+  const closeDashboard = () => { ++projectDetailEpoch.current; ++dashboardReadEpoch.current; dashboardProjectID.current = ''; setDashboard(null) }
   const triggerFlow = async (flow: Row, action: 'submit' | 'review' | 'run' | 'deprecate' | 'rollback') => {
     const flowID = flow.id; if (!flowID) return
     const body = action === 'review' ? { approve: true, comment: '运营端审核通过' } : action === 'run' ? { input: { source: 'lumo-operations' } } : action === 'rollback' ? { version: Math.max(1, (flow.version ?? 1) - 1) } : {}
@@ -3278,24 +3427,45 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
   }
   const refreshPlacement = async () => { if (!placement?.task_id) return; const result = await run<Placement>('placement-refresh', '调度任务状态已刷新。', () => api<Placement>(`/lumo/api/scheduler/placements/${encodeURIComponent(placement.task_id!)}`)); if (result) setPlacement(result) }
   const previewDelegation = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); const fields = new FormData(event.currentTarget); const intent = String(fields.get('intent') ?? '').trim(); if (!intent) { setNotice('请先描述要交付的工作意图。'); return }
+    event.preventDefault(); if (previewPending.current || operationsPending.current) return
+    const form = event.currentTarget
+    const generation = ++delegationPreviewEpoch.current
+    const input = JSON.stringify([...new FormData(form).entries()])
+    const fields = new FormData(form); const intent = String(fields.get('intent') ?? '').trim(); if (!intent) { setNotice('请先描述要交付的工作意图。'); return }
+    previewPending.current = true
+    setDelegationPreview(null); delegationPreviewInput.current = ''
     setBusy('delegation-preview'); setNotice('')
     try {
       const result = await api<DelegationPreview>('/lumo/api/delegations/preview', { method: 'POST', body: JSON.stringify({ intent, project_id: String(fields.get('project_id') ?? '').trim(), required_tags: splitCSV(String(fields.get('required_tags') ?? '')), required_skills: splitCSV(String(fields.get('required_skills') ?? '')), residency: String(fields.get('residency') ?? '').trim() }) })
-      const candidates = result.candidates.map(candidate => ({ ...candidate, worker_id: candidate.worker_id || candidate.user_id, user_id: candidate.user_id || candidate.worker_id }))
-      setDelegationPreview({ ...result, candidates }); setSelectedAssignee(candidates.find(candidate => candidate.eligible)?.worker_id ?? ''); setAssignmentMode('auto')
-    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setBusy('') }
+      if (generation !== delegationPreviewEpoch.current || input !== JSON.stringify([...new FormData(form).entries()])) return
+      const strings = (value: unknown): string[] => {
+        if (value === null) return []
+        if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) throw new Error('候选人响应不完整，请重新识别。')
+        return value as string[]
+      }
+      if (!result || (result.candidates !== null && !Array.isArray(result.candidates))) throw new Error('候选人响应不完整，请重新识别。')
+      delegationPreviewInput.current = input
+      const candidates = (result.candidates ?? []).map(candidate => {
+        if (!candidate || !(candidate.worker_id || candidate.user_id) || typeof candidate.display_name !== 'string' || typeof candidate.eligible !== 'boolean' || !Number.isFinite(candidate.score) || !Number.isSafeInteger(candidate.active_tasks)) throw new Error('候选人响应不完整，请重新识别。')
+        return { ...candidate, worker_id: candidate.worker_id || candidate.user_id, user_id: candidate.user_id || candidate.worker_id,
+          matched_tags: strings(candidate.matched_tags), matched_skills: strings(candidate.matched_skills), rationale: strings(candidate.rationale) }
+      })
+      setDelegationPreview({ ...result, candidates, intent_terms: strings(result.intent_terms), inferred_tags: strings(result.inferred_tags), inferred_skills: strings(result.inferred_skills) }); setSelectedAssignee(candidates.find(candidate => candidate.eligible)?.worker_id ?? ''); setAssignmentMode('auto')
+    } catch (reason) { if (generation === delegationPreviewEpoch.current) setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { previewPending.current = false; setBusy(current => current === 'delegation-preview' ? '' : current) }
   }
   const dispatchDelegation = async () => {
-    const form = delegationFormRef.current; if (!form || !delegationPreview) return
+    const form = delegationFormRef.current; if (!form || !delegationPreview || operationsPending.current) return
+    if (delegationPreviewInput.current !== JSON.stringify([...new FormData(form).entries()])) { setDelegationPreview(null); setNotice('任务条件已变化，请重新识别候选人。'); return }
     const fields = new FormData(form); const intent = String(fields.get('intent') ?? '').trim(); const title = String(fields.get('title') ?? '').trim() || intent
+    const submittedInput = JSON.stringify([...fields.entries()])
     const selected = delegationPreview.candidates.find(candidate => candidate.worker_id === selectedAssignee || candidate.user_id === selectedAssignee)
+    if (assignmentMode === 'manual' ? !selected?.eligible : !delegationPreview.candidates.some(candidate => candidate.eligible)) { setNotice('当前没有满足条件的执行者，请重新识别候选人。'); return }
     const assignee = selected?.display_name ?? selectedAssignee
     const result = await run<DelegatedTask>('delegation', assignmentMode === 'auto' ? `任务「${title}」已按意图、标签、技能和负载自动分发。` : `任务「${title}」已分发给 ${assignee}。`, async () => {
       const created = await createOnce<DelegationCreated>('/lumo/api/delegations', JSON.stringify({ title, intent, project_id: String(fields.get('project_id') ?? '').trim(), required_tags: splitCSV(String(fields.get('required_tags') ?? '')), required_skills: splitCSV(String(fields.get('required_skills') ?? '')), assignee_user_id: assignmentMode === 'auto' || selected?.worker_kind === 'agent' ? '' : selected?.user_id ?? '', assignee_worker_id: assignmentMode === 'auto' ? '' : selected?.worker_id ?? selectedAssignee, auto_assign: assignmentMode === 'auto', schedule: { cluster_id: String(fields.get('cluster_id') ?? '').trim(), requires: parseSchedulerRequirements(String(fields.get('requires') ?? '')), priority: Number(fields.get('priority') ?? 0) || 0, residency: String(fields.get('residency') ?? '').trim(), queue: 'delegated', weight: 1, avoid_nodes: [] } }))
       return created.task ?? created as DelegatedTask
     })
-    if (result) { setDelegationPreview(null); setSelectedAssignee(''); form.reset() }
+    if (result && submittedInput === JSON.stringify([...new FormData(form).entries()])) { setDelegationPreview(null); setSelectedAssignee(''); form.reset() }
   }
   const cancelTask = async (task: DelegatedTask) => {
     await run(`task-${task.id}`, `已向执行节点请求取消「${task.title}」；将在收到终态回报后显示最终结果。`, () =>
@@ -3354,12 +3524,19 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
   const openChildTask = (child: TaskIntentFacts) => { void openTaskByID(child.id) }
 	const closeTaskRuns = () => { ++taskDetailEpoch.current; setBusy(''); setRunsTask(null); setTaskRuns([]); setTaskAudit([]); setTaskCollaboration(null); setCollaborationError(''); setControlSession(''); closeEvidence() }
   const saveProfileTags = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); if (!profileUserID) return
+    event.preventDefault(); if (!profileUserID || !profileReady || profilePending.current) return
+    const generation = ++profileWriteEpoch.current
+    const id = profileUserID
+    profilePending.current = true
     setProfileBusy(true); setProfileNotice('')
     try {
-      const result = await api<{ tags?: string[] }>(`/lumo/api/users/${encodeURIComponent(profileUserID)}/tags`, { method: 'PUT', body: JSON.stringify({ tags: splitCSV(profileTags) }) })
-      setProfileTags((result.tags ?? []).join(', ')); setProfileNotice('人员标签已保存，后续意图分发会使用最新画像。')
-    } catch (reason) { setProfileNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setProfileBusy(false) }
+      const result = await api<{ tags?: string[] }>(`/lumo/api/users/${encodeURIComponent(id)}/tags`, { method: 'PUT', body: JSON.stringify({ tags: splitCSV(profileTags) }) })
+      if (generation !== profileWriteEpoch.current) return
+      if (!Array.isArray(result.tags) || !result.tags.every(tag => typeof tag === 'string')) throw new Error('标签保存回执不完整，请核对后再继续。')
+      setProfileTags(result.tags.join(', ')); setProfileNotice('人员标签已保存，后续意图分发会使用最新画像。')
+      ++delegationPreviewEpoch.current; delegationPreviewInput.current = ''; setDelegationPreview(null)
+    } catch (reason) { if (generation === profileWriteEpoch.current) setProfileNotice(reason instanceof Error ? reason.message : String(reason)) }
+    finally { if (generation === profileWriteEpoch.current) { profilePending.current = false; setProfileBusy(false) } }
   }
 	const toggleAgentPreset = async (preset: AgentPreset) => {
 		const nextStatus = preset.status === 'active' ? 'disabled' : 'active'
@@ -3370,18 +3547,43 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
   const refreshDashboard = async () => {
     const projectID = dashboard?.project?.id
     if (!projectID) throw new Error('项目详情不可用，请重新打开。')
-    setDashboard(await api<Dashboard>(`/lumo/api/projects/${encodeURIComponent(projectID)}/dashboard`))
+    const generation = projectDetailEpoch.current
+    const reading = ++dashboardReadEpoch.current
+    try {
+      const next = await api<Dashboard>(`/lumo/api/projects/${encodeURIComponent(projectID)}/dashboard`)
+      if (generation !== projectDetailEpoch.current || reading !== dashboardReadEpoch.current || dashboardProjectID.current !== projectID) return
+      if (next?.project?.id !== projectID) throw new Error('项目详情与所选项目不一致，请重新读取。')
+      setDashboard(next)
+      window.dispatchEvent(new Event(PROJECTS_CHANGED_EVENT))
+    } catch (reason) {
+      if (generation === projectDetailEpoch.current && reading === dashboardReadEpoch.current && reason instanceof ApiError && [401, 403, 404].includes(reason.status)) closeDashboard()
+      throw reason
+    }
   }
   const projectLifecycle = async (action: 'archive' | 'unarchive') => {
     const projectID = dashboard?.project?.id
     if (!projectID) throw new Error('项目详情不可用，请重新打开。')
+    const generation = projectDetailEpoch.current
     setBusy(`project-${action}`); setNotice('')
     try {
       await api(`/lumo/api/projects/${encodeURIComponent(projectID)}/${action}`, { method: 'POST' })
       setNotice(action === 'archive' ? '项目已归档。' : '项目已恢复。')
-      await load(); setDashboard(null)
+      window.dispatchEvent(new Event(PROJECTS_CHANGED_EVENT))
+      if (generation === projectDetailEpoch.current) closeDashboard()
+      await load()
     } finally { setBusy('') }
   }
+  useEffect(() => {
+    const navigate = () => {
+      const target = takeOperationsTarget()
+      if (!target) return
+      if (target.kind === 'task') { setArea('delivery'); void openTaskByID(target.id) }
+      else { setArea('projects'); void openProject({ id: target.id }) }
+    }
+    navigate()
+    window.addEventListener(OPERATIONS_TARGET_EVENT, navigate)
+    return () => window.removeEventListener(OPERATIONS_TARGET_EVENT, navigate)
+  }, [])
   const online = countOnline(data)
   const permissionDecisions = rowsOf<PermissionDecision>(governance?.permissions, 'decisions')
 	const agentWorkerByPreset = new Map(agentWorkers.map(worker => [worker.worker_id.replace(/^agent:/u, ''), worker]))
@@ -3432,8 +3634,8 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
     </> : null}
     {area === 'delivery' ? <>
     {data.deployment.clusterReady ? <AgentPresetEditor request={api} presets={agentPresets} refresh={load} /> : null}
-    <Section title="上下游任务协同" meta={governance?.features.ok ? '集群已就绪 · 意图、标签、有效技能交集' : '仅集群已就绪时开放跨用户委派'}><div className="lumo-delegation-layout"><form ref={delegationFormRef} className="lumo-delegation-form" onSubmit={previewDelegation}><label><span>任务标题</span><input name="title" placeholder="例如：华东客户合同复核" /></label><label className="wide"><span>工作意图</span><textarea name="intent" rows={3} required placeholder="描述交付结果、业务范围和约束，例如：跟进华东客户的合同复核并标出高风险条款。" /></label><label><span>项目边界</span><select name="project_id" defaultValue=""><option value="">不绑定项目</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name ?? project.id}</option>)}</select></label><label><span>必须标签</span><input name="required_tags" placeholder="华东, 客户" /></label><label><span>必须技能</span><input name="required_skills" placeholder="合同复核" /></label><label><span>调度集群</span><input name="cluster_id" placeholder="cluster-a" /></label><label className="wide"><span>节点能力</span><input name="requires" placeholder="cpu, region=cn-east" /></label><label><span>优先级</span><input name="priority" type="number" defaultValue="0" /></label><label><span>数据驻留</span><input name="residency" placeholder="cn-east" /></label><BusyButton type="submit" busy={busy === 'delegation-preview'} className="lumo-primary">识别候选人</BusyButton></form><div className="lumo-delegation-preview">{delegationPreview ? <><div className="lumo-preview-head"><div><span className="lumo-inspector-label">匹配预览</span><b>{delegationPreview.candidates.filter(candidate => candidate.eligible).length} 个可分发对象</b></div><small>{delegationPreview.intent_terms.join(' · ') || '未提取词项'}</small></div><div className="lumo-inference"><span>识别标签：{delegationPreview.inferred_tags.join('、') || '无'}</span><span>识别技能：{delegationPreview.inferred_skills.join('、') || '无'}</span></div><div className="lumo-assignment-mode"><label><input type="checkbox" checked={assignmentMode === 'auto'} onChange={event => setAssignmentMode(event.target.checked ? 'auto' : 'manual')} /> <b>自动分发</b><span>按意图 · 标签 · 技能 · 当前负载选择</span></label><small>{assignmentMode === 'auto' ? '系统将在服务端再次计算候选集并写入审计理由。' : '手动指定仅可选择满足硬约束的候选人。'}</small></div><div className="lumo-candidate-list">{delegationPreview.candidates.slice(0, 8).map(candidate => <button type="button" disabled={!candidate.eligible} className={assignmentMode === 'manual' && selectedAssignee === candidate.user_id ? 'selected' : ''} key={candidate.user_id} onClick={() => { setSelectedAssignee(candidate.user_id); setAssignmentMode('manual') }}><span><b>{candidate.display_name}</b><small>{candidate.user_id} · {candidate.active_tasks} 个进行中任务</small></span><em>{candidate.eligible ? `${candidate.score} · ${candidate.matched_tags.concat(candidate.matched_skills).join(' / ') || '可接收'}` : candidate.rationale[0] ?? '不满足条件'}</em></button>)}</div><BusyButton busy={busy === 'delegation'} disabled={assignmentMode === 'manual' && !selectedAssignee} className="lumo-primary" onClick={() => void dispatchDelegation()}>{assignmentMode === 'auto' ? `自动分发${delegationPreview.candidates.find(candidate => candidate.eligible)?.display_name ? ` · 推荐 ${delegationPreview.candidates.find(candidate => candidate.eligible)?.display_name}` : ''}` : `确认分发给 ${delegationPreview.candidates.find(candidate => candidate.user_id === selectedAssignee)?.display_name ?? '候选人'}`}</BusyButton></> : <div className="lumo-delegation-empty"><Glyph surface="operations" /><b>先描述任务，再生成可解释分发建议</b><p>系统只使用当前 realm 的启用用户、用户标签和已生效技能；没有满足交集时不会强行分发。</p></div>}</div></div><div className="lumo-task-tracker"><header><b>任务跟踪</b><span>{delegationError ? '请求未完成' : `${delegations.length} 条记录 · 30 秒同步`}</span></header>{delegations.length ? delegations.map(task => <div className="lumo-task-row" key={task.id}><span className="lumo-task-state"><i className={task.state === 'COMPLETED' ? 'done' : task.state === 'FAILED' || task.state === 'BLOCKED' ? 'bad' : 'live'} />{localizedTaskDisplayState(task)}</span><span className="lumo-task-main"><b>{task.title}</b><small>{task.assignee_name ?? task.assignee_user_id} · {task.selected_skills.join(' / ') || '意图匹配'} · {task.assigned_node_id ?? '等待节点'}</small></span><em>{task.updated_at ? formatSync(task.updated_at) : '刚刚'}</em>{['ASSIGNED', 'QUEUED', 'RUNNING'].includes(task.state) ? <BusyButton busy={busy === `task-${task.id}`} className="lumo-small lumo-danger" onClick={() => void cancelTask(task)}>取消任务</BusyButton> : task.state === 'CANCELLING' ? <em>取消中，等待执行节点确认</em> : null}</div>) : <Empty>{delegationError || '还没有委派任务。识别候选人后，系统会保留委派、技能快照和节点调度状态。'}</Empty>}</div></Section>
-    <Section title="人员画像" meta="标签直接参与意图分发与负载排序"><div className="lumo-profile-layout">{directory.length ? <form className="lumo-profile-form" onSubmit={saveProfileTags}><label><span>人员</span><select value={profileUserID} onChange={event => setProfileUserID(event.target.value)}>{directory.map(user => <option value={user.id} key={user.id}>{user.display_name} · {user.id}</option>)}</select></label><label className="wide"><span>标签</span><input value={profileTags} onChange={event => setProfileTags(event.target.value)} placeholder="华东, 合同, 客户成功" /></label><BusyButton type="submit" busy={profileBusy} className="lumo-primary">保存标签</BusyButton>{profileNotice ? <small className="lumo-form-note">{profileNotice}</small> : null}</form> : <div className="lumo-profile-empty"><b>{directoryError ? '人员目录请求失败' : '人员目录不可用'}</b><span>{directoryError || '只有集群已就绪且当前身份具备 task:delegate 权限时，才能编辑人员画像。'}</span></div>}<div className="lumo-profile-hint"><span>分发判定</span><b>标签硬约束 + 技能交集 + 当前负载</b><small>保存后立即影响下一次预览；已经分发的任务保留当时的技能快照与匹配理由，便于审计。</small></div></div></Section>
+    <Section title="上下游任务协同" meta={governance?.features.ok ? '集群已就绪 · 意图、标签、有效技能交集' : '仅集群已就绪时开放跨用户委派'}><div className="lumo-delegation-layout"><form ref={delegationFormRef} className="lumo-delegation-form" onSubmit={previewDelegation} onChange={() => { ++delegationPreviewEpoch.current; delegationPreviewInput.current = ''; setDelegationPreview(null); setSelectedAssignee('') }}><label><span>任务标题</span><input name="title" placeholder="例如：华东客户合同复核" /></label><label className="wide"><span>工作意图</span><textarea name="intent" rows={3} required placeholder="描述交付结果、业务范围和约束，例如：跟进华东客户的合同复核并标出高风险条款。" /></label><label><span>项目边界</span><select name="project_id" defaultValue=""><option value="">不绑定项目</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name ?? project.id}</option>)}</select></label><label><span>必须标签</span><input name="required_tags" placeholder="华东, 客户" /></label><label><span>必须技能</span><input name="required_skills" placeholder="合同复核" /></label><label><span>调度集群</span><input name="cluster_id" placeholder="cluster-a" /></label><label className="wide"><span>节点能力</span><input name="requires" placeholder="cpu, region=cn-east" /></label><label><span>优先级</span><input name="priority" type="number" defaultValue="0" /></label><label><span>数据驻留</span><input name="residency" placeholder="cn-east" /></label><BusyButton type="submit" busy={busy === 'delegation-preview'} className="lumo-primary">识别候选人</BusyButton></form><div className="lumo-delegation-preview">{delegationPreview ? <><div className="lumo-preview-head"><div><span className="lumo-inspector-label">匹配预览</span><b>{delegationPreview.candidates.filter(candidate => candidate.eligible).length} 个可分发对象</b></div><small>{delegationPreview.intent_terms.join(' · ') || '未提取词项'}</small></div><div className="lumo-inference"><span>识别标签：{delegationPreview.inferred_tags.join('、') || '无'}</span><span>识别技能：{delegationPreview.inferred_skills.join('、') || '无'}</span></div><div className="lumo-assignment-mode"><label><input type="checkbox" checked={assignmentMode === 'auto'} onChange={event => setAssignmentMode(event.target.checked ? 'auto' : 'manual')} /> <b>自动分发</b><span>按意图 · 标签 · 技能 · 当前负载选择</span></label><small>{assignmentMode === 'auto' ? '系统将在服务端再次计算候选集并写入审计理由。' : '手动指定仅可选择满足硬约束的候选人。'}</small></div><div className="lumo-candidate-list">{delegationPreview.candidates.slice(0, 8).map(candidate => <button type="button" disabled={!candidate.eligible} className={assignmentMode === 'manual' && selectedAssignee === candidate.worker_id ? 'selected' : ''} key={candidate.worker_id} onClick={() => { setSelectedAssignee(candidate.worker_id ?? candidate.user_id); setAssignmentMode('manual') }}><span><b>{candidate.display_name}</b><small>{candidate.user_id} · {candidate.active_tasks} 个进行中任务</small></span><em>{candidate.eligible ? `${candidate.score} · ${candidate.matched_tags.concat(candidate.matched_skills).join(' / ') || '可接收'}` : candidate.rationale[0] ?? '不满足条件'}</em></button>)}</div><BusyButton busy={busy === 'delegation'} disabled={assignmentMode === 'manual' ? !delegationPreview.candidates.some(candidate => candidate.eligible && candidate.worker_id === selectedAssignee) : !delegationPreview.candidates.some(candidate => candidate.eligible)} className="lumo-primary" onClick={() => void dispatchDelegation()}>{assignmentMode === 'auto' ? `自动分发${delegationPreview.candidates.find(candidate => candidate.eligible)?.display_name ? ` · 推荐 ${delegationPreview.candidates.find(candidate => candidate.eligible)?.display_name}` : ''}` : `确认分发给 ${delegationPreview.candidates.find(candidate => candidate.worker_id === selectedAssignee)?.display_name ?? '候选人'}`}</BusyButton></> : <div className="lumo-delegation-empty"><Glyph surface="operations" /><b>先描述任务，再生成可解释分发建议</b><p>系统只使用当前 realm 的启用用户、用户标签和已生效技能；没有满足交集时不会强行分发。</p></div>}</div></div><div className="lumo-task-tracker"><header><b>任务跟踪</b><span>{delegationError ? '请求未完成' : `${delegations.length} 条记录 · 30 秒同步`}</span></header>{delegations.length ? delegations.map(task => <div className="lumo-task-row" key={task.id}><span className="lumo-task-state"><i className={task.state === 'COMPLETED' ? 'done' : task.state === 'FAILED' || task.state === 'BLOCKED' ? 'bad' : 'live'} />{localizedTaskDisplayState(task)}</span><span className="lumo-task-main"><b>{task.title}</b><small>{task.assignee_name ?? task.assignee_user_id} · {task.selected_skills.join(' / ') || '意图匹配'} · {task.assigned_node_id ?? '等待节点'}</small></span><em>{task.updated_at ? formatSync(task.updated_at) : '刚刚'}</em>{['ASSIGNED', 'QUEUED', 'RUNNING'].includes(task.state) ? <BusyButton busy={busy === `task-${task.id}`} className="lumo-small lumo-danger" onClick={() => void cancelTask(task)}>取消任务</BusyButton> : task.state === 'CANCELLING' ? <em>取消中，等待执行节点确认</em> : null}</div>) : <Empty>{delegationError || '还没有委派任务。识别候选人后，系统会保留委派、技能快照和节点调度状态。'}</Empty>}</div></Section>
+    <Section title="人员画像" meta="标签直接参与意图分发与负载排序"><div className="lumo-profile-layout">{directory.length ? <form className="lumo-profile-form" onSubmit={saveProfileTags}><label><span>人员</span><select value={profileUserID} onChange={event => setProfileUserID(event.target.value)}>{directory.map(user => <option value={user.id} key={user.id}>{user.display_name} · {user.id}</option>)}</select></label><label className="wide"><span>标签</span><input disabled={profileBusy || !profileReady} value={profileTags} onChange={event => setProfileTags(event.target.value)} placeholder="华东, 合同, 客户成功" /></label><BusyButton type="submit" busy={profileBusy} disabled={!profileReady} className="lumo-primary">保存标签</BusyButton><button type="button" className="lumo-button lumo-secondary" disabled={profileBusy} onClick={() => setProfileRetry(value => value + 1)}>重新读取标签</button>{profileNotice ? <small className="lumo-form-note">{profileNotice}</small> : null}</form> : <div className="lumo-profile-empty"><b>{directoryError ? '人员目录请求失败' : '人员目录不可用'}</b><span>{directoryError || '只有集群已就绪且当前身份具备 task:delegate 权限时，才能编辑人员画像。'}</span></div>}<div className="lumo-profile-hint"><span>分发判定</span><b>标签硬约束 + 技能交集 + 当前负载</b><small>保存后立即影响下一次预览；已经分发的任务保留当时的技能快照与匹配理由，便于审计。</small></div></div></Section>
     <Section title="专家运行管理" meta={agentPresetError ? '专家目录不可用' : `${agentPresets.length} 个专家 · 配置与运行态分离`} actions={<button type="button" className="lumo-button lumo-secondary" onClick={() => openSurface('skillhub')}>前往技能中心新建专家</button>}><div className="lumo-agent-preset-layout directory"><div className="lumo-table-list">{agentPresets.length ? agentPresets.map(preset => <div key={preset.id}><span><b>{preset.name}</b><small>{preset.provider} · {preset.model_ref} · {agentOutputProfileLabel(preset.output_profile)} · v{preset.version} · 所有者 {preset.owner_user_id}{preset.project_id ? ` · 项目 ${preset.project_id}` : ' · 全 Realm'}</small></span><em>{preset.status === 'active' ? `启用 · ${preset.max_concurrency} 并发 · ${agentRuntimeLabel(preset)}` : `已停用 · ${agentRuntimeLabel(preset)}`}</em><BusyButton className={preset.status === 'active' ? 'lumo-danger lumo-small' : 'lumo-secondary lumo-small'} busy={busy === `agent-preset-${preset.id}`} onClick={() => void toggleAgentPreset(preset)}>{preset.status === 'active' ? '停用' : '启用'}</BusyButton></div>) : <Empty>{agentPresetError || '尚未创建专家。普通成员只能看到自己拥有的专家。'}</Empty>}</div></div></Section>
     </> : null}
     {area === 'permissions' ? <Section title="权限诊断" meta="Realm ∩ Project ∩ Space · 未知边界默认拒绝"><p className="lumo-form-hint">这里展示当前登录身份的有效权限和判定依据；用户角色分配在“用户管理”中维护。</p><div className="lumo-compact-list">{governance?.permissions?.ok ? permissionDecisions.map(decision => <div key={decision.action}><span><b>{decision.action}</b><small>{decision.reason}</small></span><em>{decision.allowed ? `允许 · ${decision.matched_policies.join(' + ')}` : '拒绝'}</em></div>) : <Empty>{governance?.permissions?.error || '权限策略版本尚未部署；当前不会将其伪装为空权限。'}</Empty>}</div></Section> : null}
@@ -3455,7 +3657,7 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
     </Section> : null}
     </> : null}
     {['users', 'departments', 'roles'].includes(area) && organizationAllowed && data.deployment.clusterReady ? <OrganizationManagement view={area as 'users' | 'departments' | 'roles'} /> : null}
-    {dashboard ? <DashboardSheet data={dashboard} clusterReady={data.deployment.clusterReady} close={() => setDashboard(null)} refresh={refreshDashboard} lifecycle={projectLifecycle} /> : null}
+    {dashboard ? <DashboardSheet key={dashboard.project?.id} data={dashboard} clusterReady={data.deployment.clusterReady} close={closeDashboard} refresh={refreshDashboard} lifecycle={projectLifecycle} /> : null}
   </div>
 }
 
@@ -3793,7 +3995,7 @@ export function OrganizationManagement({ view }: { view: 'users' | 'departments'
         </form>
       </div>
       <div id="lumo-organization-roles" hidden={view !== 'roles'}><h3>角色目录</h3><div className="lumo-compact-list">{roles.map(role => <div key={role.id}><span><b>{role.name}</b><small>{role.id}{role.description ? ` · ${role.description}` : ''}</small></span><em>{role.status === 'active' ? '正常' : '已停用'}</em><BusyButton className="lumo-secondary lumo-small" disabled={Boolean(busy)} onClick={() => setEditingRole(role)}>编辑</BusyButton><BusyButton className="lumo-secondary lumo-small" disabled={Boolean(busy)} onClick={() => setPermissionRole(role)}>配置权限</BusyButton></div>)}</div>
-        {view === 'roles' && permissionRole ? <RolePermissionsPanel key={permissionRole.id} request={api} role={roles.find(role => role.id === permissionRole.id) ?? permissionRole} roles={roles} /> : null}
+        {view === 'roles' && permissionRole ? <RolePermissionsPanel key={permissionRole.id} request={api} role={roles.find(role => role.id === permissionRole.id) ?? permissionRole} roles={roles} disabled={Boolean(busy)} refreshKey={revision} /> : null}
         <h3>{editingRole ? `编辑角色 · ${editingRole.name}` : '新建角色'}</h3>
         <form key={editingRole?.id ?? 'new-role'} className="lumo-governance-form lumo-user-form" onSubmit={saveRole}>
           <label><span>角色 ID</span><input name="id" required readOnly={Boolean(editingRole)} defaultValue={editingRole?.id ?? ''} maxLength={128} pattern="[A-Za-z0-9_\x2d][A-Za-z0-9._\x2d]{0,127}" /></label>

@@ -38,3 +38,5 @@
 .lumo-user-security .lumo-user-security-error { margin: 12px 0; color: var(--lumo-danger); }
 .lumo-user-security .lumo-user-security-notice { margin: 12px 0; color: var(--lumo-cyan); }
 @media (max-width: 600px) { .lumo-user-security-facts { grid-template-columns: 1fr; } .lumo-user-security-tabs { gap: 16px; } }
+
+@media (max-width: 600px) { .lumo-user-security > header { flex-wrap: wrap; } .lumo-user-security-tabs { overflow-x: auto; } .lumo-user-security-tabs button { flex-shrink: 0; } .lumo-user-security-revoke > div { flex-wrap: wrap; } }

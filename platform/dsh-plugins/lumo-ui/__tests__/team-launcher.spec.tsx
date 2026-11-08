@@ -38,3 +38,23 @@ describe('team launch via the native captain session', () => {
     expect((screen.getByRole('button', { name: '准备团队任务' }) as HTMLButtonElement).disabled).toBe(true)
   })
 })
+
+it.each(['read', 'write'] as const)('keeps the goal visible if the composer %s fails', phase => {
+ const onPrepared = vi.fn()
+ const bridge = { getDraft: () => { if (phase === 'read') throw Error('session changed'); return '' }, setDraft: vi.fn(() => { throw Error('composer unavailable') }) }
+ render(<TeamLauncher capabilities={capabilities} bridge={bridge} onPrepared={onPrepared} />)
+ fireEvent.change(screen.getByRole('textbox', { name: '团队目标' }), { target: { value: '必须保留的目标' } })
+ fireEvent.click(screen.getByRole('button', { name: '准备团队任务' }))
+ expect(screen.getByRole('alert').textContent).toContain('团队目标已保留')
+ expect((screen.getByRole('textbox', { name: '团队目标' }) as HTMLTextAreaElement).value).toBe('必须保留的目标')
+ expect(onPrepared).not.toHaveBeenCalled()
+})
+
+it('does not close the launcher when a composer explicitly declines a draft', () => {
+ const onPrepared = vi.fn()
+ render(<TeamLauncher capabilities={capabilities} bridge={{ getDraft: () => '', setDraft: () => false }} onPrepared={onPrepared} />)
+ fireEvent.change(screen.getByRole('textbox', { name: '团队目标' }), { target: { value: '保留拒收目标' } })
+ fireEvent.click(screen.getByRole('button', { name: '准备团队任务' }))
+ expect(screen.getByRole('alert').textContent).toContain('当前输入框未接收内容')
+ expect(onPrepared).not.toHaveBeenCalled()
+})

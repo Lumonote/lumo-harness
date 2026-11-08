@@ -2,6 +2,7 @@ import { Readable } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
 
 import { api, type Config } from '../src/index.ts'
+import { encodeIdentityAssertion, signIdentityAssertion } from '../src/identity.ts'
 
 const config = {
   schedulerUrl: '', projectsUrl: '', flowsUrl: '', connectorUrl: '', governanceUrl: '', registryUrl: '',
@@ -99,4 +100,41 @@ describe('knowledge source management API', () => {
     await api(config, { query: vi.fn() }, undefined, undefined, undefined, request('GET', '/lumo/api/knowledge/sources') as never, unsupported.res)
     expect(unsupported.result.status).toBe(501)
   })
+})
+
+describe('knowledge query space narrowing', () => {
+  it.each([undefined, [], ['operations'], ['产品知识', 'operations', 'operations']])('passes spaces %j with only the current trusted identity', async spaces => {
+    const knowledge = manager(); knowledge.query.mockResolvedValue([])
+    const { res, result } = response()
+    await api({ ...config, roles: ['viewer'], userId: 'viewer-a' }, knowledge, undefined, undefined, undefined, request('POST', '/lumo/api/knowledge/query', {
+      text: '  如何审批  ', topK: 3, ...(spaces === undefined ? {} : { spaces }),
+      realm: 'foreign', roles: ['realm_admin'], userId: 'attacker', libraryAdmin: true, scope: 'draft',
+    }) as never, res)
+    expect(result.status).toBe(200)
+    expect(knowledge.query).toHaveBeenCalledWith({ realm: 'realm-a', roles: ['viewer'], userId: 'viewer-a', libraryAdmin: false, text: '如何审批', topK: 3, scope: 'published', ...(spaces === undefined ? {} : { spaces: [...new Set(spaces)] }) })
+    expect(result.body).toEqual({ query: '如何审批', scope: 'published', hits: [] })
+  })
+  it.each([null, 'operations', {}, [null], [''], [' space'], ['space '], ['space\u0000'], ['a'.repeat(129)], Array.from({ length: 65 }, () => 'a')])('rejects malformed or oversized space selectors %j', async spaces => {
+    const knowledge = manager(); const { res, result } = response()
+    await api(config, knowledge, undefined, undefined, undefined, request('POST', '/lumo/api/knowledge/query', { text: '审批', spaces }) as never, res)
+    expect(result.status).toBe(400); expect(knowledge.query).not.toHaveBeenCalled()
+  })
+  it('does not turn empty spaces into a bypass of provider authorization', async () => {
+    const knowledge = manager(); knowledge.query.mockRejectedValue(Object.assign(Error('knowledge forbidden'), { code: 'forbidden' }))
+    const { res, result } = response()
+    await api(config, knowledge, undefined, undefined, undefined, request('POST', '/lumo/api/knowledge/query', { text: '审批', spaces: [] }) as never, res)
+    expect(knowledge.query).toHaveBeenCalledWith(expect.objectContaining({ spaces: [], realm: 'realm-a' }))
+    expect(result.status).not.toBe(200)
+  })
+})
+
+it('binds narrowed knowledge queries to signed browser identity instead of deployment defaults', async () => {
+  const secret = '0123456789abcdef0123456789abcdef'
+  const encoded = encodeIdentityAssertion({ aud: 'lumo-ui', exp: Math.floor(Date.now() / 1000) + 60, realm: 'signed-realm', userId: 'signed-user', roles: ['viewer'] })
+  const req = request('POST', '/lumo/api/knowledge/query', { text: '审批', spaces: ['team-space'], realm: 'forged', userId: 'forged', roles: ['admin'], libraryAdmin: true })
+  req.headers = { 'x-lumo-identity': encoded, 'x-lumo-identity-signature': signIdentityAssertion(encoded, secret) }
+  const knowledge = manager(); knowledge.query.mockResolvedValue([]); const { res, result } = response()
+  await api({ ...config, identityAssertionSecret: secret }, knowledge, undefined, undefined, undefined, req as never, res)
+  expect(result.status).toBe(200)
+  expect(knowledge.query).toHaveBeenCalledWith({ realm: 'signed-realm', userId: 'signed-user', roles: ['viewer'], libraryAdmin: false, text: '审批', topK: 8, scope: 'published', spaces: ['team-space'] })
 })

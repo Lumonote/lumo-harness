@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ProjectSettingsPanel } from '../src/client/project-settings-panel.tsx'
 
@@ -73,5 +73,26 @@ describe('project settings', () => {
     finish({ ...project, name: 'Updated' })
     expect((await screen.findByRole('alert')).textContent).toBe('已保存，刷新失败：offline')
     expect(screen.getByRole('status').textContent).toBe('项目名称已保存。')
+  })
+  it('isolates drafts and late saves when switching projects without a parent key', async () => {
+    let finish!: (value: unknown) => void
+    const request = vi.fn().mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const refresh = vi.fn().mockResolvedValue(undefined)
+    const f = mount({ request, refresh }); rename()
+    f.rerender(<ProjectSettingsPanel request={request} refresh={refresh} project={{ ...project, id: 'second' }} role="owner" />)
+    expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('Original')
+    await act(async () => finish({ ...project, name: 'Updated' }))
+    expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe('Original')
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(refresh).not.toHaveBeenCalled()
+  })
+  it('keeps the draft and requires authoritative reread after a malformed save receipt', async () => {
+    const request = vi.fn().mockResolvedValue({ ...project, id: 'another-project', name: 'Other' })
+    mount({ request }); rename()
+    expect((await screen.findByRole('alert')).textContent).toContain('保存响应无效')
+    expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe(' Updated ')
+    expect((screen.getByRole('button', { name: '保存名称' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: '读取最新名称（保留草稿）' })).toBeTruthy()
+    expect(screen.queryByText('项目名称已保存。')).toBeNull()
   })
 })

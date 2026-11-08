@@ -95,3 +95,45 @@ it('clears sensitive stale facts when authority is revoked during refresh', asyn
   expect(screen.queryByText('child、deny、realm_admin')).toBeNull()
   expect(screen.queryByRole('button', { name: '全部下线' })).toBeNull()
 })
+
+it('clears sensitive facts and confirmation after a logout write loses authority', async () => {
+  const request = baseRequest().mockRejectedValueOnce(Object.assign(Error('管理员权限已撤销'), { status: 403 }))
+  render(<UserSecurityPanel request={request} userId="employee" userName="员工" />)
+  await screen.findByText('显式拒绝'); fireEvent.click(screen.getByRole('tab', { name: '登录会话 · 1' })); fireEvent.click(screen.getByRole('button', { name: '全部下线' }))
+  fireEvent.change(screen.getByRole('textbox', { name: '下线原因' }), { target: { value: '安全核对' } }); fireEvent.click(screen.getByRole('button', { name: '确认下线' }))
+  await screen.findByText('管理员权限已撤销'); expect(screen.queryByText('session-a')).toBeNull(); expect(screen.queryByRole('button', { name: '确认下线' })).toBeNull()
+  fireEvent.click(screen.getByRole('tab', { name: '权限解释' })); expect(screen.queryByText('child、deny、realm_admin')).toBeNull()
+})
+it('blocks navigation and refresh while a logout confirmation is open', async () => {
+  const request = vi.fn().mockResolvedValueOnce(overview).mockResolvedValueOnce({ ...sessionPage, total: 30, has_more: true }).mockResolvedValueOnce(eventPage)
+  render(<UserSecurityPanel request={request} userId="employee" userName="员工" />)
+  await screen.findByText('显式拒绝'); fireEvent.click(screen.getByRole('tab', { name: '登录会话 · 30' })); fireEvent.click(screen.getByRole('button', { name: '全部下线' }))
+  expect((screen.getByRole('button', { name: '刷新账户安全' }) as HTMLButtonElement).disabled).toBe(true)
+  expect((within(screen.getByRole('navigation', { name: '登录会话分页' })).getByRole('button', { name: '下一页' }) as HTMLButtonElement).disabled).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: '取消下线' })); expect((screen.getByRole('button', { name: '刷新账户安全' }) as HTMLButtonElement).disabled).toBe(false)
+})
+it('corrects an expired session page after the active device count shrinks', async () => {
+  const request = vi.fn().mockResolvedValueOnce(overview).mockResolvedValueOnce({ ...sessionPage, total: 26, has_more: true }).mockResolvedValueOnce(eventPage)
+    .mockResolvedValueOnce(overview).mockResolvedValueOnce({ ...sessionPage, sessions: [], total: 1, offset: 25 }).mockResolvedValueOnce(eventPage).mockResolvedValueOnce(sessionPage)
+  render(<UserSecurityPanel request={request} userId="employee" userName="员工" />)
+  await screen.findByText('显式拒绝'); fireEvent.click(screen.getByRole('tab', { name: '登录会话 · 26' }))
+  fireEvent.click(within(screen.getByRole('navigation', { name: '登录会话分页' })).getByRole('button', { name: '下一页' }))
+  await screen.findByRole('tab', { name: '登录会话 · 1' })
+  expect(request).toHaveBeenLastCalledWith('/lumo/api/users/employee/sessions?limit=25&offset=0'); expect(screen.getByText('共 1 条 · 1–1')).toBeTruthy()
+})
+it('requires refresh when a logout reply cannot be verified', async () => {
+  const request = baseRequest().mockRejectedValueOnce(Error('网络断开'))
+  render(<UserSecurityPanel request={request} userId="employee" userName="员工" />)
+  await screen.findByText('显式拒绝'); fireEvent.click(screen.getByRole('tab', { name: '登录会话 · 1' })); fireEvent.click(screen.getByRole('button', { name: '全部下线' }))
+  fireEvent.change(screen.getByRole('textbox', { name: '下线原因' }), { target: { value: '设备遗失' } }); fireEvent.click(screen.getByRole('button', { name: '确认下线' }))
+  expect((await screen.findByRole('alert')).textContent).toContain('刷新账户安全确认结果')
+  expect(screen.queryByRole('button', { name: '确认下线' })).toBeNull(); expect(screen.queryByRole('button', { name: '全部下线' })).toBeNull()
+})
+it.each([
+  { security: { ...overview, resolution: { ...overview.resolution, actions: { 'task:delegate': { allowed: true, explicit_deny: false } } } }, history: eventPage },
+  { security: overview, history: { ...eventPage, events: [{ ...eventPage.events[0], detail: null }] } },
+])('rejects malformed security details without crashing %j', async value => {
+  const request = vi.fn().mockResolvedValueOnce(value.security).mockResolvedValueOnce(sessionPage).mockResolvedValueOnce(value.history)
+  render(<UserSecurityPanel request={request} userId="employee" userName="员工" />)
+  await screen.findByText('账户安全响应无效，请重新读取。'); expect(screen.queryByText('child、deny、realm_admin')).toBeNull()
+})

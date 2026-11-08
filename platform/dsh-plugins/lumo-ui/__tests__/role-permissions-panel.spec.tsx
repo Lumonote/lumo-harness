@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
+import { act, cleanup, fireEvent, render, screen } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
 import { afterEach, expect, it, vi } from 'vitest'
 import { RolePermissionsPanel } from '../src/client/role-permissions-panel.tsx'
 
@@ -58,4 +58,59 @@ it('ignores a late response after selecting a different role', async () => {
   await screen.findByText('已保存的权限解释 · v9')
   finish(base)
   expect(screen.queryByText('已保存的权限解释 · v3')).toBeNull()
+})
+
+it('disables unchanged writes and respects a parent operation lock without losing the draft', async () => {
+  const request = vi.fn().mockResolvedValueOnce({ actions }).mockResolvedValueOnce(base)
+  const view = render(<RolePermissionsPanel request={request} role={roles[0]!} roles={roles} />)
+  await screen.findByText('显式拒绝')
+  expect((screen.getByRole('button', { name: '保存动作权限' }) as HTMLButtonElement).disabled).toBe(true)
+  fireEvent.change(screen.getByRole('combobox', { name: '任务委派策略' }), { target: { value: 'allow' } })
+  view.rerender(<RolePermissionsPanel request={request} role={roles[0]!} roles={roles} disabled />)
+  fireEvent.click(screen.getByRole('button', { name: '保存动作权限' })); expect(request).toHaveBeenCalledTimes(2)
+  expect((screen.getByRole('combobox', { name: '任务委派策略' }) as HTMLSelectElement).disabled).toBe(true)
+  view.rerender(<RolePermissionsPanel request={request} role={roles[0]!} roles={roles} />)
+  expect((screen.getByRole('combobox', { name: '任务委派策略' }) as HTMLSelectElement).value).toBe('allow')
+  expect((screen.getByRole('button', { name: '保存动作权限' }) as HTMLButtonElement).disabled).toBe(false)
+})
+it('reloads externally changed role status and ignores an old pending mutation', async () => {
+  let finish!: (value: unknown) => void
+  const request = vi.fn().mockResolvedValueOnce({ actions }).mockResolvedValueOnce(base).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    .mockResolvedValueOnce({ actions }).mockResolvedValueOnce({ ...base, status: 'disabled', revision: 5 })
+  const view = render(<RolePermissionsPanel request={request} role={roles[0]!} roles={roles} refreshKey={1} />)
+  await screen.findByText('显式拒绝'); fireEvent.change(screen.getByRole('combobox', { name: '任务委派策略' }), { target: { value: 'allow' } }); fireEvent.click(screen.getByRole('button', { name: '保存动作权限' }))
+  view.rerender(<RolePermissionsPanel request={request} role={{ ...roles[0]!, status: 'disabled' }} roles={roles} refreshKey={2} />)
+  await screen.findByText('已保存的权限解释 · v5')
+  await act(async () => { finish({ ...base, revision: 4 }) })
+  expect(screen.queryByText('角色动作权限已保存。')).toBeNull(); expect(screen.getByText(/此角色已停用/u)).toBeTruthy()
+})
+it('removes editable policy after authorization is revoked during a write', async () => {
+  const request = vi.fn().mockResolvedValueOnce({ actions }).mockResolvedValueOnce(base).mockRejectedValueOnce(Object.assign(Error('权限已撤销'), { status: 403 }))
+  render(<RolePermissionsPanel request={request} role={roles[0]!} roles={roles} />)
+  await screen.findByText('显式拒绝'); fireEvent.change(screen.getByRole('combobox', { name: '任务委派策略' }), { target: { value: 'allow' } }); fireEvent.click(screen.getByRole('button', { name: '保存动作权限' }))
+  await screen.findByText('权限已撤销'); expect(screen.queryByRole('combobox', { name: '任务委派策略' })).toBeNull()
+})
+it.each([Error('连接断开'), null])('requires authoritative reload after an uncertain write result %s', async failure => {
+  const request = vi.fn().mockResolvedValueOnce({ actions }).mockResolvedValueOnce(base)
+  if (failure) request.mockRejectedValueOnce(failure)
+  else request.mockResolvedValueOnce({ ...base, revision: 4, resolution: { ...base.resolution, facts: null } })
+  render(<RolePermissionsPanel request={request} role={roles[0]!} roles={roles} />)
+  await screen.findByText('显式拒绝'); fireEvent.change(screen.getByRole('combobox', { name: '任务委派策略' }), { target: { value: 'allow' } }); fireEvent.click(screen.getByRole('button', { name: '保存动作权限' }))
+  expect((await screen.findByRole('alert')).textContent).toContain('请重新读取角色权限')
+  expect((screen.getByRole('button', { name: '保存动作权限' }) as HTMLButtonElement).disabled).toBe(true)
+  expect((screen.getByRole('combobox', { name: '任务委派策略' }) as HTMLSelectElement).value).toBe('allow')
+})
+it('fails closed for malformed authorization decisions instead of rendering a broken panel', async () => {
+  const request = vi.fn().mockResolvedValueOnce({ actions }).mockResolvedValueOnce({ ...base, resolution: { ...base.resolution, actions: { 'task:delegate': { allowed: true, explicit_deny: false } } } })
+  render(<RolePermissionsPanel request={request} role={roles[0]!} roles={roles} />)
+  await screen.findByText('角色权限响应无效，请重试。'); expect(screen.queryByRole('button', { name: '保存动作权限' })).toBeNull()
+})
+it('recomputes inherited permissions after the parent role is disabled', async () => {
+  const withParent = { ...base, parent_role_id: 'operator' }
+  const request = vi.fn().mockResolvedValueOnce({ actions }).mockResolvedValueOnce(withParent)
+    .mockResolvedValueOnce({ actions }).mockResolvedValueOnce({ ...withParent, resolution: { ...base.resolution, effective_roles: ['custom'] } })
+  const view = render(<RolePermissionsPanel request={request} role={roles[0]!} roles={roles} />)
+  await screen.findByText('显式拒绝')
+  view.rerender(<RolePermissionsPanel request={request} role={roles[0]!} roles={roles.map(role => role.id === 'operator' ? { ...role, status: 'disabled' } : role)} />)
+  await screen.findByRole('option', { name: '运营（已停用）' }); expect(request).toHaveBeenCalledTimes(4)
 })

@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { authorityDenied, isRecord } from './access-response.ts'
 import { UserDirectoryPagination, userDirectoryURL } from './user-directory.tsx'
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 interface DirectoryUser { id: string; display_name: string; status?: string; primary_dept_id?: string }
 interface DirectoryPage { users: DirectoryUser[]; total: number; has_more: boolean }
 
-export function DirectoryUserPicker({ request, name = 'manager_user_id', label = '负责人', initialUserId = '', disabled = false }: {
-  request: Request; name?: string; label?: string; initialUserId?: string; disabled?: boolean
-}) {
+interface Props { request: Request; name?: string; label?: string; initialUserId?: string; disabled?: boolean }
+export function DirectoryUserPicker(props: Props) { return <DirectoryUserPickerContent key={props.initialUserId ?? ''} {...props} /> }
+function DirectoryUserPickerContent({ request, name = 'manager_user_id', label = '负责人', initialUserId = '', disabled = false }: Props) {
   const pageSize = 20
   const [selection, setSelection] = useState<DirectoryUser | null>(() => initialUserId ? { id: initialUserId, display_name: initialUserId } : null)
   const [query, setQuery] = useState('')
@@ -16,6 +17,8 @@ export function DirectoryUserPicker({ request, name = 'manager_user_id', label =
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const sequence = useRef(0)
+  const [resetKey, setResetKey] = useState(0)
+  const failedOffset = useRef(0)
   const root = useRef<HTMLDivElement>(null)
   const searchPending = query.trim() !== search
   const currentPage = page.search === search && !searchPending
@@ -27,16 +30,23 @@ export function DirectoryUserPicker({ request, name = 'manager_user_id', label =
     const form = root.current?.closest('form')
     const reset = () => {
       setSelection(initialUserId ? { id: initialUserId, display_name: initialUserId } : null)
-      setQuery(''); setSearch(''); setError('')
+      sequence.current++
+      setQuery(''); setSearch(''); setError(''); setResetKey(current => current + 1)
     }
     form?.addEventListener('reset', reset)
     return () => form?.removeEventListener('reset', reset)
   }, [initialUserId])
   const load = useCallback(async (offset = 0) => {
     const current = ++sequence.current
-    setLoading(true); setError('')
+    setLoading(true); setError(''); failedOffset.current = offset
     try {
-      const read = (requestedOffset: number) => request<DirectoryPage>(userDirectoryURL({ query: search, status: 'active', limit: pageSize, offset: requestedOffset }))
+      const read = async (requestedOffset: number) => {
+        const result = await request<DirectoryPage>(userDirectoryURL({ query: search, status: 'active', limit: pageSize, offset: requestedOffset }))
+        if (!isRecord(result) || !Array.isArray(result.users) || !Number.isSafeInteger(result.total) || result.total < 0 || typeof result.has_more !== 'boolean'
+          || result.users.some(user => !isRecord(user) || typeof user.id !== 'string' || !user.id || typeof user.display_name !== 'string' || typeof user.status !== 'string' || (user.primary_dept_id !== undefined && user.primary_dept_id !== null && typeof user.primary_dept_id !== 'string'))
+          || new Set(result.users.map(user => user.id)).size !== result.users.length) throw Error('用户目录响应无效，请重新读取。')
+        return result
+      }
       let result = await read(offset)
       if (current !== sequence.current) return
       let resolvedOffset = offset
@@ -47,18 +57,21 @@ export function DirectoryUserPicker({ request, name = 'manager_user_id', label =
       }
       setPage({ users: result.users ?? [], total: result.total, offset: resolvedOffset, hasMore: result.has_more, search })
       setSelection(selected => selected ? result.users?.find(user => user.id === selected.id) ?? selected : null)
-    } catch (reason) { if (current === sequence.current) setError(reason instanceof Error ? reason.message : String(reason)) }
+    } catch (reason) { if (current === sequence.current) {
+      if (authorityDenied(reason)) setPage({ users: [], total: 0, offset: 0, hasMore: false, search })
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } }
     finally { if (current === sequence.current) setLoading(false) }
   }, [request, search])
-  useEffect(() => { void load(); return () => { sequence.current++ } }, [load])
+  useEffect(() => { void load(); return () => { sequence.current++ } }, [load, resetKey])
   const unavailable = disabled || loading || !currentPage
   return <div ref={root} className="lumo-directory-user-picker" role="group" aria-label={`${label}选择`}>
     <input type="hidden" name={name} value={selection?.id ?? ''} />
     <label><span>{label}搜索</span><input value={query} disabled={disabled} maxLength={200} placeholder="搜索姓名或用户 ID" onChange={event => setQuery(event.target.value)} /></label>
-    <div className="lumo-user-form-actions"><span className="lumo-section-note">{selection ? `已选择：${selection.display_name} · ${selection.id}` : '未指定负责人'}</span>{selection ? <button type="button" className="lumo-secondary lumo-small" disabled={disabled} onClick={() => setSelection(null)}>清除{label}</button> : null}</div>
-    {error ? <div className="lumo-cluster-feedback error" role="alert">{error}<button type="button" className="lumo-secondary lumo-small" disabled={disabled || loading || searchPending} onClick={() => void load(currentPage ? page.offset : 0)}>重试读取{label}</button></div> : null}
+    <div className="lumo-user-form-actions"><span className="lumo-section-note">{selection ? `已选择：${selection.display_name} · ${selection.id}` : `未指定${label}`}</span>{selection ? <button type="button" className="lumo-secondary lumo-small" disabled={disabled} onClick={() => setSelection(null)}>清除{label}</button> : null}</div>
+    {error ? <div className="lumo-cluster-feedback error" role="alert">{error}<button type="button" className="lumo-secondary lumo-small" disabled={disabled || loading || searchPending} onClick={() => void load(currentPage ? failedOffset.current : 0)}>重试读取{label}</button></div> : null}
     <div className="lumo-organization-users" aria-label={`${label}候选用户`} aria-busy={loading || searchPending}>
-      {page.users.map(user => <button type="button" key={user.id} disabled={unavailable || user.status !== 'active'} aria-pressed={selection?.id === user.id} onClick={() => setSelection(user)}><span><b>{user.display_name}</b><small>{user.id}{user.primary_dept_id ? ` · ${user.primary_dept_id}` : ''}</small></span><em>{selection?.id === user.id ? '已选择' : '选择'}</em></button>)}
+      {page.users.map(user => <button type="button" key={user.id} disabled={unavailable || Boolean(error) || user.status !== 'active'} aria-pressed={selection?.id === user.id} onClick={() => setSelection(user)}><span><b>{user.display_name}</b><small>{user.id}{user.primary_dept_id ? ` · ${user.primary_dept_id}` : ''}</small></span><em>{selection?.id === user.id ? '已选择' : '选择'}</em></button>)}
     </div>
     {!page.users.length && !loading && !error ? <p className="lumo-muted">没有匹配的启用用户。</p> : null}
     <UserDirectoryPagination total={page.total} limit={pageSize} offset={page.offset} hasMore={page.hasMore} loading={unavailable} onOffsetChange={offset => void load(offset)} />

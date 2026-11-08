@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import './user-security-panel.css'
+import { authorityDenied, isRecord, isStringList, responseStatus, validActionCatalog, validActionDecisions } from './access-response.ts'
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 interface SecurityOverview {
@@ -30,7 +31,7 @@ const eventNames: Record<string, string> = {
 const timestamp = (value: string) => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('zh-CN') : '未知时间'
 const message = (reason: unknown) => reason instanceof Error ? reason.message : String(reason)
 function validPage(page: Page, offset: number) {
-  return Number.isSafeInteger(page.total) && page.total >= 0 && page.limit === 25 && page.offset === offset && typeof page.has_more === 'boolean'
+  return isRecord(page) && Number.isSafeInteger(page.total) && page.total >= 0 && page.limit === 25 && page.offset === offset && typeof page.has_more === 'boolean'
 }
 
 export function UserSecurityPanel(props: Props) {
@@ -57,13 +58,23 @@ function UserSecurityContent({ request, userId, userName, refreshKey, disabled =
     const version = ++sequence.current
     pending.current = true; setBusy(true); setError('')
     try {
+      const readPage = async <T extends Page,>(kind: 'sessions' | 'security-events', offset: number): Promise<T> => {
+        let currentOffset = offset
+        for (let attempt = 0; ; attempt++) {
+          const result = await request<T>(`${base}/${kind}?limit=25&offset=${currentOffset}`)
+          if (!validPage(result, currentOffset)) throw new Error('账户安全分页响应无效，请重新读取。')
+          if (version !== sequence.current || currentOffset === 0 || currentOffset < result.total) return result
+          currentOffset = attempt < 2 ? Math.max(0, Math.floor((result.total - 1) / 25) * 25) : 0
+        }
+      }
       const [security, devices, history] = await Promise.all([
-        request<SecurityOverview>(`${base}/security`),
-        request<SessionPage>(`${base}/sessions?limit=25&offset=${sessionOffset}`),
-        request<EventPage>(`${base}/security-events?limit=25&offset=${eventOffset}`),
+        request<SecurityOverview>(`${base}/security`), readPage<SessionPage>('sessions', sessionOffset), readPage<EventPage>('security-events', eventOffset),
       ])
       if (version !== sequence.current) return
-      if (security.user_id !== userId || !Array.isArray(security.actions) || !Array.isArray(security.resolution?.direct_roles) || !Array.isArray(security.resolution?.effective_roles) || !security.resolution.actions || !Array.isArray(devices.sessions) || !Array.isArray(history.events) || !validPage(devices, sessionOffset) || !validPage(history, eventOffset)) throw new Error('账户安全响应无效，请重新读取。')
+      if (!isRecord(security) || security.user_id !== userId || typeof security.status !== 'string' || typeof security.organization_admin !== 'boolean'
+        || !validActionCatalog(security.actions) || !isStringList(security.resolution?.direct_roles) || !isStringList(security.resolution?.effective_roles) || !validActionDecisions(security.resolution.actions)
+        || !Array.isArray(devices.sessions) || devices.sessions.some(session => !isRecord(session) || typeof session.id !== 'string' || !session.id || typeof session.client_ip !== 'string' || typeof session.created_at !== 'string' || typeof session.last_seen_at !== 'string' || typeof session.expires_at !== 'string')
+        || !Array.isArray(history.events) || history.events.some(event => !isRecord(event) || !Number.isSafeInteger(event.id) || typeof event.event !== 'string' || typeof event.created_at !== 'string' || !isRecord(event.detail) || (event.client_ip !== undefined && typeof event.client_ip !== 'string'))) throw new Error('账户安全响应无效，请重新读取。')
       setOverview(security); setSessions(devices); setEvents(history)
     } catch (failure) {
       if (version === sequence.current) {
@@ -90,18 +101,22 @@ function UserSecurityContent({ request, userId, userName, refreshKey, disabled =
       setRevoke(null); setReason(''); setNotice(`已注销 ${result.revoked} 个登录会话。`)
       await load()
     } catch (failure) {
-      if (version === sequence.current) setError(message(failure))
+      if (version === sequence.current) {
+        if (authorityDenied(failure)) { setOverview(null); setSessions(null); setEvents(null); setRevoke(null); setReason('') }
+        else if (responseStatus(failure) === undefined || (responseStatus(failure) ?? 0) >= 500) { setRevoke(null); setReason(''); setOverview(null); setSessions(null); setEvents(null) }
+        setError(`${message(failure)}${responseStatus(failure) === undefined || (responseStatus(failure) ?? 0) >= 500 ? ' 请刷新账户安全确认结果后再操作。' : ''}`)
+      }
     } finally { if (version === sequence.current) { pending.current = false; setBusy(false) } }
   }
   const blocked = busy || disabled
   const pagination = (page: Page, kind: 'sessions' | 'events') => <nav className="lumo-user-security-pagination" aria-label={kind === 'sessions' ? '登录会话分页' : '账户记录分页'}>
     <span>共 {page.total} 条{page.total > page.offset ? ` · ${page.offset + 1}–${Math.min(page.offset + page.limit, page.total)}` : ''}</span>
-    <button type="button" className="lumo-button lumo-secondary lumo-small" disabled={blocked || page.offset === 0} onClick={() => void load(kind === 'sessions' ? Math.max(0, page.offset - page.limit) : sessions!.offset, kind === 'events' ? Math.max(0, page.offset - page.limit) : events!.offset)}>上一页</button>
-    <button type="button" className="lumo-button lumo-secondary lumo-small" disabled={blocked || !page.has_more} onClick={() => void load(kind === 'sessions' ? page.offset + page.limit : sessions!.offset, kind === 'events' ? page.offset + page.limit : events!.offset)}>下一页</button>
+    <button type="button" className="lumo-button lumo-secondary lumo-small" disabled={blocked || Boolean(revoke) || page.offset === 0} onClick={() => void load(kind === 'sessions' ? Math.max(0, page.offset - page.limit) : sessions!.offset, kind === 'events' ? Math.max(0, page.offset - page.limit) : events!.offset)}>上一页</button>
+    <button type="button" className="lumo-button lumo-secondary lumo-small" disabled={blocked || Boolean(revoke) || !page.has_more} onClick={() => void load(kind === 'sessions' ? page.offset + page.limit : sessions!.offset, kind === 'events' ? page.offset + page.limit : events!.offset)}>下一页</button>
   </nav>
 
   return <section className="lumo-user-security" aria-label={`员工访问与安全 · ${userName}`} aria-busy={busy}>
-    <header><div><h3>访问与安全</h3><p>核对员工权限、登录设备与账户变更。</p></div><button type="button" className="lumo-button lumo-secondary lumo-small" disabled={blocked} onClick={() => { if (!pending.current) { setNotice(''); void load() } }}>刷新账户安全</button></header>
+    <header><div><h3>访问与安全</h3><p>核对员工权限、登录设备与账户变更。</p></div><button type="button" className="lumo-button lumo-secondary lumo-small" disabled={blocked || Boolean(revoke)} onClick={() => { if (!pending.current) { setNotice(''); void load() } }}>刷新账户安全</button></header>
     <div role="tablist" aria-label="账户安全视图" className="lumo-user-security-tabs">{([['access', '权限解释'], ['sessions', `登录会话${sessions ? ` · ${sessions.total}` : ''}`], ['events', '账户记录']] as const).map(([id, label]) => <button key={id} id={`security-tab-${userId}-${id}`} type="button" role="tab" aria-selected={tab === id} aria-controls={`security-panel-${userId}`} disabled={Boolean(revoke)} onClick={() => setTab(id)}>{label}</button>)}</div>
     {error ? <p role="alert" className="lumo-user-security-error">{error}</p> : null}
     {notice ? <p role="status" className="lumo-user-security-notice">{notice}</p> : null}

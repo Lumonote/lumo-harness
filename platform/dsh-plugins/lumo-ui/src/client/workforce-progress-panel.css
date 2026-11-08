@@ -28,6 +28,10 @@
 .lumo-workforce-pages{display:flex;justify-content:flex-end;align-items:center;gap:14px;margin:20px 0 0;font-size:12px}
 .lumo-task-progress{margin-top:20px}
 .lumo-progress-details{margin-bottom:16px}
+.lumo-progress-run{color:var(--lumo-muted);font-size:12px;overflow-wrap:anywhere;margin:12px 0}
+.lumo-progress-conflict{border:1px solid color-mix(in srgb,#c17c39 40%,var(--lumo-line));border-radius:10px;padding:12px 14px;background:color-mix(in srgb,#c17c39 7%,var(--lumo-panel));font-size:13px;line-height:1.6}
+.lumo-progress-conflict p{margin:0 0 10px}
+.lumo-progress-conflict>div{display:flex;gap:8px;flex-wrap:wrap}
 .lumo-progress-form{grid-template-columns:1fr 1fr;padding-top:10px}
 .lumo-progress-form .wide,.lumo-progress-form .lumo-form-actions{grid-column:1/-1}
 .lumo-progress-history{margin-top:20px;border-top:1px solid var(--lumo-line);padding-top:16px}

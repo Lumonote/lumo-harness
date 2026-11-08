@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
+import { act, cleanup, fireEvent, render, screen } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ProjectSpacesPanel, ProjectAutomationsPanel, ProjectArtifactsPanel } from '../src/client/project-resources-panel.tsx'
 
@@ -70,5 +70,99 @@ describe('project resource lifecycle panels', () => {
   expect(screen.getByText('Before')).toBeTruthy()
   expect(screen.getByText('auto/1')).toBeTruthy()
   expect(screen.getByText('review')).toBeTruthy()
+ })
+ it('blocks stale submissions until resource reload and ends the obsolete edit explicitly', async () => {
+  const p = { ...shared(), request: vi.fn().mockRejectedValueOnce(Object.assign(new Error('changed'), { status: 409 })).mockResolvedValue({}) }
+  const f = render(<ProjectAutomationsPanel {...p} automations={[automation]} />)
+  fireEvent.click(screen.getByRole('button', { name: '编辑自动化 auto/1' }))
+  fireEvent.change(screen.getByRole('textbox', { name: '自动化触发规则' }), { target: { value: 'draft' } })
+  fireEvent.click(screen.getByRole('button', { name: '保存自动化修改' }))
+  await screen.findByRole('alert')
+  fireEvent.submit(screen.getByRole('textbox', { name: '规则 ID' }).closest('form')!)
+  expect(p.request).toHaveBeenCalledOnce()
+  expect((screen.getByRole('button', { name: '保存自动化修改' }) as HTMLButtonElement).disabled).toBe(true)
+  f.rerender(<ProjectAutomationsPanel {...p} automations={[{ ...automation, revision: 4 }]} />)
+  fireEvent.click(screen.getByRole('button', { name: '重新读取资源并结束编辑' }))
+  await screen.findByText('资源已重新读取，请选择最新记录后编辑。')
+  expect((screen.getByRole('textbox', { name: '规则 ID' }) as HTMLInputElement).value).toBe('')
+  fireEvent.click(screen.getByRole('button', { name: '编辑自动化 auto/1' }))
+  fireEvent.click(screen.getByRole('button', { name: '保存自动化修改' }))
+  await screen.findByText('自动化规则已保存。')
+  expect(JSON.parse(p.request.mock.calls[1]![1].body).expectedRevision).toBe(4)
+ })
+ it('isolates resource drafts and never refreshes a new project after an old save finishes', async () => {
+  let finish!: (value: unknown) => void
+  const p = { ...shared(), request: vi.fn().mockImplementation(() => new Promise(resolve => { finish = resolve })) }
+  const f = render(<ProjectArtifactsPanel {...p} artifacts={[artifact]} />)
+  fireEvent.click(screen.getByRole('button', { name: '更新制品 review' }))
+  fireEvent.change(screen.getByRole('textbox', { name: '制品版本' }), { target: { value: '2' } })
+  fireEvent.click(screen.getByRole('button', { name: '更新制品引用' }))
+  f.rerender(<ProjectArtifactsPanel {...p} projectID="second" artifacts={[artifact]} />)
+  fireEvent.change(screen.getByRole('textbox', { name: '制品名称' }), { target: { value: 'second draft' } })
+  await act(async () => finish({}))
+  expect((screen.getByRole('textbox', { name: '制品名称' }) as HTMLInputElement).value).toBe('second draft')
+  expect(screen.queryByText('制品引用已保存。')).toBeNull()
+  expect(p.refresh).not.toHaveBeenCalled()
+ })
+ it('keeps the resource revision captured when deletion was first confirmed', async () => {
+  const p = shared()
+  const f = render(<ProjectAutomationsPanel {...p} automations={[automation]} />)
+  fireEvent.click(screen.getByRole('button', { name: '删除自动化 auto/1' }))
+  f.rerender(<ProjectAutomationsPanel {...p} automations={[{ ...automation, revision: 4 }]} />)
+  fireEvent.click(screen.getByRole('button', { name: '确认删除自动化' }))
+  await screen.findByText('自动化规则已删除。')
+  expect(p.request).toHaveBeenCalledWith('/lumo/api/projects/p%2F1/automations/auto%2F1?expectedRevision=3', { method: 'DELETE' })
+ })
+ it('keeps the original space name when the resource changes during removal confirmation', async () => {
+  const p = shared()
+  const f = render(<ProjectSpacesPanel {...p} spaces={[space]} />)
+  fireEvent.click(screen.getByRole('button', { name: '移除空间 Before' }))
+  f.rerender(<ProjectSpacesPanel {...p} spaces={[{ ...space, name: 'Someone else renamed' }]} />)
+  fireEvent.click(screen.getByRole('button', { name: '确认移除空间' }))
+  await screen.findByText('空间已从项目移除，知识资料保留。')
+  expect(JSON.parse(p.request.mock.calls[0]![1].body)).toEqual({ expectedName: 'Before' })
+ })
+ it('keeps the original artifact version when the resource changes during removal confirmation', async () => {
+  const p = shared()
+  const f = render(<ProjectArtifactsPanel {...p} artifacts={[artifact]} />)
+  fireEvent.click(screen.getByRole('button', { name: '卸载制品 review' }))
+  f.rerender(<ProjectArtifactsPanel {...p} artifacts={[{ ...artifact, version: '2' }]} />)
+  fireEvent.click(screen.getByRole('button', { name: '确认卸载制品' }))
+  await screen.findByText('制品已从项目卸载，源制品保留。')
+  expect(JSON.parse(p.request.mock.calls[0]![1].body)).toEqual({ expectedVersion: '1' })
+ })
+ it('locks mutations after a successful write whose refresh fails, then retries only the refresh', async () => {
+  const p = { ...shared(), refresh: vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(undefined) }
+  render(<ProjectSpacesPanel {...p} spaces={[space]} />)
+  fireEvent.change(screen.getByRole('textbox', { name: '项目空间名称' }), { target: { value: 'New' } })
+  fireEvent.click(screen.getByRole('button', { name: '创建空间' }))
+  expect((await screen.findByRole('alert')).textContent).toContain('已保存，刷新失败')
+  expect(screen.getByText('项目空间已创建。')).toBeTruthy()
+  expect((screen.getByRole('textbox', { name: '项目空间名称' }) as HTMLInputElement).disabled).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: '重新读取资源并结束编辑' }))
+  await screen.findByText('资源已重新读取，请选择最新记录后编辑。')
+  expect(p.request).toHaveBeenCalledOnce()
+  expect(p.refresh).toHaveBeenCalledTimes(2)
+ })
+ it('clears an edit when the same space is detached', async () => {
+  const p = shared(); render(<ProjectSpacesPanel {...p} spaces={[space]} />)
+  fireEvent.click(screen.getByRole('button', { name: '重命名空间 Before' }))
+  fireEvent.click(screen.getByRole('button', { name: '移除空间 Before' }))
+  fireEvent.click(screen.getByRole('button', { name: '确认移除空间' }))
+  await screen.findByText('空间已从项目移除，知识资料保留。')
+  expect((screen.getByRole('textbox', { name: '项目空间名称' }) as HTMLInputElement).value).toBe('')
+  expect(screen.queryByRole('button', { name: '保存空间名称' })).toBeNull()
+ })
+ it('keeps automation edits from being discarded by an independent enable action', () => {
+  const p = shared(); render(<ProjectAutomationsPanel {...p} automations={[automation]} />)
+  fireEvent.click(screen.getByRole('button', { name: '编辑自动化 auto/1' }))
+  fireEvent.change(screen.getByRole('textbox', { name: '自动化触发规则' }), { target: { value: 'pending edits' } })
+  const toggle = screen.getByRole('button', { name: '启用自动化 auto/1' }) as HTMLButtonElement
+  expect(toggle.disabled).toBe(true)
+  fireEvent.click(toggle)
+  expect(p.request).not.toHaveBeenCalled()
+  expect((screen.getByRole('textbox', { name: '自动化触发规则' }) as HTMLInputElement).value).toBe('pending edits')
+  fireEvent.click(screen.getByRole('checkbox', { name: '规则启用状态' }))
+  expect((screen.getByRole('checkbox', { name: '规则启用状态' }) as HTMLInputElement).checked).toBe(true)
  })
 })

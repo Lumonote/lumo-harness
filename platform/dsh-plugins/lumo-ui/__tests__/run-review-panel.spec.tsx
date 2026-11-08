@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { webcrypto } from 'node:crypto'
-import { cleanup, fireEvent, render, screen, waitFor } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RunReviewPanel, runReviewRequestKey } from '../src/client/run-review-panel.tsx'
 
@@ -33,7 +33,7 @@ describe('independent review task entry', () => {
     chooseAndCreate()
     await screen.findByText('审核任务已创建，等待审核 Agent 执行并提交结论。')
     expect(f.request).toHaveBeenCalledExactlyOnceWith('/lumo/api/tasks/producer/runs/producer%3Aattempt%3A1/review-tasks', expect.objectContaining({ method: 'POST', body: '{"reviewer_worker_id":"agent:reviewer"}', headers: { 'Idempotency-Key': expect.stringMatching(/^ui-review:[a-f0-9]{64}$/u) } }))
-    expect(screen.getByRole('status').textContent).toContain('review-run · QUEUED')
+    expect(screen.getByRole('status').textContent).toContain('review-run · 排队中')
     fireEvent.click(screen.getByRole('button', { name: /打开审核任务/u }))
     expect(f.onOpen).toHaveBeenCalledExactlyOnceWith(receipt.task)
   })
@@ -106,4 +106,45 @@ describe('independent review task entry', () => {
       [actor, 'another-run', 'agent:reviewer'], [actor, run.id, 'agent:another'],
     ] as const) expect(await runReviewRequestKey(who, 'producer', runID, reviewer)).not.toBe(first)
   })
+})
+
+it('ignores an old Run response after switching task scope without relying on the parent key', async () => {
+ let resolve!: (value: typeof receipt) => void
+ const request = vi.fn().mockImplementation(() => new Promise(done => { resolve = done }))
+ const f = mount(request); chooseAndCreate(); await waitFor(() => expect(request).toHaveBeenCalledOnce())
+ f.rerender(<RunReviewPanel request={request} actor={actor} taskID="new-producer" projectID="p1" run={{ ...run, id: 'new-run' }} workers={workers} onOpen={f.onOpen} />)
+ await act(async () => resolve(receipt))
+ expect(screen.queryByRole('status')).toBeNull()
+ expect((screen.getByRole('combobox', { name: '审核 Agent' }) as HTMLSelectElement).value).toBe('')
+ expect((screen.getByRole('button', { name: '创建审核任务' }) as HTMLButtonElement).disabled).toBe(true)
+})
+
+it('refreshes to the latest review attempt and reports execution completion without claiming acceptance', async () => {
+ const latest = { ...receipt.run, id: 'review-run-2', state: 'COMPLETED', attempt: 2 }
+ const request = vi.fn().mockImplementation((path: string, init?: RequestInit) => {
+  if (init?.method === 'POST') return Promise.resolve(receipt)
+  if (path.includes('/delegations/')) return Promise.resolve({ ...receipt.task, business_state: 'VERIFYING' })
+  if (path.endsWith('/runs')) return Promise.resolve({ runs: [{ ...receipt.run, attempt: 1, state: 'FAILED' }, latest] })
+  return Promise.resolve({ task_id: receipt.task.id, run_id: latest.id, state: 'COMPLETED', summary: '审核内容已提交，需要核对产物证据' })
+ })
+ const f = mount(request); chooseAndCreate(); await screen.findByRole('status')
+ fireEvent.click(screen.getByRole('button', { name: '刷新审核状态' }))
+ await screen.findByText('审核内容已提交，需要核对产物证据')
+ expect(screen.getByRole('status').textContent).toContain('review-run-2 · 审核执行完成')
+ expect(screen.getByRole('status').textContent).toContain('原任务验收分别记录')
+ fireEvent.click(screen.getByRole('button', { name: /打开审核任务/u }))
+ expect(f.onOpen).toHaveBeenCalledWith(expect.objectContaining({ business_state: 'VERIFYING' }))
+})
+
+it('does not render a result receipt belonging to another review attempt', async () => {
+ const request = vi.fn().mockImplementation((path: string, init?: RequestInit) => {
+  if (init?.method === 'POST') return Promise.resolve(receipt)
+  if (path.includes('/delegations/')) return Promise.resolve(receipt.task)
+  if (path.endsWith('/runs')) return Promise.resolve({ runs: [{ ...receipt.run, state: 'COMPLETED', attempt: 1 }] })
+  return Promise.resolve({ task_id: receipt.task.id, run_id: 'wrong', state: 'COMPLETED', summary: 'wrong result text' })
+ })
+ mount(request); chooseAndCreate(); await screen.findByRole('status')
+ fireEvent.click(screen.getByRole('button', { name: '刷新审核状态' }))
+ expect((await screen.findByRole('alert')).textContent).toContain('审核回执与当前执行不一致')
+ expect(screen.queryByText('wrong result text')).toBeNull()
 })

@@ -152,3 +152,23 @@ describe('vault knowledge provider', () => {
     rmSync(vault, { recursive: true, force: true })
   })
 })
+
+it('narrows FTS and short-word queries using the same public spaces contract without overriding realm', async () => {
+  const { vault, db } = tempVault(); const subject = new VaultKnowledgeProvider({ vaultRoot: vault, dbPath: db })
+  try {
+    for (const space of ['产品知识', 'operations']) {
+      mkdirSync(join(vault, space)); writeFileSync(join(vault, space, 'note.md'), '# 审批\n\n知识库文档包含审批流程。')
+    }
+    await subject.sync()
+    const target = subject.listSources('local').find(source => source.space === '产品知识')!
+    for (const text of ['知识库文档', '审批']) {
+      const query = { realm: 'local', roles: ['viewer'], text, topK: 1, scope: 'published' as const }
+      expect(subject.query({ ...query, spaces: ['产品知识'] }).map(hit => hit.docId)).toEqual([target.docId])
+      expect(subject.query({ ...query, spaces: [] })).toEqual([])
+      expect(subject.query({ ...query, spaces: ['missing'] })).toEqual([])
+      expect(subject.query({ ...query, spaces: ['产品知识'], realm: 'foreign' })).toEqual([])
+      expect(subject.query({ ...query, spaces: ['产品知识'], scope: 'draft' })).toEqual([])
+    }
+    expect(() => subject.query({ realm: 'local', roles: ['viewer'], text: '审批', topK: 1, scope: 'published', spaces: [''] })).toThrow('invalid knowledge spaces')
+  } finally { subject.close(); rmSync(vault, { recursive: true, force: true }) }
+})

@@ -88,10 +88,14 @@ export class MilvusKnowledgeProvider implements KnowledgeSeam {
   async query(request: KnowledgeQuery): Promise<KnowledgeHit[]> {
     this.authorize(request.roles)
     if (request.scope !== 'published') throw forbidden('MilvusKnowledgeProvider: only published sources are searchable')
+    if (request.spaces?.length === 0) return []
+    const spaceFilter = request.spaces === undefined ? '' : ` && space in [${request.spaces.map(space => `"${escapeFilter(space)}"`).join(', ')}]`
     const [vector] = await this.embedding.embed([request.text])
     const result = await this.client.request<MilvusResult>('/v2/vectordb/entities/search', { method: 'POST', body: JSON.stringify({
       collectionName: this.collection, data: [vector], annsField: 'vector', limit: request.topK,
-      filter: `realm == "${escapeFilter(request.realm)}" && embedding_model == "${escapeFilter(this.embeddingModel)}"`,
+      // Apply space narrowing in Milvus before its candidate limit. PG still
+      // rechecks source versions, realm, Space bindings and document ACLs.
+      filter: `realm == "${escapeFilter(request.realm)}" && embedding_model == "${escapeFilter(this.embeddingModel)}"${spaceFilter}`,
       outputFields: ['doc_id', 'source_version', 'text'],
     }) })
     return (result.data ?? []).map((hit) => ({ docId: hit.doc_id, sourceVersion: hit.source_version, text: hit.text, score: hit.score ?? hit.distance ?? 0 }))
@@ -134,4 +138,4 @@ export class NebulaGraphProvider implements GraphSeam {
   async close(): Promise<void> {}
 }
 
-function escapeFilter(value: string): string { return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"') }
+function escapeFilter(value: string): string { return JSON.stringify(value).slice(1, -1) }

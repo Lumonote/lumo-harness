@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ProjectBudgetPanel } from '../src/client/project-budget-panel.tsx'
 import { DashboardSheet } from '../src/client/index.tsx'
@@ -87,6 +87,31 @@ describe('project budget management', () => {
     fireEvent.click(screen.getByRole('button', { name: '重新读取预算' }))
     await screen.findByRole('form', { name: '预算配置' })
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+  it('never applies the previous project save to the newly selected project', async () => {
+    let finish!: (value: unknown) => void
+    const request = vi.fn().mockResolvedValueOnce(initial)
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+      .mockResolvedValue({ ...initial, projectId: 'second', total: 5000 })
+    const f = mount({ request })
+    await screen.findByRole('form', { name: '预算配置' }); submit()
+    f.rerender(<ProjectBudgetPanel request={request} projectID="second" editable />)
+    await waitFor(() => expect((screen.getByRole('spinbutton', { name: '预算总额' }) as HTMLInputElement).value).toBe('5000'))
+    await act(async () => finish({ ...initial, total: 1200, revision: 4 }))
+    expect((screen.getByRole('spinbutton', { name: '预算总额' }) as HTMLInputElement).value).toBe('5000')
+    expect(screen.queryByText('预算已调整，已用额度保持不变。')).toBeNull()
+  })
+  it.each([{}, { ...initial, projectId: 'other' }, { ...initial, revision: -1 }])('rejects an invalid budget response %j', async response => {
+    mount({ request: vi.fn().mockResolvedValue(response) })
+    expect((await screen.findByRole('alert')).textContent).toContain('预算响应无效')
+    expect(screen.queryByRole('form', { name: '预算配置' })).toBeNull()
+  })
+  it('requires reread after an invalid save receipt instead of claiming success', async () => {
+    mount({ request: vi.fn().mockResolvedValueOnce(initial).mockResolvedValue({}) })
+    await screen.findByRole('form', { name: '预算配置' }); submit()
+    expect((await screen.findByRole('alert')).textContent).toContain('保存回执无效')
+    expect((screen.getByRole('button', { name: '保存预算' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.queryByText('预算已调整，已用额度保持不变。')).toBeNull()
   })
 
   it.each([{ role: 'owner', status: 'active', write: true }, { role: 'editor', status: 'active', write: false }, { role: 'owner', status: 'archived', write: false }])('loads budget on expansion and respects $role/$status write scope', async state => {

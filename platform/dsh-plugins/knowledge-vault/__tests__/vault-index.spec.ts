@@ -119,3 +119,29 @@ describe('vault index (node:sqlite + FTS5)', () => {
     rmSync(db, { force: true })
   })
 })
+
+describe('vault space scope before candidate limits', () => {
+  it.each(['知识库文档', '审批'])('applies space predicates before topK for %s', text => {
+    const db = tempDb(); const index = new VaultIndex(db)
+    try {
+      // Unselected docs are newer, so a post-LIMIT filter would lose selected's result.
+      for (let i = 0; i < 30; i++) index.upsertDoc(doc({ docId: `unselected-${i}`, space: 'other', updatedAt: 1000 + i, chunks: [{ text, metadata: {} }] }))
+      index.upsertDoc(doc({ docId: 'selected', space: 'selected', updatedAt: 1, chunks: [{ text, metadata: {} }] }))
+      index.upsertDoc(doc({ docId: 'foreign', realm: 'other-realm', space: 'selected', updatedAt: 2000, chunks: [{ text, metadata: {} }] }))
+      const hits = index.query('local', text, 1, ['selected'])
+      expect(hits.map(hit => hit.docId)).toEqual(['selected'])
+      expect(index.query('local', text, 10, [])).toEqual([])
+      expect(index.query('local', text, 10, ['missing'])).toEqual([])
+      expect(index.query('local', text, 40)).toHaveLength(31)
+    } finally { index.close(); rmSync(db, { force: true }) }
+  })
+  it.each(['知识库文档', '审批'])('binds Unicode and SQL punctuation selectors as exact data for %s', text => {
+    const db = tempDb(); const index = new VaultIndex(db)
+    try {
+      index.upsertDoc(doc({ docId: 'unicode', space: '项目知识', chunks: [{ text, metadata: {} }] }))
+      index.upsertDoc(doc({ docId: 'quoted', space: "a') OR 1=1 --", chunks: [{ text, metadata: {} }] }))
+      expect(index.query('local', text, 10, ['项目知识']).map(hit => hit.docId)).toEqual(['unicode'])
+      expect(index.query('local', text, 10, ["a') OR 1=1 --"]).map(hit => hit.docId)).toEqual(['quoted'])
+    } finally { index.close(); rmSync(db, { force: true }) }
+  })
+})

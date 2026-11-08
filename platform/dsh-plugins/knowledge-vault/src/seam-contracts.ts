@@ -30,6 +30,8 @@ export interface KnowledgeQuery {
   text: string
   topK: number
   scope: 'published' | 'draft'
+  /** Space narrowing only: omitted is unrestricted; [] returns no hits. */
+  spaces?: readonly string[]
 }
 
 export interface KnowledgeHit {

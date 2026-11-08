@@ -6,7 +6,20 @@ interface Budget {
   state: 'within' | 'soft' | 'overdraft' | 'hard' | 'unconfigured'
 }
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
-export function ProjectBudgetPanel({ request, projectID, editable }: { request: Request; projectID: string; editable: boolean }) {
+interface Props { request: Request; projectID: string; editable: boolean }
+export function ProjectBudgetPanel(props: Props) {
+  return <ProjectBudgetEditor key={props.projectID} {...props} />
+}
+function validBudget(value: unknown, projectID: string): value is Budget {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Budget
+  const nonnegative = (number: unknown) => Number.isSafeInteger(number) && Number(number) >= 0
+  return item.projectId === projectID && item.unit === 'tokens' && nonnegative(item.revision) && nonnegative(item.overdraft)
+    && (item.total === null || nonnegative(item.total)) && (item.softLimit === null || nonnegative(item.softLimit))
+    && (item.remaining === null || Number.isSafeInteger(item.remaining))
+    && ['within', 'soft', 'overdraft', 'hard', 'unconfigured'].includes(item.state)
+}
+function ProjectBudgetEditor({ request, projectID, editable }: Props) {
   const [budget, setBudget] = useState<Budget | null>(null)
   const [total, setTotal] = useState('')
   const [soft, setSoft] = useState('')
@@ -25,13 +38,19 @@ export function ProjectBudgetPanel({ request, projectID, editable }: { request: 
     setMode(next.total === null ? 'reset' : 'adjust'); setConfirm(false); setConflict(false)
   }
   const load = useCallback(async () => {
+    if (pending.current) return
     const current = ++sequence.current
-    setBusy(true); setError('')
-    try { const next = await request<Budget>(path); if (current === sequence.current) accept(next) }
-    catch (reason) { if (current === sequence.current) setError(reason instanceof Error ? reason.message : String(reason)) }
+    setBusy(true); setError(''); setNotice('')
+    try {
+      const next = await request<Budget>(path)
+      if (current !== sequence.current) return
+      if (!validBudget(next, projectID)) throw Error('预算响应无效，请重新读取。')
+      accept(next)
+    }
+    catch (reason) { if (current === sequence.current) { setBudget(null); setError(reason instanceof Error ? reason.message : String(reason)) } }
     finally { if (current === sequence.current) setBusy(false) }
-  }, [request, path])
-  useEffect(() => { void load(); return () => { ++sequence.current } }, [load])
+  }, [request, path, projectID])
+  useEffect(() => { void load(); return () => { ++sequence.current; pending.current = false } }, [load])
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     if (!editable || !budget || pending.current || busy || conflict) return
@@ -39,14 +58,18 @@ export function ProjectBudgetPanel({ request, projectID, editable }: { request: 
     if (!numbers.every(value => Number.isSafeInteger(value) && value >= 0) || numbers[1]! > numbers[0]! || !Number.isSafeInteger(numbers[0]! + numbers[2]!)) { setError('请输入非负整数，软限额不能超过总额。'); return }
     if (mode === 'reset' && !confirm) { setError('重置会重新计算本期可用额度，请先确认。'); return }
     pending.current = true; setBusy(true); setError(''); setNotice('')
+    const current = sequence.current
     try {
       const next = await request<Budget>(path, { method: 'POST', body: JSON.stringify({ mode, total: numbers[0], softLimit: numbers[1], overdraft: numbers[2], expectedRevision: budget.revision, ...(mode === 'reset' ? { confirmReset: true } : {}) }) })
+      if (current !== sequence.current) return
+      if (!validBudget(next, projectID)) { setConflict(true); throw Error('预算保存回执无效，请重新读取后核对。') }
       accept(next); setNotice(mode === 'adjust' ? '预算已调整，已用额度保持不变。' : '本期预算已重置，历史台账保留。')
     } catch (reason) {
+      if (current !== sequence.current) return
       const stale = typeof reason === 'object' && reason !== null && 'status' in reason && reason.status === 409
       if (stale) setConflict(true)
       setError((stale ? '预算已变化，请重新读取后编辑：' : '') + (reason instanceof Error ? reason.message : String(reason)))
-    } finally { pending.current = false; setBusy(false) }
+    } finally { if (current === sequence.current) { pending.current = false; setBusy(false) } }
   }
   return <section className="lumo-section lumo-cluster-panel" aria-label="项目预算">
     <div className="lumo-section-title"><div><h4>项目预算</h4><p className="lumo-section-note">额度单位为 tokens；期中调整保留已用额度，重置用于开始新的预算周期。</p></div><button type="button" className="lumo-secondary" disabled={busy} onClick={() => { setNotice(''); void load() }}>重新读取预算</button></div>

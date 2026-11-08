@@ -144,7 +144,7 @@ export class VaultKnowledgeProvider {
 
   private statusAndQuery(request: KnowledgeQuery): KnowledgeHit[] {
     if (request.topK < 1) return []
-    return this.index.query(this.realm, request.text, Math.min(Math.max(request.topK, 1), 20))
+    return this.index.query(this.realm, request.text, Math.min(Math.max(request.topK, 1), 20), request.spaces)
       .map((hit: VaultQueryHit) => ({ docId: hit.docId, sourceVersion: hit.sourceVersion, score: hit.score, text: hit.text }))
   }
 
