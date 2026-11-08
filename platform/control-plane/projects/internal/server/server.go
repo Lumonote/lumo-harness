@@ -106,6 +106,7 @@ func (s *Server) require(w http.ResponseWriter, r *http.Request, projectID strin
 func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/projects", s.create)
 	mux.HandleFunc("GET /v1/projects", s.list)
+	mux.HandleFunc("GET /v1/projects/directory", s.directory)
 	mux.HandleFunc("GET /v1/projects/{id}", s.get)
 	mux.HandleFunc("PATCH /v1/projects/{id}", s.rename)
 	mux.HandleFunc("GET /v1/projects/{id}/members", s.listMembers)

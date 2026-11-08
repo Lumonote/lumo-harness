@@ -160,6 +160,9 @@ func (s *Store) LinkOIDCUser(ctx context.Context, realm, userID, issuer, subject
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireCurrentRolePolicyAdmin(ctx, tx, realm, actor); err != nil {
+		return err
+	}
 	var username string
 	err = tx.QueryRow(ctx, `SELECT COALESCE(c.username,u.id) FROM governance_users u
 		LEFT JOIN governance_auth_credentials c ON c.realm=u.realm AND c.user_id=u.id
@@ -195,6 +198,9 @@ func (s *Store) UnlinkOIDCUser(ctx context.Context, realm, userID, actor string)
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireCurrentRolePolicyAdmin(ctx, tx, realm, actor); err != nil {
+		return err
+	}
 	before, err := s.activeAdminCount(ctx, tx, realm)
 	if err != nil {
 		return err

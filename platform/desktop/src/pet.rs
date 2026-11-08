@@ -582,17 +582,113 @@ fn evaluate(window: &WebviewWindow, script: String) -> Result<serde_json::Value,
     serde_json::from_str(&result).map_err(|_| "工作台返回了无效状态".to_string())
 }
 
-fn cancellation_result(result: serde_json::Value, failure: String) -> Result<(), String> {
-    // A slow evaluation callback may arrive after the client already applied the
-    // draft. Acknowledging that success avoids encouraging a duplicate retry.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PetAttachment {
+    name: String,
+    mime_type: String,
+    base64: String,
+}
+
+const PET_MAX_FILES: usize = 4;
+const PET_FILE_BYTES: usize = 8 * 1024 * 1024;
+const PET_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+
+fn attachment_bytes(file: &PetAttachment) -> Result<usize, String> {
+    let raw = file.base64.as_bytes();
+    if file.name.is_empty()
+        || file.name.chars().count() > 255
+        || file
+            .name
+            .chars()
+            .any(|ch| ch.is_control() || ch == '/' || ch == '\\')
+        || file.mime_type.len() > 255
+        || file.mime_type.chars().any(char::is_control)
+        || raw.is_empty()
+        || raw.len() > (PET_FILE_BYTES + 2) / 3 * 4
+        || raw.len() % 4 != 0
+    {
+        return Err("附件名称、类型或大小无效".into());
+    }
+    let padding = raw.iter().rev().take_while(|&&ch| ch == b'=').count();
+    if padding > 2
+        || raw[..raw.len() - padding]
+            .iter()
+            .any(|ch| !ch.is_ascii_alphanumeric() && *ch != b'+' && *ch != b'/')
+    {
+        return Err("附件编码无效".into());
+    }
+    let bytes = raw.len() / 4 * 3 - padding;
+    if bytes > PET_FILE_BYTES {
+        return Err("单个附件不能超过 8 MB".into());
+    }
+    Ok(bytes)
+}
+
+fn validate_pet_request(
+    target: &str,
+    draft: &str,
+    workspace_id: Option<&str>,
+    request_id: Option<&str>,
+    attachments: &[PetAttachment],
+) -> Result<bool, String> {
+    if !["home", "chat", "tasks"].contains(&target)
+        || draft.encode_utf16().count() > 12000
+        || (target != "chat"
+            && (!draft.is_empty() || !attachments.is_empty() || workspace_id.is_some()))
+    {
+        return Err("无效的桌宠请求".into());
+    }
+    if let Some(id) = workspace_id {
+        if id.trim().is_empty() || id.len() > 1024 || id.chars().any(char::is_control) {
+            return Err("请选择有效的工作空间".into());
+        }
+    }
+    if let Some(id) = request_id {
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-')
+        {
+            return Err("发送标识无效".into());
+        }
+    }
+    let submitting = target == "chat" && (!draft.trim().is_empty() || !attachments.is_empty());
+    if submitting && (workspace_id.is_none() || request_id.is_none()) {
+        return Err("发送需要工作空间和请求标识".into());
+    }
+    if attachments.len() > PET_MAX_FILES {
+        return Err("最多添加 4 个附件".into());
+    }
+    let mut total = 0;
+    for file in attachments {
+        total += attachment_bytes(file)?;
+    }
+    if total > PET_TOTAL_BYTES {
+        return Err("附件总大小不能超过 16 MB".into());
+    }
+    Ok(submitting)
+}
+
+fn cancellation_result(
+    result: serde_json::Value,
+    failure: String,
+) -> Result<serde_json::Value, String> {
+    // The browser keeps submission IDs after admission starts. A late native
+    // timeout must never encourage replay as a different conversation.
     if result["state"] == "accepted" {
-        Ok(())
+        Ok(result)
     } else {
         Err(failure)
     }
 }
 
-fn cancel_handoff(window: &WebviewWindow, id: &str, failure: String) -> Result<(), String> {
+fn cancel_handoff(
+    window: &WebviewWindow,
+    id: &str,
+    failure: String,
+) -> Result<serde_json::Value, String> {
     match evaluate(
         window,
         format!("window.__lumoDesktopPet?.cancel({id}) ?? {{state:'rejected'}}"),
@@ -602,22 +698,12 @@ fn cancel_handoff(window: &WebviewWindow, id: &str, failure: String) -> Result<(
     }
 }
 
-fn handoff(window: WebviewWindow, target: String, draft: String) -> Result<(), String> {
-    let id = format!("desktop-{}", NEXT_REQUEST.fetch_add(1, Ordering::Relaxed));
-    let id_literal = super::js_string(&id);
-    let expires_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_millis()
-        + 8000;
-    let request = serde_json::json!({ "id": id, "target": target, "draft": draft, "expiresAt": expires_at as u64 })
-        .to_string()
-        .replace('<', "\\u003c");
-    let opened = match evaluate(&window, format!("(() => {{ try {{ return window.__lumoDesktopPet?.open({request}) ?? {{accepted:false,error:'工作台正在加载，请稍后重试'}} }} catch {{ return {{accepted:false,error:'工作台入口暂不可用'}} }} }})()")) {
+fn handoff(window: WebviewWindow, request: serde_json::Value) -> Result<serde_json::Value, String> {
+    let id_literal = super::js_string(request["id"].as_str().ok_or("缺少发送标识")?);
+    let request = request.to_string().replace('<', "\\u003c");
+    let opened = match evaluate(&window, format!("(() => {{ try {{ return window.__lumoDesktopPet?.open({request}) ?? {{accepted:false,error:'工作台正在加载，请稍后重试'}} }} catch {{ return {{accepted:false,error:'桌宠发送入口暂不可用'}} }} }})()")) {
         Ok(result) => result,
-        Err(error) => {
-            return cancel_handoff(&window, &id_literal, error);
-        }
+        Err(error) => return cancel_handoff(&window, &id_literal, error),
     };
     if opened["accepted"] != true {
         return Err(opened["error"]
@@ -625,31 +711,59 @@ fn handoff(window: WebviewWindow, target: String, draft: String) -> Result<(), S
             .unwrap_or("工作台尚未就绪")
             .to_string());
     }
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let result = evaluate(&window, format!("window.__lumoDesktopPet?.result({id_literal}) ?? {{state:'rejected',error:'工作台连接已中断'}}"));
         match result {
-            Ok(result) if result["state"] == "accepted" => return Ok(()),
+            Ok(result) if result["state"] == "accepted" => return Ok(result),
             Ok(result) if result["state"] == "rejected" => {
-                return Err(result["error"]
-                    .as_str()
-                    .unwrap_or("工作台未接收请求")
-                    .to_string())
+                return Err(result["error"].as_str().unwrap_or("消息未受理").to_string())
             }
-            Err(error) => {
-                return cancel_handoff(&window, &id_literal, error);
-            }
+            Err(error) => return cancel_handoff(&window, &id_literal, error),
             _ => {}
         }
         if Instant::now() >= deadline {
             return cancel_handoff(
                 &window,
                 &id_literal,
-                "工作台未及时接收，草稿已保留，请重试".into(),
+                "发送回执尚未确认，草稿和附件已保留；重试会核对同一条消息".into(),
             );
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn connected_main(app: &AppHandle) -> Result<WebviewWindow, String> {
+    let main = super::main_window(app).ok_or("主窗口未创建")?;
+    let expected = app
+        .state::<PetState>()
+        .data
+        .lock()
+        .map_err(|_| "桌宠状态暂不可用")?
+        .runtime_url
+        .clone()
+        .ok_or("请等待本地工作台启动")?;
+    let current = main.url().map_err(|error| error.to_string())?;
+    if current.origin() != expected.origin() {
+        return Err("工作台连接已变化，请重新打开应用".into());
+    }
+    Ok(main)
+}
+
+#[tauri::command]
+pub async fn pet_workspaces(
+    window: WebviewWindow,
+    app: AppHandle,
+) -> Result<serde_json::Value, String> {
+    authorize(&window)?;
+    let main = connected_main(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = evaluate(&main, "(() => { try { return window.__lumoDesktopPet?.workspaces() ?? {error:'工作空间正在加载'} } catch { return {error:'工作空间暂不可用'} } })()".into())?;
+        if let Some(error) = result["error"].as_str() { return Err(error.to_string()); }
+        let items = result["workspaces"].as_array().ok_or("工作空间响应无效")?;
+        if items.len() > 1000 || items.iter().any(|item| !item["id"].is_string() || !item["label"].is_string()) { return Err("工作空间响应无效".into()); }
+        Ok(result)
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -658,35 +772,42 @@ pub async fn pet_open_workbench(
     app: AppHandle,
     target: String,
     draft: String,
-) -> Result<(), String> {
+    workspace_id: Option<String>,
+    request_id: Option<String>,
+    attachments: Option<Vec<PetAttachment>>,
+) -> Result<serde_json::Value, String> {
     authorize(&window)?;
-    if !["home", "chat", "tasks"].contains(&target.as_str())
-        || draft.encode_utf16().count() > 12000
-        || (target != "chat" && !draft.is_empty())
-    {
-        return Err("无效的工作台请求".into());
-    }
-    let main = super::main_window(&app).ok_or("主窗口未创建")?;
-    let expected = app
-        .state::<PetState>()
-        .data
-        .lock()
-        .map_err(|_| "桌宠状态暂不可用")?
-        .runtime_url
-        .clone();
-    let Some(expected) = expected else {
-        if target == "home" {
+    let attachments = attachments.unwrap_or_default();
+    let submitting = validate_pet_request(
+        &target,
+        &draft,
+        workspace_id.as_deref(),
+        request_id.as_deref(),
+        &attachments,
+    )?;
+    let main = match connected_main(&app) {
+        Ok(main) => main,
+        Err(_) if target == "home" => {
             super::show_main_window(&app);
-            return Ok(());
+            return Ok(serde_json::json!({"state":"accepted"}));
         }
-        return Err("请等待本地工作台启动".into());
+        Err(error) => return Err(error),
     };
-    let current = main.url().map_err(|error| error.to_string())?;
-    if current.origin() != expected.origin() {
-        return Err("工作台连接已变化，请重新打开应用".into());
+    if !submitting {
+        super::show_main_window(&app);
     }
-    super::show_main_window(&app);
-    tauri::async_runtime::spawn_blocking(move || handoff(main, target, draft))
+    let id = request_id
+        .unwrap_or_else(|| format!("desktop-{}", NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)));
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis()
+        + 65000;
+    let mut request = serde_json::json!({"id":id,"target":target,"draft":draft,"attachments":attachments,"expiresAt":expires_at as u64});
+    if let Some(id) = workspace_id {
+        request["workspaceId"] = id.into();
+    }
+    tauri::async_runtime::spawn_blocking(move || handoff(main, request))
         .await
         .map_err(|error| error.to_string())?
 }
@@ -805,6 +926,87 @@ mod tests {
         assert_eq!(fs::read_to_string(sentinel).unwrap(), "untouched");
         assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
         fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn message_requests_require_workspace_and_stable_identity() {
+        assert_eq!(
+            validate_pet_request("chat", "hello", Some("workspace-1"), Some("request_1"), &[]),
+            Ok(true)
+        );
+        assert_eq!(
+            validate_pet_request("chat", "", Some("workspace-1"), None, &[]),
+            Ok(false)
+        );
+        assert!(validate_pet_request("chat", "hello", None, Some("request-1"), &[]).is_err());
+        assert!(validate_pet_request("chat", "hello", Some("workspace-1"), None, &[]).is_err());
+        assert!(validate_pet_request(
+            "chat",
+            "hello",
+            Some("workspace-1"),
+            Some("bad/request"),
+            &[]
+        )
+        .is_err());
+        assert!(validate_pet_request("home", "hello", None, None, &[]).is_err());
+        assert!(validate_pet_request("tasks", "", Some("workspace-1"), None, &[]).is_err());
+    }
+
+    #[test]
+    fn attachments_are_bounded_and_encoded_as_plain_base64() {
+        let file = PetAttachment {
+            name: "report.txt".into(),
+            mime_type: "text/plain".into(),
+            base64: "YQ==".into(),
+        };
+        assert_eq!(attachment_bytes(&file), Ok(1));
+        assert_eq!(
+            validate_pet_request(
+                "chat",
+                "",
+                Some("workspace-1"),
+                Some("request-1"),
+                &[file.clone()]
+            ),
+            Ok(true)
+        );
+        for encoded in [
+            "",
+            "=",
+            "data:text/plain;base64,YQ==",
+            "YQ=",
+            "Y===",
+            "YQ==AAAA",
+        ] {
+            assert!(
+                attachment_bytes(&PetAttachment {
+                    base64: encoded.into(),
+                    ..file.clone()
+                })
+                .is_err(),
+                "{encoded}"
+            );
+        }
+        for name in ["../secret", "folder\\report", "bad\nname", ""] {
+            assert!(attachment_bytes(&PetAttachment {
+                name: name.into(),
+                ..file.clone()
+            })
+            .is_err());
+        }
+        assert!(validate_pet_request(
+            "chat",
+            "",
+            Some("workspace-1"),
+            Some("request-1"),
+            &vec![file.clone(); 5]
+        )
+        .is_err());
+        let full = PetAttachment {
+            base64: "AAAA".repeat(PET_FILE_BYTES / 3 + 1),
+            ..file
+        };
+        assert!(attachment_bytes(&full).is_err());
     }
 
     #[test]

@@ -20,7 +20,7 @@ func seedRolePolicyAdmin(t *testing.T, s *Store) {
 }
 func policyRole(t *testing.T, s *Store, id string) domain.Role {
 	t.Helper()
-	r, err := s.CreateRole(context.Background(), domain.Role{Realm: "realm", ID: id, Name: id, Status: "active"})
+	r, err := s.CreateRole(context.Background(), domain.Role{Realm: "realm", ID: id, Name: id, Status: "active"}, "manager")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,8 @@ func TestRolePolicyAuditEventUpgradePreservesOldHistoryAndNewEvents(t *testing.T
 			seedRolePolicyAdmin(t, s)
 			policyRole(t, s, "custom")
 			// Reproduce an already-deployed CHECK that predates role policy events.
-			if _, err := s.pool.Exec(ctx, `ALTER TABLE governance_auth_security_events DROP CONSTRAINT governance_auth_security_events_event_check;
+			if _, err := s.pool.Exec(ctx, `DELETE FROM governance_auth_security_events WHERE event='role_created';
+ ALTER TABLE governance_auth_security_events DROP CONSTRAINT governance_auth_security_events_event_check;
  ALTER TABLE governance_auth_security_events ADD CONSTRAINT governance_auth_security_events_event_check CHECK(event IN ('login_succeeded','login_failed','role_assigned'));
  INSERT INTO governance_auth_security_events(realm,user_id,event) VALUES('realm','manager','login_succeeded')`); err != nil {
 				t.Fatal(err)

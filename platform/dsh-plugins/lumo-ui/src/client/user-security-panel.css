@@ -1,0 +1,40 @@
+.lumo-user-security { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--lumo-line); color: var(--lumo-ink); }
+.lumo-user-security > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.lumo-user-security > header h3 { margin: 0 0 6px; }
+.lumo-user-security p { margin: 0; color: var(--lumo-muted); font-size: 12px; line-height: 1.7; }
+.lumo-user-security button { font: inherit; cursor: pointer; }
+.lumo-user-security button:disabled { cursor: default; opacity: .5; }
+.lumo-user-security-tabs { display: flex; gap: 24px; margin: 18px 0; border-bottom: 1px solid var(--lumo-line); }
+.lumo-user-security-tabs button { border: 0; border-bottom: 2px solid transparent; padding: 10px 0; color: var(--lumo-muted); background: transparent; font-size: 12px; }
+.lumo-user-security-tabs button[aria-selected=true] { border-bottom-color: var(--lumo-mint); color: var(--lumo-ink); }
+.lumo-user-security button:focus-visible, .lumo-user-security summary:focus-visible, .lumo-user-security input:focus-visible { outline: 2px solid var(--lumo-mint); outline-offset: 3px; }
+.lumo-user-security-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 24px; margin: 20px 0; font-size: 12px; }
+.lumo-user-security-facts dt { margin-bottom: 6px; color: var(--lumo-muted); }
+.lumo-user-security-facts dd { margin: 0; overflow-wrap: anywhere; }
+.lumo-user-security-actions > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 16px; padding: 14px 0; border-top: 1px solid var(--lumo-line); font-size: 12px; }
+.lumo-user-security-actions b { font-weight: 550; }
+.lumo-user-security-actions small { display: block; margin-top: 5px; color: var(--lumo-muted); font-size: 11px; line-height: 1.6; }
+.lumo-user-security-actions > div > span { font-size: 11px; color: var(--lumo-muted); }
+.lumo-user-security-actions > div > span[data-allowed=true] { color: var(--lumo-cyan); }
+.lumo-user-security-actions details { grid-column: 1 / -1; color: var(--lumo-muted); font-size: 11px; }
+.lumo-user-security-actions summary { cursor: pointer; }
+.lumo-user-security-actions code { display: block; margin-top: 6px; overflow-wrap: anywhere; }
+.lumo-user-security .lumo-user-security-hint { margin-top: 12px; font-size: 11px; }
+.lumo-user-security-session-toolbar, .lumo-user-security-pagination { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.lumo-user-security-session-toolbar p, .lumo-user-security-pagination > span { flex: 1; }
+.lumo-user-security-sessions, .lumo-user-security-events { margin: 10px 0 0; padding: 0; list-style: none; }
+.lumo-user-security-sessions li { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--lumo-line); }
+.lumo-user-security-sessions li > div { display: grid; min-width: 0; gap: 6px; font-size: 12px; }
+.lumo-user-security-sessions small, .lumo-user-security-sessions code { color: var(--lumo-muted); font-size: 11px; overflow-wrap: anywhere; }
+.lumo-user-security-revoke { display: grid; gap: 14px; padding: 16px; margin-top: 16px; background: var(--lumo-panel-soft); border: 1px solid var(--lumo-line); border-radius: 10px; font-size: 12px; }
+.lumo-user-security-revoke label { display: grid; gap: 8px; }
+.lumo-user-security-revoke input { width: 100%; min-width: 0; padding: 9px 12px; border: 1px solid var(--lumo-line); border-radius: 8px; background: var(--lumo-panel); color: var(--lumo-ink); font: inherit; }
+.lumo-user-security-revoke > div { display: flex; gap: 10px; }
+.lumo-user-security-events li { padding: 14px 0; border-bottom: 1px solid var(--lumo-line); overflow-wrap: anywhere; }
+.lumo-user-security-events li > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; justify-content: space-between; font-size: 12px; }
+.lumo-user-security-events time { color: var(--lumo-faint); font-size: 11px; }
+.lumo-user-security-events p { margin-top: 6px; font-size: 11px; }
+.lumo-user-security-pagination { margin-top: 16px; font-size: 11px; color: var(--lumo-muted); }
+.lumo-user-security .lumo-user-security-error { margin: 12px 0; color: var(--lumo-danger); }
+.lumo-user-security .lumo-user-security-notice { margin: 12px 0; color: var(--lumo-cyan); }
+@media (max-width: 600px) { .lumo-user-security-facts { grid-template-columns: 1fr; } .lumo-user-security-tabs { gap: 16px; } }

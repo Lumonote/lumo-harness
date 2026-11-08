@@ -124,9 +124,16 @@ describe('Lumo native Harness integration', () => {
     accountStatus = 200
     vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const path = typeof input === 'string' ? input : input.toString()
+      const url = new URL(path, 'http://lumo.test')
       calls.push(`${init?.method ?? 'GET'} ${path}`)
       const body =
-        new URL(path, 'http://lumo.test').pathname === '/lumo/api/collaboration/threads' ? fleetResponse ?? {} :
+        url.pathname === '/lumo/api/collaboration/threads' ? fleetResponse ?? {} :
+        url.pathname === '/lumo/api/projects/directory' ? {
+          projects: [{ id: 'growth', name: '增长项目', status: 'active', yourRole: 'owner', memberCount: 2, createdAt: '2026-11-01T00:00:00Z' }],
+          summary: { total: 1, active: 1, archived: 0 }, total: 1,
+          limit: Number(url.searchParams.get('limit') ?? 20), offset: Number(url.searchParams.get('offset') ?? 0), hasMore: false,
+        } :
+        /^\/lumo\/api\/tasks\/[^/]+\/progress$/u.test(url.pathname) ? { current_run_id: '', revision: 0, progress: null, history: [], can_update: false } :
 		init?.method === 'POST' && path === '/lumo/api/flows/launch-flow/run' ? { order: ['start'], outputs: { start: { source: 'lumo-ui-manual' } } } :
 		init?.method === 'POST' && path === '/lumo/api/flows/launch-flow/runs/12/replay' ? { status: 'queued', replay_trigger_id: 13, already_queued: false } :
 		path === '/lumo/api/flows/launch-flow/versions/1' ? { flow_id: 'launch-flow', version: 1, reviewer: 'reviewer-a', definition: { nodes: [{ id: 'start', operator: 'identity' }], edges: [] } } :
@@ -1168,6 +1175,7 @@ describe('Lumo native Harness integration', () => {
       const path = typeof input === 'string' ? input : input.toString()
       let body: unknown
       if (path === '/lumo/api/delegations') body = { tasks: [producer] }
+      else if (path === '/lumo/api/delegations/review-task') body = review
       else if (path === '/lumo/api/tasks/producer-task/runs') body = { runs: [{ id: 'producer-run', task_id: producer.id, worker_id: 'agent:producer', state: 'COMPLETED', attempt: 1, created_at: producer.created_at }] }
       else if (path === '/lumo/api/tasks/producer-task/runs/producer-run/review-tasks') { requests.push(init!); body = { task: review, run: reviewRun } }
       else if (path === '/lumo/api/tasks/review-task/runs') body = { runs: [reviewRun] }

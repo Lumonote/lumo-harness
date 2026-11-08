@@ -1,0 +1,26 @@
+.lumo-project-directory { display: grid; gap: 18px; }
+.lumo-project-directory-summary { display: flex; flex-wrap: wrap; gap: 12px 24px; color: var(--lumo-muted); font-size: 13px; }
+.lumo-project-directory-summary strong { margin-left: 6px; color: var(--lumo-ink); font-variant-numeric: tabular-nums; }
+.lumo-project-directory-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.lumo-project-directory-filters label { display: grid; gap: 6px; color: var(--lumo-muted); font-size: 12px; }
+.lumo-project-directory-filters .lumo-project-directory-search { flex: 1 1 220px; }
+.lumo-project-directory-filters input,
+.lumo-project-directory-filters select { min-height: 36px; width: 100%; padding: 7px 10px; border: 1px solid var(--lumo-line); border-radius: 8px; color: var(--lumo-ink); background: var(--lumo-panel); font: inherit; }
+.lumo-project-directory-filters input:focus-visible,
+.lumo-project-directory-filters select:focus-visible { outline: 2px solid var(--lumo-mint); outline-offset: 1px; }
+.lumo-project-directory-list { display: grid; }
+.lumo-project-directory-item { display: grid; grid-template-columns: minmax(150px, 1fr) auto auto; align-items: center; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--lumo-line); }
+.lumo-project-directory-item:first-child { border-top: 1px solid var(--lumo-line); }
+.lumo-project-directory-identity { display: grid; gap: 5px; min-width: 0; }
+.lumo-project-directory-identity b { color: var(--lumo-ink); overflow-wrap: anywhere; font-size: 14px; }
+.lumo-project-directory-identity small { color: var(--lumo-faint); overflow-wrap: anywhere; font-size: 11px; }
+.lumo-project-directory-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; color: var(--lumo-muted); font-size: 12px; }
+.lumo-project-directory-pagination { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.lumo-project-directory-pagination > span { margin-right: auto; color: var(--lumo-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.lumo-project-directory .lumo-cluster-feedback { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+@media (max-width: 720px) {
+  .lumo-project-directory-item { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+  .lumo-project-directory-meta { grid-column: 1; grid-row: 2; }
+  .lumo-project-directory-item > button { grid-column: 2; grid-row: 1 / 3; }
+  .lumo-project-directory-filters label { flex: 1 1 100px; }
+}

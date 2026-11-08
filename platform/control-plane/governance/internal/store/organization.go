@@ -20,6 +20,9 @@ func (s *Store) UpdateRole(ctx context.Context, role domain.Role, actor string) 
 		return domain.Role{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireCurrentRolePolicyAdmin(ctx, tx, role.Realm, actor); err != nil {
+		return domain.Role{}, err
+	}
 	before, err := s.activeAdminCount(ctx, tx, role.Realm)
 	if err != nil {
 		return domain.Role{}, err
@@ -53,6 +56,9 @@ func (s *Store) UpdateDepartment(ctx context.Context, department domain.Departme
 		return domain.Department{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireCurrentRolePolicyAdmin(ctx, tx, department.Realm, actor); err != nil {
+		return domain.Department{}, err
+	}
 	var oldPath string
 	var oldLevel int
 	err = tx.QueryRow(ctx, `SELECT path,level FROM governance_departments WHERE realm=$1 AND id=$2 FOR UPDATE`, department.Realm, department.ID).Scan(&oldPath, &oldLevel)

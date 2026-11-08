@@ -64,9 +64,10 @@ type CollaborationSummary struct {
 }
 
 type ChildTaskProgress struct {
-	Task   DelegatedTask `json:"task"`
-	Run    *TaskRun      `json:"run,omitempty"`
-	Result *TaskResult   `json:"result,omitempty"`
+	Task     DelegatedTask `json:"task"`
+	Run      *TaskRun      `json:"run,omitempty"`
+	Result   *TaskResult   `json:"result,omitempty"`
+	Progress *TaskProgress `json:"progress,omitempty"`
 }
 
 type CollaborationProgress struct {
@@ -74,4 +75,5 @@ type CollaborationProgress struct {
 	Children []ChildTaskProgress  `json:"children"`
 	Summary  CollaborationSummary `json:"summary"`
 	HasMore  bool                 `json:"has_more"`
+	Progress *TaskProgress        `json:"progress,omitempty"`
 }

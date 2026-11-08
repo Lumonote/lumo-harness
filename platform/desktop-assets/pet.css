@@ -11,10 +11,10 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
-button, textarea, input { font: inherit; }
+button, textarea, input, select { font: inherit; }
 button { -webkit-tap-highlight-color: transparent; cursor: pointer; -webkit-user-select: none; user-select: none; }
-button:disabled, input:disabled { cursor: default; opacity: .44; }
-button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+button:disabled, input:disabled, select:disabled { cursor: default; opacity: .44; }
+button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 [hidden] { display: none !important; }
 svg { width: 20px; height: 20px; flex-shrink: 0; stroke: currentColor; stroke-width: 1.55; stroke-linecap: round; stroke-linejoin: round; }
 p { margin: 0; }
@@ -57,12 +57,24 @@ p { margin: 0; }
 h1 { font-size: 22px; line-height: 1.42; letter-spacing: -.7px; font-weight: 650; margin: 0; }
 .introduction p { margin-top: 8px; font-size: 12px; color: var(--muted); line-height: 1.5; }
 
-.composer { margin-top: 15px; border: 1px solid #e0e6f4; border-radius: 13px; background: #fff; box-shadow: 0 2px 5px #3f60b005; transition: border-color .15s, box-shadow .15s; }
+.workspace-picker { display: flex; align-items: center; gap: 7px; margin-top: 14px; color: var(--muted); font-size: 11px; }
+.workspace-picker label { flex-shrink: 0; }
+.workspace-picker select { flex: 1; min-width: 0; height: 30px; padding: 4px 7px; border: 1px solid #e0e6f4; border-radius: 8px; color: #33415e; background: #fff; text-overflow: ellipsis; }
+.workspace-picker .icon-button { flex-shrink: 0; }
+.workspace-status { margin-top: 4px; color: #a44236; font-size: 11px; line-height: 1.5; }
+.composer { margin-top: 8px; border: 1px solid #e0e6f4; border-radius: 13px; background: #fff; box-shadow: 0 2px 5px #3f60b005; transition: border-color .15s, box-shadow .15s; }
 .composer:focus-within { border-color: #9faefb; box-shadow: 0 0 0 3px #4d6bfe0a; }
 textarea { padding: 12px 12px 4px; width: 100%; height: 70px; min-height: 70px; resize: none; display: block; border: 0; border-radius: 13px; background: transparent; color: #33415e; font-size: 13px; line-height: 1.65; outline: none !important; -webkit-user-select: text; user-select: text; }
 textarea::placeholder { color: #7c89a2; }
 .composer-footer { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 2px 7px 7px 12px; }
 .composer-footer > span { color: #737f97; font-size: 10px; line-height: 1.5; max-width: 235px; }
+.composer-footer > span { flex: 1; }
+.attach-button { flex-shrink: 0; }
+.attachments { list-style: none; display: flex; flex-direction: column; gap: 4px; margin: 3px 9px 8px; padding: 0; max-height: 104px; overflow: auto; }
+.attachment-item { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 3px 5px 3px 8px; border-radius: 7px; background: #f2f5fc; font-size: 11px; }
+.attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.attachment-size { color: var(--muted); font-size: 10px; flex-shrink: 0; }
+.attachment-item .icon-button { width: 23px; height: 23px; font-size: 17px; flex-shrink: 0; }
 .send-button { width: 30px; height: 30px; border: 0; border-radius: 9px; background: var(--accent); color: #fff; display: grid; place-items: center; box-shadow: 0 2px 5px #4d6bfe24; flex-shrink: 0; }
 .send-button:hover:not(:disabled) { background: #3d58e3; }
 .send-button svg { width: 18px; height: 18px; }

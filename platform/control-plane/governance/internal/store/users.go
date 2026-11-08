@@ -153,6 +153,9 @@ func (s *Store) CreateLocalUser(ctx context.Context, input LocalUser, actor stri
 		return domain.User{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireCurrentRolePolicyAdmin(ctx, tx, user.Realm, actor); err != nil {
+		return domain.User{}, err
+	}
 	if err := checkUserDepartment(ctx, tx, user); err != nil {
 		return domain.User{}, err
 	}
@@ -228,6 +231,9 @@ func (s *Store) SetUserCredentials(ctx context.Context, realm, userID, username,
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireCurrentRolePolicyAdmin(ctx, tx, realm, actor); err != nil {
+		return err
+	}
 	var exists bool
 	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM governance_users WHERE realm=$1 AND id=$2)`, realm, userID).Scan(&exists); err != nil {
 		return err
@@ -266,6 +272,9 @@ func (s *Store) RevokeRole(ctx context.Context, realm, userID, roleID, actor str
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireCurrentRolePolicyAdmin(ctx, tx, realm, actor); err != nil {
+		return err
+	}
 	before, err := s.activeAdminCount(ctx, tx, realm)
 	if err != nil {
 		return err

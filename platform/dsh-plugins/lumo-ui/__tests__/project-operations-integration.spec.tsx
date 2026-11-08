@@ -22,6 +22,11 @@ async function mount(status = 'active') {
     const method = init?.method ?? 'GET'
     calls.push(`${method} ${path}`)
     if (path === '/lumo/api/overview') return json(overview)
+    if (new URL(path, 'https://lumo.test').pathname === '/lumo/api/projects/directory') return json({
+      projects: [{ ...project, status, yourRole: 'owner', memberCount: 1, createdAt: overview.generatedAt }],
+      summary: { total: 1, active: status === 'active' ? 1 : 0, archived: status === 'archived' ? 1 : 0 },
+      total: 1, limit: 20, offset: 0, hasMore: false,
+    })
     if (path === '/auth/account') return json({ realm: 'realm-a', userId: 'owner', roles: ['realm_admin'] })
     if (path === '/lumo/api/capabilities') return json({ organization: true })
     if (path === '/lumo/api/governance') return json({})
@@ -39,7 +44,11 @@ async function mount(status = 'active') {
     throw new Error(`Unexpected request ${method} ${path}`)
   }))
   const view = render(<LumoOverlay {...{} as never} />)
-  fireEvent.click(await screen.findByRole('button', { name: /团队项目.*详情/u }))
+  // The overview's first response refreshes the independent project directory.
+  // Wait for that parent load before resolving the button, so the click targets
+  // the settled page instead of a detached row from its preliminary response.
+  await waitFor(() => expect((screen.getByRole('button', { name: '重新读取' }) as HTMLButtonElement).disabled).toBe(false))
+  fireEvent.click(await screen.findByRole('button', { name: '打开项目 团队项目' }))
   const sheet = await screen.findByRole('complementary', { name: '项目详情' })
   return { ...view, calls, sheet: () => within(sheet), failRefresh: () => { failRefresh = true }, allowLifecycle: () => { failLifecycle = false }, reads: () => dashboardReads }
 }

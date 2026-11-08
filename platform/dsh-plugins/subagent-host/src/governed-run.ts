@@ -12,12 +12,13 @@ import { loadPromptReference, type PromptSource } from './prompt-source.ts'
 import { prepareGovernedRun, type PreparedRun } from './run-review.ts'
 import { readChildResult } from './tturn.ts'
 import { CLOSED_FILES_PROFILE,CONTROLLED_FILE_TOOL,ControlledFiles } from './controlled-files.ts'
+import { GovernedProgressReporter } from './task-progress.ts'
 
 /** One explicitly scoped text turn. No host tools or parent cwd/model/policy
  * are inherited from the dispatch payload. The existing process plugins retain
  * the exact owner/project/Agent identity checked at admission. */
 export async function runGovernedTask(ctx: Context, execution: GovernedExecution, binding: WorkerBinding,
-  nodeId: string, stop: AbortSignal, promptSource?: PromptSource, prepare?: (signal: AbortSignal) => Promise<PreparedRun>): Promise<GovernedResult> {
+  nodeId: string, stop: AbortSignal, promptSource?: PromptSource, prepare?: (signal: AbortSignal) => Promise<PreparedRun>, progress?: GovernedProgressReporter): Promise<GovernedResult> {
   const result: GovernedResult = { run_id: execution.runId, task_id: execution.task.id,
     session_ref: execution.sessionRef, node_id: nodeId, state: 'FAILED', summary: '' }
   let dispose: (() => Promise<void>) | undefined
@@ -118,12 +119,17 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
     if(execution.preset.output_profile===CLOSED_FILES_PROFILE&&!closedFiles)throw new Error('Controlled file execution requires the authority profile before Agent creation')
     if(closedFiles){if(execution.preset.output_profile!==CLOSED_FILES_PROFILE||prepared?.review)throw new Error('Controlled file profile differs from its trusted producer preset');files=new ControlledFiles()}
     if(prepared?.review?.manifest.files?.length&&(!prepared.review.read_files||prepared.review.read_files.length!==prepared.review.manifest.files.length||prepared.reviewFileReceipts?.length!==prepared.review.manifest.files.length))throw new Error('Independent reviewer must read every complete file before execution')
+    await progress?.report({ status: 'on_track', percent: 0, summary: 'Runtime admitted this execution and started the Agent', next_step: 'Produce the deliverable required by the task contract',
+      ...(execution.deadlineMS > 0 ? { due_at: new Date(execution.deadlineMS).toISOString() } : {}),
+    }, signal, true).catch(error => ctx.logger.warn('governed task %s initial progress unavailable: %s', execution.runId, error))
+    signal.throwIfAborted()
     const handle = await ctx.agents.create({
       sessionId: SessionId(execution.sessionRef), signal,
       meta: { delegationDepth: depth },
       agentOptions: { provider: binding.provider, model: binding.model },
       setup(childCtx) {
         files?.install(childCtx,execution.sessionRef)
+        if (progress && !closedText && !closedFiles) progress.install(childCtx, signal)
         // 工具白名单：默认全拒，只放行预设列出的知识空间与连接器对应的工具。
         //
         // `restrict` 对不认识的名字会抛错；上面的 scope 检查保证对应插件已经挂载，
@@ -174,6 +180,10 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
     if (Buffer.byteLength(JSON.stringify(result), 'utf8') > (closedFiles?3_000_000:900_000)) {
       result.state = 'FAILED'; result.summary = 'Agent result exceeds the supported receipt size'; delete result.output
     }
+    if (!signal.aborted && result.state === 'COMPLETED') await progress?.report({ status: 'on_track', percent: 100,
+      summary: 'Runtime produced a deliverable; acceptance is pending', next_step: 'Submit the immutable result for independent and requester review',
+      ...(execution.deadlineMS > 0 ? { due_at: new Date(execution.deadlineMS).toISOString() } : {}),
+    }, signal, true).catch(error => ctx.logger.warn('governed task %s final progress unavailable: %s', execution.runId, error))
     return result
   } catch (error) {
     ctx.logger.warn('governed task %s stopped: %s', execution.runId, error)
@@ -230,7 +240,7 @@ export function startGovernedDispatch(ctx: Context, store: GovernedStore, onErro
         const stop = new AbortController()
         if (closed) stop.abort()
         const done = runGovernedTask(ctx, execution, store.config.binding, store.config.nodeId,
-          stop.signal, store.config.promptSource, signal => prepareGovernedRun(store.config, execution, undefined, signal))
+          stop.signal, store.config.promptSource, signal => prepareGovernedRun(store.config, execution, undefined, signal), new GovernedProgressReporter(store.config, execution))
           .then(result => persist(execution, result)).catch(onError).finally(() => active.delete(execution.runId))
         active.set(execution.runId, { execution, stop, done })
       }

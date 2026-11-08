@@ -1,216 +1,226 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { installDesktopPetBridge, registerDesktopPetSurface, type DesktopPetServices } from '../src/client/desktop-pet.ts'
-
+import { webcrypto } from 'node:crypto'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { DESKTOP_PET_ATTACHMENT_LIMITS, installDesktopPetBridge, registerDesktopPetSurface, type DesktopPetResult, type DesktopPetServices, type DesktopPetWorkspaceList } from '../src/client/desktop-pet.ts'
 interface Bridge {
   open(value: unknown): { accepted: boolean; error?: string }
-  result(id: string): { state: string; error?: string }
-  cancel(id: string): { state: string; error?: string }
+  result(id: string): DesktopPetResult
+  cancel(id: string): DesktopPetResult
+  workspaces(): DesktopPetWorkspaceList
 }
 const desktop = window as Window & { __LUMO_DESKTOP__?: boolean; __lumoDesktopPet?: Bridge }
 const disposers: Array<() => void> = []
+beforeEach(() => {
+  vi.stubGlobal('crypto', webcrypto)
+  URL.createObjectURL = vi.fn().mockReturnValue('blob:desktop-pet-preview')
+  URL.revokeObjectURL = vi.fn()
+})
 afterEach(() => {
   for (const dispose of disposers.splice(0).reverse()) dispose()
-  delete desktop.__LUMO_DESKTOP__
-  delete desktop.__lumoDesktopPet
-  vi.restoreAllMocks()
+  delete desktop.__LUMO_DESKTOP__; delete desktop.__lumoDesktopPet
+  Reflect.deleteProperty(window, Symbol.for('@lumo/desktop-pet/requests'))
+  vi.restoreAllMocks(); vi.unstubAllGlobals()
 })
-
 function deferred<T>() {
-  let resolve!: (value: T) => void
-  let reject!: (reason: unknown) => void
+  let resolve!: (value: T) => void; let reject!: (reason: unknown) => void
   const promise = new Promise<T>((accept, refuse) => { resolve = accept; reject = refuse })
   return { promise, resolve, reject }
 }
-async function settle() { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve() }
-
-function mount(options: { surface?: boolean; create?: Promise<string>; ready?: Promise<unknown>; initialization?: 'applied' | 'preserved' | 'blocked' } = {}) {
+async function finished(bridge: Bridge, id: string, state: DesktopPetResult['state'] = 'accepted') {
+  await vi.waitFor(() => expect(bridge.result(id).state).toBe(state)); return bridge.result(id)
+}
+function mount(options: { surface?: boolean; create?: Promise<string>; ready?: Promise<unknown> } = {}) {
   desktop.__LUMO_DESKTOP__ = true
-  const navigation = new AbortController()
-  const surface = vi.fn()
-  const binding = { sessionId: 'new-session' }
-  const release = vi.fn()
+  const navigation = new AbortController(); const surface = vi.fn(); const release = vi.fn(); const abandon = vi.fn()
+  type Session = NonNullable<NonNullable<ReturnType<DesktopPetServices['sessions']['binding']>>['session']>
+  const prompt = vi.fn<Session['prompt']>().mockResolvedValue({ ok: true })
+  const beginSubmission = vi.fn<Session['beginSubmission']>().mockReturnValue({ requestId: 'host-request-id', abandon })
+  const binding = { sessionId: 'new-session', session: { prompt, beginSubmission } }
   const services: DesktopPetServices = {
     sessions: {
       list: { getSnapshot: () => ({ phase: 'ready', byId: { 'old-session': { updatedAt: 10, retainedBy: { mainView: 1 } }, 'other-session': { updatedAt: 20 } } }) },
       create: vi.fn(() => options.create ?? Promise.resolve('new-session')),
-      retain: vi.fn(() => ({ ready: options.ready ?? Promise.resolve(), release })),
-      binding: vi.fn(() => binding),
+      retain: vi.fn(() => ({ ready: options.ready ?? Promise.resolve(), release })), binding: vi.fn(() => binding),
     },
     workspaces: { list: { getSnapshot: () => ({ phase: 'ready', items: [
-      { workspaceId: 'current-workspace', sessionIds: ['old-session'], createdAt: '2026-01-01T00:00:00Z' },
-      { workspaceId: 'other-workspace', sessionIds: ['other-session'], createdAt: '2026-02-01T00:00:00Z' },
+      { workspaceId: 'current-workspace', title: '当前项目', path: '/current', sessionIds: ['old-session'], createdAt: '2026-01-01T00:00:00Z' },
+      { workspaceId: 'other-workspace', path: '/other', sessionIds: ['other-session'], createdAt: '2026-02-01T00:00:00Z' },
     ] }) } },
-    conversation: { input: { requestDraftInitialization: vi.fn(() => options.initialization ?? 'applied') } },
-    uiWorkspace: { openSession: vi.fn() },
-    layout: { beginNavigation: vi.fn(() => navigation.signal), selectPanel: vi.fn() },
+    conversation: { input: { requestDraftInitialization: vi.fn(() => 'applied') } },
+    fileUpload: {
+      upload: vi.fn().mockResolvedValue({ ok: true, value: { receiptId: 'file-receipt', file: { name: 'report.pdf', bytes: 3, attachmentId: 'sha256:file' } } }),
+      uploadImage: vi.fn().mockResolvedValue({ ok: true, value: { receiptId: 'image-receipt', image: { name: 'picture.png' } } }),
+    },
+    uiWorkspace: { openSession: vi.fn() }, layout: { beginNavigation: vi.fn(() => navigation.signal), selectPanel: vi.fn() },
   }
   if (options.surface !== false) disposers.push(registerDesktopPetSurface(window, surface))
-  const dispose = installDesktopPetBridge(window, services)
-  disposers.push(dispose)
-  return { services, bridge: desktop.__lumoDesktopPet!, navigation, surface, binding, release, dispose }
+  const dispose = installDesktopPetBridge(window, services); disposers.push(dispose)
+  return { services, bridge: desktop.__lumoDesktopPet!, navigation, surface, release, dispose, prompt, beginSubmission, abandon }
 }
-
-describe('桌宠工作台握手', () => {
-  it('过期的原生排队请求不会创建对话', () => {
-    const { bridge, services } = mount()
-    expect(bridge.open({ id: 'expired', target: 'chat', draft: 'keep', expiresAt: Date.now() - 1 }).accepted).toBe(false)
-    expect(services.sessions.create).not.toHaveBeenCalled()
-  })
-
-  it('原生回执与取消均迟到时，过期的异步创建不会带入草稿', async () => {
-    const now = Date.now()
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
-    const create = deferred<string>()
-    const { bridge, services } = mount({ create: create.promise })
-    expect(bridge.open({ id: 'deadline', target: 'chat', draft: 'keep', expiresAt: now + 8000 }).accepted).toBe(true)
-    clock.mockReturnValue(now + 8000)
-    create.resolve('new-session')
-    await settle()
-    expect(bridge.result('deadline').state).toBe('rejected')
-    expect(services.sessions.retain).not.toHaveBeenCalled()
-    expect(services.conversation.input.requestDraftInitialization).not.toHaveBeenCalled()
-  })
+const file = { name: 'report.pdf', mimeType: 'application/pdf', base64: 'YWJj' }
+const picture = { name: 'picture.png', mimeType: 'image/png', base64: 'aW1n' }
+describe('桌宠宿主消息提交', () => {
   it('普通浏览器不安装桌面桥', () => {
-    const stop = installDesktopPetBridge(window, {} as DesktopPetServices)
-    expect(desktop.__lumoDesktopPet).toBeUndefined()
-    stop()
+    const stop = installDesktopPetBridge(window, {} as DesktopPetServices); expect(desktop.__lumoDesktopPet).toBeUndefined(); stop()
   })
-
-  it('创建独立对话并实际接收草稿后才确认，保留当前会话的草稿', async () => {
-    const ready = deferred<void>()
-    const { services, bridge, binding, surface, release } = mount({ ready: ready.promise })
-    expect(bridge.open({ id: 'request-1', target: 'chat', draft: '  <idea>\n不自动发送  ' })).toEqual({ accepted: true })
-    await settle()
-    expect(bridge.result('request-1').state).toBe('pending')
+  it('宿主确认提交后才成功，保留准确文本，不切换主窗或写入草稿', async () => {
+    const ready = deferred<void>(); const receipt = deferred<{ ok: boolean }>()
+    const { services, bridge, prompt, beginSubmission, surface, release } = mount({ ready: ready.promise }); prompt.mockReturnValue(receipt.promise)
+    const draft = '  <idea>\n请直接发送  '
+    expect(bridge.open({ id: 'send', target: 'chat', draft })).toEqual({ accepted: true })
+    await vi.waitFor(() => expect(services.sessions.retain).toHaveBeenCalledOnce()); expect(prompt).not.toHaveBeenCalled(); ready.resolve()
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce())
+    expect(bridge.result('send')).toMatchObject({ state: 'pending', phase: 'submitting', sessionId: 'new-session' })
+    expect(beginSubmission).toHaveBeenCalledWith({ mode: 'queue', text: draft, attachments: [], onAccept: expect.any(Function) })
+    expect(prompt).toHaveBeenCalledWith([{ type: 'text', text: draft }], 'queue', undefined, 'host-request-id')
+    receipt.resolve({ ok: true }); expect(await finished(bridge, 'send')).toEqual({ state: 'accepted', sessionId: 'new-session' })
     expect(services.sessions.create).toHaveBeenCalledWith({ workspaceId: 'current-workspace' })
-    expect(services.conversation.input.requestDraftInitialization).not.toHaveBeenCalled()
-    ready.resolve()
-    await settle()
-    expect(services.conversation.input.requestDraftInitialization).toHaveBeenCalledWith(binding, { prompt: '  <idea>\n不自动发送  ', whenDraftExists: 'keep' })
-    expect(services.uiWorkspace.openSession).toHaveBeenCalledWith('new-session')
-    expect(surface).toHaveBeenCalledWith('home')
-    expect(bridge.result('request-1')).toEqual({ state: 'accepted' })
-    expect(release).toHaveBeenCalledOnce()
+    expect(services.conversation.input.requestDraftInitialization).not.toHaveBeenCalled(); expect(services.uiWorkspace.openSession).not.toHaveBeenCalled()
+    expect(services.layout.beginNavigation).not.toHaveBeenCalled(); expect(surface).not.toHaveBeenCalled(); expect(release).toHaveBeenCalledOnce()
   })
-
-  it('新建空对话不更改任何草稿', async () => {
-    const { bridge, services } = mount()
-    bridge.open({ id: 'empty', target: 'chat', draft: '' })
-    await settle()
-    expect(bridge.result('empty')).toEqual({ state: 'accepted' })
-    expect(services.conversation.input.requestDraftInitialization).not.toHaveBeenCalled()
+  it('宿主已经接受后引用清理失败不能改成可重发状态', async () => {
+    const { bridge, release, prompt } = mount(); release.mockImplementationOnce(() => { throw Error('cleanup failed') })
+    const request = { id: 'cleanup', target: 'chat', draft: 'run' }; bridge.open(request); await finished(bridge, request.id)
+    bridge.open(request); await finished(bridge, request.id); expect(prompt).toHaveBeenCalledOnce()
   })
-
-  it.each(['preserved', 'blocked'] as const)('宿主返回 %s 时拒绝确认，桌宠可继续保留草稿', async initialization => {
-    const { bridge, services, release } = mount({ initialization })
-    bridge.open({ id: 'refused', target: 'chat', draft: 'idea' })
-    await settle()
-    expect(bridge.result('refused').state).toBe('rejected')
-    expect(services.uiWorkspace.openSession).not.toHaveBeenCalled()
-    expect(release).toHaveBeenCalledOnce()
+  it('取消内容校验不能把未校验请求错误确认成历史成功', async () => {
+    const { bridge, prompt } = mount(); const request = { id: 'cancel-check', target: 'chat', draft: 'run' }
+    bridge.open(request); await finished(bridge, request.id)
+    const hash = deferred<ArrayBuffer>(); vi.spyOn(webcrypto.subtle, 'digest').mockReturnValueOnce(hash.promise)
+    bridge.open({ ...request, draft: 'different' }); expect(bridge.cancel(request.id).state).toBe('rejected')
+    hash.resolve(new ArrayBuffer(32)); await Promise.resolve(); await Promise.resolve()
+    expect(bridge.result(request.id).state).toBe('rejected')
+    bridge.open(request); await finished(bridge, request.id); expect(prompt).toHaveBeenCalledOnce()
   })
-
-  it('超时取消后，迟到的创建结果不能写入草稿或切换会话', async () => {
-    const create = deferred<string>()
-    const { bridge, services } = mount({ create: create.promise })
-    bridge.open({ id: 'late', target: 'chat', draft: 'keep me' })
-    expect(bridge.cancel('late').state).toBe('rejected')
-    create.resolve('new-session')
-    await settle()
-    expect(services.sessions.retain).not.toHaveBeenCalled()
-    expect(services.conversation.input.requestDraftInitialization).not.toHaveBeenCalled()
-    expect(services.uiWorkspace.openSession).not.toHaveBeenCalled()
-    expect(bridge.result('late').state).toBe('rejected')
+  it('空对话按钮仍导航，但不提交消息', async () => {
+    const { bridge, services, prompt, surface } = mount(); bridge.open({ id: 'empty', target: 'chat', draft: '' }); await finished(bridge, 'empty')
+    expect(services.uiWorkspace.openSession).toHaveBeenCalledWith('new-session'); expect(surface).toHaveBeenCalledWith('home'); expect(prompt).not.toHaveBeenCalled()
   })
-
-  it('先到达的取消阻止迟到的open复活；已接受请求取消仍返回成功', async () => {
-    const { bridge, services } = mount()
-    expect(bridge.cancel('cancel-before-open').state).toBe('rejected')
-    expect(bridge.open({ id: 'cancel-before-open', target: 'chat', draft: 'late' }).accepted).toBe(false)
-    expect(services.sessions.create).not.toHaveBeenCalled()
-    bridge.open({ id: 'accepted', target: 'home', draft: '' })
-    await settle()
-    expect(bridge.cancel('accepted')).toEqual({ state: 'accepted' })
-  })
-
-  it('用户后续导航优先，释放保留引用并停止原请求', async () => {
-    const ready = deferred<void>()
-    const { bridge, services, navigation, release } = mount({ ready: ready.promise })
-    bridge.open({ id: 'superseded', target: 'chat', draft: 'idea' })
-    await settle()
-    navigation.abort()
-    ready.resolve()
-    await settle()
-    expect(bridge.result('superseded').state).toBe('rejected')
-    expect(services.conversation.input.requestDraftInitialization).not.toHaveBeenCalled()
-    expect(release).toHaveBeenCalledOnce()
-  })
-
-  it('重复请求幂等，冲突请求和并发请求均拒绝入队', async () => {
-    const create = deferred<string>()
-    const { bridge, services } = mount({ create: create.promise })
-    const request = { id: 'same', target: 'chat', draft: 'idea' }
-    expect(bridge.open(request)).toEqual({ accepted: true })
-    expect(bridge.open(request)).toEqual({ accepted: true })
-    expect(bridge.open({ ...request, draft: 'other' }).accepted).toBe(false)
-    expect(bridge.open({ ...request, id: 'different' }).accepted).toBe(false)
-    expect(services.sessions.create).toHaveBeenCalledOnce()
-    create.resolve('new-session')
-    await settle()
-    expect(bridge.open(request)).toEqual({ accepted: true })
-    expect(services.sessions.create).toHaveBeenCalledOnce()
-  })
-
-  it('任务和主页只切换视图，界面未挂载时拒绝确认', async () => {
-    const { bridge, services, surface } = mount()
-    bridge.open({ id: 'tasks', target: 'tasks', draft: '' })
-    await settle()
-    expect(services.layout.selectPanel).toHaveBeenCalledWith(null)
-    expect(surface).toHaveBeenCalledWith('tasks')
-    expect(bridge.result('tasks')).toEqual({ state: 'accepted' })
-    expect(services.sessions.create).not.toHaveBeenCalled()
-    const absent = mount({ surface: false })
-    // Simulate a loader replay after the old overlay has unmounted.
-    for (const dispose of disposers.splice(0, 1)) dispose()
-    absent.bridge.open({ id: 'absent', target: 'home', draft: '' })
-    await settle()
-    expect(absent.bridge.result('absent').state).toBe('rejected')
-  })
-
-  it('无工作区时给出可恢复错误，不创建无归属会话', async () => {
-    const { bridge, services } = mount()
-    services.workspaces.list.getSnapshot = () => ({ phase: 'ready', items: [] })
-    bridge.open({ id: 'no-workspace', target: 'chat', draft: 'idea' })
-    await settle()
-    expect(bridge.result('no-workspace').error).toContain('添加工作区')
-    expect(services.sessions.create).not.toHaveBeenCalled()
-  })
-
-  it('无当前会话时继承最近活动的工作区', async () => {
-    const { bridge, services } = mount()
-    services.sessions.list.getSnapshot = () => ({ phase: 'ready', byId: { 'other-session': { updatedAt: Date.parse('2026-03-01T00:00:00Z') } } })
-    bridge.open({ id: 'recent', target: 'chat', draft: '' })
-    await settle()
+  it('列出真实工作区并允许明确选择，删除的工作区拒绝发送', async () => {
+    const { bridge, services, prompt } = mount()
+    expect(bridge.workspaces()).toEqual({ workspaces: [{ id: 'current-workspace', label: '当前项目', path: '/current' }, { id: 'other-workspace', label: '/other', path: '/other' }], selectedWorkspaceId: 'current-workspace' })
+    bridge.open({ id: 'selected', target: 'chat', draft: 'run', workspaceId: 'other-workspace' }); await finished(bridge, 'selected')
     expect(services.sessions.create).toHaveBeenCalledWith({ workspaceId: 'other-workspace' })
+    bridge.open({ id: 'removed', target: 'chat', draft: 'run', workspaceId: 'missing' })
+    expect((await finished(bridge, 'removed', 'rejected')).error).toContain('已移除'); expect(prompt).toHaveBeenCalledOnce()
   })
-
-  it('服务卸载取消待处理请求，旧 disposer 不能移除新版桥', async () => {
-    const create = deferred<string>()
-    const first = mount({ create: create.promise })
-    first.bridge.open({ id: 'first', target: 'chat', draft: 'idea' })
-    const second = mount()
-    first.dispose()
-    create.resolve('new-session')
-    await settle()
-    expect(first.bridge.result('first').state).toBe('rejected')
-    expect(first.services.conversation.input.requestDraftInitialization).not.toHaveBeenCalled()
-    expect(desktop.__lumoDesktopPet).toBe(second.bridge)
+  it('无当前会话选择最近工作区，无工作区不创建孤立会话', async () => {
+    const { bridge, services } = mount(); services.sessions.list.getSnapshot = () => ({ phase: 'ready', byId: { 'other-session': { updatedAt: Date.parse('2026-03-01T00:00:00Z') } } })
+    expect(bridge.workspaces().selectedWorkspaceId).toBe('other-workspace'); services.workspaces.list.getSnapshot = () => ({ phase: 'ready', items: [] })
+    bridge.open({ id: 'none', target: 'chat', draft: 'idea' })
+    expect((await finished(bridge, 'none', 'rejected')).error).toContain('添加工作区'); expect(services.sessions.create).not.toHaveBeenCalled()
   })
-
-  it.each([null, {}, { id: '../bad', target: 'home', draft: '' }, { id: 'bad', target: 'execute', draft: '' }, { id: 'bad', target: 'tasks', draft: 'private' }, { id: 'bad', target: 'chat', draft: 'a'.repeat(12001) }])('拒绝非法请求 %j', value => {
-    const { bridge, services } = mount()
-    expect(bridge.open(value).accepted).toBe(false)
-    expect(services.sessions.create).not.toHaveBeenCalled()
+  it('附件经公开服务上传并按原顺序携带回执，支持纯附件', async () => {
+    const { bridge, services, prompt, beginSubmission } = mount()
+    bridge.open({ id: 'files', target: 'chat', draft: '', attachments: [file, picture] }); await finished(bridge, 'files')
+    expect(services.fileUpload!.upload).toHaveBeenCalledWith('new-session', new Uint8Array([97, 98, 99]), 'report.pdf', expect.any(AbortSignal))
+    expect(services.fileUpload!.uploadImage).toHaveBeenCalledWith('new-session', expect.any(Blob), 'image/png', 'picture.png', expect.any(AbortSignal))
+    expect(prompt).toHaveBeenCalledWith([{ type: 'file', receiptId: 'file-receipt' }, { type: 'file', receiptId: 'image-receipt' }], 'queue', undefined, 'host-request-id')
+    expect(beginSubmission.mock.calls[0]![0].attachments).toEqual([{ type: 'file', value: { name: 'report.pdf', bytes: 3, attachmentId: 'sha256:file' } }, { type: 'image', value: { previewUrl: 'blob:desktop-pet-preview', name: 'picture.png' } }])
+    beginSubmission.mock.calls[0]![0].onRetire!(); expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:desktop-pet-preview')
+  })
+  it('附件失败重试复用会话与已上传回执', async () => {
+    const { bridge, services, prompt } = mount()
+    vi.mocked(services.fileUpload!.uploadImage).mockResolvedValueOnce({ ok: false, error: { message: '上传暂不可用' } }).mockResolvedValue({ ok: true, value: { receiptId: 'image-receipt' } })
+    const request = { id: 'retry-files', target: 'chat', draft: 'inspect', attachments: [file, picture] }; bridge.open(request)
+    expect((await finished(bridge, request.id, 'rejected')).retryable).toBe(true); expect(prompt).not.toHaveBeenCalled()
+    bridge.open(request); await finished(bridge, request.id)
+    expect(services.sessions.create).toHaveBeenCalledOnce(); expect(services.fileUpload!.upload).toHaveBeenCalledOnce()
+    expect(services.fileUpload!.uploadImage).toHaveBeenCalledTimes(2); expect(prompt).toHaveBeenCalledOnce()
+  })
+  it('无附件服务仍可发送纯文本，附件返回明确错误', async () => {
+    const { bridge, services, prompt } = mount(); delete services.fileUpload
+    bridge.open({ id: 'text', target: 'chat', draft: 'hello' }); await finished(bridge, 'text')
+    bridge.open({ id: 'unavailable', target: 'chat', draft: '', attachments: [file] })
+    expect((await finished(bridge, 'unavailable', 'rejected')).error).toContain('附件上传服务'); expect(prompt).toHaveBeenCalledOnce()
+  })
+  it('明确拒绝可重试同一会话；网络不确定时禁止重发', async () => {
+    const { bridge, services, prompt, abandon } = mount(); const request = { id: 'rejected', target: 'chat', draft: 'run' }
+    prompt.mockResolvedValueOnce({ ok: false, error: { code: 'session/agent-busy', message: '暂不可用' } }); bridge.open(request)
+    expect((await finished(bridge, request.id, 'rejected')).retryable).toBe(true); expect(abandon).toHaveBeenCalledOnce()
+    bridge.open(request); await finished(bridge, request.id); expect(services.sessions.create).toHaveBeenCalledOnce(); expect(prompt).toHaveBeenCalledTimes(2)
+    prompt.mockRejectedValueOnce(Error('connection lost')); const uncertain = { ...request, id: 'uncertain' }; bridge.open(uncertain)
+    expect(await finished(bridge, uncertain.id, 'rejected')).toMatchObject({ retryable: false, sessionId: 'new-session', error: expect.stringContaining('不会自动重发') })
+    bridge.open(uncertain); await finished(bridge, uncertain.id, 'rejected'); expect(prompt).toHaveBeenCalledTimes(3)
+  })
+  it.each(['gateway/internal', 'gateway/cancelled', 'gateway/result-invalid'])('官方网关 %s 失败回包也不可盲目重发', async code => {
+    const { bridge, prompt } = mount(); prompt.mockResolvedValueOnce({ ok: false, error: { code, message: 'transport failure' } })
+    const request = { id: 'gateway-failure', target: 'chat', draft: 'run' }; bridge.open(request)
+    expect((await finished(bridge, request.id, 'rejected')).retryable).toBe(false)
+    bridge.open(request); await finished(bridge, request.id, 'rejected'); expect(prompt).toHaveBeenCalledOnce()
+  })
+  it('提交后取消不打断任务，Inbox先确认即成功，迟到错误不覆盖成功', async () => {
+    const receipt = deferred<{ ok: boolean }>(); const { bridge, prompt, beginSubmission } = mount(); prompt.mockReturnValue(receipt.promise)
+    bridge.open({ id: 'admission', target: 'chat', draft: 'run', expiresAt: Date.now() + 3000 }); await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce())
+    expect(bridge.cancel('admission')).toMatchObject({ state: 'pending', phase: 'submitting' }); beginSubmission.mock.calls[0]![0].onAccept()
+    expect(bridge.result('admission').state).toBe('accepted'); receipt.reject(Error('late network error'))
+    expect(await finished(bridge, 'admission')).toMatchObject({ sessionId: 'new-session' })
+  })
+  it('取消后立即重试与迟到创建共用会话，旧任务不会覆盖新状态', async () => {
+    const create = deferred<string>(); const { bridge, services, prompt } = mount({ create: create.promise }); const request = { id: 'cancel-retry', target: 'chat', draft: 'run' }
+    bridge.open(request); await vi.waitFor(() => expect(services.sessions.create).toHaveBeenCalledOnce()); expect(bridge.cancel(request.id).state).toBe('rejected')
+    bridge.open(request); create.resolve('new-session'); await finished(bridge, request.id)
+    expect(services.sessions.create).toHaveBeenCalledOnce(); expect(prompt).toHaveBeenCalledOnce()
+  })
+  it('取消后迟到上传不会发送消息或复用该回执', async () => {
+    const upload = deferred<{ ok: boolean; value: { receiptId: string } }>(); const { bridge, services, prompt } = mount()
+    vi.mocked(services.fileUpload!.upload).mockReturnValueOnce(upload.promise); const request = { id: 'cancel-upload', target: 'chat', draft: 'run', attachments: [file] }
+    bridge.open(request); await vi.waitFor(() => expect(services.fileUpload!.upload).toHaveBeenCalledOnce()); bridge.cancel(request.id)
+    upload.resolve({ ok: true, value: { receiptId: 'late' } }); await Promise.resolve(); await Promise.resolve()
+    expect(bridge.result(request.id).state).toBe('rejected'); expect(prompt).not.toHaveBeenCalled()
+    bridge.open(request); await finished(bridge, request.id); expect(services.fileUpload!.upload).toHaveBeenCalledTimes(2)
+    expect(prompt.mock.calls[0]![0][0]).toEqual({ type: 'file', receiptId: 'file-receipt' })
+  })
+  it('重复请求只查状态，指纹冲突拒绝，缓存不保留原始附件', async () => {
+    const { bridge, services, prompt } = mount(); const request = { id: 'same', target: 'chat', draft: 'idea', attachments: [file] }
+    bridge.open(request); await finished(bridge, request.id); bridge.open({ ...request, expiresAt: Date.now() + 5000 }); await finished(bridge, request.id)
+    bridge.open({ ...request, attachments: [{ ...file, base64: 'ZGVm' }] }); expect((await finished(bridge, request.id, 'rejected')).error).toContain('冲突')
+    bridge.open(request); await finished(bridge, request.id); expect(prompt).toHaveBeenCalledOnce(); expect(services.sessions.create).toHaveBeenCalledOnce()
+    const ledger = Reflect.get(window, Symbol.for('@lumo/desktop-pet/requests')); expect(JSON.stringify([...ledger.results.values()])).not.toContain(file.base64)
+  })
+  it('并发不同请求拒绝，预先取消阻止迟到请求复活', async () => {
+    const create = deferred<string>(); const { bridge, services } = mount({ create: create.promise })
+    bridge.cancel('cancel-before-open'); expect(bridge.open({ id: 'cancel-before-open', target: 'chat', draft: 'late' }).accepted).toBe(false)
+    bridge.open({ id: 'pending', target: 'chat', draft: 'run' }); expect(bridge.open({ id: 'different', target: 'chat', draft: 'run' }).accepted).toBe(false)
+    await vi.waitFor(() => expect(services.sessions.create).toHaveBeenCalledOnce()); create.resolve('new-session'); await finished(bridge, 'pending')
+  })
+  it('初始过期不创建会话，异步创建期间过期也不发送', async () => {
+    const create = deferred<string>(); const { bridge, services, prompt } = mount({ create: create.promise })
+    expect(bridge.open({ id: 'expired', target: 'chat', draft: 'keep', expiresAt: Date.now() - 1 }).accepted).toBe(false)
+    const now = Date.now(); bridge.open({ id: 'deadline', target: 'chat', draft: 'keep', expiresAt: now + 5000 })
+    await vi.waitFor(() => expect(services.sessions.create).toHaveBeenCalledOnce()); vi.spyOn(Date, 'now').mockReturnValue(now + 5001)
+    create.resolve('new-session'); await finished(bridge, 'deadline', 'rejected'); expect(services.sessions.retain).not.toHaveBeenCalled(); expect(prompt).not.toHaveBeenCalled()
+  })
+  it('实际发送不受主窗导航影响，空对话导航则尊重后续导航', async () => {
+    const ready = deferred<void>(); const { bridge, navigation, prompt, release } = mount({ ready: ready.promise })
+    bridge.open({ id: 'independent', target: 'chat', draft: 'run' }); navigation.abort(); ready.resolve(); await finished(bridge, 'independent')
+    expect(prompt).toHaveBeenCalledOnce(); expect(release).toHaveBeenCalledOnce()
+    bridge.open({ id: 'superseded', target: 'chat', draft: '' }); await finished(bridge, 'superseded', 'rejected'); expect(prompt).toHaveBeenCalledOnce()
+  })
+  it('桥热重装保留提交结果，同一请求不会重复发送', async () => {
+    const first = mount(); const request = { id: 'hot-reload', target: 'chat', draft: 'run' }; first.bridge.open(request); await finished(first.bridge, request.id)
+    const second = mount(); first.dispose(); second.bridge.open(request); await finished(second.bridge, request.id)
+    expect(first.prompt).toHaveBeenCalledOnce(); expect(second.prompt).not.toHaveBeenCalled(); expect(desktop.__lumoDesktopPet).toBe(second.bridge)
+  })
+  it('导航需界面挂载，实际发送允许隐藏界面', async () => {
+    const { bridge, services, surface } = mount(); bridge.open({ id: 'tasks', target: 'tasks', draft: '' }); await finished(bridge, 'tasks')
+    expect(services.layout.selectPanel).toHaveBeenCalledWith(null); expect(surface).toHaveBeenCalledWith('tasks'); expect(services.sessions.create).not.toHaveBeenCalled()
+    for (const dispose of disposers.splice(0).reverse()) dispose()
+    const absent = mount({ surface: false }); absent.bridge.open({ id: 'absent', target: 'home', draft: '' }); await finished(absent.bridge, 'absent', 'rejected')
+    absent.bridge.open({ id: 'hidden-send', target: 'chat', draft: 'run' }); await finished(absent.bridge, 'hidden-send'); expect(absent.prompt).toHaveBeenCalledOnce()
+  })
+  it('最大单文件base64校验不溢出正则栈', () => {
+    const { bridge } = mount(); const base64 = Buffer.alloc(DESKTOP_PET_ATTACHMENT_LIMITS.fileBytes).toString('base64')
+    expect(() => bridge.open({ id: 'large', target: 'chat', draft: '', attachments: [{ ...file, base64 }] })).not.toThrow(); bridge.cancel('large')
+  })
+  it.each([
+    null, {}, { id: '../bad', target: 'home', draft: '' }, { id: 'bad', target: 'execute', draft: '' },
+    { id: 'bad', target: 'tasks', draft: 'private' }, { id: 'bad', target: 'chat', draft: 'a'.repeat(12001) },
+    { id: 'bad', target: 'chat', draft: '', workspaceId: '' },
+    ...['data:text/plain;base64,YWJj', 'A===', '====', 'aa a', 'a'].map(base64 => ({ id: 'bad', target: 'chat', draft: '', attachments: [{ ...file, base64 }] })),
+    { id: 'bad', target: 'chat', draft: '', attachments: [{ ...file, name: '../private' }] },
+    { id: 'bad', target: 'chat', draft: '', attachments: Array.from({ length: 5 }, () => file) },
+  ])('拒绝非法请求 %j', value => {
+    const { bridge, services } = mount(); expect(bridge.open(value).accepted).toBe(false); expect(services.sessions.create).not.toHaveBeenCalled()
   })
 })

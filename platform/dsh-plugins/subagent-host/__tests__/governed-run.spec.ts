@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { runGovernedTask, startGovernedDispatch } from '../src/governed-run.ts'
 import { ExecutionConflictError, type GovernedExecution, type GovernedResult } from '../src/governed-dispatch.ts'
 import { binding, config, execution } from './governed-fixtures.ts'
@@ -289,4 +289,64 @@ it('does not create an Agent if authoritative preparation fails',async()=>{
  const {ctx,requests}=await context('must not execute')
  const result=await runGovernedTask(ctx,execution(),binding,config.nodeId,new AbortController().signal,undefined,async()=>{throw Error('revoked before execution')})
  expect(result.state).toBe('FAILED');expect(requests).toHaveLength(0)
+})
+
+it.each(['platform-closed-text-v1', 'unknown'] as const)('reports observed lifecycle checkpoints without opening closed tools: %s', async profile => {
+  const { ctx, requests } = await context('Deliverable awaiting acceptance')
+  const item = execution()
+  const { GovernedProgressReporter, TASK_PROGRESS_TOOL } = await import('../src/task-progress.ts')
+  let revision = 0
+  const checkpoints: Record<string, unknown>[] = []
+  let persisted: Record<string, unknown> | null = null
+  const reporter = new GovernedProgressReporter(config, item, async (_url, init) => {
+    if (init?.method === 'GET') return Response.json({ current_run_id: item.runId, revision, can_update: true, progress: persisted })
+    persisted = { ...JSON.parse(String(init?.body)), source: 'runtime' }
+    checkpoints.push(persisted!)
+    return Response.json({ run_id: item.runId, task_id: item.task.id, revision: ++revision, source: 'runtime' })
+  })
+  const result = await runGovernedTask(ctx, item, binding, config.nodeId, new AbortController().signal, undefined,
+    async () => ({ snapshot: { realm: config.realm, task_id: item.task.id, run_id: item.runId, worker_id: 'agent:writer',
+      node_id: config.nodeId, session_ref: item.sessionRef, preset_id: 'writer', preset_revision: 7, provider: 'mock', model: 'mock', output_profile: profile } }), reporter)
+  expect(result.state).toBe('COMPLETED')
+  expect(checkpoints.map(p => p.percent)).toEqual([0, 100])
+  expect(checkpoints[1]?.next_step).toContain('review')
+  expect(requests[0]?.tools?.map(tool => tool.name) ?? []).toEqual(profile === 'unknown' ? [TASK_PROGRESS_TOOL] : [])
+})
+
+it.each(['on_track', 'at_risk', 'blocked'] as const)('keeps the model checkpoint after a final reply during an actual governed Agent loop: %s', async status => {
+  const ctx = new Context(); contexts.push(ctx)
+  await mountAgentLoopTestDependencies(ctx)
+  await ctx.plugin(AgentLoop, { agents: [] })
+  const { GovernedProgressReporter, TASK_PROGRESS_TOOL } = await import('../src/task-progress.ts')
+  let turns = 0
+  ctx.llm.registerAdapter(['mock'], new (class extends LlmAdapter {
+    override async *stream(): AsyncIterable<StreamChunk> {
+      if (++turns === 1) {
+        const id = ToolCallId('checkpoint-1')
+        const args = JSON.stringify({ status, percent: 40, summary: 'Reviewed the inputs', next_step: 'Obtain staging access',
+          ...(status === 'blocked' ? { blocked_reason: 'Missing staging grant' } : {}) })
+        yield { type: 'tool-call-delta', index: 0, id, name: TASK_PROGRESS_TOOL, argumentsDelta: args }
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: TASK_PROGRESS_TOOL, arguments: args } }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      } else {
+        yield { type: 'text-delta', index: 0, text: 'Reviewed deliverable' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+  })())
+  let revision = 0
+  const percentages: number[] = []
+  let persisted: Record<string, unknown> | null = null
+  const item = execution()
+  const reporter = new GovernedProgressReporter(config, item, async (_url, init) => {
+    if (init?.method === 'GET') return Response.json({ current_run_id: item.runId, revision, can_update: true, progress: persisted })
+    persisted = { ...JSON.parse(String(init?.body)), source: 'runtime' }
+    percentages.push(Number(persisted!.percent))
+    return Response.json({ run_id: item.runId, task_id: item.task.id, revision: ++revision, source: 'runtime' })
+  })
+  const result = await runGovernedTask(ctx, item, binding, config.nodeId, new AbortController().signal, undefined, undefined, reporter)
+  expect(result.state).toBe('COMPLETED')
+  expect(percentages).toEqual([0, 40])
+  expect(persisted).toMatchObject({ status, percent: 40, next_step: 'Obtain staging access' })
+  if (status === 'blocked') expect(persisted).toHaveProperty('blocked_reason', 'Missing staging grant')
 })

@@ -116,6 +116,7 @@ func New(st *store.Store, cfg Config, log *slog.Logger) (*Server, error) {
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
+	s.registerUserSecurityRoutes(mux)
 	mux.HandleFunc("GET /v1/storage/quota", s.storageQuota)
 	mux.HandleFunc("PUT /v1/storage/quota", s.storageQuota)
 	s.registerRecoveryRoutes(mux)
@@ -160,6 +161,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/agent-presets/{presetID}", s.getAgentPreset)
 	mux.HandleFunc("PATCH /v1/agent-presets/{presetID}", s.updateAgentPreset)
 	mux.HandleFunc("GET /v1/workers", s.listWorkers)
+	mux.HandleFunc("GET /v1/workforce/progress", s.workforceProgress)
 	mux.HandleFunc("GET /v1/workers/{workerID}/profile", s.workerProfile)
 	mux.Handle("PUT /v1/workers/{workerID}/runtime", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.reportWorkerRuntime)))
 	mux.Handle("GET /v1/runtime/agent-presets/{presetID}", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.runtimeAgentPreset)))
@@ -168,6 +170,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /v1/bot/channels/{channel}/subjects/{subject}", s.manageBotSubject)
 	mux.HandleFunc("PUT /v1/bot/channels/{channel}/subjects/{subject}/grants", s.manageBotGrant)
 	mux.Handle("PUT /v1/runtime/task-runs/{runID}/result", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.runtimeTaskResult)))
+	mux.Handle("GET /v1/runtime/task-runs/{runID}/progress", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.runtimeTaskProgress)))
+	mux.Handle("PUT /v1/runtime/task-runs/{runID}/progress", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.runtimeTaskProgress)))
 	mux.Handle("GET /v1/runtime/workers/{workerID}/nodes", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.workerNodes)))
 	mux.HandleFunc("GET /v1/users", s.listUsers)
 	mux.HandleFunc("GET /v1/users/{userID}/tags", s.userTags)
@@ -185,6 +189,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/tasks/{taskID}/audit", s.listTaskAudit)
 	mux.HandleFunc("GET /v1/tasks/{taskID}/children", s.listChildTasks)
 	mux.HandleFunc("GET /v1/tasks/{taskID}/collaboration", s.collaborationProgress)
+	mux.HandleFunc("GET /v1/tasks/{taskID}/progress", s.taskProgress)
+	mux.HandleFunc("PUT /v1/tasks/{taskID}/progress", s.taskProgress)
 	mux.HandleFunc("GET /v1/tasks/{taskID}/collaborators", s.taskCollaborators)
 	mux.HandleFunc("PUT /v1/tasks/{taskID}/collaborators", s.taskCollaborators)
 	mux.HandleFunc("GET /v1/tasks/{taskID}/runs/{runID}/result", s.taskResult)
@@ -2018,7 +2024,7 @@ func (s *Server) createDepartment(w http.ResponseWriter, r *http.Request) {
 	}
 	department, err := s.store.CreateDepartment(r.Context(), domain.Department{
 		ID: req.ID, Realm: c.realm, ParentDeptID: req.ParentDeptID, Name: req.Name, ManagerUserID: req.ManagerUserID,
-	})
+	}, c.userID)
 	if err != nil {
 		s.respondStoreError(w, err)
 		return
@@ -2063,7 +2069,7 @@ func (s *Server) createRole(w http.ResponseWriter, r *http.Request) {
 	if req.ID == "" {
 		req.ID = newID("role")
 	}
-	role, err := s.store.CreateRole(r.Context(), domain.Role{ID: req.ID, Realm: c.realm, Name: req.Name, Description: req.Description})
+	role, err := s.store.CreateRole(r.Context(), domain.Role{ID: req.ID, Realm: c.realm, Name: req.Name, Description: req.Description}, c.userID)
 	if err != nil {
 		s.respondStoreError(w, err)
 		return

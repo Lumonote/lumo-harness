@@ -776,6 +776,7 @@ fn main() {
             pet::pet_start_drag,
             pet::pet_hide,
             pet::pet_set_preferences,
+            pet::pet_workspaces,
             pet::pet_open_workbench
         ])
         .build(tauri::generate_context!())

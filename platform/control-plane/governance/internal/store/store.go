@@ -137,6 +137,8 @@ UPDATE governance_auth_sessions SET session_id=gen_random_uuid()::text WHERE ses
 ALTER TABLE governance_auth_sessions ALTER COLUMN session_id SET NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS governance_auth_sessions_id_idx ON governance_auth_sessions (session_id);
 CREATE INDEX IF NOT EXISTS governance_auth_sessions_expiry_idx ON governance_auth_sessions (expires_at);
+CREATE INDEX IF NOT EXISTS governance_auth_sessions_user_idx
+  ON governance_auth_sessions (realm,user_id,last_seen_at DESC,created_at DESC,session_id DESC);
 CREATE TABLE IF NOT EXISTS governance_auth_security_events (
   id          BIGSERIAL PRIMARY KEY,
   realm       TEXT NOT NULL,
@@ -148,7 +150,7 @@ CREATE TABLE IF NOT EXISTS governance_auth_security_events (
 );
 ALTER TABLE governance_auth_security_events DROP CONSTRAINT IF EXISTS governance_auth_security_events_event_check;
 ALTER TABLE governance_auth_security_events ADD CONSTRAINT governance_auth_security_events_event_check
-  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected','user_created','user_updated','credentials_reset','role_assigned','role_revoked','role_updated','department_updated','node_updated','skill_access_updated','oidc_login','oidc_linked','oidc_unlinked','role_permissions_updated','role_parent_updated','storage_quota_updated'));
+  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected','user_created','user_updated','credentials_reset','role_assigned','role_revoked','role_updated','department_updated','node_updated','skill_access_updated','oidc_login','oidc_linked','oidc_unlinked','role_permissions_updated','role_parent_updated','storage_quota_updated','role_created','department_created','admin_session_revoked','admin_sessions_revoked'));
 CREATE INDEX IF NOT EXISTS governance_auth_security_events_user_idx
   ON governance_auth_security_events (realm, user_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS governance_auth_totp (
@@ -531,7 +533,7 @@ CREATE TABLE IF NOT EXISTS governance_role_permissions (
 );
 ALTER TABLE governance_auth_security_events DROP CONSTRAINT IF EXISTS governance_auth_security_events_event_check;
 ALTER TABLE governance_auth_security_events ADD CONSTRAINT governance_auth_security_events_event_check
-  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected','user_created','user_updated','credentials_reset','role_assigned','role_revoked','role_updated','department_updated','node_updated','skill_access_updated','oidc_login','oidc_linked','oidc_unlinked','role_permissions_updated','role_parent_updated','storage_quota_updated'));
+  CHECK (event IN ('login_succeeded','login_failed','login_locked','logout','session_revoked','sessions_revoked','password_changed','mfa_enabled','mfa_disabled','passkey_registered','passkey_removed','passkey_login','passkey_clone_detected','user_created','user_updated','credentials_reset','role_assigned','role_revoked','role_updated','department_updated','node_updated','skill_access_updated','oidc_login','oidc_linked','oidc_unlinked','role_permissions_updated','role_parent_updated','storage_quota_updated','role_created','department_created','admin_session_revoked','admin_sessions_revoked'));
 
 `
 
@@ -560,6 +562,9 @@ func (s *Store) Init(ctx context.Context) error {
 	}
 	if _, err := tx.Exec(ctx, taskResultsDDL); err != nil {
 		return fmt.Errorf("initialize task results: %w", err)
+	}
+	if _, err := tx.Exec(ctx, taskProgressDDL); err != nil {
+		return fmt.Errorf("initialize task progress: %w", err)
 	}
 	if _, err := tx.Exec(ctx, taskSchedulingDDL); err != nil {
 		return fmt.Errorf("initialize task scheduling: %w", err)
@@ -600,6 +605,9 @@ func (s *Store) UpsertUser(ctx context.Context, user domain.User, actor string) 
 		return domain.User{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireCurrentRolePolicyAdmin(ctx, tx, user.Realm, actor); err != nil {
+		return domain.User{}, err
+	}
 	if err := checkUserDepartment(ctx, tx, user); err != nil {
 		return domain.User{}, err
 	}
@@ -1045,7 +1053,7 @@ func (s *Store) workerStats(ctx context.Context, realm, workerID string) (float6
 	return confidence, *quality, nil
 }
 
-func (s *Store) CreateDepartment(ctx context.Context, department domain.Department) (domain.Department, error) {
+func (s *Store) CreateDepartment(ctx context.Context, department domain.Department, actor string) (domain.Department, error) {
 	department.Name = strings.TrimSpace(department.Name)
 	if !managedID.MatchString(department.ID) || department.Realm == "" || department.Name == "" || len([]rune(department.Name)) > 160 {
 		return domain.Department{}, fmt.Errorf("%w: department id, realm, and name are required", ErrBadRequest)
@@ -1061,6 +1069,9 @@ func (s *Store) CreateDepartment(ctx context.Context, department domain.Departme
 		return domain.Department{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireCurrentRolePolicyAdmin(ctx, tx, department.Realm, actor); err != nil {
+		return domain.Department{}, err
+	}
 
 	parentPath := "/"
 	department.Level = 0
@@ -1096,10 +1107,10 @@ func (s *Store) CreateDepartment(ctx context.Context, department domain.Departme
 	if err != nil {
 		return domain.Department{}, fmt.Errorf("create department: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := recordUserAdminEvent(ctx, tx, department.Realm, actor, "department_created", actor, map[string]any{"department_id": department.ID}); err != nil {
 		return domain.Department{}, err
 	}
-	return department, nil
+	return department, tx.Commit(ctx)
 }
 
 func (s *Store) ListDepartments(ctx context.Context, realm string) ([]domain.Department, error) {
@@ -1121,7 +1132,7 @@ func (s *Store) ListDepartments(ctx context.Context, realm string) ([]domain.Dep
 	return out, rows.Err()
 }
 
-func (s *Store) CreateRole(ctx context.Context, role domain.Role) (domain.Role, error) {
+func (s *Store) CreateRole(ctx context.Context, role domain.Role, actor string) (domain.Role, error) {
 	role.Name = strings.TrimSpace(role.Name)
 	if !managedID.MatchString(role.ID) || len([]rune(role.Name)) > 160 || len([]rune(role.Description)) > 500 {
 		return domain.Role{}, fmt.Errorf("%w: invalid role", ErrBadRequest)
@@ -1135,7 +1146,15 @@ func (s *Store) CreateRole(ctx context.Context, role domain.Role) (domain.Role, 
 	if !validOrgStatus(role.Status) {
 		return domain.Role{}, fmt.Errorf("%w: invalid role status", ErrBadRequest)
 	}
-	err := s.pool.QueryRow(ctx, `
+	tx, err := s.beginOrganizationChange(ctx, role.Realm)
+	if err != nil {
+		return domain.Role{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireCurrentRolePolicyAdmin(ctx, tx, role.Realm, actor); err != nil {
+		return domain.Role{}, err
+	}
+	err = tx.QueryRow(ctx, `
 		INSERT INTO governance_roles (realm,id,name,description,status) VALUES ($1,$2,$3,$4,$5) RETURNING permission_revision`,
 		role.Realm, role.ID, role.Name, role.Description, role.Status).Scan(&role.PermissionRevision)
 	if isUniqueViolation(err) {
@@ -1144,7 +1163,10 @@ func (s *Store) CreateRole(ctx context.Context, role domain.Role) (domain.Role, 
 	if err != nil {
 		return domain.Role{}, err
 	}
-	return role, nil
+	if err := recordUserAdminEvent(ctx, tx, role.Realm, actor, "role_created", actor, map[string]any{"role_id": role.ID}); err != nil {
+		return domain.Role{}, err
+	}
+	return role, tx.Commit(ctx)
 }
 
 func (s *Store) ListRoles(ctx context.Context, realm string) ([]domain.Role, error) {
@@ -1173,6 +1195,9 @@ func (s *Store) AssignRole(ctx context.Context, realm, userID, roleID, grantedBy
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := requireCurrentRolePolicyAdmin(ctx, tx, realm, grantedBy); err != nil {
+		return err
+	}
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM governance_users u, governance_roles r
 		WHERE u.realm=$1 AND u.id=$2 AND r.realm=$1 AND r.id=$3 AND r.status='active')`, realm, userID, roleID).Scan(&exists); err != nil {

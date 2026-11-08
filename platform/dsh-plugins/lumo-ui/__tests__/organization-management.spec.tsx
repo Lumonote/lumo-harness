@@ -24,6 +24,11 @@ function mount(directory: (params: URLSearchParams) => DirectoryPage | Response 
     if (url.pathname === '/lumo/api/roles') return json({ roles: [{ id: 'employee', name: '员工', status: 'active' }] })
     if (url.pathname === '/lumo/api/departments') return json({ departments: [{ id: 'main', name: '总部', status: 'active' }, { id: 'late', name: '分部', status: 'active' }] })
     if (/^\/lumo\/api\/users\/[^/]+\/access$/u.test(url.pathname)) return json({ username: '', login_enabled: false, roles: [] })
+    const security = url.pathname.match(/^\/lumo\/api\/users\/([^/]+)\/(security|sessions|security-events)$/u)
+    if (security && method === 'GET') {
+      if (security[2] === 'security') return json({ user_id: security[1], status: 'active', organization_admin: false, actions: [], resolution: { direct_roles: [], effective_roles: [], actions: {} } })
+      return json({ [security[2] === 'sessions' ? 'sessions' : 'events']: [], total: 0, limit: Number(url.searchParams.get('limit') ?? 25), offset: Number(url.searchParams.get('offset') ?? 0), has_more: false })
+    }
     throw new Error(`Unexpected request ${method} ${url.pathname}`)
   }))
   const view = render(<OrganizationManagement view="users" />)

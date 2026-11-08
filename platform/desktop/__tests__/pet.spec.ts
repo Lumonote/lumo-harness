@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mountPet } from '../../desktop-assets/pet.mjs'
+import { mountPet, PET_ATTACHMENT_LIMITS } from '../../desktop-assets/pet.mjs'
 import { BREACH_DURATION, paintWhaleFrame, WHALE_ATLAS } from '../../desktop-assets/pet-motion.mjs'
 
 const html = readFileSync(new URL('../../desktop-assets/pet.html', import.meta.url), 'utf8')
@@ -52,7 +52,11 @@ function fixture(native?: NativeCall, options: { reduced?: boolean } = {}) {
     callbacks.forEach(callback => callback(time))
   }
   if (options.reduced) Object.assign(view, { matchMedia: () => ({ matches: true }) })
-  const invoke = vi.fn(native ?? (() => undefined))
+  const invoke = vi.fn((command: string, args?: Record<string, unknown>) => {
+    const result = native?.(command, args)
+    if (command === 'pet_workspaces' && result === undefined) return { workspaces: [{ id: 'work', label: 'My work' }], selectedWorkspaceId: 'work' }
+    return result
+  })
   if (native) Object.assign(view, { __TAURI__: { core: { invoke } } })
   const dispose = mountPet(view)
   cleanups.push(() => { dispose(); dom.window.close() })
@@ -67,7 +71,11 @@ function fixture(native?: NativeCall, options: { reduced?: boolean } = {}) {
     Object.defineProperty(value, 'pointerId', { value: 7 })
     target.dispatchEvent(value)
   }
-  return { view, invoke, dispose, element, input, key, pointer, frame, rafs, load, image, output, reader }
+  const addFiles = (files: File[]) => {
+    Object.defineProperty(element('attachment-input'), 'files', { value: files, configurable: true })
+    element('attachment-input').dispatchEvent(new view.Event('change', { bubbles: true }))
+  }
+  return { view, invoke, dispose, element, input, key, pointer, addFiles, frame, rafs, load, image, output, reader }
 }
 
 beforeEach(() => vi.useFakeTimers())
@@ -95,7 +103,7 @@ describe('desktop companion', () => {
     expect(pet.element('runtime-label').textContent).toBe('外观预览')
   })
 
-  it('waits for a valid snapshot before enabling preferences and a draft handoff', async () => {
+  it('waits for a valid snapshot and workspace before enabling message submission', async () => {
     const state = deferred<typeof ready>()
     const pet = fixture(command => command === 'pet_snapshot' ? state.promise : undefined)
     pet.input('hello')
@@ -108,8 +116,8 @@ describe('desktop companion', () => {
     expect(pet.element<HTMLButtonElement>('send-draft').disabled).toBe(false)
   })
 
-  it('clears a draft only after native acknowledgment and blocks duplicate handoffs', async () => {
-    const handoff = deferred<void>()
+  it('clears a draft only after submission acknowledgment and blocks duplicate sends', async () => {
+    const handoff = deferred<{ sessionId: string }>()
     const pet = fixture(command => command === 'pet_snapshot' ? ready : command === 'pet_open_workbench' ? handoff.promise : undefined)
     await settle()
     pet.element('whale').click()
@@ -120,14 +128,15 @@ describe('desktop companion', () => {
     pet.key('draft', 'Enter', { ctrlKey: true })
     await settle()
     expect(pet.invoke.mock.calls.filter(([command]) => command === 'pet_open_workbench')).toEqual([
-      ['pet_open_workbench', { target: 'chat', draft }],
+      ['pet_open_workbench', { target: 'chat', draft, workspaceId: 'work', attachments: [], requestId: expect.any(String) }],
     ])
     expect(pet.element<HTMLTextAreaElement>('draft').readOnly).toBe(true)
     expect(pet.element<HTMLTextAreaElement>('draft').value).toBe(draft)
-    handoff.resolve()
+    handoff.resolve({ sessionId: 'session-1' })
     await settle()
     expect(pet.element<HTMLTextAreaElement>('draft').value).toBe('')
-    expect(pet.element('feedback').textContent).toContain('请在工作台确认发送')
+    expect(pet.element('feedback').textContent).toContain('已发送')
+    expect(pet.element('assistant').hidden).toBe(false)
     expect(pet.element<HTMLButtonElement>('send-draft').disabled).toBe(true)
   })
 
@@ -144,8 +153,152 @@ describe('desktop companion', () => {
     pet.key('draft', 'Enter', { ctrlKey: true })
     await settle()
     expect(pet.element<HTMLTextAreaElement>('draft').value).toBe('需要保留的想法')
-    expect(pet.element('feedback').textContent).toContain('草稿已保留')
+    expect(pet.element('feedback').textContent).toContain('草稿和附件已保留')
     expect(pet.element<HTMLTextAreaElement>('draft').readOnly).toBe(false)
+  })
+
+  it('retains retry identity until content or workspace changes and rejects an empty success receipt', async () => {
+    const pet = fixture(command => {
+      if (command === 'pet_snapshot') return ready
+      if (command === 'pet_workspaces') return { workspaces: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }], selectedWorkspaceId: 'a' }
+    })
+    await settle()
+    pet.input('Do the work')
+    pet.key('draft', 'Enter', { ctrlKey: true }); await settle()
+    expect(pet.element<HTMLTextAreaElement>('draft').value).toBe('Do the work')
+    pet.key('draft', 'Enter', { ctrlKey: true }); await settle()
+    let calls = pet.invoke.mock.calls.filter(([command]) => command === 'pet_open_workbench')
+    expect(calls[1][1]?.requestId).toBe(calls[0][1]?.requestId)
+    pet.element<HTMLSelectElement>('workspace').value = 'b'
+    pet.element('workspace').dispatchEvent(new pet.view.Event('change'))
+    pet.key('draft', 'Enter', { ctrlKey: true }); await settle()
+    calls = pet.invoke.mock.calls.filter(([command]) => command === 'pet_open_workbench')
+    expect(calls[2][1]?.workspaceId).toBe('b')
+    expect(calls[2][1]?.requestId).not.toBe(calls[1][1]?.requestId)
+    pet.input('Changed request')
+    pet.key('draft', 'Enter', { ctrlKey: true }); await settle()
+    calls = pet.invoke.mock.calls.filter(([command]) => command === 'pet_open_workbench')
+    expect(calls[3][1]?.requestId).not.toBe(calls[2][1]?.requestId)
+  })
+
+  it('shows uncertain submission receipts without suggesting that a retry sends another message', async () => {
+    const explanation = '发送回执未确认，请在对应对话中核对。为避免重复任务，本次请求不会自动重发。'
+    const pet = fixture(command => {
+      if (command === 'pet_snapshot') return ready
+      if (command === 'pet_open_workbench') throw explanation
+    })
+    await settle()
+    pet.input('Need confirmation')
+    pet.key('draft', 'Enter', { ctrlKey: true }); await settle()
+    expect(pet.element('feedback').textContent).toContain(explanation)
+    expect(pet.element('feedback').textContent).not.toContain('请重试')
+    expect(pet.element<HTMLTextAreaElement>('draft').value).toBe('Need confirmation')
+  })
+
+  it('sends the selected workspace only for chat navigation, never for home or tasks', async () => {
+    const pet = fixture(command => command === 'pet_snapshot' ? ready : undefined)
+    await settle()
+    expect(pet.element<HTMLSelectElement>('workspace').value).toBe('work')
+    pet.element('open-home').click(); await settle()
+    pet.element('view-tasks').click(); await settle()
+    pet.element('new-chat').click(); await settle()
+    expect(pet.invoke.mock.calls.filter(([command]) => command === 'pet_open_workbench')).toEqual([
+      ['pet_open_workbench', { target: 'home', draft: '' }],
+      ['pet_open_workbench', { target: 'tasks', draft: '' }],
+      ['pet_open_workbench', { target: 'chat', draft: '', workspaceId: 'work' }],
+    ])
+  })
+
+  it('blocks unavailable workspaces and recovers through explicit refresh without choosing an unrelated workspace', async () => {
+    let result = { workspaces: [{ id: 'a', label: '<b>Workspace A</b>' }, { id: 'b', label: 'Workspace B' }], selectedWorkspaceId: 'a' }
+    let fail = true
+    const pet = fixture(command => {
+      if (command === 'pet_snapshot') return ready
+      if (command === 'pet_workspaces') { if (fail) throw Error('offline'); return result }
+    })
+    await settle()
+    pet.input('Work here')
+    expect(pet.element<HTMLButtonElement>('send-draft').disabled).toBe(true)
+    expect(pet.element('workspace-status').textContent).toContain('读取失败')
+    fail = false
+    pet.element('refresh-workspaces').click(); await settle()
+    expect(pet.element<HTMLSelectElement>('workspace').value).toBe('a')
+    expect(pet.element('workspace').querySelector('b')).toBeNull()
+    expect(pet.element<HTMLButtonElement>('send-draft').disabled).toBe(false)
+    result = { workspaces: [{ id: 'b', label: 'Workspace B' }], selectedWorkspaceId: 'b' }
+    pet.element('refresh-workspaces').click(); await settle()
+    expect(pet.element<HTMLSelectElement>('workspace').value).toBe('')
+    expect(pet.element<HTMLButtonElement>('send-draft').disabled).toBe(true)
+    expect(pet.element('workspace-status').textContent).toContain('原工作空间已不可用')
+  })
+
+  it('reads attachment bytes, preserves the file on failure and sends an attachment-only message on retry', async () => {
+    const pending = deferred<{ sessionId: string }>()
+    let attempt = 0
+    const pet = fixture(command => {
+      if (command === 'pet_snapshot') return { ...ready, compact: false }
+      if (command === 'pet_open_workbench') { if (++attempt === 1) throw Error('upload failed'); return pending.promise }
+    })
+    await settle()
+    pet.addFiles([new pet.view.File(['actual bytes'], '<report>.txt', { type: 'text/plain' })])
+    expect(pet.element('attachments').textContent).toContain('<report>.txt')
+    expect(pet.element('attachments').querySelector('report')).toBeNull()
+    pet.element('send-draft').click()
+    await vi.advanceTimersByTimeAsync(20)
+    await settle()
+    expect(pet.element('attachments').children).toHaveLength(1)
+    expect(pet.element('feedback').textContent).toContain('草稿和附件已保留')
+    const first = pet.invoke.mock.calls.find(([command]) => command === 'pet_open_workbench')![1]!
+    expect(first.attachments).toEqual([{ name: '<report>.txt', mimeType: 'text/plain', base64: Buffer.from('actual bytes').toString('base64') }])
+    pet.element('send-draft').click()
+    await vi.advanceTimersByTimeAsync(20); await settle()
+    const calls = pet.invoke.mock.calls.filter(([command]) => command === 'pet_open_workbench')
+    expect(calls[1][1]?.requestId).toBe(first.requestId)
+    expect(pet.element<HTMLSelectElement>('workspace').disabled).toBe(true)
+    expect(pet.element<HTMLButtonElement>('attach-files').disabled).toBe(true)
+    expect(pet.element<HTMLButtonElement>('attachments').querySelector('button')?.disabled).toBe(true)
+    pending.resolve({ sessionId: 'file-session' }); await settle()
+    expect(pet.element('attachments').children).toHaveLength(0)
+    expect(pet.element('assistant').hidden).toBe(false)
+  })
+
+  it('enforces attachment count and byte limits before reading data and supports removal', async () => {
+    const pet = fixture(command => command === 'pet_snapshot' ? ready : undefined)
+    await settle()
+    const file = (name: string, size = 1) => {
+      const item = new pet.view.File(['x'], name)
+      Object.defineProperty(item, 'size', { value: size })
+      return item
+    }
+    pet.addFiles([file('keep.txt')])
+    pet.addFiles(Array.from({ length: PET_ATTACHMENT_LIMITS.count }, (_, index) => file(`${index}.txt`)))
+    expect(pet.element('feedback').textContent).toContain('最多添加 4 个')
+    expect(pet.element('attachments').children).toHaveLength(1)
+    pet.addFiles([file('big', PET_ATTACHMENT_LIMITS.fileBytes + 1)])
+    expect(pet.element('feedback').textContent).toContain('8 MB')
+    pet.addFiles([file('a', PET_ATTACHMENT_LIMITS.fileBytes), file('b', PET_ATTACHMENT_LIMITS.fileBytes)])
+    expect(pet.element('feedback').textContent).toContain('16 MB')
+    expect(pet.element('attachments').children).toHaveLength(1)
+    pet.element('attachments').querySelector<HTMLButtonElement>('button')!.click()
+    expect(pet.element('attachments').children).toHaveLength(0)
+    expect(pet.element<HTMLButtonElement>('send-draft').disabled).toBe(true)
+    expect(pet.invoke.mock.calls.filter(([command]) => command === 'pet_open_workbench')).toHaveLength(0)
+  })
+
+  it('cancels a pending file read when the pet closes without submitting in the background', async () => {
+    const pet = fixture(command => command === 'pet_snapshot' ? ready : undefined)
+    await settle()
+    let reader: { abort: () => void; onabort?: () => void; readAsDataURL: () => void } | undefined
+    const aborted = vi.fn()
+    Object.assign(pet.view, { FileReader: function () {
+      reader = { readAsDataURL() {}, abort() { aborted(); this.onabort?.() } }
+      return reader
+    } })
+    pet.addFiles([new pet.view.File(['data'], 'report.txt')])
+    pet.element('send-draft').click(); await settle()
+    pet.dispose(); await settle()
+    expect(aborted).toHaveBeenCalledOnce()
+    expect(pet.invoke.mock.calls.filter(([command]) => command === 'pet_open_workbench')).toHaveLength(0)
   })
 
   it('does not let an older poll collapse a newly expanded companion', async () => {

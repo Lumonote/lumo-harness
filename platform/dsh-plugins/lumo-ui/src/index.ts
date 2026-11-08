@@ -1697,6 +1697,29 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     return
   }
 
+  const userSecurity = pathname.match(/^\/lumo\/api\/users\/([^/]+)\/(security|sessions|security-events)(?:\/([^/]+))?$/u)
+  if (userSecurity !== null) {
+    if (!requireClusterReady(config, res)) return
+    if (!isRealmAdmin(identity)) { writeJson(res, 403, { error: 'organization administrator required' }); return }
+    const userID = safeID(userSecurity[1])
+    const resource = userSecurity[2]
+    const sessionID = userSecurity[3] === undefined ? undefined : safeRunID(userSecurity[3])
+    if (userID === undefined || (userSecurity[3] !== undefined && sessionID === undefined)) { writeJson(res, 400, { error: 'invalid user or session id' }); return }
+    const path = `/v1/users/${encodeURIComponent(userID)}/${resource}${sessionID === undefined ? '' : `/${encodeURIComponent(sessionID)}`}`
+    if (req.method === 'GET' && sessionID === undefined) {
+      const params = new URLSearchParams()
+      const incoming = new URL(req.url ?? '/', 'http://lumo.local').searchParams
+      if (resource !== 'security') for (const key of ['limit', 'offset']) for (const value of incoming.getAll(key)) params.append(key, value)
+      writeUpstream(res, await upstream(config, identity, 'governance', `${path}${params.size ? `?${params}` : ''}`, req)); return
+    }
+    if (req.method === 'DELETE' && resource === 'sessions') {
+      try { writeUpstream(res, await upstream(config, identity, 'governance', path, req, 'DELETE', await readBody(req))) }
+      catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+      return
+    }
+    writeJson(res, 405, { error: 'method not allowed' }); return
+  }
+
   const userAccess = pathname.match(/^\/lumo\/api\/users\/([^/]+)\/(access|credentials|oidc)$/u)
   if (userAccess !== null) {
     if (!requireClusterReady(config, res)) return
@@ -1864,6 +1887,36 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     if (taskID === undefined) { writeJson(res, 400, { error: 'invalid task id' }); return }
     try { writeUpstream(res, await upstream(config, identity, 'governance', `/v1/delegations/${encodeURIComponent(taskID)}/reassign`, req, 'POST', await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
     return
+  }
+
+  if (pathname === '/lumo/api/workforce/progress') {
+    if (!requireClusterReady(config, res)) return
+    if (req.method !== 'GET') { writeJson(res, 405, { error: 'method not allowed' }); return }
+    const params = new URLSearchParams()
+    const incoming = new URL(req.url ?? '/', 'http://lumo.local').searchParams
+    for (const key of ['scope', 'limit', 'cursor']) for (const value of incoming.getAll(key)) params.append(key, value)
+    writeUpstream(res, await upstream(config, identity, 'governance', `/v1/workforce/progress?${params}`, req)); return
+  }
+  const taskProgress = pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/progress$/u)
+  if (taskProgress !== null) {
+    if (!requireClusterReady(config, res)) return
+    const taskID = safeID(taskProgress[1])
+    if (taskID === undefined) { writeJson(res, 400, { error: 'invalid task id' }); return }
+    const path = `/v1/tasks/${encodeURIComponent(taskID)}/progress`
+    if (req.method === 'GET') { writeUpstream(res, await upstream(config, identity, 'governance', path, req)); return }
+    if (req.method === 'PUT') {
+      try { writeUpstream(res, await upstream(config, identity, 'governance', path, req, 'PUT', await readBody(req))) }
+      catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
+      return
+    }
+    writeJson(res, 405, { error: 'method not allowed' }); return
+  }
+  const delegationDetail = pathname.match(/^\/lumo\/api\/delegations\/([^/]+)$/u)
+  if (req.method === 'GET' && delegationDetail !== null) {
+    if (!requireClusterReady(config, res)) return
+    const taskID = safeID(delegationDetail[1])
+    if (taskID === undefined) { writeJson(res, 400, { error: 'invalid task id' }); return }
+    writeUpstream(res, await upstream(config, identity, 'governance', `/v1/delegations/${encodeURIComponent(taskID)}`, req)); return
   }
 
   const taskRuns = pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/runs$/u)
@@ -2173,6 +2226,14 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
       writeUpstream(res, created)
     } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }
     return
+  }
+
+  if (pathname === '/lumo/api/projects/directory') {
+    if (req.method !== 'GET') { writeJson(res, 405, { error: 'method not allowed' }); return }
+    const params = new URLSearchParams()
+    const incoming = new URL(req.url ?? '/', 'http://lumo.local').searchParams
+    for (const key of ['q', 'status', 'role', 'sort', 'limit', 'offset']) for (const value of incoming.getAll(key)) params.append(key, value)
+    writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/directory?${params}`, req)); return
   }
 
   const projectDetail = pathname.match(/^\/lumo\/api\/projects\/([^/]+)$/u)

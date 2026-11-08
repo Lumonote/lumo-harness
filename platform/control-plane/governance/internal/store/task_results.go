@@ -362,5 +362,36 @@ func (s *Store) CollaborationProgress(ctx context.Context, realm, taskID string)
 		return out, err
 	}
 	out.HasMore = out.Summary.Total > len(out.Children)
+	ids = append(ids, taskID)
+	rows, err = tx.Query(ctx, `SELECT DISTINCT ON (p.task_id) p.task_id,p.payload
+	  FROM governance_task_progress p
+	  WHERE p.realm=$1 AND p.task_id=ANY($2) AND p.run_id=(
+	    SELECT r.id FROM governance_task_runs r WHERE r.realm=p.realm AND r.task_id=p.task_id ORDER BY attempt DESC LIMIT 1)
+	  ORDER BY p.task_id,p.revision DESC`, realm, ids)
+	if err != nil {
+		return out, err
+	}
+	for rows.Next() {
+		var id string
+		var raw []byte
+		var progress domain.TaskProgress
+		if err := rows.Scan(&id, &raw); err != nil {
+			rows.Close()
+			return out, err
+		}
+		if err := json.Unmarshal(raw, &progress); err != nil {
+			rows.Close()
+			return out, err
+		}
+		if id == taskID {
+			out.Progress = &progress
+		} else if child := byID[id]; child != nil {
+			child.Progress = &progress
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
 	return out, tx.Commit(ctx)
 }

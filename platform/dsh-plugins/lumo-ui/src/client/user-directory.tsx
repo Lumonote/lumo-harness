@@ -1,3 +1,5 @@
+export { UserSecurityPanel } from './user-security-panel'
+
 export interface UserDirectoryQuery {
   query?: string
   status?: string

@@ -19,9 +19,15 @@ var taskArtifactHash = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // task's ancestor chain. Grant subjects are evaluated against current user and
 // department state, so department membership changes take effect immediately.
 func (s *Store) TaskAccess(ctx context.Context, realm, taskID, userID string) (string, error) {
+	return taskAccess(ctx, s.pool, realm, taskID, userID)
+}
+
+// taskAccess can read through a write transaction after its task lock is held.
+// A preflight pool read does not authorize writes after a collaborator removal.
+func taskAccess(ctx context.Context, q receiptQuerier, realm, taskID, userID string) (string, error) {
 	var score int
 	var exists bool
-	err := s.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 WITH RECURSIVE ancestors AS (
   SELECT id,intent_contract->>'parent_task_id' AS parent_task_id,requester_user_id,assignee_user_id,ARRAY[id]::text[] AS visited
   FROM governance_delegation_tasks WHERE realm=$1 AND id=$2
