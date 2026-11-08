@@ -72,3 +72,15 @@ node ../../../deepseek-harness/node_modules/tsdown/dist/run.mjs --config tsdown.
 其余生产与外部环境待验范围仍见[剩余功能复核](remaining-development-2026-11-07.md)。
 
 上游 `deepseek-harness/` 未修改：`git status --porcelain -uno` 为空，`git describe --always --dirty` 为 `fcc0ad4621`。
+
+## CI 共享建表归属补充修复
+
+后续完整 CI 在 `ddl-ownership.spec.ts` 发现任务进度表遗漏登记：
+`governance_task_progress` 同时由迁移 033 与 Governance `taskProgressDDL` 创建，
+但尚未加入 `SHAPE_CHECKS`。两份 DDL 一致，本次补上正式的数据库结构比对及依赖表准备，
+由既有推导规则纳入共表清单，没有增加检查豁免，也没有修改生产 DDL 或已发布迁移。
+
+修复前本机复现同一失败；修复后完整平台单元测试为 **2158 PASS / 0 FAIL / 314 SKIP**。
+另在本次新建、仅绑定回环地址且无持久卷的 PostgreSQL 16 中，完整 DDL 归属与结构套件
+**35 PASS / 0 FAIL / 0 SKIP**，包含新增任务进度表的实际结构比较。
+平台 TypeScript 与差异检查通过；临时数据库验证后已移除。上游源码仍保持干净。

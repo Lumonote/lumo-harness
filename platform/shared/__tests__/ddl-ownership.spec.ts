@@ -286,6 +286,12 @@ function tablesIn(ddl: string): string[] {
  */
 const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequisites?: DdlSource | DdlSource[] }> = [
   {
+    label: '任务进度检查点（Go governance ↔ 迁移 033）',
+    a: { files: [`${MIGRATION_DIR}/033_task_progress.sql`] },
+    b: { files: ['control-plane/governance/internal/store/task_progress.go'], constName: 'taskProgressDDL' },
+    prerequisites: { files: ['control-plane/governance/internal/store/store.go'], constName: 'DDL' },
+  },
+  {
     label: '存储配额台账（Go ↔ 迁移 031）',
     a: {files:[`${MIGRATION_DIR}/031_storage_ledger.sql`]},
     b: {files:['control-plane/storageledger/ledger.go'],constName:'DDL'},
