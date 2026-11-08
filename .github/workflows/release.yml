@@ -141,15 +141,16 @@ jobs:
           # 默认 glob 是 `**/uv.lock,**/requirements*.txt`，从仓库根遍历整棵工作区。而
           # platform/desktop/target 下有 pnpm 装出来的插件树（.pnpm 虚拟存储全是软链/联接），
           # Windows 上 stat 这些链接会直接 EPERM 中断本步骤。target/ 里还有历史构建残留的
-          # requirements.txt，同样会把遍历引进去。这里改为点名仓库里真正的两个依赖文件：
+          # requirements.txt，同样会把遍历引进去。这里只点名实际依赖输入：
           # 既绕开 target/，也省掉一次全仓库扫描。
           cache-dependency-glob: |
             deepseek-harness/python/sdk/uv.lock
             platform/upstream/skills/ppt-master/requirements.txt
+            platform/upstream/ppt-constraints.txt
 
       # install-components.sh 要求 PPT 解释器可重定位（Homebrew 的 python 链接
       # Cellar 绝对路径，会在打包阶段才失败）。uv 的 standalone Python 是官方推荐路径。
-      # 版本跟随开发环境的系统 python3（3.13）。
+      # 使用 3.13；PPT constraints 固定三种桌面架构均有官方 wheel 的 PyMuPDF。
       - name: Select relocatable Python for the PPT bundle
         shell: bash
         run: |

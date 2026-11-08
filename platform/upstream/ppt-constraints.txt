@@ -1,0 +1,4 @@
+# Platform packaging constraints; keep the pinned PPT Master snapshot unchanged.
+# PyMuPDF 2.x no longer publishes macOS Intel wheels. 1.27.2 provides official
+# CPython 3.10+ ABI3 wheels for darwin-x64, darwin-arm64, win-x64 and Linux.
+PyMuPDF==1.27.2

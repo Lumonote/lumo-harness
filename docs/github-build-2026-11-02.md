@@ -79,3 +79,13 @@ RocketMQ 门禁已在运行 `41405260712` 远端通过；下一项集群探针�
 布局规划现尝试将冲突版本放入最高的安全祖先目录，每次候选都检查所有已满足的同名依赖是否仍解析到原始包根，最终再验证全部依赖边。保留多版本、别名、循环和局部依赖身份，不引入安装包内符号链接。Windows 在完整暂存结束后、Rust 编译前检查资源绝对路径，超过限制时直接报告具体路径。
 
 真实 Node 回归中，同一冲突链的可执行文件路径从旧实现 262 字符缩短为 141，全部版本解析正确；同祖先 sibling 的不同版本、别名和真实目录的路径检查均通过。本机已安装图含 1242 个包根、958 个包名，规划产物从 1732 份减少到 1623 份，最长 Windows 源路径由 302 缩短至 232，4214 条新布局依赖边均指向预期包根，扫描范围内没有超过 259 字符的路径。此图不含本机缺失的六个额外基线插件，完整远端产物另受路径检查约束。完整平台回归 1838 通过、0 失败、313 按既有门控跳过，类型检查通过；Windows 安装包需由后续 release 验证。
+
+## 2026-11-08：macOS Intel 的 PPT Python 依赖转为源码构建
+
+用户提供的 `build.sh --targets darwin-x64` 日志在安装 PPT Master 依赖时失败，尚未进入桌面编译。固定上游快照的 `PyMuPDF>=1.23.0` 解析到 2.1，但该版本没有 macOS Intel wheel；pip 转入源码元数据构建，下载 `mupdf.com` 的 MuPDF 源码时收到 HTTP 504。重试这次下载不能解决缺少预编译包的原因，Python 3.13 本身无需降级。
+
+平台新增 `upstream/ppt-constraints.txt`，固定官方仍提供 Intel、Apple Silicon、Windows x64 和 Linux wheel 的 `PyMuPDF==1.27.2`。该版本使用 CPython 3.10 ABI3，可供 CI 的 Python 3.13 使用。桌面安装脚本和服务器 Dockerfile 共同消费约束，安装使用 `--only-binary=:all:`，随后执行 `pip check`；缺少 wheel 或依赖冲突均中止后续构建。release 的 uv 缓存输入同步包含约束文件，不修改固定技能快照或独立上游仓库。
+
+官方 PyPI 依赖解析验收覆盖 Python 3.13 的三个桌面目标，以及 Debian 12 / Python 3.11 的 Linux x64、arm64；五个目标各解析出 87 个 wheel，没有源码包。本机 Apple Silicon 的全新 Python 3.13 虚拟环境实际安装全部 87 个 wheel，`pip check`、`fitz` PDF 文字提取与渲染、PPTX 保存后重读及 YAML/Flask 加载均通过。安装脚本的 5 项进程级回归覆盖三个目标分支，以及安装失败和依赖检查失败时的中止行为；这些是 POSIX 主机模拟，未替代原生 Windows 验收。
+
+完整平台测试 2163 通过、0 失败、314 按现有依赖门控跳过；类型检查、Shell 语法和 diff 检查通过。第一次全量运行因沙箱禁止监听本机端口出现 `EPERM`，允许本机临时端口后，同一测试套件通过。独立上游源码和锁文件保持干净。本机不是 Intel，未运行完整 Intel 桌面构建；最终 macOS Intel 和 Windows 安装包结果仍以对应 release runner 为准。

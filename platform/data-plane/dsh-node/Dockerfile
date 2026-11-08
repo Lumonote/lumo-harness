@@ -126,9 +126,11 @@ COPY platform/package.json /workspace/platform/package.json
 RUN cd /workspace/platform && pnpm fetch
 
 COPY platform/upstream/skills/ppt-master/requirements.txt /tmp/lumo-ppt-requirements.txt
+COPY platform/upstream/ppt-constraints.txt /tmp/lumo-ppt-constraints.txt
 RUN python3 -m venv /opt/lumo-ppt \
-    && /opt/lumo-ppt/bin/python -m pip install --no-cache-dir \
-      -r /tmp/lumo-ppt-requirements.txt
+    && /opt/lumo-ppt/bin/python -m pip install --no-cache-dir --only-binary=:all: \
+      --constraint /tmp/lumo-ppt-constraints.txt -r /tmp/lumo-ppt-requirements.txt \
+    && /opt/lumo-ppt/bin/python -m pip check
 
 # Source edits do not invalidate the Python or package download layers.
 FROM dsh-dependencies AS dsh-build

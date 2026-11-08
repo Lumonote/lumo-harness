@@ -91,8 +91,8 @@ resolve_bootstrap_python() {
   local -a candidates=()
   if command -v uv >/dev/null 2>&1; then
     # 3.13 优先：与 CI（uv python install 3.13）及开发环境的系统 python3 对齐。
-    # PPT Master 的 requirements 在 3.13 上已实测可全部装成 wheel（含 PyMuPDF /
-    # skia-pathops / uharfbuzz 等原生包），不再需要回退到 3.12。
+    # 平台 constraints 固定仍有 Intel wheel 的 PyMuPDF 1.x；安装只接受 wheel，
+    # 防止未来依赖版本转为源码构建后隐式下载 MuPDF 或依赖本机编译工具链。
     for minor in 3.13 3.12 3.11 3.10; do
       candidate="$(uv python find "${minor}" 2>/dev/null || true)"
       [[ -n "${candidate}" ]] && candidates+=("${candidate}")
@@ -333,7 +333,9 @@ install_ppt_requirements() {
       fi
     fi
   fi
-  PATH="${pip_path}" "${venv_python}" -m pip install -r "${ppt_root}/requirements.txt"
+  PATH="${pip_path}" "${venv_python}" -m pip install --only-binary=:all: \
+    --constraint "${script_dir}/ppt-constraints.txt" -r "${ppt_root}/requirements.txt"
+  PATH="${pip_path}" "${venv_python}" -m pip check
 }
 
 cleanup_pip_interrupted_state

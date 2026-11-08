@@ -32,6 +32,13 @@ python.org 官方安装包或 uv 管理的 standalone Python（`@rpath`/仅系�
 装的 Python（链接 Cellar 绝对路径）不行——`install-components.sh` 会在建 venv 前校验并给出
 指引（`LUMO_PPT_BOOTSTRAP_PYTHON` 指定正确解释器）。服务器镜像则在镜像构建阶段安装
 同一份 `requirements.txt`，任务执行期间不得安装依赖。
+
+桌面安装和服务器镜像同时使用平台维护的 `ppt-constraints.txt`，不改固定上游快照。
+PyMuPDF 固定为 `1.27.2`：官方提供 macOS Intel、Apple Silicon、Windows x64 和 Linux
+的 CPython 3.10+ ABI3 wheel，可供 CI 的 Python 3.13 使用；2.x 不再提供 macOS Intel wheel。
+安装只接受预编译 wheel，并运行 `pip check`。依赖缺少兼容 wheel 时直接失败，不会转入
+MuPDF 源码下载或本机编译。升级约束前应验证所有目标的 wheel 解析及现有 `fitz` 使用。
+
 `build.sh --targets images`、`up.sh ... --build` 和 nightly 自动准备这些快照；直接调用
 Docker build 时先执行 `--snapshots-only`。下载使用只作用于临时克隆的 HTTP/1.1、最多
 三次重试，并核对检出的完整 commit；失败即停止，不回退到浮动分支。
