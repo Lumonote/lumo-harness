@@ -5,7 +5,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import typescript from 'typescript'
-import { compilePackagedTypeScriptPlugin } from '../packaged-typescript.mjs'
+import { compilePackagedTypeScriptPlugin, packagedTypeScriptPluginDirectories } from '../packaged-typescript.mjs'
 
 const temporary: string[] = []
 const platformRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
@@ -110,7 +110,7 @@ export async function lazy(): Promise<string> {
     expect(f.run(`await new plugin.SessionOwnerClient('https://authority.test', 'fixture-token', async () => new Response(JSON.stringify({ owner: ${JSON.stringify(owner)} }))).get('r1', 's1')`)).toEqual(owner)
   })
 
-  it.each(['agent-teams', 'open-design', 'archify', 'creative-skills', 'ruflo-orchestration', 'web-fetch-fakeip'])(
+  it.each(packagedTypeScriptPluginDirectories)(
     'emits the current %s plugin and its complete relative runtime graph', (name) => {
       const f = fixture()
       const packageRoot = join(platformRoot, 'dsh-plugins', name)

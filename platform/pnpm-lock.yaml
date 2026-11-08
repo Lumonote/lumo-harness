@@ -46,6 +46,9 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: link:../../../deepseek-harness/packages/core/tools
         version: link:../../../deepseek-harness/packages/core/tools
+      '@lumo/computer-use':
+        specifier: link:../../dsh-plugins/computer-use
+        version: link:../../dsh-plugins/computer-use
       '@lumo/control':
         specifier: link:../../dsh-plugins/control
         version: link:../../dsh-plugins/control
@@ -137,6 +140,46 @@ importers:
       sharp:
         specifier: ^0.35.3
         version: 0.35.3(@types/node@26.2.0)
+
+  dsh-plugins/computer-use:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: link:../../../deepseek-harness/vendor/cordis
+        version: link:../../../deepseek-harness/vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: link:../../../deepseek-harness/packages/core/agent
+        version: link:../../../deepseek-harness/packages/core/agent
+      '@deepseek-ai/dsh-atomic-write':
+        specifier: link:../../../deepseek-harness/packages/util/atomic-write
+        version: link:../../../deepseek-harness/packages/util/atomic-write
+      '@deepseek-ai/dsh-session':
+        specifier: link:../../../deepseek-harness/packages/core/session
+        version: link:../../../deepseek-harness/packages/core/session
+      '@deepseek-ai/dsh-tools':
+        specifier: link:../../../deepseek-harness/packages/core/tools
+        version: link:../../../deepseek-harness/packages/core/tools
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../deepseek-harness/vendor/schemastery
+        version: link:../../../deepseek-harness/vendor/schemastery
+    devDependencies:
+      '@deepseek-ai/dsh-agent-loop':
+        specifier: link:../../../deepseek-harness/packages/core/agent-loop
+        version: link:../../../deepseek-harness/packages/core/agent-loop
+      '@deepseek-ai/dsh-agent-loop-testkit':
+        specifier: link:../../../deepseek-harness/packages/test-support/agent-loop-testkit
+        version: link:../../../deepseek-harness/packages/test-support/agent-loop-testkit
+      '@deepseek-ai/dsh-llm':
+        specifier: link:../../../deepseek-harness/packages/llm/llm
+        version: link:../../../deepseek-harness/packages/llm/llm
+      '@deepseek-ai/dsh-system-prompt':
+        specifier: link:../../../deepseek-harness/packages/core/system-prompt
+        version: link:../../../deepseek-harness/packages/core/system-prompt
+      '@deepseek-ai/dsh-tool-executor-native':
+        specifier: link:../../../deepseek-harness/packages/core/tool-executor-native
+        version: link:../../../deepseek-harness/packages/core/tool-executor-native
+      '@deepseek-ai/dsh-tool-testkit':
+        specifier: link:../../../deepseek-harness/packages/test-support/tool-testkit
+        version: link:../../../deepseek-harness/packages/test-support/tool-testkit
 
   dsh-plugins/connector:
     dependencies:

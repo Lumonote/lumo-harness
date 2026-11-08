@@ -27,6 +27,7 @@ describe('profile plugin installation', () => {
   it('loads every platform plugin by package name instead of a filesystem path', () => {
     expect(Object.values(PLATFORM_PLUGIN_MODULES)).toContain('@lumo/knowledge')
     expect(Object.values(PLATFORM_PLUGIN_MODULES)).toContain('@lumo/dsh-platform-ui')
+    expect(Object.values(PLATFORM_PLUGIN_MODULES)).toContain('@lumo/computer-use')
     expect(Object.values(PLATFORM_PLUGIN_MODULES)).toContain('@lumo/open-design')
     expect(Object.values(PLATFORM_PLUGIN_MODULES)).toContain('@lumo/archify')
     expect(Object.values(PLATFORM_PLUGIN_MODULES)).toContain('@lumo/creative-skills')
@@ -50,6 +51,7 @@ describe('profile plugin installation', () => {
     expect(headless.some(({ name }) => name === '@yejiming/dsh-data-agent')).toBe(false)
     expect(local.map(({ name }) => name)).toEqual([
       '@lumo/agent-teams',
+      '@lumo/computer-use',
       '@lumo/dsh-platform-ui', '@lumo/open-design', '@lumo/archify',
       '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/knowledge-vault', '@lumo/skill-local',
       '@lumo/web-fetch-fakeip',

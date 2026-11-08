@@ -89,6 +89,7 @@ export const BASELINE_EXCLUDED_PLUGINS: readonly { name: string; reason: string 
 export const PACKAGED_FIRST_PARTY_MODULES: readonly string[] = [
   '@deepseek-ai/dsh-storage-sqlite',
   '@lumo/agent-teams',
+  '@lumo/computer-use',
   '@lumo/dsh-platform-ui',
   '@lumo/knowledge-vault',
   '@lumo/open-design',

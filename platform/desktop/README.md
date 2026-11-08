@@ -67,6 +67,21 @@ Windows 包内使用 `runtime/lumo-runtime.cmd`、`node.exe` 和 `python/python.
 
 ## 桌面基础插件
 
+### 电脑操作
+
+本地侧边栏「电脑操作」管理当前对话的桌面控制授权、占用状态和立即停止。先在插件页面
+启用官方 Computer Use，使用 PTC 对话，再允许当前对话操作电脑。系统权限和逐应用授权
+继续使用官方界面；打开状态面板不会触发系统授权。授权默认关闭，重启后重新确认。
+
+目前原生 Provider 支持 macOS 14 及以上。macOS 构建会使用官方 Swift 脚本准备 release helper，并验证
+架构、内容摘要和签名；构建机需要 Xcode/Swift 和 Python 3，最终用户无需安装开发工具。
+默认 ad-hoc 签名，可设置 `LUMO_CUA_SIGNING_IDENTITY` 和可选的
+`LUMO_CUA_SIGNING_KEYCHAIN`；正式发布仍需完成 Developer ID 签名、公证与系统权限验收。
+Windows 页面明确显示暂不支持，构建不会运行 Swift。
+
+同一轮 Agent 独占桌面，停止时等待原生调用结束后才释放，不自动重放动作。详细配置、
+验证范围与远程 Bot 边界见 [本机电脑操作记录](../../docs/computer-use-2026-11-08.md)。
+
 ### 鲸鱼悬浮窗
 
 桌面伙伴是与主窗口同时运行的独立透明悬浮窗，显示在操作系统桌面上。主窗口最小化后，

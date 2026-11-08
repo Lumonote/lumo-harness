@@ -80,7 +80,7 @@ export function planRuntimePackages(modulesRoot, packageSources) {
   return queue
 }
 
-export function copyRuntimePackage(packageRoot, destination) {
+export function copyRuntimePackage(packageRoot, destination, { exclude = [] } = {}) {
   cpSync(packageRoot, destination, {
     recursive: true,
     dereference: true,
@@ -88,6 +88,7 @@ export function copyRuntimePackage(packageRoot, destination) {
       const rel = relative(packageRoot, source)
       if (rel === '') return true
       return !['node_modules', 'tests', '__tests__', '.git'].includes(rel.split(sep)[0])
+        && !exclude.some((path) => rel === path || rel.startsWith(`${path}${sep}`))
     },
   })
 }

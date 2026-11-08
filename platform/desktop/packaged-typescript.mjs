@@ -1,6 +1,12 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 
+// One list drives both dependency-closure roots and compilation. A source
+// plugin cannot be compiled unless its runtime dependencies were staged too.
+export const packagedTypeScriptPluginDirectories = Object.freeze([
+  'agent-teams', 'computer-use', 'open-design', 'archify', 'creative-skills', 'ruflo-orchestration', 'web-fetch-fakeip',
+])
+
 function isWithin(root, path) {
   const value = relative(root, path)
   return value === '' || (value !== '..' && !value.startsWith(`..${sep}`) && !isAbsolute(value))

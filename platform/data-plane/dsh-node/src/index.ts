@@ -61,6 +61,7 @@ const {
   control: controlEntry,
   project: projectEntry,
   connector: connectorEntry,
+  computerUse: computerUseEntry,
   webGateway: webGatewayEntry,
   webFetchFakeIp: webFetchFakeIpEntry,
   recovery: recoveryEntry,
@@ -445,7 +446,12 @@ ${webFetchFakeIpPatchRow}` : ''}${localMode ? '' : `- id: attachment-local
   disabled: true
 `}
 - insert:
-${localMode ? localStorageRows(dshProfile, sqlitePath) + localVaultRows(sqlitePath, platformRealm) + webFetchFakeIpRows + agentTeamsRows : `    - id: lumo-object-store
+${localMode ? localStorageRows(dshProfile, sqlitePath) + localVaultRows(sqlitePath, platformRealm) + webFetchFakeIpRows + agentTeamsRows + `    - id: lumo-computer-use
+      name: ${JSON.stringify(computerUseEntry)}
+      inject: [tools]
+      config:
+        idleLeaseMs: 120000
+` : `    - id: lumo-object-store
       name: ${JSON.stringify(objectStoreEntry)}
       inject: []
       config:

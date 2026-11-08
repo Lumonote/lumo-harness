@@ -46,6 +46,8 @@ import { KnowledgeLibraryEditor, type LibraryEditorResource } from './knowledge-
 import type { ThreadFacts } from './thread-board.ts'
 import { installDesktopPetBridge, registerDesktopPetSurface, type DesktopPetServices } from './desktop-pet.ts'
 import { DesktopPetTasks } from './desktop-pet-tasks.tsx'
+import { ComputerUsePanel } from './computer-use-panel.tsx'
+import { installComputerUseServices, type ComputerUseClientServices } from './computer-use-services.ts'
 import { installAnchoredOverlayFallback } from './anchored-overlays.ts'
 
 // A desktop WebView can evaluate more than one copy of this bundle while the
@@ -67,7 +69,7 @@ interface ConversationInputActions {
   submit(): void
 }
 
-type Surface = 'knowledge' | 'skills' | 'connectors' | 'operations' | 'design' | 'presentation' | 'account' | 'market' | 'skillhub' | 'collaboration'
+type Surface = 'knowledge' | 'skills' | 'connectors' | 'operations' | 'design' | 'presentation' | 'account' | 'market' | 'skillhub' | 'collaboration' | 'computer'
 type OverlayProps = PropsRuntime<'shell.overlay'>
 type SidebarNavigationProps = PropsRuntime<'sidebar.navigation'>
 type ComposerDockProps = PropsRuntime<'conversation.input.dock'>
@@ -208,6 +210,7 @@ type AuthPasskeyStatus = { configured: boolean; rp_id?: string; require_user_ver
 
 const emptyOverview: Overview = { generatedAt: '', deployment: { mode: 'standalone', label: '服务器单例', storage: 'postgres', middleware: [], distributed: false, desktop: false, clusterReady: false, clusterOnly: false }, services: {}, cluster: { nodes: [] }, projects: [], flows: [], connectors: [], plugins: [] }
 const surfaceMeta: Record<Surface, { label: string; eyebrow: string; description: string; short: string }> = {
+  computer: { label: '电脑操作', eyebrow: '本机自动化', description: '授权当前对话操作电脑，查看执行状态并随时停止。', short: '电脑' },
   collaboration: { label: '协作空间', eyebrow: '目标与协作', description: '把委派链、执行进度、交付物与待你决策的事项放在一张空间视图里。', short: '协作' },
   operations: { label: '项目运营', eyebrow: '项目与平台管理', description: '管理项目资产、集群运行状态与组织权限。', short: '运营' },
   skills: { label: '技能管理', eyebrow: '运行时与治理', description: '检查已安装技能的调用策略、版本与治理状态。', short: '技能管理' },
@@ -221,11 +224,11 @@ const surfaceMeta: Record<Surface, { label: string; eyebrow: string; description
 }
 const surfaces = Object.keys(surfaceMeta) as Surface[]
 function availableSurfaces(localMode: boolean): Surface[] {
-  const localSurfaces: Surface[] = ['operations', 'knowledge', 'design', 'presentation', 'skills', 'skillhub', 'market']
-  return localMode ? surfaces.filter(surface => localSurfaces.includes(surface)) : surfaces
+  const localSurfaces: Surface[] = ['operations', 'knowledge', 'design', 'presentation', 'skills', 'skillhub', 'market', 'computer']
+  return localMode ? surfaces.filter(surface => localSurfaces.includes(surface)) : surfaces.filter(surface => surface !== 'computer')
 }
 function navigationSurfaces(localMode: boolean): Surface[] {
-  const primarySurfaces: Surface[] = ['collaboration', 'knowledge', 'skillhub', 'market']
+  const primarySurfaces: Surface[] = ['collaboration', 'knowledge', 'computer', 'skillhub', 'market']
   const available = availableSurfaces(localMode)
   return primarySurfaces.filter(surface => available.includes(surface))
 }
@@ -593,6 +596,7 @@ function openSurface(surface: Surface): void {
 
 function Glyph({ surface }: { surface: Surface }) {
   const paths: Record<Surface, ReactNode> = {
+    computer: <><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4m-1-12 4 3-3 1-1 3z" /></>,
     collaboration: <><circle cx="12" cy="12" r="2.6" /><path d="M12 4.5a7.5 7.5 0 0 1 0 15" /><path d="M12 4.5a7.5 7.5 0 0 0 0 15" /><circle cx="12" cy="3" r="1.1" /><circle cx="19.5" cy="16.5" r="1.1" /><circle cx="4.5" cy="16.5" r="1.1" /></>,
     knowledge: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v14H6.5A2.5 2.5 0 0 0 4 19.5z" /><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v14h4.5a2.5 2.5 0 0 1 2.5 2.5z" /></>,
     skills: <><path d="m12 3 1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5z" /><path d="m18.5 15 .75 2.25L21.5 18l-2.25.75L18.5 21l-.75-2.25L15.5 18z" /></>,
@@ -4017,7 +4021,7 @@ function Workbench({ surface, close, select, commandOpen, toggleCommand }: { sur
   }, [surface])
   return <div className="lumo-backdrop"><section ref={ref} tabIndex={-1} className="lumo-workbench" data-lumo-surface={identity.surface} data-lumo-emphasis={identity.emphasis} data-lumo-effects={identity.effects} data-lumo-view={surface} role="dialog" aria-modal="true" aria-label={`${meta.label}工作台`}>
     <WorkbenchRail surface={surface} available={primaryNavigation} select={select} />
-    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>Lumo 工作台</span><i>›</i><b>{meta.label}</b><small>{meta.eyebrow}</small></div></header><main>{surface === 'collaboration' ? <CollaborationSurface onClose={close} /> : surface === 'knowledge' ? <KnowledgeSurface onClose={close} /> : surface === 'skills' ? <SkillsSurface onClose={close} /> : surface === 'connectors' ? <ConnectorsSurface onClose={close} /> : surface === 'operations' ? <OperationsSurface onClose={close} /> : surface === 'design' ? <OpenDesignSurface onConversationStart={close} /> : surface === 'presentation' ? <PresentationSurface onConversationStart={close} /> : surface === 'market' ? <MarketSurface onClose={close} /> : surface === 'skillhub' ? <SkillHubSurface onClose={close} /> : <AccountSurface onClose={close} />}</main><footer className="lumo-workbench-footer"><span>在对话中输入 /design 或 /ppt，开始创作</span><span>Esc 返回对话</span></footer></div>
+    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>Lumo 工作台</span><i>›</i><b>{meta.label}</b><small>{meta.eyebrow}</small></div></header><main>{surface === 'computer' ? <ComputerUsePanel onClose={close} /> : surface === 'collaboration' ? <CollaborationSurface onClose={close} /> : surface === 'knowledge' ? <KnowledgeSurface onClose={close} /> : surface === 'skills' ? <SkillsSurface onClose={close} /> : surface === 'connectors' ? <ConnectorsSurface onClose={close} /> : surface === 'operations' ? <OperationsSurface onClose={close} /> : surface === 'design' ? <OpenDesignSurface onConversationStart={close} /> : surface === 'presentation' ? <PresentationSurface onConversationStart={close} /> : surface === 'market' ? <MarketSurface onClose={close} /> : surface === 'skillhub' ? <SkillHubSurface onClose={close} /> : <AccountSurface onClose={close} />}</main><footer className="lumo-workbench-footer"><span>在对话中输入 /design 或 /ppt，开始创作</span><span>Esc 返回对话</span></footer></div>
     <CommandPalette open={commandOpen} surface={surface} available={available} select={select} close={toggleCommand} />
   </section></div>
 }
@@ -4145,6 +4149,12 @@ export function apply(ctx: ClientContext): void {
       desktopCtx.effect(() => installDesktopPetBridge(window, services as unknown as DesktopPetServices), 'lumo-ui: desktop pet handoff')
     })
   }
+  if (typeof window !== 'undefined') ctx.inject(['sessions', 'layout'], (computerCtx) => {
+    const sessions = computerCtx.get('sessions')
+    const layout = computerCtx.get('layout')
+    if (sessions === undefined || layout === undefined) return
+    computerCtx.effect(() => installComputerUseServices(window, { sessions, layout } as unknown as ComputerUseClientServices), 'lumo-ui: current conversation computer controls')
+  })
   installLumoThemes(ctx)
   ctx.slots.inject('sidebar.navigation', () => ctx.slots.register(
     { name: 'sidebar.navigation', id: 'lumo-navigation', order: 10, label: 'Lumo 功能菜单' },

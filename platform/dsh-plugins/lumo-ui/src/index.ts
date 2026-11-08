@@ -15,6 +15,7 @@ import { assertIdentityConfiguration, IdentityAssertionError, resolveRequestIden
 import { collaborationThreads, type AgentThreadReader, type FleetControl } from './collaboration-threads.ts'
 import { lumoBootThemeInjection } from './boot-theme.ts'
 import { registerDesktopHandoff } from './desktop-handoff.ts'
+import { registerComputerUseRoutes } from './computer-use-api.ts'
 import { discoverSkillDemos, resolveSkillDemoAsset, type SkillDemo } from './skill-demos.ts'
 import { allowedAssetUrl, createUpstreamDemoService, type GallerySkill, type UpstreamDemoService } from './upstream-demos.ts'
 import { loadCatalog, installItem, searchCatalog, type SkillHubConfig, type SkillHubKind } from './skillhub.ts'
@@ -2509,6 +2510,7 @@ function ops(_req: IncomingMessage, res: ServerResponse): void { res.writeHead(3
 
 export function apply(ctx: Context, config: Config): void {
   assertIdentityConfiguration(config)
+  registerComputerUseRoutes(ctx, config.deploymentMode === 'local')
   let skillhubRuntime: SkillHubRuntime | undefined
   if (config.deploymentMode === 'local') {
     ctx.inject(['skills'], (skillsCtx) => {

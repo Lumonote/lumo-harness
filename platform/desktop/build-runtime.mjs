@@ -26,8 +26,9 @@ import { prepareSkillHubArchive, stageSkillHub } from './skillhub-tooling.mjs'
 import { acquireBuildLock } from './build-lock.mjs'
 import { prepareSourcePlugins } from '../tools/prepare-source-plugins.mjs'
 import { assertWindowsRuntimePaths, copyRuntimePackage, planRuntimePackages, resolveInstalledPackage } from './runtime-dependencies.mjs'
-import { compilePackagedTypeScriptPlugin } from './packaged-typescript.mjs'
+import { compilePackagedTypeScriptPlugin, packagedTypeScriptPluginDirectories } from './packaged-typescript.mjs'
 import { stageDshNode } from './stage-dsh-node.mjs'
+import { cuaProviderPackage, stageCuaHelper, verifyCuaHelper } from './cua-helper.mjs'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(desktopRoot, '..', '..')
@@ -108,7 +109,8 @@ const modulesRoot = resolve(stagingRoot, 'node_modules')
 const upstreamPluginRoot = resolve(desktopRoot, 'lumo-upstream-plugins')
 const upstreamPluginModulesRoot = resolve(upstreamPluginRoot, 'node_modules')
 const upstreamPluginPackageManager = 'pnpm@11.7.0'
-const packagedTypeScriptPlugins = new Set(['@lumo/agent-teams', '@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/web-fetch-fakeip'])
+const packagedTypeScriptPluginRoots = packagedTypeScriptPluginDirectories.map(name => resolve(repoRoot, 'platform', 'dsh-plugins', name))
+const packagedTypeScriptPlugins = new Set(packagedTypeScriptPluginRoots.map(root => readManifest(root).name))
 // RuVector's current published manifest still lists MetaHarness packages in
 // `dependencies`, although the integration is intentionally removable and all
 // call sites degrade when the packages are absent. pnpm may therefore omit
@@ -421,12 +423,7 @@ for (const root of [
   ...overriddenPackageRoots,
   resolve(dshRoot, 'packages', 'storage', 'storage-sqlite'),
   lumoUiRoot,
-  resolve(repoRoot, 'platform', 'dsh-plugins', 'open-design'),
-  resolve(repoRoot, 'platform', 'dsh-plugins', 'archify'),
-  resolve(repoRoot, 'platform', 'dsh-plugins', 'creative-skills'),
-  resolve(repoRoot, 'platform', 'dsh-plugins', 'ruflo-orchestration'),
-  resolve(repoRoot, 'platform', 'dsh-plugins', 'web-fetch-fakeip'),
-  resolve(repoRoot, 'platform', 'dsh-plugins', 'agent-teams'),
+  ...packagedTypeScriptPluginRoots,
   knowledgeVaultRoot,
   ...upstreamPluginSpecs.map((spec) => packagePath(spec.slice(0, spec.lastIndexOf('@')), upstreamPluginRoot)),
 ]) {
@@ -519,9 +516,20 @@ for (let index = 0; index < packageQueue.length; index += 1) {
 
 assertDshPackagesCameFromSnapshot()
 const runtimePackages = planRuntimePackages(modulesRoot, packageSources)
-for (const { root, destination } of runtimePackages) copyRuntimePackage(root, destination)
+for (const { root, destination, manifest } of runtimePackages) {
+  copyRuntimePackage(root, destination, {
+    exclude: manifest.name === cuaProviderPackage ? [join('native', '.build'), join('native', 'bin')] : [],
+  })
+}
 assertOverridesCameFromSnapshot()
 compilePackagedTypeScriptPlugins()
+const cuaPackageRoot = runtimePackages.find(({ manifest }) => manifest.name === cuaProviderPackage)?.destination
+const computerUse = stageCuaHelper({
+  packageRoot: cuaPackageRoot,
+  targetPlatform,
+  targetArch,
+  scratchPath: resolve(repoRoot, 'platform', '.build', 'cua-helper', buildTarget),
+})
 
 if (!existsSync(bundledSkillSources)) throw new Error(`无法构建桌面 runtime：找不到 ${bundledSkillSources}`)
 cpSync(bundledSkillsRoot, resolve(stagingRoot, 'skills'), {
@@ -536,6 +544,8 @@ cpSync(bundledSkillsRoot, resolve(stagingRoot, 'skills'), {
 const pptPython = bundlePptPython()
 const prunedBytes = pruneStagedRuntime()
 assertTargetNativePayload()
+// Bundle bytes are content-addressed and signed. Generic pruning must not alter them.
+if (computerUse.available) verifyCuaHelper({ packageRoot: cuaPackageRoot, targetArch })
 
 const runtimeNode = resolve(stagingRoot, targetPlatform === 'win32' ? 'node.exe' : 'node')
 const nodeSource = findPortableNode()
@@ -570,6 +580,7 @@ writeFileSync(resolve(stagingRoot, 'runtime-manifest.json'), `${JSON.stringify({
   packageCount: runtimePackages.length,
   python: pptPython,
   skillhub,
+  computerUse,
   prunedBytes,
   entrypoint: launcherName,
   upstreamPlugins: upstreamPluginSpecs,

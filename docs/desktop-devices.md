@@ -292,10 +292,10 @@ WebSocket 下发给设备。**这条链路已于 2026-09-17 接通：**
 重启恢复依赖 `task_result` 通道，所以它只能在 WebSocket 连上之后跑。
 
 顺序不变量（未落盘不收件、回执先于上报、没有 runner 不接受、执行不阻塞心跳）见
-`docs/superpowers/specs/2026-09-17-device-task-result-channel-design.md`。**已知缺口**：
-任务跑起来之后**没有取消通道**（设备命令面没有对应 action，runner socket 契约也没有取消帧），
-设备重启后也不会把「有收件箱、无回执」的 run 报成 FAILED —— 那条 run 会停在 `RUNNING`
-直到超时或人工处理。
+`docs/superpowers/specs/2026-09-17-device-task-result-channel-design.md`。取消和重启恢复已按上述
+链路实现；socket 对端仍需在 EOF 时停止真实执行，且当前 runner 交换具有绝对 30 秒期限。
+本机 Computer Use 使用独立的会话工具与桌面租约，不能把这条设备投递通道直接当成持续的
+鼠标／键盘控制接口。
 
 进程运行默认关闭。启用时需要同时满足：
 

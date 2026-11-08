@@ -59,6 +59,7 @@
   "packagedFirstParty": [
     "@deepseek-ai/dsh-storage-sqlite",
     "@lumo/agent-teams",
+    "@lumo/computer-use",
     "@lumo/dsh-platform-ui",
     "@lumo/knowledge-vault",
     "@lumo/open-design",

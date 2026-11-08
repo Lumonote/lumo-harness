@@ -18,6 +18,7 @@
     "@deepseek-ai/dsh-session": "link:../../../deepseek-harness/packages/core/session",
     "@deepseek-ai/dsh-tools": "link:../../../deepseek-harness/packages/core/tools",
     "@lumo/control": "link:../../dsh-plugins/control",
+    "@lumo/computer-use": "link:../../dsh-plugins/computer-use",
     "@lumo/dsh-platform-ui": "link:../../dsh-plugins/lumo-ui",
     "@lumo/mailbox": "link:../../dsh-plugins/mailbox",
     "@lumo/knowledge": "link:../../dsh-plugins/knowledge",

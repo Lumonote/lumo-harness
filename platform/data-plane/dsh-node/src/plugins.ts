@@ -8,6 +8,7 @@ export const PLATFORM_PLUGIN_MODULES = {
   agentTeams: '@lumo/agent-teams',
   attachments: '@lumo/attachments',
   connector: '@lumo/connector',
+  computerUse: '@lumo/computer-use',
   control: '@lumo/control',
   jobControl: '@lumo/job-control',
   knowledge: '@lumo/knowledge',
@@ -50,6 +51,7 @@ const PLATFORM_PLUGIN_DIRECTORIES: Record<keyof typeof PLATFORM_PLUGIN_MODULES, 
   agentTeams: 'agent-teams',
   attachments: 'attachments',
   connector: 'connector',
+  computerUse: 'computer-use',
   control: 'control',
   jobControl: 'job-control',
   knowledge: 'knowledge',
@@ -170,7 +172,7 @@ export function profilePluginSpecs(profile: string, platformRoot: string, deploy
   if (deploymentMode === 'local') {
     // local 模式的知识源是 Vault（sqlite+FTS5），不是需要 PG 的 @lumo/knowledge 接缝。
     // 本名单同时是 packagedFirstParty 清单的来源：打包 runtime 只 symlink 这些模块。
-    const localOnly = new Set(['@lumo/agent-teams', '@lumo/dsh-platform-ui', '@lumo/knowledge-vault', '@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/skill-local', '@lumo/web-fetch-fakeip'])
+    const localOnly = new Set(['@lumo/agent-teams', '@lumo/computer-use', '@lumo/dsh-platform-ui', '@lumo/knowledge-vault', '@lumo/open-design', '@lumo/archify', '@lumo/creative-skills', '@lumo/ruflo-orchestration', '@lumo/skill-local', '@lumo/web-fetch-fakeip'])
     return [
       ...local.filter(({ name }) => localOnly.has(name)),
       ...baseline,

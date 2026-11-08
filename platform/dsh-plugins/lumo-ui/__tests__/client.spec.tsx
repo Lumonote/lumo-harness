@@ -902,7 +902,7 @@ describe('Lumo native Harness integration', () => {
     }), { status: 200, headers: { 'content-type': 'application/json' } })))
     render(<Navigation wide />)
     const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
-    await waitFor(() => expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual(['资料库', '技能中心', '工作工具']))
+    await waitFor(() => expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual(['资料库', '电脑操作', '技能中心', '工作工具']))
     expect(within(navigation).queryByRole('button', { name: '更多' })).toBeNull()
     expect(within(navigation).getByRole('button', { name: '工作工具' }).querySelector('small')).toBeNull()
     expect(within(navigation).queryByRole('button', { name: '项目运营' })).toBeNull()
