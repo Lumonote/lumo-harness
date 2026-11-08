@@ -89,3 +89,13 @@ RocketMQ 门禁已在运行 `41405260712` 远端通过；下一项集群探针�
 官方 PyPI 依赖解析验收覆盖 Python 3.13 的三个桌面目标，以及 Debian 12 / Python 3.11 的 Linux x64、arm64；五个目标各解析出 87 个 wheel，没有源码包。本机 Apple Silicon 的全新 Python 3.13 虚拟环境实际安装全部 87 个 wheel，`pip check`、`fitz` PDF 文字提取与渲染、PPTX 保存后重读及 YAML/Flask 加载均通过。安装脚本的 5 项进程级回归覆盖三个目标分支，以及安装失败和依赖检查失败时的中止行为；这些是 POSIX 主机模拟，未替代原生 Windows 验收。
 
 完整平台测试 2163 通过、0 失败、314 按现有依赖门控跳过；类型检查、Shell 语法和 diff 检查通过。第一次全量运行因沙箱禁止监听本机端口出现 `EPERM`，允许本机临时端口后，同一测试套件通过。独立上游源码和锁文件保持干净。本机不是 Intel，未运行完整 Intel 桌面构建；最终 macOS Intel 和 Windows 安装包结果仍以对应 release runner 为准。
+
+## 2026-11-08：Windows NSIS 工具下载 HTTP 504
+
+后续用户日志已完成 win-x64 runtime 暂存（1641 个包）及 Rust release 编译，失败于 Tauri 从 GitHub Release 下载 `nsis-3.13.zip` 时返回 HTTP 504。ONNX WASM fallback 和 Node 弃用提示不是本次退出原因。官方 bundler 下载没有内置重试；单次外部下载故障会使整个桌面 job 失败。
+
+Windows 总构建入口和 `desktop:win` 现在共同调用 `desktop/build-windows.mjs`。先执行一次 `cargo tauri build --no-bundle`，保留原有 runtime 准备与 Rust 编译，再独立执行 `cargo tauri bundle --bundles nsis`。仅当输出包含官方下载及 Tauri 明确的 HTTP 408/429/500/502/503/504 打包错误时，按 5 秒、15 秒间隔重试，最多三次；编译失败、403/404、摘要校验失败、makensis 错误、进程中断或启动失败均不重试，保留失败结果。独立 bundle 不执行 `beforeBuildCommand` 或重新编译。
+
+启用官方 `bundle.useLocalToolsDir`，将工具保存在 Cargo 的 `target/.tauri/`；release 将该目录与 Rust 编译缓存分开，按 Windows 架构及实际 Tauri CLI 版本缓存。下载 URL、版本和摘要校验继续由官方 bundler 维护，没有第三方镜像或本地写死摘要。已核对与日志匹配的 bundler 2.10.4 源码：NSIS 缺件或版本不符时自动重建，插件摘要不符时重新下载，HTTP 失败不会落盘未经校验的工具。
+
+完整平台测试 2184 通过、0 失败、314 按既有门控跳过，类型检查通过。随后补充默认 spawn 的真实子进程回归，打包测试共 22 项通过：临时 PATH 含空格与特殊字符，真实 stdout/stderr 输出 504，验证编译一次、仅重试 bundle、参数及工作目录、目标环境和清理；未启动真实 Cargo 编译或网络请求。Windows 总入口 dry-run、Node/Shell 语法及工作流 YAML/Tauri JSON 解析通过。当前本机为 macOS，且 GitHub CLI 未登录，未触发远端 Windows release；完整安装包仍需对应 runner 验收。

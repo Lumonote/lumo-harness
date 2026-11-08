@@ -20,6 +20,7 @@
   },
   "bundle": {
     "active": true,
+    "useLocalToolsDir": true,
     "targets": "all",
     "icon": [
       "icons/Lumo.icns",

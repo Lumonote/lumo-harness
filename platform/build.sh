@@ -326,7 +326,8 @@ build_desktop() {
       # 在最终生成 CAB 时失败——Tauri 默认吞掉 light.exe 的 stderr，只报
       # "failed to run ...\light.exe"（tauri-apps/tauri#7372、#12085）。NSIS 流式
       # 打包同一份 payload 可正常产出，因此 Windows 交付 NSIS 安装包。
-      run env "LUMO_DESKTOP_TARGET=$target" cargo tauri build --bundles nsis
+      # 编译只做一次；工具下载的临时 HTTP 失败仅重试 bundle 阶段。
+      run env "LUMO_DESKTOP_TARGET=$target" node "$platform_root/desktop/build-windows.mjs"
       local bundle_root="$platform_root/desktop/target/release/bundle"
       if [[ $dry_run -eq 1 ]]; then
         printf '+ test -n "$(find %q -type f -name "*.exe" -print -quit)"  # Windows NSIS\n' "$bundle_root/nsis"

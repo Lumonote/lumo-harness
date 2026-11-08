@@ -125,6 +125,23 @@ jobs:
         if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
         run: cargo install tauri-cli --version "^2.0.0" --locked
 
+      # NSIS 由 Tauri 官方下载并校验；与 Cargo 编译缓存分开保存，避免每次构建
+      # 都依赖 GitHub Release 下载。useLocalToolsDir 将工具放到 target/.tauri。
+      - name: Read Tauri CLI version for the Windows tool cache
+        if: runner.os == 'Windows'
+        id: tauri-version
+        shell: bash
+        run: |
+          version="$(cargo tauri --version)"
+          echo "version=${version#tauri-cli }" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Windows bundler tools
+        if: runner.os == 'Windows'
+        uses: actions/cache@v5
+        with:
+          path: platform/desktop/target/.tauri
+          key: tauri-bundler-${{ runner.os }}-${{ runner.arch }}-${{ steps.tauri-version.outputs.version }}-v1
+
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
         with:

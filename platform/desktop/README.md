@@ -62,6 +62,11 @@ Windows 使用同一个总入口，在 Git Bash 中执行：
 MSVC 工具链、Node.js、Python 3.10+、Corepack 和 WebView2；产物位于
 `platform/desktop/target/release/bundle/nsis`。Windows 只出 NSIS：runtime 约 1.3GB，
 WiX `light.exe` 生成 CAB 会失败，NSIS 可正常打包同一份 payload。
+这两个 Windows 入口共用 `build-windows.mjs`：先由 `tauri build --no-bundle` 准备
+runtime 并编译，再由 `tauri bundle --bundles nsis` 生成安装包。官方下载遇到
+HTTP 408/429/500/502/503/504 时，仅重试打包，最多三次，间隔 5 秒和 15 秒；
+编译错误、摘要校验失败及 NSIS 脚本错误直接退出。工具仍由 Tauri 官方下载和校验，
+保存在 `target/.tauri/`，release 按 Windows 架构及实际 Tauri CLI 版本缓存该目录。
 Windows 包内使用 `runtime/lumo-runtime.cmd`、`node.exe` 和 `python/python.exe`，运行时不依赖
 当前 checkout 或开发机上的 Node。
 
