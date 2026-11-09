@@ -70,6 +70,11 @@ HTTP 408/429/500/502/503/504 时，仅重试打包，最多三次，间隔 5 秒
 Windows 包内使用 `runtime/lumo-runtime.cmd`、`node.exe` 和 `python/python.exe`，运行时不依赖
 当前 checkout 或开发机上的 Node。
 
+下载体积与安装占用需分开核对：DMG/NSIS 压缩运行时，展开后还包含 Node、Python、插件与技能素材，
+大量小文件也会产生额外分配开销。可用 `python3 platform/desktop/audit-runtime-size.py /path/to/runtime`
+从仓库根目录只读统计；加 `--hash-duplicates` 核对大文件副本。跨平台原因、历史样本和优化边界见
+[安装体积排查](../../docs/desktop-installation-size-audit-2026-11-09.md)。
+
 ## 桌面基础插件
 
 ### 电脑操作
