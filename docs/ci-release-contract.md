@@ -50,3 +50,14 @@ bash -n platform/deploy/acceptance-cluster.sh
 基础 CI 同时编译 Node、浏览器及两套 eval 入口，执行全部 deploy Python 合同测试，
 并以固定 `playwright@1.58.2` 与匹配 Chromium 运行 headless 源码工作台验收。
 该浏览器证据标识为源码 fixture，与目标部署、模型、原生系统验收分别记录。
+
+## 全新 checkout 的准备与依赖就绪
+
+`platform/upstream/skills/` 是忽略提交的快照目录。基础 CI 在安装文档 Python 依赖前，
+先执行 `upstream/install-components.sh --snapshots-only`，按 `skill-sources.json` 的固定
+提交重建快照及 PPT Master 的 `requirements.txt`；此模式不创建桌面 venv 或安装原生组件。
+之后仍使用隔离 venv、平台 constraints、wheel-only 安装、`pip check` 和必要模块导入检查。
+
+平台与 Registry 的 MinIO 就绪探针绕过代理，并在120秒重试预算内接受启动期连接重置后重试；
+持续不健康仍失败。回归从空快照目录执行实际引导脚本，校验固定提交，并用本机 HTTP 服务
+验证连接重置后的恢复和持续503的有界失败。
