@@ -5,6 +5,7 @@ import { ownedChatHtml, ownedChatScript } from '../src/owned-chat.ts'
 const ids = [`session-${'a'.repeat(32)}`, `session-${'b'.repeat(32)}`]
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T
 const receipt = { receipt_id: `att_${'a'.repeat(48)}`, name: 'ready.txt', bytes: 5 }
+const inventory = (receipts:unknown[], retired = 0, next_cursor = '') => ({receipts,next_cursor,usage:{total_count:receipts.length+retired,active_count:receipts.length,retired_count:retired,total_bytes:(receipts.length+retired)*5,active_bytes:receipts.length*5,retired_bytes:retired*5,active_limit:100,accounting:'logical-retained-reference-bytes',retirement_releases_quota:false}})
 const models = { choices: [{ id: 'fast', label: '快速' }, { id: 'deep', label: '深入' }], selected_choice_id: 'fast', can_select: true, selection_revision: 1, policy_digest: 'digest', attachment_policy: { max_upload_bytes: 10000, max_per_message: 4 } }
 type Intercept = (url: string, init: RequestInit, action: string, body: Record<string, unknown>) => Promise<Response> | undefined
 function mount(intercept?: Intercept, owners = ids) {
@@ -15,6 +16,7 @@ function mount(intercept?: Intercept, owners = ids) {
     if (action === 'wait') return new Promise<Response>(() => {})
     if (action === 'list') return Promise.resolve(new Response(JSON.stringify({ owners: owners.map(session_ref => ({ session_ref, created_at: '2026-11-07' })), next_cursor: '' })))
     if (action === 'models') return Promise.resolve(new Response(JSON.stringify(models)))
+    if (action === 'attachmentInventory') return Promise.resolve(new Response(JSON.stringify(inventory([]))))
     if (action === 'events') return Promise.resolve(new Response('{"events":[]}'))
     if (action === 'interactionList') return Promise.resolve(new Response('{"questions":[]}'))
     return Promise.resolve(new Response('{"accepted":true}'))
@@ -183,7 +185,7 @@ it('recovers uploaded receipts after switching views and reconciles an uncertain
   let retired=false
   const f=mount((url,_init,action)=>{
     if (url.startsWith('/lumo/session-attachments/')) return Promise.resolve(new Response(JSON.stringify(receipt)))
-    if (action==='attachmentList') return Promise.resolve(new Response(JSON.stringify({receipts:retired?[]:[receipt]})))
+    if (action==='attachmentInventory') return Promise.resolve(new Response(JSON.stringify(inventory(retired?[]:[receipt],retired?1:0))))
     if (action==='retireAttachment') { retired=true;return Promise.reject(Error('response lost')) }
   })
   await f.open();fireEvent.click(byId('attachment-refresh'))
@@ -197,4 +199,38 @@ it('recovers uploaded receipts after switching views and reconciles an uncertain
   await screen.findByText('没有可再次发送的附件。')
   expect(byId('attachments').childElementCount).toBe(0)
   expect(byId('status').textContent).toContain('已退役的待发送项已移除')
+})
+
+it('shows retained logical capacity and pages retired history without reopening its send action',async()=>{
+ const retired={...receipt,retired_at:'2026-11-09'},second={...retired,receipt_id:'att_'+ 'b'.repeat(48),name:'older.txt'}
+ const f=mount((_url,_init,action,body)=>{
+  if(action!=='attachmentInventory')return
+  const page=body.after?inventory([second]):inventory([retired],0,retired.receipt_id)
+  page.usage={...page.usage,total_count:102,active_count:0,retired_count:102,total_bytes:510,active_bytes:0,retired_bytes:510}
+  return Promise.resolve(new Response(JSON.stringify(page)))
+ })
+ await f.open();fireEvent.change(byId('attachment-status'),{target:{value:'retired'}})
+ await waitFor(()=>expect(byId('attachment-usage').textContent).toContain('已退役 102'))
+ expect(byId('attachment-usage').textContent).toContain('不代表磁盘占用')
+ expect(byId('uploaded-attachments').textContent).not.toContain('加入待发送')
+ expect(byId('uploaded-attachments').querySelector('a')?.getAttribute('href')).toBe('/lumo/session-attachments/'+ids[0]+'/'+receipt.receipt_id)
+ fireEvent.click(byId('attachment-more'))
+ await screen.findByText('older.txt · 已退役')
+ expect(byId('attachment-more').hidden).toBe(true)
+ expect(f.fetcher.mock.calls.filter(([url])=>url.endsWith('/attachmentInventory')).map(([,init])=>JSON.parse(String(init.body)))).toEqual([{sessionId:ids[0],status:'retired',limit:50},{sessionId:ids[0],status:'retired',limit:50,after:receipt.receipt_id}])
+})
+
+it('discards late attachment capacity after switching Sessions and allows a failed page read to retry',async()=>{
+ let finish!:(r:Response)=>void,failed=true
+ const f=mount((_url,_init,action,body)=>{
+  if(action!=='attachmentInventory')return
+  if(body.sessionId===ids[0])return new Promise(resolve=>{finish=resolve})
+  return failed?Promise.reject(Error('inventory offline')):Promise.resolve(new Response(JSON.stringify(inventory([]))))
+ })
+ await f.open();fireEvent.click(byId('attachment-refresh'));await waitFor(()=>expect(finish).toBeDefined())
+ fireEvent.click(document.querySelectorAll('#sessions button')[1]!);await waitFor(()=>expect(byId<HTMLSelectElement>('model-choice').disabled).toBe(false))
+ finish(new Response(JSON.stringify(inventory([receipt]))));await new Promise(resolve=>setTimeout(resolve,0))
+ expect(byId('uploaded-attachments').textContent).not.toContain(receipt.name)
+ fireEvent.click(byId('attachment-refresh'));await screen.findByText('inventory offline');expect(byId('attachment-usage').textContent).toContain('读取失败')
+ failed=false;fireEvent.click(byId('attachment-refresh'));await waitFor(()=>expect(byId('attachment-usage').textContent).toContain('累计保留 0'))
 })

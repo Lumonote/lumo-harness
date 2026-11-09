@@ -48,7 +48,7 @@ function reciprocalRank(result: RunResult): number {
 function ndcgAt(result: RunResult, k: number): number {
   const expected = new Set(result.expected)
   const gains = result.ranked.slice(0, k).map((id) => (expected.has(id) ? 1 : 0))
-  const dcg = gains.reduce((sum, rel, i) => sum + rel / Math.log2(i + 2), 0)
+  const dcg = gains.reduce<number>((sum, rel, i) => sum + rel / Math.log2(i + 2), 0)
   const ideal = Math.min(result.expected.length, k)
   let idcg = 0
   for (let i = 0; i < ideal; i++) idcg += 1 / Math.log2(i + 2)
@@ -60,6 +60,9 @@ function mean(values: number[]): number {
 }
 
 export function scoreRun(results: RunResult[]): Metrics {
+  // Metrics are at document level. Multiple chunks from one document must
+  // never collect repeated relevance credit (which could make nDCG exceed 1).
+  results = results.map(r => ({ expected: [...new Set(r.expected)], ranked: [...new Set(r.ranked)] }))
   return {
     cases: results.length,
     recallAt1: mean(results.map((r) => recallAt(r, 1))),

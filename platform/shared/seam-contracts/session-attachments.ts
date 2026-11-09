@@ -13,6 +13,19 @@ export interface SessionAttachmentReceipt {
 export interface SessionAttachmentConfig { realm: string; maxUploadBytes?: number; maxTextBytes?: number; maxPerMessage?: number }
 export interface SessionAttachmentUpload { name: string; mediaType: string }
 export interface SessionAttachmentDownload { data: Uint8Array; name: string; mediaType: string }
+export interface SessionAttachmentUsage {
+  total_count: number; active_count: number; retired_count: number
+  total_bytes: number; active_bytes: number; retired_bytes: number
+  active_limit: number
+  /** Logical bytes per durable reference, including forks; never physical size. */
+  accounting: 'logical-retained-reference-bytes'
+  retirement_releases_quota: false
+}
+export interface SessionAttachmentInventory {
+  receipts: SessionAttachmentReceipt[]
+  next_cursor: string
+  usage: SessionAttachmentUsage
+}
 export const SESSION_ATTACHMENT_PATH = '/lumo/session-attachments'
 export const SESSION_ATTACHMENT_RUNTIME_PATH = '/lumo/runtime/session-attachments'
 export const SESSION_ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024

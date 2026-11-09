@@ -1,8 +1,8 @@
-import { readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { AUTHENTICATED_APP_HOME } from '../src/app-home.ts'
 import { loginScript } from '../src/html.ts'
+import { querySurface, surfaceMeta, availableSurfaces } from '../../lumo-ui/src/client/surface-navigation.ts'
 
 /**
  * 登录成功之后落在哪一页。
@@ -12,8 +12,6 @@ import { loginScript } from '../src/html.ts'
  * 两半分叉时不会有任何报错——登录成功、页面正常打开，只是又回到那个**空白的原生
  * 会话页**，也就是这个常量存在的原因。所以下面既钉常量的形状，也钉消费方真的认它。
  */
-const clientSource = readFileSync(new URL('../../lumo-ui/src/client/index.tsx', import.meta.url), 'utf8')
-
 describe('AUTHENTICATED_APP_HOME', () => {
   it('是同源的根路径 + 一个工作区参数，而不是裸的 "/"', () => {
     const url = new URL(AUTHENTICATED_APP_HOME, 'http://lumo.local')
@@ -31,11 +29,13 @@ describe('AUTHENTICATED_APP_HOME', () => {
     const surface = url.searchParams.get(param ?? '') ?? ''
     expect(param).toBeTruthy()
     expect(surface).toBeTruthy()
-    // 参数名：客户端的 querySurface 读的就是它。
-    expect(clientSource).toContain(`new URLSearchParams(location.search).get('${param}')`)
-    // 工作区名：surfaceMeta 里必须有这个键，否则 querySurface 会把值丢掉、回落到无工作台。
-    expect(clientSource).toContain(`${surface}: { label:`)
-    expect(clientSource).toContain('const surfaces = Object.keys(surfaceMeta) as Surface[]')
+    vi.stubGlobal('location', url)
+    try {
+      // 执行真实消费方，避免纯函数搬文件后静态源码断言误报。
+      expect(querySurface()).toBe(surface)
+      expect(surfaceMeta).toHaveProperty(surface)
+      expect(availableSurfaces(false)).toContain(surface)
+    } finally { vi.unstubAllGlobals() }
   })
 
   it('把交互式登录脚本的落地页也钉在这里', () => {

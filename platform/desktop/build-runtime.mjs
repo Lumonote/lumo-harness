@@ -30,6 +30,8 @@ import { compilePackagedTypeScriptPlugin, packagedTypeScriptPluginDirectories } 
 import { stageDshNode } from './stage-dsh-node.mjs'
 import { cuaProviderPackage, stageCuaHelper, verifyCuaHelper } from './cua-helper.mjs'
 import { stageWindowsCua, verifyWindowsCua } from './windows-cua.mjs'
+import { copyPortablePythonTree } from './portable-python.mjs'
+import { writeRuntimeSizeReport } from './runtime-size.mjs'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(desktopRoot, '..', '..')
@@ -587,6 +589,7 @@ if (targetPlatform !== 'win32') chmodSync(launcherDestination, 0o755)
 if (targetPlatform === 'win32') assertWindowsRuntimePaths(stagingRoot)
 
 writeFileSync(resolve(stagingRoot, 'runtime-manifest.json'), `${JSON.stringify({
+  version: JSON.parse(readFileSync(resolve(repoRoot, 'platform/package.json'), 'utf8')).version,
   target: buildTarget,
   node: nodeVersion(nodeSource),
   nodeSource,
@@ -600,6 +603,14 @@ writeFileSync(resolve(stagingRoot, 'runtime-manifest.json'), `${JSON.stringify({
   bundledSkills: JSON.parse(readFileSync(bundledSkillSources, 'utf8')).skills,
   generatedAt: new Date().toISOString(),
 }, null, 2)}\n`)
+
+writeRuntimeSizeReport(stagingRoot, {
+  target: buildTarget,
+  version: JSON.parse(readFileSync(resolve(repoRoot, 'platform/package.json'), 'utf8')).version,
+  output: resolve(desktopRoot, 'target', 'runtime-size', `${buildTarget}.json`),
+  budgetPath: process.env.LUMO_RUNTIME_SIZE_BUDGET,
+  baselinePath: process.env.LUMO_RUNTIME_SIZE_BASELINE,
+})
 
 console.log(`桌面 runtime 已准备：${buildTarget}，${runtimePackages.length} 个包，Node ${nodeVersion(nodeSource)}，裁剪回收 ${(prunedBytes / 1024 / 1024).toFixed(0)} MB`)
 
@@ -642,9 +653,8 @@ function bundlePptPython() {
   }
   assertBinaryArchitecture(portableExecutable, 'PPT Master Python')
 
-  cpSync(baseRoot, destination, {
-    recursive: true,
-    dereference: true,
+  const baseCopy = copyPortablePythonTree(baseRoot, destination, {
+    preserveLinks: !windows,
     filter(source) {
       const rel = relative(baseRoot, source)
       if (rel === '') return true
@@ -656,9 +666,8 @@ function bundlePptPython() {
   const runtimeSitePackages = windows
     ? resolve(destination, 'Lib', 'site-packages')
     : resolve(destination, 'lib', versionDirectory, 'site-packages')
-  cpSync(sitePackages, runtimeSitePackages, {
-    recursive: true,
-    dereference: true,
+  const siteCopy = copyPortablePythonTree(sitePackages, runtimeSitePackages, {
+    preserveLinks: !windows,
     filter(source) {
       if (isDanglingSymlink(source)) return false
       return !relative(sitePackages, source).split(sep).some((part) => part === '__pycache__')
@@ -681,7 +690,7 @@ function bundlePptPython() {
       || [verify.stderr, verify.stdout].filter((value) => value?.trim()).join('\n').trim()
     throw new Error(`打包后的 PPT Master Python 不可用：${detail || '依赖导入失败'}`)
   }
-  return { version: inspected.version, entrypoint: windows ? 'python/python.exe' : 'python/bin/python3', skill: 'ppt-master@5.1.0' }
+  return { version: inspected.version, entrypoint: windows ? 'python/python.exe' : 'python/bin/python3', skill: 'ppt-master@5.1.0', copy: { base: baseCopy, site: siteCopy } }
 }
 
 // ---- 产物体积裁剪 ----

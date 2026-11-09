@@ -24,11 +24,20 @@ func TestSupervisorStartsLogsAndStopsSignedEntrypoint(t *testing.T) {
 	}
 	logs := filepath.Join(dir, "runtime-logs", "demo.log")
 	supervisor := NewSupervisor(time.Second)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := supervisor.StopAll(ctx); err != nil {
+			t.Errorf("cleanup runtime: %v", err)
+		}
+	})
 	status, err := supervisor.Start(Spec{ID: "demo@1.0.0", Executable: entrypoint, Dir: filepath.Join(dir, "payload"), LogPath: logs})
 	if err != nil || status.State != StateRunning || status.PID == 0 {
 		t.Fatalf("start = %+v, %v", status, err)
 	}
-	deadline := time.Now().Add(time.Second)
+	// Child startup is asynchronous and race builds can contend with other
+	// packages. This is a lifecycle assertion, not a one-second startup SLO.
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		raw, readErr := os.ReadFile(logs)
 		if readErr == nil && strings.Contains(string(raw), "ready") {

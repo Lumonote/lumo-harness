@@ -6,7 +6,7 @@
 # 每一步都断言「真的执行了活体用例」。`it.skip` / `describe.skipIf` / `t.Skip` 会让
 # 退出码保持 0，所以「脚本绿了」本身不足以证明这一步产生了证据：2026-09-15 实测
 # `session-log/__tests__/pg-log.spec.ts` 在 DSN 名字对不上时 19 个用例全跳过、退出码 0。
-# 计数为 0 即失败，并打出跳过数，让「部分覆盖」至少是可见的。
+# 结构化证据拒绝零用例、任意测试跳过、失败和缺失终态；无测试文件的包单列。
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +41,8 @@ else
 fi
 require_value LUMO_TEST_PG_DSN
 require_value LUMO_TEST_RMQ_ENDPOINT
+require_value LUMO_TEST_REDIS_ADDR
+require_value LUMO_TEST_REDIS_DSN
 require_value LUMO_TEST_NACOS_HEALTH_URL
 require_value LUMO_TEST_MILVUS_HEALTH_URL
 require_value LUMO_TEST_OPA_HEALTH_URL
@@ -121,16 +123,7 @@ if [[ "${LUMO_ACCEPTANCE_SKIP_PROBES:-0}" != "1" ]]; then
     "$script_dir/probes-cluster.sh"
 fi
 
-# 读 vitest 的 JSON 报告，输出「实际执行（非跳过）」的用例数。
-count_executed_tests() {
-  node -e '
-    const fs = require("node:fs")
-    const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
-    const skipped = (r.numPendingTests || 0) + (r.numTodoTests || 0)
-    process.stdout.write(String((r.numTotalTests || 0) - skipped))
-  ' "$1"
-}
-
+# Reuse the same strict validators as ordinary CI; exit status alone is not evidence.
 run_vitest() {
   local step="$1"; shift
   local report="$report_dir/vitest-$step.json"
@@ -138,33 +131,20 @@ run_vitest() {
   (cd "$root_dir/platform" && "${vitest_cmd[@]}" run "$@" \
     --testTimeout=30000 --hookTimeout=30000 \
     --reporter=default --reporter=json --outputFile.json="$report")
-  local executed
-  executed="$(count_executed_tests "$report")"
-  if (( executed < 1 )); then
-    fail "$step 执行了 0 个活体用例（全部跳过）——这一步没有产生证据，不能算通过"
-  fi
-  echo "cluster-acceptance: $step 执行 $executed 个活体用例"
+  node "$root_dir/platform/tools/verify-platform-test-report.mjs" "$report"
 }
 
 run_go_integration() {
   local module="$1" package="$2"
-  # 报告名带上包路径：同一个 module 可能被检查两个包（如 connector-gateway 的
-  # server 与 audit），否则后一次会覆盖前一次的证据文件。
-  local report="$report_dir/go-${module}${package//\//_}.txt"
+  local stem="$report_dir/go-${module}${package//\//_}"
   echo "cluster-acceptance: go test $module $package"
-  if ! (cd "$root_dir/platform/control-plane/$module" && go test -v "$package" -count=1) \
-    >"$report" 2>&1; then
-    cat "$report" >&2
+  (cd "$root_dir/platform/control-plane/$module" && go list "$package") > "$stem.packages.txt"
+  if ! (cd "$root_dir/platform/control-plane/$module" && go test -race -json "$package" -count=1) \
+    >"$stem.jsonl"; then
+    cat "$stem.jsonl" >&2
     fail "go test $module $package 失败"
   fi
-  local passed skipped
-  passed="$(grep -c '^--- PASS' "$report" || true)"
-  skipped="$(grep -c '^--- SKIP' "$report" || true)"
-  if (( passed < 1 )); then
-    cat "$report" >&2
-    fail "go test $module $package 执行了 0 个通过用例（全部 SKIP）——这一步没有产生证据"
-  fi
-  echo "cluster-acceptance: $module$package 通过 $passed 跳过 $skipped"
+  node "$root_dir/platform/tools/verify-go-test-report.mjs" "$stem.jsonl" --packages "$stem.packages.txt"
 }
 
 # Scheduler lease expiry is the real fencing/takeover check; the session-log
@@ -173,6 +153,8 @@ run_go_integration() {
 # 服务但此前完全不在验收链里，后者是本轮新增的审计读取面（E7）。
 run_go_integration scheduler ./internal/integration
 run_go_integration governance ./internal/store
+run_go_integration session-control ./internal/store
+run_go_integration ratelimit .
 run_go_integration collaborator ./internal/integration
 run_go_integration flows ./internal/integration
 run_go_integration projects ./internal/integration

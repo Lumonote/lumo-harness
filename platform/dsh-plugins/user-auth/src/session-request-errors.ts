@@ -6,6 +6,7 @@ const failures = {
   session_attachment_too_large: [413, 'Attachment exceeds the upload byte limit', false],
   session_attachment_busy: [429, 'Attachment transfer capacity reached', true],
   session_attachment_retired: [409, 'Attachment is retired; choose another receipt for future messages', false],
+  session_attachment_capacity: [409, 'Retire an active attachment before uploading another; retained history remains charged', false],
   session_attachment_denied: [403, 'Attachment ownership or execution lease is unavailable', false],
   session_attachment_unavailable: [503, 'Attachment dependency or integrity verification is unavailable', true],
   session_connector_denied: [403, 'Connector request was refused by current authorization', false],
@@ -58,6 +59,7 @@ export async function sessionUpstreamError(response: Response, kind: 'attachment
   if (kind === 'attachment' && status === 400) return new SessionRequestError('session_attachment_invalid')
   if (kind === 'attachment' && status === 413) return new SessionRequestError('session_attachment_too_large')
   if (kind === 'attachment' && status === 415) return new SessionRequestError('session_attachment_unsupported')
+  if (kind === 'attachment' && status === 409 && code === 'session_attachment_capacity') return new SessionRequestError('session_attachment_capacity')
   if (kind === 'connector' && status === 409) return new SessionRequestError('session_connector_changed')
   return new SessionRequestError(`${prefix}_unavailable`)
 }

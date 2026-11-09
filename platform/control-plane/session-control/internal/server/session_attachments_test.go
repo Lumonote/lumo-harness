@@ -13,14 +13,47 @@ import (
 type attachmentFake struct {
 	ownerFake
 	requests int
+	err      error
 }
 
 func (f *attachmentFake) SessionAttachments(_ context.Context, ref string, in store.AttachmentRequest) ([]store.AttachmentReceipt, error) {
 	f.requests++
+	if f.err != nil {
+		return nil, f.err
+	}
 	if ref == "missing" {
 		return nil, store.ErrNotFound
 	}
 	return []store.AttachmentReceipt{}, nil
+}
+func (f *attachmentFake) SessionAttachmentInventory(_ context.Context, _ string, in store.AttachmentRequest) (store.AttachmentInventory, error) {
+	f.requests++
+	if f.err != nil {
+		return store.AttachmentInventory{}, f.err
+	}
+	return store.AttachmentInventory{Receipts: []store.AttachmentReceipt{}, Usage: store.AttachmentUsage{ActiveLimit: 100, Accounting: "logical-retained-reference-bytes"}}, nil
+}
+func TestAttachmentInventoryAPIAndCapacityAreExplicit(t *testing.T) {
+	f := &attachmentFake{}
+	mux := http.NewServeMux()
+	New(Options{Owners: f}).Routes(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("POST", "/v1/session-attachments/test", strings.NewReader(`{"operation":"inventory","status":"all","limit":50}`)))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"accounting":"logical-retained-reference-bytes"`) || !strings.Contains(w.Body.String(), `"retirement_releases_quota":false`) {
+		t.Fatalf("inventory: %d %s", w.Code, w.Body.String())
+	}
+	f.err = store.ErrAttachmentCapacity
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("POST", "/v1/session-attachments/test", strings.NewReader(`{"operation":"create"}`)))
+	if w.Code != 409 || !strings.Contains(w.Body.String(), `"error":"session_attachment_capacity"`) {
+		t.Fatalf("capacity: %d %s", w.Code, w.Body.String())
+	}
+	f.err = store.ErrExecutionFenced
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("POST", "/v1/session-attachments/test", strings.NewReader(`{"operation":"inventory"}`)))
+	if w.Code != 409 || strings.Contains(w.Body.String(), `"usage"`) {
+		t.Fatalf("stale inventory leaked: %d %s", w.Code, w.Body.String())
+	}
 }
 func TestAttachmentAPIRejectsUnrecognizedFieldsAndMultipleBodies(t *testing.T) {
 	previous := observability.Default

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -336,5 +337,251 @@ func TestAttachmentRetirementRollsBackWhenLeaseExpiresAtOwnerLock(t *testing.T) 
 	var retained bool
 	if err = s.pool.QueryRow(ctx, `SELECT retired_at IS NULL FROM session_attachment_receipts WHERE receipt_id=$1`, request.ReceiptID).Scan(&retained); err != nil || !retained {
 		t.Fatalf("partial retirement committed: %v %v", retained, err)
+	}
+}
+
+func TestAttachmentActiveCapacityAndInventoryKeepRetainedHistory(t *testing.T) {
+	s, owner, request := attachmentFixture(t)
+	ctx := context.Background()
+	// Historical capacity is independent of active admission. Seed immutable rows
+	// as an old long-lived Session, then exercise all new operations through the
+	// public Store boundary and its real execution lease.
+	_, err := s.pool.Exec(ctx, `INSERT INTO session_attachment_receipts(realm,session_ref,receipt_id,owner_user_id,project_id,kind,name,media_type,bytes,sha256,native_ref,retired_at)
+ SELECT 'r',$1,'att_'||lpad(i::text,48,'0'),'alice','p','text','notes.txt','text/plain',5,repeat('a',64),jsonb_build_object('attachmentId','r/file-content/'||repeat('a',64),'name','notes.txt','bytes',5),CASE WHEN i<=105 THEN now() ELSE NULL END FROM generate_series(1,205) i`, owner.SessionRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.initStorageLedger(ctx); err != nil {
+		t.Fatal(err)
+	}
+	request.Operation, request.Receipt = "create", textAttachment()
+	if _, err = s.SessionAttachments(ctx, owner.SessionRef, request); !errors.Is(err, ErrAttachmentCapacity) {
+		t.Fatalf("active limit bypass: %v", err)
+	}
+	request.Operation, request.Receipt, request.ReceiptID = "retire", nil, "att_"+strings.Repeat("0", 45)+"205"
+	if _, err = s.SessionAttachments(ctx, owner.SessionRef, request); err != nil {
+		t.Fatal(err)
+	}
+	request.Operation, request.Receipt, request.ReceiptID = "create", textAttachment(), ""
+	created, err := s.SessionAttachments(ctx, owner.SessionRef, request)
+	if err != nil || len(created) != 1 {
+		t.Fatalf("retirement did not reopen admission: %+v %v", created, err)
+	}
+	request.Operation, request.Receipt, request.Status, request.Limit = "inventory", nil, "all", 31
+	seen := map[string]bool{}
+	for {
+		page, e := New(s.pool).SessionAttachmentInventory(ctx, owner.SessionRef, request)
+		if e != nil {
+			t.Fatal(e)
+		}
+		u := page.Usage
+		if u.TotalCount != 206 || u.ActiveCount != 100 || u.RetiredCount != 106 || u.TotalBytes != 1030 || u.ActiveBytes != 500 || u.RetiredBytes != 530 || u.Accounting != "logical-retained-reference-bytes" || u.RetirementReleasesQuota {
+			t.Fatalf("invalid usage: %+v", u)
+		}
+		if len(page.Receipts) > 31 {
+			t.Fatal("unbounded page")
+		}
+		for _, r := range page.Receipts {
+			if seen[r.ReceiptID] || r.ReceiptID <= request.After {
+				t.Fatal("duplicate/backward page")
+			}
+			seen[r.ReceiptID] = true
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		request.After = page.NextCursor
+	}
+	if len(seen) != 206 {
+		t.Fatalf("lost retained rows: %d", len(seen))
+	}
+	var charged int64
+	if err = s.pool.QueryRow(ctx, `SELECT COALESCE(sum(bytes),0) FROM platform_storage_charges WHERE reference_id LIKE $1 AND released_at IS NULL`, owner.SessionRef+"/%").Scan(&charged); err != nil || charged != 1030 {
+		t.Fatalf("logical retained charge differs: %d %v", charged, err)
+	}
+	request.After = ""
+	request.Status = "retired"
+	request.Limit = 100
+	page, err := s.SessionAttachmentInventory(ctx, owner.SessionRef, request)
+	if err != nil || len(page.Receipts) != 100 || page.NextCursor == "" {
+		t.Fatalf("retired page %+v %v", page, err)
+	}
+	for _, r := range page.Receipts {
+		if r.RetiredAt == nil {
+			t.Fatal("active row in retired page")
+		}
+	}
+	for _, bad := range []AttachmentRequest{
+		func() AttachmentRequest { v := request; v.OwnerUserID = "bob"; return v }(),
+		func() AttachmentRequest { v := request; v.After = "https://private"; return v }(),
+		func() AttachmentRequest { v := request; v.Limit = 101; return v }(),
+		func() AttachmentRequest { v := request; v.Status = "unknown"; return v }(),
+	} {
+		if _, err = s.SessionAttachmentInventory(ctx, owner.SessionRef, bad); err == nil {
+			t.Fatal("forged inventory accepted")
+		}
+	}
+}
+
+func TestAttachmentForkBatchesAreIdempotentAndRetainEveryHistoricalReceipt(t *testing.T) {
+	s, owner, request := attachmentFixture(t)
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, `INSERT INTO session_attachment_receipts(realm,session_ref,receipt_id,owner_user_id,project_id,kind,name,media_type,bytes,sha256,native_ref,retired_at)
+ SELECT 'r',$1,'att_'||lpad(i::text,48,'0'),'alice','p','text','notes.txt','text/plain',5,repeat('a',64),jsonb_build_object('attachmentId','r/file-content/'||repeat('a',64),'name','notes.txt','bytes',5),CASE WHEN i<=150 THEN now() ELSE NULL END FROM generate_series(1,206) i`, owner.SessionRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, token, err := s.ReserveSessionOwner(ctx, ReserveSessionOwner{Realm: "r", OwnerUserID: "alice", ProjectID: "p", NodeID: "node", ParentSessionRef: owner.SessionRef})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := s.SessionExecutionLease(ctx, child.SessionRef, request.ExecutionLeaseRequest, "acquire")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.FencingToken, request.Operation, request.SourceSession = lease.FencingToken, "inherit", owner.SessionRef
+	for offset := 1; offset <= 205; offset += 100 {
+		request.ReceiptIDs = nil
+		for i := offset; i < offset+100 && i <= 205; i++ {
+			request.ReceiptIDs = append(request.ReceiptIDs, fmt.Sprintf("att_%048d", i))
+		}
+		for repeat := 0; repeat < 2; repeat++ {
+			rows, e := s.SessionAttachments(ctx, child.SessionRef, request)
+			if e != nil || len(rows) != len(request.ReceiptIDs) {
+				t.Fatalf("batch: %d %v", len(rows), e)
+			}
+		}
+	}
+	var count, retired int
+	var charged int64
+	if err = s.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE retired_at IS NOT NULL) FROM session_attachment_receipts WHERE session_ref=$1`, child.SessionRef).Scan(&count, &retired); err != nil || count != 205 || retired != 150 {
+		t.Fatalf("fork lost history: %d %d %v", count, retired, err)
+	}
+	if err = s.pool.QueryRow(ctx, `SELECT COALESCE(sum(bytes),0) FROM platform_storage_charges WHERE reference_id LIKE $1 AND released_at IS NULL`, child.SessionRef+"/%").Scan(&charged); err != nil || charged != 1025 {
+		t.Fatalf("duplicate charges: %d %v", charged, err)
+	}
+	if _, err = s.ActivateSessionOwner(ctx, "r", child.SessionRef, token); err != nil {
+		t.Fatal(err)
+	}
+	request.Operation, request.SourceSession, request.ReceiptIDs, request.ReceiptID = "get", "", nil, fmt.Sprintf("att_%048d", 206)
+	if _, err = s.SessionAttachments(ctx, child.SessionRef, request); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unsent receipt inherited: %v", err)
+	}
+	request.Operation, request.ReceiptID, request.Status, request.Limit = "inventory", "", "all", 100
+	if _, err = s.pool.Exec(ctx, `UPDATE session_execution_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE session_ref=$1`, child.SessionRef); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.SessionAttachmentInventory(ctx, child.SessionRef, request); !errors.Is(err, ErrExecutionFenced) {
+		t.Fatalf("stale inventory: %v", err)
+	}
+}
+
+func TestAttachmentHistorySurvivesExecutionMigrationWithoutListTruncation(t *testing.T) {
+	s, ref, source, target, checkpoint := migrationFixture(t)
+	ctx := context.Background()
+	_, err := s.pool.Exec(ctx, `INSERT INTO session_attachment_receipts(realm,session_ref,receipt_id,owner_user_id,project_id,kind,name,media_type,bytes,sha256,native_ref,retired_at)
+ SELECT 'r',$1,'att_'||lpad(i::text,48,'0'),'alice','p','text','notes.txt','text/plain',5,repeat('a',64),jsonb_build_object('attachmentId','r/file-content/'||repeat('a',64),'name','notes.txt','bytes',5),now() FROM generate_series(1,205) i`, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CheckpointSessionMigration(ctx, ref, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.ActivateSessionMigration(ctx, ref, checkpoint.ID, SessionMigrationActivation{OwnerUserID: "alice", SnapshotSHA256: checkpoint.SnapshotSHA256, Execution: target}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := s.SessionExecutionLease(ctx, ref, target, "acquire")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.FencingToken = lease.FencingToken
+	request := AttachmentRequest{ExecutionLeaseRequest: target, OwnerUserID: "alice", Operation: "inventory", Status: "retired", Limit: 100}
+	seen := 0
+	for {
+		page, e := New(s.pool).SessionAttachmentInventory(ctx, ref, request)
+		if e != nil {
+			t.Fatal(e)
+		}
+		seen += len(page.Receipts)
+		if page.NextCursor == "" {
+			break
+		}
+		request.After = page.NextCursor
+	}
+	if seen != 205 {
+		t.Fatalf("migration lost retained history: %d", seen)
+	}
+	request.Operation, request.After, request.Status, request.Limit, request.ReceiptID = "get", "", "", 0, fmt.Sprintf("att_%048d", 205)
+	if rows, e := s.SessionAttachments(ctx, ref, request); e != nil || len(rows) != 1 || rows[0].RetiredAt == nil {
+		t.Fatalf("target read: %+v %v", rows, e)
+	}
+	request.ExecutionLeaseRequest = source
+	if _, err = s.SessionAttachments(ctx, ref, request); !errors.Is(err, ErrExecutionFenced) {
+		t.Fatalf("source read after migration: %v", err)
+	}
+}
+
+func TestAttachmentPartialInheritanceAbortNeverReleasesAnActiveChild(t *testing.T) {
+	s, parent, request := attachmentFixture(t)
+	ctx := context.Background()
+	request.Operation, request.Receipt = "create", textAttachment()
+	rows, err := s.SessionAttachments(ctx, parent.SessionRef, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, active := range []bool{false, true} {
+		child, token, e := s.ReserveSessionOwner(ctx, ReserveSessionOwner{Realm: "r", OwnerUserID: "alice", ProjectID: "p", NodeID: "node", ParentSessionRef: parent.SessionRef})
+		if e != nil {
+			t.Fatal(e)
+		}
+		lease, e := s.SessionExecutionLease(ctx, child.SessionRef, request.ExecutionLeaseRequest, "acquire")
+		if e != nil {
+			t.Fatal(e)
+		}
+		fork := request
+		fork.Operation, fork.Receipt, fork.SourceSession, fork.ReceiptIDs, fork.FencingToken = "inherit", nil, parent.SessionRef, []string{rows[0].ReceiptID}, lease.FencingToken
+		if _, e = s.SessionAttachments(ctx, child.SessionRef, fork); e != nil {
+			t.Fatal(e)
+		}
+		if active {
+			if _, e = s.ActivateSessionOwner(ctx, "r", child.SessionRef, token); e != nil {
+				t.Fatal(e)
+			}
+		}
+		fork.Operation, fork.ReceiptIDs, fork.CreationToken = "abort-inheritance", nil, strings.Repeat("f", 64)
+		if _, e = s.SessionAttachments(ctx, child.SessionRef, fork); e == nil {
+			t.Fatal("wrong reservation token accepted")
+		}
+		fork.CreationToken = token
+		_, e = s.SessionAttachments(ctx, child.SessionRef, fork)
+		if active {
+			if !errors.Is(e, ErrOwnerConflict) {
+				t.Fatalf("active abort: %v", e)
+			}
+		} else {
+			if e != nil {
+				t.Fatal(e)
+			}
+			if _, e = s.SessionAttachments(ctx, child.SessionRef, fork); e != nil {
+				t.Fatalf("abort replay: %v", e)
+			}
+			if _, e = s.ActivateSessionOwner(ctx, "r", child.SessionRef, token); !errors.Is(e, ErrOwnerConflict) {
+				t.Fatalf("aborted child activated: %v", e)
+			}
+		}
+		var references, charges int
+		if e = s.pool.QueryRow(ctx, `SELECT count(*) FROM session_attachment_receipts WHERE session_ref=$1`, child.SessionRef).Scan(&references); e != nil {
+			t.Fatal(e)
+		}
+		if e = s.pool.QueryRow(ctx, `SELECT count(*) FROM platform_storage_charges WHERE reference_id LIKE $1 AND released_at IS NULL`, child.SessionRef+"/%").Scan(&charges); e != nil {
+			t.Fatal(e)
+		}
+		expected := 0
+		if active {
+			expected = 1
+		}
+		if references != expected || charges != expected {
+			t.Fatalf("active=%v references=%d charges=%d", active, references, charges)
+		}
 	}
 }

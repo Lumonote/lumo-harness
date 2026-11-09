@@ -100,6 +100,11 @@ func (c ProviderConfig) Allows(realm string, target Target) bool {
 	return false
 }
 func (c ProviderConfig) Digest() string {
+	return c.DigestForVersion(ProtocolVersion)
+}
+
+// Only receipt reconciliation may use the unchanged legacy policy identity.
+func (c ProviderConfig) DigestForVersion(version string) string {
 	operations := append([]Operation{}, c.Operations...)
 	sort.Slice(operations, func(i, j int) bool { return operations[i] < operations[j] })
 	scopes := append([]TargetScope{}, c.Scopes...)
@@ -121,7 +126,7 @@ func (c ProviderConfig) Digest() string {
 		Endpoint   string
 		Operations []Operation
 		Scopes     []TargetScope
-	}{ProtocolVersion, c.ID, c.Endpoint, operations, scopes})
+	}{version, c.ID, c.Endpoint, operations, scopes})
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
@@ -143,7 +148,9 @@ func SignReceipt(receipt Receipt, key []byte) (string, error) {
 }
 func (c ProviderConfig) Call(ctx context.Context, execution Execution) (Receipt, error) {
 	var receipt Receipt
-	if !c.Enabled() || c.ID != execution.ProviderID || !c.Allows(execution.Realm, execution.Target) || (execution.Mode != "execute" && execution.Mode != "receipt") || execution.Version != ProtocolVersion || execution.ExecutionID == "" || execution.FencingToken < 1 || execution.IdempotencyKey != "lumo-recovery:"+execution.ExecutionID {
+	legacyReceipt := execution.Version == LegacyProtocolVersion && execution.Mode == "receipt" && execution.ExpiresAt == ""
+	_, expiryErr := time.Parse(time.RFC3339Nano, execution.ExpiresAt)
+	if !c.Enabled() || c.ID != execution.ProviderID || !c.Allows(execution.Realm, execution.Target) || (execution.Mode != "execute" && execution.Mode != "receipt") || (!legacyReceipt && (execution.Version != ProtocolVersion || expiryErr != nil)) || execution.ExecutionID == "" || execution.FencingToken < 1 || execution.IdempotencyKey != "lumo-recovery:"+execution.ExecutionID {
 		return receipt, ErrProviderUnavailable
 	}
 	body, err := json.Marshal(execution)

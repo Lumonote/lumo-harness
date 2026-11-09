@@ -265,11 +265,12 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
       await persistence!.flush()
       signal.throwIfAborted()
       await authority()
-      if (attachments && parent && seed) await attachments.inherit(principal, owner.session_ref, parent, seed)
+      if (attachments && parent && seed) await attachments.inherit(principal, owner.session_ref, parent, seed, async () => { signal.throwIfAborted(); await authority(); await authorizeProject(principal); await own(principal,parent) })
       await authority()
       await owners.activate(owner.realm, owner.session_ref, reserved.creation_token)
       return { sessionId: owner.session_ref }
     } catch (error) {
+      if(attachments&&parent&&seed)await attachments.abortInheritance(principal,owner.session_ref,parent,reserved.creation_token).catch(()=>{})
       await handle.dispose().catch(() => {})
       handles.delete(handle)
       throw error
@@ -347,13 +348,14 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
         const page = await owners.list(principal.realm, principal.user_id, config.nodeId, request.after as string | undefined)
         return { ...page, owners: page.owners.filter(owner => owner.project_id === config.projectId) }
       }
-      if (!unary.has(action) && !['models', 'selectModel', 'interactionList', 'interactionAnswer', 'attachmentList', 'retireAttachment'].includes(action)) throw new Error('Session action is not available in the authenticated text profile')
+      if (!unary.has(action) && !['models', 'selectModel', 'interactionList', 'interactionAnswer', 'attachmentList', 'attachmentInventory', 'retireAttachment'].includes(action)) throw new Error('Session action is not available in the authenticated text profile')
       const ref = target(request)
       await own(principal, ref)
-      if (action === 'attachmentList' || action === 'retireAttachment') {
+      if (action === 'attachmentList' || action === 'attachmentInventory' || action === 'retireAttachment') {
         if (!attachments || !authority) throw new SessionRequestError('session_attachment_denied')
-        if (Object.keys(request).some(key => key !== 'sessionId' && !(action === 'retireAttachment' && key === 'receipt_id'))) throw new SessionRequestError('session_attachment_invalid')
+        if (Object.keys(request).some(key => key !== 'sessionId' && !(action === 'retireAttachment' && key === 'receipt_id') && !(action === 'attachmentInventory' && ['after','status','limit'].includes(key)))) throw new SessionRequestError('session_attachment_invalid')
         const authorize = async () => { signal.throwIfAborted(); await authority(); await authorizeProject(principal); await own(principal, ref) }
+        if(action==='attachmentInventory'){const {sessionId:_,...options}=request;return attachments.inventory(principal,ref,options,authorize)}
         return action === 'attachmentList' ? { receipts: await attachments.list(principal, ref, authorize) } : { receipt: await attachments.retire(principal, ref, request.receipt_id, authorize) }
       }
       if (action === 'interactionList' || action === 'interactionAnswer') {

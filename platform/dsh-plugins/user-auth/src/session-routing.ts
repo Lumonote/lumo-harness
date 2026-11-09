@@ -9,7 +9,7 @@ import { SessionRequestError, sessionUpstreamError, publicSessionRequestError } 
 import { SessionMigrationClient, SessionMigrationError, migrationActions } from './session-migration.ts'
 
 const streams = new Set(['follow','observeState','observeEvent','observeProjections'])
-const unary = new Set(['fork','state','wait','events','page','projections','rename','prompt','cancel','updateQueue','models','selectModel','interactionList','interactionAnswer','attachmentList','retireAttachment','checkpoint','recover'])
+const unary = new Set(['fork','state','wait','events','page','projections','rename','prompt','cancel','updateQueue','models','selectModel','interactionList','interactionAnswer','attachmentList','attachmentInventory','retireAttachment','checkpoint','recover'])
 export const SESSION_RUNTIME_PATH = '/lumo/runtime/session'
 /** Origins are deployment configuration, never browser input or registration
  * data. A current authority fact must agree with the pinned origin as well. */

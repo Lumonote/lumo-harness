@@ -75,6 +75,57 @@ Windows 包内使用 `runtime/lumo-runtime.cmd`、`node.exe` 和 `python/python.
 从仓库根目录只读统计；加 `--hash-duplicates` 核对大文件副本。跨平台原因、历史样本和优化边界见
 [安装体积排查](../../docs/desktop-installation-size-audit-2026-11-09.md)。
 
+### 正式签名与公证
+
+普通开发构建继续允许无发行凭据。正式发布设置 `LUMO_RELEASE_SIGNING_REQUIRED=1`，
+`before-build.mjs` 在昂贵构建前校验凭据，缺失时明确失败。
+
+Mac 使用已有、已解锁 Keychain 内的 Developer ID Application 证书与 notarytool profile：
+
+```sh
+export LUMO_RELEASE_SIGNING_REQUIRED=1
+export LUMO_MACOS_SIGNING_IDENTITY='Developer ID Application: Your Company (TEAMID1234)'
+export LUMO_CUA_SIGNING_IDENTITY="$LUMO_MACOS_SIGNING_IDENTITY"
+export LUMO_MACOS_NOTARY_PROFILE='lumo-release'
+# 使用独立 keychain 时，两处必须指向同一个绝对路径
+export LUMO_MACOS_SIGNING_KEYCHAIN='/absolute/path/release.keychain-db'
+export LUMO_CUA_SIGNING_KEYCHAIN="$LUMO_MACOS_SIGNING_KEYCHAIN"
+./platform/build.sh --targets darwin-arm64
+```
+
+`make-dmg.sh` 自动从内到外签名 Mach-O 与嵌套 bundle，验证 helper 的 Developer ID、Team ID、
+hardened runtime 和时间戳；helper 已在其官方构建器中签名，不再改动内容寻址包。
+随后提交应用 ZIP 公证、只接受明确 `Accepted` 回执、staple 应用并做 Gatekeeper 校验，
+生成 DMG 后再签名、公证、staple 和校验。Node 的 JIT/原生扩展所需 entitlements 单独提供，
+没有给所有宿主二进制统一放宽。失败的命令不会输出签名/公证凭据诊断。
+
+Windows 使用 `CurrentUser\\My` 内已导入、有效且含私钥和代码签名用途的证书：
+设置 `LUMO_RELEASE_SIGNING_REQUIRED=1`、`LUMO_WINDOWS_CERT_THUMBPRINT` 和
+`LUMO_WINDOWS_TIMESTAMP_URL`，可通过 `LUMO_WINDOWS_SIGNTOOL` 指定工具路径。
+构建验证唯一当前 NSIS 产物，使用 SHA-256 摘要与 RFC3161 时间戳签名，再运行 Authenticode
+验证。不接受 argv 上的 PFX 密码，也不会把本机证书导出到仓库。
+
+应用公证/尺寸证据输出至 `target/release/release-evidence/<target>.json`；最终安装器旁
+`*.release.json` 记录公证或签名回执、最终 SHA-256、下载字节及对应 runtime 大小与版本。
+这些脚本提供发行门禁；没有真实证书、Apple 服务及全新系统安装的成功证据时，不能宣称已完成实机验收。
+
+### 运行时尺寸门禁与 Python 去重
+
+每次 runtime 构建都会生成 `target/runtime-size/<target>.json`，记录版本、当前仓库与上游 SHA、
+文件数、链接数、内容/独占 inode 字节、可用时分配字节和顶层组件占用。它不跟随链接统计，
+也不把 APFS clone 共享块当作已证实的可回收空间。
+`runtime-size-budgets.json` 提供三平台的 2 GiB/80,000 文件上限和组件上限；这些是初始保护线，
+不是本次新版产物的测量或瘦身承诺。设置 `LUMO_RUNTIME_SIZE_BASELINE=/path/previous.json`
+可对同平台历史报告执行内容和文件数至多增长 10% 的门禁；目标不一致或报告畸形会失败。
+需要调整绝对预算时，显式指定 `LUMO_RUNTIME_SIZE_BUDGET` 或审阅提交默认预算修改。
+失败报告仍保留，CI 应上传，不以删除报告消除失败。
+
+Python 复制只在 Mac 保留目标仍在包内、会被复制的相对文件链接；包内绝对链接和目录链接
+实体化，包外链接、循环和包外残留链接拒绝。复制工具仅在调用者显式提供 `externalRoots` 时允许对应
+外部树并实体化；桌面构建不开放任何外部树，嵌套链接仍检查边界。Windows 为 NSIS 兼容继续实体化。复制结果验证相对链接可重定位，
+搬迁后执行入口已用独立进程 fixture 验证；实际 Tauri/DMG 搬迁保留链接、PPT/PDF 导入与签名仍需
+三平台安装产物核对。PPT 图标和本地推理继续完整交付，未在没有消费支持时自动归档或删除。
+
 ## 桌面基础插件
 
 ### 电脑操作

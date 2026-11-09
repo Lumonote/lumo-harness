@@ -8,6 +8,7 @@ describe('safe owned session failure classification', () => {
     [400, 'private_field', 'session_attachment_invalid'],
     [413, 'secret_limit', 'session_attachment_too_large'],
     [415, 'private_parser', 'session_attachment_unsupported'],
+    [409, 'session_attachment_capacity', 'session_attachment_capacity'],
     [503, 'attachment_store_unavailable', 'session_attachment_unavailable'],
     [507, 'storage_quota_exceeded', 'storage_quota_exceeded'],
     [507, 'unknown_storage_error', 'session_attachment_unavailable'],

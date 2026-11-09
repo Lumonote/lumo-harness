@@ -50,13 +50,13 @@ type Options struct {
 }
 
 type Gateway struct {
-	options     Options
-	tls         *tls.Config
-	issuer      *x509.Certificate
-	signer      crypto.Signer
-	issuerPEM   string
-	client      *http.Client
-	connections sync.Map
+	options        Options
+	tls            *tls.Config
+	issuer         *x509.Certificate
+	signer         crypto.Signer
+	issuerPEM      string
+	client         *http.Client
+	connections    sync.Map
 	remoteComputer RemoteComputerAuthorizer
 }
 

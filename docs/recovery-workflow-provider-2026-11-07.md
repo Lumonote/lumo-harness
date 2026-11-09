@@ -43,13 +43,13 @@ Claim 持有 45 秒租约、随机 claim token 的 SHA-256 与递增 `fencing_to
 
 密钥销毁必须单独明确列入 operations，同时为 `operation: key_destroy` 配置对应 Realm、密钥命名空间和 prefix，不能套用恢复操作的目标范围，也不能仅靠 Realm 管理员输入任意 key ID。生产服务仍须验证 opaque ID 的真实租户归属、目标白名单、法务冻结、保留策略、恢复点有效性，以及目标 KMS 的原生授权。此版本提供受限协议；没有附带默认生产执行服务，也未执行真实密钥销毁。
 
-## HTTP 协议 v1
+## HTTP 协议 v2
 
 Governance 仅向固定基础地址发送 `POST {base}/execute` 或 `POST {base}/receipt`。两者 `Content-Type: application/json`，带独立 Bearer 服务凭据与稳定 `Idempotency-Key: lumo-recovery:{execution_id}`。重定向被拒绝。`receipt` 必须是无副作用查询，不得在找不到结果时启动执行。
 
 ```json
 {
-  "version": "lumo.recovery.v1",
+  "version": "lumo.recovery.v2",
   "provider_id": "tenant-recovery",
   "request_id": "recovery_...",
   "realm": "tenant-a",
@@ -61,7 +61,8 @@ Governance 仅向固定基础地址发送 `POST {base}/execute` 或 `POST {base}
   "execution_id": "execution_...",
   "idempotency_key": "lumo-recovery:execution_...",
   "fencing_token": 1,
-  "mode": "execute"
+  "mode": "execute",
+  "expires_at": "2026-11-09T13:00:00Z"
 }
 ```
 
@@ -82,7 +83,7 @@ Governance 仅向固定基础地址发送 `POST {base}/execute` 或 `POST {base}
 
 1. `version, provider_id, request_id, realm, operation, namespace, target_id`；
 2. 非空时的 `recovery_point`（key_destroy 应省略）；
-3. `request_digest, execution_id, idempotency_key, fencing_token, mode`；
+3. `request_digest, execution_id, idempotency_key, fencing_token, mode, expires_at`；
 4. `outcome, receipt_id, completed_at, signature`（此时为空字符串）。
 
 时间使用 UTC RFC3339Nano，JSON 字符串采用 Go `encoding/json` 默认转义（包括 `< > &`；可直接复用 `breakglass.SignReceipt` 作为参考实现）。签名结果为不带 padding 的 Base64URL。管理服务拒绝未知字段、多段 JSON、无签名、错误签名、其他 Realm/目标/摘要/执行 ID/fence/mode 的回执，错误内容不会原样进入状态或日志。
@@ -108,3 +109,12 @@ Governance 仅向固定基础地址发送 `POST {base}/execute` 或 `POST {base}
 测试使用独立 PostgreSQL schema 和本机 `httptest` 假服务，覆盖双人、CAS、撤权等待锁、过期/撤销、租约回收、旧 executor fencing、稳定幂等 ID、签名错误/范围错配/超大响应/重定向拒绝、超时未知结果与回执恢复。假服务只生成签名测试回执，没有真实 KMS 或备份执行能力。
 
 正式目标 KMS、真实备份恢复、法务留存策略、服务端幂等/fencing 的原生实现，以及审批有效期/租约的生产参数，仍需指定目标环境后单独验收；不能从假服务测试推断生产完成。
+
+
+## v2 执行期限与历史回执
+
+恢复 Provider 协议现为 `lumo.recovery.v2`：请求与签名回执携带已批准的 `expires_at`（UTC RFC3339），适配器在执行前使用自己的权威时间复验。`receipt` 是只读核对，允许过期后查询，不能重做动作。
+
+迁移 046 与服务启动 DDL 为历史记录增加 `provider_protocol='lumo.recovery.v1'`；新请求明确写 v2。旧 v1 请求不能重新 execute，也不悄悄升级批准。旧已执行/未知请求仍可通过原 v1 协议、原策略摘要、原 HMAC 正文做 receipt 核对；目标与部署 allowlist 变化仍拒绝。旧尚未执行请求应撤销后创建并重新双人批准 v2 请求。参考 frozen snapshot clone Provider 仅接受 v2，不伪造其未执行过的 v1 回执。
+
+可运行的有限参考实现和真实环境边界见[冻结快照克隆 Provider](frozen-snapshot-provider.md)。

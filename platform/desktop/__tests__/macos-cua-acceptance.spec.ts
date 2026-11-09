@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { exerciseOwnedFixture, passiveCatalog } from '../../tools/macos-cua-acceptance.mjs'
+import { exerciseOwnedCaptureCancellation, exerciseOwnedFixture, isAcceptanceDiagnostic, passiveCatalog } from '../../tools/macos-cua-acceptance.mjs'
 
 // These are protocol contract fixtures, never native desktop acceptance evidence.
 function scenario() {
@@ -49,6 +49,25 @@ function scenario() {
 }
 
 describe('macOS owned native acceptance contract', () => {
+  it('accepts official screenshot diagnostics before or after a reply without treating them as operation evidence', () => {
+    const issued = new Set(['acceptance-1'])
+    expect(isAcceptanceDiagnostic({ type: 'diagnostic', requestId: 'acceptance-1', stage: 'response.write.end', elapsedMs: 2 }, issued)).toBe(true)
+    expect(isAcceptanceDiagnostic({ id: 'acceptance-1', result: {} }, issued)).toBe(false)
+    expect(() => isAcceptanceDiagnostic({ type: 'diagnostic', requestId: 'foreign', stage: 'capture.begin', elapsedMs: 0 }, issued)).toThrow(/unissued/)
+    expect(() => isAcceptanceDiagnostic({ type: 'diagnostic', requestId: 'acceptance-1', stage: 'capture.begin', elapsedMs: -1 }, issued)).toThrow()
+  })
+  it('requires a native cancellation acknowledgement and a fresh successful capture without replaying inputs', async () => {
+    const f = scenario(); let cancelled = false
+    const client = { call: async (method: string, params: Record<string, unknown>, options?: { cancelAfterMs?: number }) => {
+      if (options?.cancelAfterMs !== undefined) { expect(method).toBe('screenshot'); cancelled = true; throw Object.assign(Error('Cancelled'), { code: 'NATIVE_CANCELLED' }) }
+      return f.respond(method, params)
+    } }
+    expect(await exerciseOwnedCaptureCancellation(client, f.fixture)).toMatchObject({ captureCancellationValidated: true, freshCaptureAfterCancellation: true })
+    expect(cancelled).toBe(true)
+    expect(f.calls.some(call => ['click', 'typeText'].includes(call.method))).toBe(false)
+    await expect(exerciseOwnedCaptureCancellation(f.client, f.fixture)).rejects.toThrow(/finished before cancellation/)
+    await expect(exerciseOwnedCaptureCancellation({ call: async () => { throw Object.assign(Error('Native broke'), { code: 'NATIVE_UNRESPONSIVE' }) } }, f.fixture)).rejects.toThrow('Native broke')
+  })
   it('only passively checks capabilities and permissions; never requests grants or lists user applications', async () => {
     const calls: string[] = []
     const result = await passiveCatalog({ pid: 111, call: async (method: string, params: unknown) => {

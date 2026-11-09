@@ -1,0 +1,428 @@
+{
+  "schema_version": "lumo-development-verification/v1",
+  "verification_date": "2026-11-10",
+  "timezone": "Asia/Shanghai",
+  "source": {
+    "branch": "v1.2.1",
+    "base_platform_commit": "920116fab1ddc59f9d70b868b222c2709b2c49e8",
+    "upstream_commit": "fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159",
+    "platform_changes": "uncommitted",
+    "upstream_tracked_changes": false,
+    "product_version": "1.1.1",
+    "changed_implementation_files": 96,
+    "changed_implementation_sha256": "65a068af55dfbd1a612b67779c822fd370d18bb518172cc4f1209b121964950e",
+    "fingerprint_method": "SHA256 of JSON.stringify(sorted [{path,sha256}] for git modified/untracked nonignored files under platform/ and .github/); excludes docs and ignored build artifacts."
+  },
+  "evidence_retention": {
+    "raw_reports": "temporary-local-files",
+    "limitations": "Hashes and summaries are retained here; raw reports must be archived separately for release evidence."
+  },
+  "platform": {
+    "files": 310,
+    "passed": 2892,
+    "failed": 0,
+    "skipped": 0,
+    "todo": 0,
+    "report": {
+      "temporary_path": "/private/tmp/lumo-development-platform-final.json",
+      "sha256": "9760b289c2709957d6928a313a744c531b8ce483d1854080a1b82a0fd62921a8",
+      "bytes": 1140201
+    }
+  },
+  "go": {
+    "totals": {
+      "modules": 16,
+      "packages": 121,
+      "passed": 2022,
+      "failed": 0,
+      "skipped": 0
+    },
+    "modules": [
+      {
+        "module": "collaborator",
+        "race": true,
+        "packages": 10,
+        "passed": 114,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-final-go/collaborator.tests",
+          "sha256": "4c2d419d4c198d2690d513477dd5098ef95fc858c1ff6714cff3f654366840b2",
+          "bytes": 110510
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-final-go/collaborator.packages",
+          "sha256": "3aacce6b6b88aba5eac575755648eee881f07a7bee03d25a1319dd869c00e4da",
+          "bytes": 627
+        }
+      },
+      {
+        "module": "connector-gateway",
+        "race": false,
+        "packages": 14,
+        "passed": 71,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-final-go/connector-gateway.tests",
+          "sha256": "c18062079e94e670d2bf60d420092a59f49d5e0fe600d75440b8a95d2d421b6f",
+          "bytes": 76143
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-final-go/connector-gateway.packages",
+          "sha256": "d7978e2fc36de7ebbfaa8050ecbd364a4bad50f6d5daf4419f122f86cbcc059d",
+          "bytes": 955
+        }
+      },
+      {
+        "module": "edge-gateway",
+        "race": false,
+        "packages": 7,
+        "passed": 35,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-final-go/edge-gateway.tests",
+          "sha256": "d785f5def3a0653b3d352db018133bb605e8e9cf2037bcac2aff55a8aac3d38f",
+          "bytes": 33159
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-final-go/edge-gateway.packages",
+          "sha256": "aec6cd79bf7ceb86183ca75ccbc99489fd3e516e72100e6232fd0c88b3f7f9fe",
+          "bytes": 437
+        }
+      },
+      {
+        "module": "flows",
+        "race": true,
+        "packages": 11,
+        "passed": 251,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-final-go/flows.tests",
+          "sha256": "52abd642c8a10098ecd76c44d47a3997fcb96b325606b2584624fa51c4a0bf5c",
+          "bytes": 229384
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-final-go/flows.packages",
+          "sha256": "d51d79109b38f72e16daee1e6fee57ca8b35c274b073e5bf91ee90c19288e3c8",
+          "bytes": 602
+        }
+      },
+      {
+        "module": "governance",
+        "race": true,
+        "packages": 11,
+        "passed": 436,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-governance-delivery-final-race.jsonl",
+          "sha256": "0759eb264ae3c435ade72c38eeb48b9018bfa1eea5cd46d02eb276816d0697ab",
+          "bytes": 453737
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-governance-final-packages.txt",
+          "sha256": "ee29e55f4253b80cdbf2749a29d504f4cd882656827bfa2683928e34d679f778",
+          "bytes": 687
+        }
+      },
+      {
+        "module": "heartbeat",
+        "race": false,
+        "packages": 1,
+        "passed": 65,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-final-go/heartbeat.tests",
+          "sha256": "b3aae2b15e254409ea5ba34bf77379ca2701e86f7dbb1b2e409a7180b96a1a34",
+          "bytes": 57388
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-final-go/heartbeat.packages",
+          "sha256": "9a0e604917cf68fc628410503244c350e4835c4daaedfd697a7fc188471865c5",
+          "bytes": 43
+        }
+      },
+      {
+        "module": "llm-gateway",
+        "race": false,
+        "packages": 6,
+        "passed": 70,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-final-go/llm-gateway.tests",
+          "sha256": "4de6d4956b20821ae1dad60d8da6e08b13c5a641ddc96333b25f96b625c32a75",
+          "bytes": 64201
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-final-go/llm-gateway.packages",
+          "sha256": "2072b1c64c91e8b25a17e8e860447345ca5a37635c269444024c7364e439034e",
+          "bytes": 365
+        }
+      },
+      {
+        "module": "observability",
+        "race": false,
+        "packages": 2,
+        "passed": 40,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-final-go/observability.tests",
+          "sha256": "145cbc51ee5550711ae9346da92d06187ad606e3e3b74aab949c550a6d0adf8c",
+          "bytes": 37266
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-final-go/observability.packages",
+          "sha256": "996e9603bee391ad9e89916d8ee29ba611b98a3aad9f2496ce83d5dbffb47574",
+          "bytes": 112
+        }
+      },
+      {
+        "module": "projects",
+        "race": false,
+        "packages": 5,
+        "passed": 86,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-final-go/projects.tests",
+          "sha256": "948a0a6f13da9194eaa3186d40440237c99521aa03cd9694a1deaa9d67f636e4",
+          "bytes": 83501
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-final-go/projects.packages",
+          "sha256": "5076dd7fcfb4a38612192dd5c8f8c8ace34e22e9f863b45f941195f98e11cd90",
+          "bytes": 291
+        }
+      },
+      {
+        "module": "ratelimit",
+        "race": true,
+        "packages": 1,
+        "passed": 31,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-final-go/ratelimit.tests",
+          "sha256": "df4c370cdecab86a682b41e54cae806e1451a41e92c90cb8d6c6c1b3177e87b8",
+          "bytes": 27853
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-final-go/ratelimit.packages",
+          "sha256": "ab1a1d26aba06e346eba349c379a575e8d7b6f8712561fc23728b361b56e3f7b",
+          "bytes": 43
+        }
+      },
+      {
+        "module": "registry",
+        "race": true,
+        "packages": 21,
+        "passed": 126,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-final-go/registry-complete.tests",
+          "sha256": "776fe4b4d3de6d2ef7ce04108ff9281b44edfc1f9380c22f30166e28fa66dd96",
+          "bytes": 119255
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-final-go/registry.packages",
+          "sha256": "bb00b9464beca13d96f7ef8527fc1365e5554256f8a649531cb970bb8aef6d13",
+          "bytes": 1284
+        }
+      },
+      {
+        "module": "scheduler",
+        "race": true,
+        "packages": 9,
+        "passed": 291,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-final-go/scheduler.tests",
+          "sha256": "5111159bc36a022a4d3281e55a437fb1a7153b735a538402396ee6eb6301ec8e",
+          "bytes": 276438
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-final-go/scheduler.packages",
+          "sha256": "6df716ac6839d1caf89a1cd9dac66c1507e8cf18ff8f8aba8c0757798d7c4fa5",
+          "bytes": 539
+        }
+      },
+      {
+        "module": "session-control",
+        "race": true,
+        "packages": 8,
+        "passed": 307,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-attachment-session-control-race.jsonl",
+          "sha256": "f6403d9d3ef609253ff43cf30bb13b9f79f190017a1746a0e9139b54b70930aa",
+          "bytes": 300195
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-session-control-packages.txt",
+          "sha256": "947313922f2644067fcc0d97cb97075c317492185c04ea96a528bfaf76423b27",
+          "bytes": 523
+        }
+      },
+      {
+        "module": "storageledger",
+        "race": false,
+        "packages": 1,
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-final-go/storageledger.tests",
+          "sha256": "78e8bfa7c5ba9b8ff593f04bcb27638ed54eb10c49d63f92e5d7a2bd966d27db",
+          "bytes": 4973
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-final-go/storageledger.packages",
+          "sha256": "6d18adaec786fd4365db227a876c7f1bf9bafa7502e245ba41b0cd3c2885ad88",
+          "bytes": 47
+        }
+      },
+      {
+        "module": "terminal-gateway",
+        "race": false,
+        "packages": 7,
+        "passed": 52,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-final-go/terminal-gateway.tests",
+          "sha256": "9e3007906ec63b89d8a63500a97e857836cedca9c4953e97711bac185a5edf18",
+          "bytes": 48635
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-final-go/terminal-gateway.packages",
+          "sha256": "cd59fb8fe84919b6f1683c1260a1e55040d1ccaa32f9df9f2418dceb1e7dde80",
+          "bytes": 469
+        }
+      },
+      {
+        "module": "usage-ledger",
+        "race": true,
+        "packages": 7,
+        "passed": 42,
+        "failed": 0,
+        "skipped": 0,
+        "report": {
+          "temporary_path": "/private/tmp/lumo-usage-ledger-final-race-v2.jsonl",
+          "sha256": "a798f5570fbb94439fea0de0ed56656114ab86a3335885e42139c54391260ff8",
+          "bytes": 38754
+        },
+        "package_discovery": {
+          "temporary_path": "/private/tmp/lumo-usage-ledger-final-packages.txt",
+          "sha256": "dcb96df790f1f915ce4cb49ee00353f74b8135123a32a6f73d89644f3c75a268",
+          "bytes": 453
+        }
+      }
+    ],
+    "build_and_vet": "passed-for-all-16-modules",
+    "test_count_includes": "Go test parent cases and subtests",
+    "format": {
+      "status": "passed",
+      "files_checked": 552
+    }
+  },
+  "node_tools": {
+    "passed": 27,
+    "failed": 0,
+    "skipped": 0,
+    "report": {
+      "temporary_path": "/private/tmp/lumo-final-release-contracts.log",
+      "sha256": "720653f25ce30032e8360725f00b841cd859b6e44a297895e333faf1b75149f1",
+      "bytes": 6009
+    }
+  },
+  "browsers": [
+    {
+      "headless": false,
+      "environment": "isolated-source-fixture",
+      "checks": 10,
+      "passed": 10,
+      "page_errors": 0,
+      "blocked_requests": 0,
+      "report": {
+        "temporary_path": "/private/tmp/lumo-ui-finish-acceptance-20261109-r2/report.json",
+        "sha256": "5716891266132899af415fe93d75b0241a9227355112f87aade1ec8925e46936",
+        "bytes": 3372
+      }
+    },
+    {
+      "headless": true,
+      "environment": "isolated-source-fixture",
+      "checks": 10,
+      "passed": 10,
+      "page_errors": 0,
+      "blocked_requests": 0,
+      "report": {
+        "temporary_path": "/private/tmp/lumo-ui-finish-headless-20261109/report.json",
+        "sha256": "ede3a6156217b79be657256335752b48b33af77afd2de1c7545e9da8ff45e0a9",
+        "bytes": 3371
+      }
+    }
+  ],
+  "not_executed": [
+    "real-model-and-TEI-quality-evaluation",
+    "formal-native-signing-notarization-and-installed-app-acceptance",
+    "independent-multihost-production-HA-PITR-IdP-KMS-capacity-drills",
+    "GitHub-hosted-workflow-and-complete-cluster-release-acceptance"
+  ],
+  "python_deploy": {
+    "status": "passed",
+    "tests_run": 37,
+    "passed": 37,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "unexpected_successes": 0,
+    "expected_failures": 0,
+    "log": {
+      "temporary_path": "/private/tmp/lumo-deploy-delivery-tests.log",
+      "sha256": "944e325a1cf7a68c32609b5232928bd56e4c4d7fbcb5906f6d74c8adec4b4baf",
+      "bytes": 8607
+    },
+    "report": {
+      "temporary_path": "/private/tmp/lumo-deploy-delivery-tests.json",
+      "sha256": "7daa1379b354e79f84df497d4ed64cc2fb1f408b56ba834d7513cb634e005a2d",
+      "bytes": 217
+    }
+  },
+  "workflow_syntax": {
+    "yaml_files": 3,
+    "shell_blocks": 71,
+    "script_files": 25,
+    "status": "passed",
+    "report": {
+      "temporary_path": "/private/tmp/lumo-delivery-workflow-verification.json",
+      "sha256": "24fe7724cd809997bbfb5690dc032cecd50344a40c431232f006c0b9f2e38dcf",
+      "bytes": 10709
+    }
+  },
+  "typechecks": {
+    "status": "passed",
+    "targets": [
+      "platform/tsconfig.json",
+      "platform/dsh-plugins/lumo-ui/tsconfig.json",
+      "platform/dsh-plugins/agent-teams/eval/tsconfig.json",
+      "platform/dsh-plugins/knowledge/eval/tsconfig.json"
+    ],
+    "evidence": "Exit codes were observed during this delivery; no raw report was retained."
+  },
+  "cleanup": {
+    "task_label": "io.lumo.task=remaining-development-20261109",
+    "removed_containers": 4,
+    "remaining_containers_with_task_label": 0,
+    "scope": "Only the four inspected task-owned container IDs and their anonymous volumes were removed."
+  }
+}

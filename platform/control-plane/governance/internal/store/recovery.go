@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS governance_recovery_requests (
  CHECK(executed_by='' OR executed_by<>approved_by),
  CHECK((operation='restore' AND recovery_point<>'') OR (operation='key_destroy' AND recovery_point=''))
 );
+ALTER TABLE governance_recovery_requests ADD COLUMN IF NOT EXISTS provider_protocol TEXT NOT NULL DEFAULT 'lumo.recovery.v1' CHECK(provider_protocol IN ('lumo.recovery.v1','lumo.recovery.v2'));
 CREATE INDEX IF NOT EXISTS governance_recovery_requests_list ON governance_recovery_requests(realm,created_at DESC,id DESC);
 CREATE TABLE IF NOT EXISTS governance_recovery_audit (
  id BIGSERIAL PRIMARY KEY,realm TEXT NOT NULL,request_id TEXT NOT NULL,event TEXT NOT NULL CHECK(event IN ('requested','approved','claimed','succeeded','failed','uncertain','expired','revoked')),
@@ -45,12 +46,12 @@ var ErrRecoveryChanged = errors.New("recovery request changed")
 var ErrRecoveryState = errors.New("recovery workflow transition not allowed")
 var ErrRecoveryClaim = errors.New("recovery execution claim lost")
 
-const recoverySelect = `SELECT realm,id,operation,namespace,target_id,recovery_point,reason,requested_by,approved_by,approved_at,expires_at,created_at,updated_at,status,revision,provider_id,policy_digest,request_digest,execution_id,fencing_token,executed_by,lease_until,last_error,receipt FROM governance_recovery_requests`
+const recoverySelect = `SELECT realm,id,operation,namespace,target_id,recovery_point,reason,requested_by,approved_by,approved_at,expires_at,created_at,updated_at,status,revision,provider_id,policy_digest,request_digest,execution_id,fencing_token,executed_by,lease_until,last_error,receipt,provider_protocol FROM governance_recovery_requests`
 
 func scanRecovery(row pgx.Row) (bg.DurableRequest, error) {
 	var r bg.DurableRequest
 	var receipt []byte
-	err := row.Scan(&r.Realm, &r.ID, &r.Operation, &r.Namespace, &r.TargetID, &r.RecoveryPoint, &r.Reason, &r.RequestedBy, &r.ApprovedBy, &r.ApprovedAt, &r.ExpiresAt, &r.CreatedAt, &r.UpdatedAt, &r.Status, &r.Revision, &r.ProviderID, &r.PolicyDigest, &r.RequestDigest, &r.ExecutionID, &r.FencingToken, &r.ExecutedBy, &r.LeaseUntil, &r.LastError, &receipt)
+	err := row.Scan(&r.Realm, &r.ID, &r.Operation, &r.Namespace, &r.TargetID, &r.RecoveryPoint, &r.Reason, &r.RequestedBy, &r.ApprovedBy, &r.ApprovedAt, &r.ExpiresAt, &r.CreatedAt, &r.UpdatedAt, &r.Status, &r.Revision, &r.ProviderID, &r.PolicyDigest, &r.RequestDigest, &r.ExecutionID, &r.FencingToken, &r.ExecutedBy, &r.LeaseUntil, &r.LastError, &receipt, &r.ProviderProtocol)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, ErrNotFound
 	}
@@ -107,9 +108,10 @@ func (s *Store) CreateRecovery(ctx context.Context, r bg.DurableRequest) (bg.Dur
 	if err != nil {
 		return r, err
 	}
+	r.ProviderProtocol = bg.ProtocolVersion
 	r.RequestDigest = r.Digest()
-	r, err = scanRecovery(tx.QueryRow(ctx, `INSERT INTO governance_recovery_requests(realm,id,operation,namespace,target_id,recovery_point,reason,requested_by,expires_at,status,provider_id,policy_digest,request_digest,execution_id)
- VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$10,$11,$12,$13) RETURNING `+recoveryColumns(), r.Realm, r.ID, r.Operation, r.Namespace, r.TargetID, r.RecoveryPoint, r.Reason, r.RequestedBy, r.ExpiresAt, r.ProviderID, r.PolicyDigest, r.RequestDigest, r.ExecutionID))
+	r, err = scanRecovery(tx.QueryRow(ctx, `INSERT INTO governance_recovery_requests(realm,id,operation,namespace,target_id,recovery_point,reason,requested_by,expires_at,status,provider_id,policy_digest,request_digest,execution_id,provider_protocol)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$10,$11,$12,$13,$14) RETURNING `+recoveryColumns(), r.Realm, r.ID, r.Operation, r.Namespace, r.TargetID, r.RecoveryPoint, r.Reason, r.RequestedBy, r.ExpiresAt, r.ProviderID, r.PolicyDigest, r.RequestDigest, r.ExecutionID, r.ProviderProtocol))
 	if err != nil {
 		return r, err
 	}
@@ -243,6 +245,9 @@ func (s *Store) ClaimRecovery(ctx context.Context, realm, id, actor string, expe
 		return claim, ErrRecoveryState
 	}
 	if mode == "execute" {
+		if r.ProviderProtocol != bg.ProtocolVersion {
+			return claim, ErrRecoveryChanged
+		}
 		if r.ApprovedBy == actor {
 			return claim, ErrRecoveryState
 		}

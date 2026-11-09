@@ -32,6 +32,13 @@ describe('pinned current-node Session routing',()=>{
     expect(f.local.execute).not.toHaveBeenCalled();expect(f.authority.mock.calls.length).toBeGreaterThanOrEqual(2)
     expect(f.fetcher.mock.calls.filter(([url])=>String(url).startsWith('https://b.example'))).toHaveLength(1)
   })
+  it('routes attachment inventory pages through the exact owned process and credential',async()=>{
+    const f=fixture(),request={sessionId:ref,status:'retired',limit:50,after:'att_'+'b'.repeat(48)}
+    await expect(f.transport.execute(alice,'attachmentInventory',request,new AbortController().signal,f.authority)).resolves.toEqual({accepted:true})
+    const remote=f.fetcher.mock.calls.find(([url])=>String(url).startsWith('https://b.example'))!
+    expect(JSON.parse(String(remote[1]?.body))).toMatchObject({action:'attachmentInventory',request,credential:'login-secret',destination:f.node})
+    expect(f.local.execute).not.toHaveBeenCalled()
+  })
   it('reports a frozen checkpoint before trying to resolve its offline original node',async()=>{
     const f=fixture(true)
     await expect(f.transport.execute(alice,'events',{sessionId:ref},new AbortController().signal,f.authority)).rejects.toMatchObject({code:'session_migration_frozen'})

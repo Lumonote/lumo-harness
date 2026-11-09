@@ -330,8 +330,8 @@ const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequis
     b: { files: ['control-plane/connector-gateway/internal/owned/store.go'], constName: 'DDL' },
   },
   {
-    label: '动态 Session attachment receipts（Go session-control ↔ 迁移 028/035/044）',
-    a: { files: [`${MIGRATION_DIR}/028_session_attachment_receipts.sql`, `${MIGRATION_DIR}/035_session_document_attachments.sql`, `${MIGRATION_DIR}/044_session_attachment_retirement.sql`] },
+    label: '动态 Session attachment receipts（Go session-control ↔ 迁移 028/035/044/045）',
+    a: { files: [`${MIGRATION_DIR}/028_session_attachment_receipts.sql`, `${MIGRATION_DIR}/035_session_document_attachments.sql`, `${MIGRATION_DIR}/044_session_attachment_retirement.sql`, `${MIGRATION_DIR}/045_session_attachment_inventory.sql`] },
     b: { files: ['control-plane/session-control/internal/store/session_attachments.go'], constName: 'sessionAttachmentDDL' },
     prerequisites: { files: ['control-plane/session-control/internal/store/session_owners.go'], constName: 'sessionOwnerDDL' },
   },
@@ -366,7 +366,7 @@ const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequis
   },
   {
     label: '持久恢复双人审批（Go Governance ↔ 迁移 026）',
-    a: { files: [`${MIGRATION_DIR}/026_governance_recovery_workflow.sql`] },
+    a: { files: [`${MIGRATION_DIR}/026_governance_recovery_workflow.sql`, `${MIGRATION_DIR}/046_recovery_provider_protocol.sql`] },
     b: { files: ['control-plane/governance/internal/store/recovery.go'], constName: 'recoveryDDL' },
   },
   {

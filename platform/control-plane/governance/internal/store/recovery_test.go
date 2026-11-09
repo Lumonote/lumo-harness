@@ -92,6 +92,38 @@ func TestRecoveryPersistentDualControlOneTimeExecutionAndAudit(t *testing.T) {
 	}
 }
 
+func TestLegacyRecoveryCannotExecuteButRetainsReceiptReconciliation(t *testing.T) {
+	s := recoveryStore(t)
+	ctx := context.Background()
+	r := newRecovery(t, s)
+	if _, err := s.pool.Exec(ctx, `UPDATE governance_recovery_requests SET provider_protocol='lumo.recovery.v1' WHERE realm=$1 AND id=$2`, r.Realm, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := s.GetRecovery(ctx, r.Realm, r.ID, "manager")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = approveRecovery(t, s, r)
+	if _, err = s.ClaimRecovery(ctx, r.Realm, r.ID, "manager", r.Revision, r.ProviderID, r.PolicyDigest, "execute"); !errors.Is(err, ErrRecoveryChanged) {
+		t.Fatal("legacy approval executed", err)
+	}
+	if _, err = s.pool.Exec(ctx, `UPDATE governance_recovery_requests SET status='uncertain',fencing_token=1 WHERE realm=$1 AND id=$2`, r.Realm, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := s.ClaimRecovery(ctx, r.Realm, r.ID, "manager", r.Revision, r.ProviderID, r.PolicyDigest, "receipt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution := claim.Request.Execution("receipt")
+	if execution.Version != bg.LegacyProtocolVersion || execution.ExpiresAt != "" {
+		t.Fatal("legacy receipt identity changed")
+	}
+	done, err := s.FinishRecovery(ctx, claim, claimReceipt(claim, "succeeded"), "")
+	if err != nil || done.Status != bg.Succeeded {
+		t.Fatal(done, err)
+	}
+}
+
 func TestRecoveryConcurrentCASClaimFencingAndUnknownOutcome(t *testing.T) {
 	s := recoveryStore(t)
 	ctx := context.Background()

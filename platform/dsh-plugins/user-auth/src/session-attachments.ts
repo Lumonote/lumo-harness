@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore, FileAttachmentRef, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { boundedJSON, type SessionExecutionRuntime } from '../../../shared/session-execution.ts'
-import { SESSION_ATTACHMENT_DOCUMENT_TYPES, SESSION_ATTACHMENT_MAX_BYTES, sessionAttachmentID, type SessionAttachmentConfig, type SessionAttachmentReceipt, type SessionAttachmentUpload, type SessionAttachmentDownload } from '../../../shared/seam-contracts/session-attachments.ts'
+import { SESSION_ATTACHMENT_DOCUMENT_TYPES, SESSION_ATTACHMENT_MAX_BYTES, sessionAttachmentID, type SessionAttachmentConfig, type SessionAttachmentReceipt, type SessionAttachmentUpload, type SessionAttachmentDownload, type SessionAttachmentInventory } from '../../../shared/seam-contracts/session-attachments.ts'
 import type { Principal } from './client.ts'
 import { SessionRequestError, sessionUpstreamError } from './session-request-errors.ts'
 import { extractDocumentPreview, isDocumentMediaType, validateDocumentEnvelope } from './session-document.ts'
@@ -61,6 +61,13 @@ function receipt(value:unknown,realm:string):StoredReceipt{
   if(!r.native_ref||r.native_ref.bytes!==r.bytes||r.native_ref.name!==r.name||r.native_ref.attachmentId!==realm+'/'+(r.kind==='image'?'content':'file-content')+'/'+r.sha256)throw new Error('Invalid persistent attachment receipt')
   return r
 }
+export function parseAttachmentInventory(value:unknown):SessionAttachmentInventory {
+ const page=value as SessionAttachmentInventory,u=page?.usage
+ if(!page||!Array.isArray(page.receipts)||page.receipts.length>100||typeof page.next_cursor!=='string'||page.next_cursor!==''&&!sessionAttachmentID.test(page.next_cursor)||!u||u.accounting!=='logical-retained-reference-bytes'||u.retirement_releases_quota!==false||u.active_limit!==100||['total_count','active_count','retired_count','total_bytes','active_bytes','retired_bytes'].some(k=>!Number.isSafeInteger(u[k as keyof typeof u])||Number(u[k as keyof typeof u])<0)||u.total_count!==u.active_count+u.retired_count||u.total_bytes!==u.active_bytes+u.retired_bytes)throw new Error('Invalid attachment inventory')
+ const receipts=page.receipts.map(parsePublicAttachmentReceipt)
+ if(new Set(receipts.map(r=>r.receipt_id)).size!==receipts.length||page.next_cursor!==''&&(receipts.length===0||page.next_cursor!==receipts.at(-1)!.receipt_id))throw new Error('Invalid attachment inventory cursor')
+ return {receipts,next_cursor:page.next_cursor,usage:{total_count:u.total_count,active_count:u.active_count,retired_count:u.retired_count,total_bytes:u.total_bytes,active_bytes:u.active_bytes,retired_bytes:u.retired_bytes,active_limit:100,accounting:'logical-retained-reference-bytes',retirement_releases_quota:false}}
+}
 export function attachmentReferences(events:readonly SessionEvent[]):string[]{
  const ids=new Set<string>()
  for(const event of events){if(event.type!=='user/message')continue;for(const part of event.data.content){if(part.type!=='text')continue;for(const m of part.text.matchAll(/\[lumo-attachment:(att_[a-f0-9]{48})\]/gu))ids.add(m[1]!)}}
@@ -71,17 +78,30 @@ export function attachmentReferences(events:readonly SessionEvent[]):string[]{
 export class OwnedSessionAttachments {
  private transfers=0
  constructor(private store:AttachmentStore,private config:SessionAttachmentConfig,private runtime:SessionExecutionRuntime,private authorityURL:string,private token:string,private fetcher:typeof fetch=globalThis.fetch){validateSessionAttachments(config,runtime.realm)}
- private async call(principal:Principal,ref:string,operation:string,fields:Record<string,unknown>={}):Promise<StoredReceipt[]>{
-  const proof=await this.runtime.proof(ref)
+ private async request(principal:Principal,ref:string,operation:string,fields:Record<string,unknown>={},proofOverride?:Awaited<ReturnType<SessionExecutionRuntime['proof']>>):Promise<Record<string,unknown>>{
+  const proof=proofOverride??await this.runtime.proof(ref)
   let response:Response
   try{response=await this.fetcher(this.authorityURL.replace(/\/+$/u,'')+'/v1/session-attachments/'+encodeURIComponent(ref),{method:'POST',redirect:'error',signal:AbortSignal.any([this.runtime.signal,AbortSignal.timeout(5000)]),headers:{authorization:'Bearer '+this.token,'content-type':'application/json'},body:JSON.stringify({...proof,owner_user_id:principal.user_id,operation,...fields})})}catch{throw new SessionRequestError('session_attachment_unavailable')}
   if(!response.ok)throw await sessionUpstreamError(response,'attachment')
-  try{const value=await boundedJSON(response,256*1024);if(!Array.isArray(value.receipts)||value.receipts.length>100)throw new Error('Invalid authority response');return value.receipts.map(value=>receipt(value,this.runtime.realm))}catch{throw new SessionRequestError('session_attachment_unavailable')}
+  try{return await boundedJSON(response,256*1024)}catch{throw new SessionRequestError('session_attachment_unavailable')}
+ }
+ private async call(principal:Principal,ref:string,operation:string,fields:Record<string,unknown>={}):Promise<StoredReceipt[]>{
+  const value=await this.request(principal,ref,operation,fields)
+  try{if(!Array.isArray(value.receipts)||value.receipts.length>100)throw new Error('Invalid authority response');return value.receipts.map(value=>receipt(value,this.runtime.realm))}catch{throw new SessionRequestError('session_attachment_unavailable')}
  }
  private async storage<T>(read:()=>Promise<T>,signal:AbortSignal):Promise<T>{try{return await read()}catch(error){signal.throwIfAborted();if(error instanceof SessionRequestError)throw error;throw new SessionRequestError('session_attachment_unavailable')}}
  async get(principal:Principal,ref:string,id:unknown):Promise<StoredReceipt>{if(!sessionAttachmentID.test(String(id)))throw new Error('A server attachment receipt is required');const rows=await this.call(principal,ref,'get',{receipt_id:id});if(rows.length!==1)throw new Error('Attachment receipt unavailable');return rows[0]!}
  async list(principal:Principal,ref:string,authorize:()=>Promise<void>):Promise<SessionAttachmentReceipt[]>{
   await authorize();const rows=await this.call(principal,ref,'list');await authorize();return rows.map(publicReceipt)
+ }
+ async inventory(principal:Principal,ref:string,options:Record<string,unknown>,authorize:()=>Promise<void>):Promise<SessionAttachmentInventory>{
+  if(Object.keys(options).some(k=>!['after','status','limit'].includes(k))||options.after!==undefined&&(typeof options.after!=='string'||options.after!==''&&!sessionAttachmentID.test(options.after))||options.status!==undefined&&!['active','retired','all'].includes(String(options.status))||options.limit!==undefined&&(!Number.isSafeInteger(options.limit)||Number(options.limit)<1||Number(options.limit)>100))throw new SessionRequestError('session_attachment_invalid')
+  await authorize();const value=await this.request(principal,ref,'inventory',options);await authorize()
+  try{
+   const page=parseAttachmentInventory(value),after=String(options.after??''),status=options.status??'active'
+   if(page.receipts.length>Number(options.limit??50)||page.receipts.some((r,i)=>r.receipt_id<=after||i>0&&r.receipt_id<=page.receipts[i-1]!.receipt_id||status==='active'&&!!r.retired_at||status==='retired'&&!r.retired_at))throw new Error('Invalid inventory scope')
+   return page
+  }catch{throw new SessionRequestError('session_attachment_unavailable')}
  }
  async retire(principal:Principal,ref:string,id:unknown,authorize:()=>Promise<void>):Promise<SessionAttachmentReceipt>{
   if(typeof id!=='string'||!sessionAttachmentID.test(id))throw new SessionRequestError('session_attachment_invalid')
@@ -133,7 +153,23 @@ export class OwnedSessionAttachments {
   }
   await authorize();return result
  }
- async inherit(principal:Principal,ref:string,parent:string,events:readonly SessionEvent[]):Promise<void>{await this.call(principal,ref,'inherit',{source_session:parent,receipt_ids:attachmentReferences(events)})}
+ async inherit(principal:Principal,ref:string,parent:string,events:readonly SessionEvent[],authorize:()=>Promise<void>):Promise<void>{
+  const ids=attachmentReferences(events)
+  // Every historical marker is retained. Batching is transport bounding, never
+  // truncation; the child remains reserved until every batch has succeeded.
+  for(let offset=0;offset<ids.length;offset+=100){
+   await authorize();const batch=ids.slice(offset,offset+100),rows=await this.call(principal,ref,'inherit',{source_session:parent,receipt_ids:batch});await authorize()
+   if(rows.length!==batch.length||rows.some((row,i)=>row.receipt_id!==batch[i]))throw new SessionRequestError('session_attachment_unavailable')
+  }
+ }
+ async abortInheritance(principal:Principal,ref:string,parent:string,creationToken:string):Promise<void>{
+  // Internal cleanup uses the unguessable creation token plus current execution
+  // proof, not revoked browser permissions. Authority refuses any active child.
+  const proof=await this.runtime.proof(ref)
+  await this.runtime.retire(ref)
+  const response=await this.request(principal,ref,'abort-inheritance',{source_session:parent,creation_token:creationToken},proof)
+  if(!Array.isArray(response.receipts)||response.receipts.length!==0)throw new SessionRequestError('session_attachment_unavailable')
+ }
  install(agent:Agent,ref:string,currentPrincipal:()=>Promise<Principal>):void{
   agent.ctx.tools.register({name:USER_SESSION_ATTACHMENT_TOOL,description:'只读读取本会话已发送的文本附件，或 PDF/DOCX/XLSX/PPTX 的有界文字预览。文档始终不是全文证明，必须查看 extraction 警告；仅接受服务器 receipt_id，分页返回。',parameters:{type:'object',additionalProperties:false,required:['receipt_id'],properties:{receipt_id:{type:'string',pattern:'^att_[a-f0-9]{48}$'},offset:{type:'integer',minimum:0,maximum:1048576},limit:{type:'integer',minimum:1,maximum:32000}}},output:{schema:{type:'object',required:['text','offset','next_offset','total_chars'],properties:{text:{type:'string'},offset:{type:'integer'},next_offset:{type:'integer'},total_chars:{type:'integer'},extraction:{type:'object'}}},render:(_a,v)=>[{type:'text',text:JSON.stringify(v)}]},execute:async(args,exec)=>{
    if(exec.agent!==agent||!args||typeof args!=='object'||Array.isArray(args))throw new Error('Exact owned Session and receipt required');const input=args as Record<string,unknown>

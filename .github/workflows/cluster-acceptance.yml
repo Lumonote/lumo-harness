@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '25 18 * * *'
   workflow_call:
+    inputs:
+      upstream_ref:
+        description: Immutable upstream commit selected by the release orchestrator
+        required: true
+        type: string
   workflow_dispatch:
 
 permissions:
@@ -37,16 +42,21 @@ jobs:
       LUMO_TEST_RMQ_ENDPOINT: 127.0.0.1:8081
       LUMO_TEST_REDIS_ADDR: 127.0.0.1:16379
       SESSION_LOG_TEST_REDIS: 127.0.0.1:16379
+      LUMO_TEST_REDIS_DSN: redis://127.0.0.1:16379
       LUMO_TEST_NACOS_HEALTH_URL: http://127.0.0.1:18848/nacos/v1/console/health/readiness
       LUMO_TEST_MILVUS_HEALTH_URL: http://127.0.0.1:19091/healthz
       LUMO_TEST_OPA_HEALTH_URL: http://127.0.0.1:18181/health
       LUMO_TEST_VAULT_HEALTH_URL: http://127.0.0.1:18200/v1/sys/health
     steps:
       - uses: actions/checkout@v5
+      - name: Validate upstream checkout identity
+        env:
+          LUMO_UPSTREAM_REF: ${{ inputs.upstream_ref || 'master' }}
+        run: node platform/tools/resolve-upstream-ref.mjs --validate "$LUMO_UPSTREAM_REF"
       - uses: actions/checkout@v5
         with:
           repository: deepseek-ai/deepseek-harness
-          ref: master
+          ref: ${{ inputs.upstream_ref || 'master' }}
           fetch-depth: 0
           path: deepseek-harness
       - uses: pnpm/action-setup@v5

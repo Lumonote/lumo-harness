@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -218,12 +219,25 @@ func newProducer(t *testing.T, endpoint string) rmq.Producer {
 	return p
 }
 
-func newSimpleConsumer(t *testing.T, endpoint, group string) rmq.SimpleConsumer {
+func newSimpleConsumer(t *testing.T, endpoint, group string, topics ...string) rmq.SimpleConsumer {
 	t.Helper()
 	rmq.EnableSsl = false
-	subs, err := rmqconsume.SubscriptionExpressions(rmqpublish.TopicPrefixDefault)
+	all, err := rmqconsume.SubscriptionExpressions(rmqpublish.TopicPrefixDefault)
 	if err != nil {
 		t.Fatalf("构造订阅: %v", err)
+	}
+	// SDK 每轮 Receive 从无序 map 重建 topic 列表，再按递增 index 选一个。
+	// 单 topic 合同测试显式限定订阅，避免对其余空 topic 的长轮询耗尽预算。
+	if len(topics) == 0 {
+		t.Fatal("必须显式声明本测试实际发送的 topic")
+	}
+	subs := make(map[string]*rmq.FilterExpression, len(topics))
+	for _, topic := range topics {
+		filter, ok := all[topic]
+		if !ok {
+			t.Fatalf("topic 不在成本闭集: %s", topic)
+		}
+		subs[topic] = filter
 	}
 	sc, err := rmq.NewSimpleConsumer(&rmq.Config{
 		Endpoint:      endpoint,
@@ -241,6 +255,63 @@ func newSimpleConsumer(t *testing.T, endpoint, group string) rmq.SimpleConsumer 
 	}
 	t.Cleanup(func() { _ = sc.GracefulStop() })
 	return sc
+}
+
+// observedConsumer 委托真实 broker Ack，只有其成功才记录消息身份；不模拟传输。
+// 重放断言必须证明第二消费组读到并处理了原 messageId，不能只读首组已写好的行。
+type observedConsumer struct {
+	rmq.SimpleConsumer
+	mu    sync.Mutex
+	acked map[string]string
+}
+
+func observeConsumer(sc rmq.SimpleConsumer) *observedConsumer {
+	return &observedConsumer{SimpleConsumer: sc, acked: make(map[string]string)}
+}
+
+func (sc *observedConsumer) Ack(ctx context.Context, message *rmq.MessageView) error {
+	if err := sc.SimpleConsumer.Ack(ctx, message); err != nil {
+		return err
+	}
+	sc.mu.Lock()
+	sc.acked[message.GetProperties()["eventKey"]] = message.GetMessageId()
+	sc.mu.Unlock()
+	return nil
+}
+
+func (sc *observedConsumer) acknowledged(prefix string) map[string]string {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	result := make(map[string]string)
+	for key, id := range sc.acked {
+		if strings.HasPrefix(key, prefix) {
+			result[key] = id
+		}
+	}
+	return result
+}
+
+func runConsumer(t *testing.T, consumer *rmqconsume.Consumer) func() {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = consumer.Run(ctx)
+	}()
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("消费循环未在取消后退出")
+			}
+		})
+	}
+	t.Cleanup(stop)
+	return stop
 }
 
 func mustTopics(t *testing.T) []string {
@@ -382,13 +453,14 @@ func TestRMQTransportE2E(t *testing.T) {
 		t.Fatalf("published_at 标记数: %d err=%v want 3", marked, err)
 	}
 
-	// 第一消费组：新组重放全部历史，本测试的 3 键必然在内
-	cctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	sc := newSimpleConsumer(t, endpoint, fmt.Sprintf("ul-e2e-%d", time.Now().UnixNano()))
+	// 第一消费组：新组重放该 topic 全部历史，本测试的 3 键必然在内。
+	topic := rmqpublish.TopicFor(rmqpublish.TopicPrefixDefault, "llm.tokens")
+	sc := observeConsumer(newSimpleConsumer(t, endpoint, fmt.Sprintf("ul-e2e-%d", time.Now().UnixNano()), topic))
 	cons := rmqconsume.New(pool, sc, slog.New(slog.DiscardHandler))
-	go func() { _ = cons.Run(cctx) }()
-	waitUntil(t, "3 事件落账", 30*time.Second, func() bool { return countPrefix(t, pool, prefix) >= 3 })
+	stop := runConsumer(t, cons)
+	waitUntil(t, "3 事件落账并得到 broker Ack", 30*time.Second,
+		func() bool { return countPrefix(t, pool, prefix) == 3 && len(sc.acknowledged(prefix)) == 3 })
+	originalMessages := sc.acknowledged(prefix)
 
 	for i, want := range seeded {
 		var got time.Time
@@ -400,17 +472,20 @@ func TestRMQTransportE2E(t *testing.T) {
 			t.Fatalf("事件时刻未保真（%d）: got %v want %v（outbox.ts=消息属性 ts=ledger.ts 三处必须同值）", i, got, want)
 		}
 	}
-	cancel()
+	stop()
 
 	// 第二消费组重放同一批（至少一次投递的重复消费场景）→ 幂等键去重，行数不变
-	sc2 := newSimpleConsumer(t, endpoint, fmt.Sprintf("ul-e2e-replay-%d", time.Now().UnixNano()))
+	sc2 := observeConsumer(newSimpleConsumer(t, endpoint, fmt.Sprintf("ul-e2e-replay-%d", time.Now().UnixNano()), topic))
 	cons2 := rmqconsume.New(pool, sc2, slog.New(slog.DiscardHandler))
-	cctx2, cancel2 := context.WithCancel(ctx)
-	defer cancel2()
-	go func() { _ = cons2.Run(cctx2) }()
-	waitUntil(t, "重放组也读到消息（噪音可入账，前缀行不变）", 30*time.Second,
-		func() bool { return countPrefix(t, pool, prefix) >= 3 })
-	time.Sleep(3 * time.Second) // 给重放组留出重复消费窗口
+	stopReplay := runConsumer(t, cons2)
+	waitUntil(t, "重放组确实处理并 Ack 原3个消息", 30*time.Second,
+		func() bool { return len(sc2.acknowledged(prefix)) == 3 })
+	stopReplay()
+	for key, messageID := range originalMessages {
+		if replayed := sc2.acknowledged(prefix)[key]; replayed != messageID || messageID == "" {
+			t.Fatalf("重放消息身份不符: key=%s original=%s replay=%s", key, messageID, replayed)
+		}
+	}
 	if n := countPrefix(t, pool, prefix); n != 3 {
 		t.Fatalf("重放后前缀行数应仍为 3（event_key 幂等）, got %d", n)
 	}
@@ -452,7 +527,8 @@ func TestConsumerRejectsPoison(t *testing.T) {
 	poison := e2eEvent("llm.tokens")
 	poison.CostType = "made.up" // 闭集外：topic 是 llm-tokens 但 payload 自称 made.up
 	body, _ := json.Marshal(poison)
-	msg := &rmq.Message{Topic: "usage-events-llm-tokens", Body: body}
+	topic := rmqpublish.TopicFor(rmqpublish.TopicPrefixDefault, "llm.tokens")
+	msg := &rmq.Message{Topic: topic, Body: body}
 	msg.SetKeys(poisonKey)
 	msg.AddProperty("ts", time.Now().UTC().Format(time.RFC3339Nano))
 	msg.AddProperty("eventKey", poisonKey)
@@ -460,13 +536,18 @@ func TestConsumerRejectsPoison(t *testing.T) {
 		t.Fatalf("发送毒丸: %v", err)
 	}
 
-	rejected := make(chan string, 16)
-	sc := newSimpleConsumer(t, endpoint, fmt.Sprintf("ul-poison-%d", time.Now().UnixNano()))
+	rejected := make(chan string, 1)
+	sc := observeConsumer(newSimpleConsumer(t, endpoint, fmt.Sprintf("ul-poison-%d", time.Now().UnixNano()), topic))
 	cons := rmqconsume.New(pool, sc, slog.New(slog.DiscardHandler),
-		rmqconsume.WithOnReject(func(m string) { rejected <- m }))
-	cctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go func() { _ = cons.Run(cctx) }()
+		rmqconsume.WithOnReject(func(m string) {
+			if strings.Contains(m, "eventKey="+poisonKey+"）") {
+				select {
+				case rejected <- m:
+				default:
+				}
+			}
+		}))
+	stop := runConsumer(t, cons)
 
 	var gotReject string
 	waitUntil(t, "毒丸触发告警", 30*time.Second, func() bool {
@@ -477,9 +558,22 @@ func TestConsumerRejectsPoison(t *testing.T) {
 			return false
 		}
 	})
-	if !strings.Contains(gotReject, "made.up") && !strings.Contains(gotReject, poisonKey) {
+	if !strings.Contains(gotReject, "made.up") || !strings.Contains(gotReject, poisonKey) {
 		t.Fatalf("告警应指向毒丸: %s", gotReject)
 	}
+	waitUntil(t, "当前毒丸被 broker 确认 Ack", 30*time.Second,
+		func() bool { return sc.acknowledged(poisonKey)[poisonKey] != "" })
+	// 确认毒丸处理完成后再发正常事件，证明消费循环继续工作，不靠历史行通过。
+	goodKey := poisonKey + "-after"
+	seedOutbox(t, pool, goodKey, time.Now(), e2eEvent("llm.tokens"))
+	pub := rmqpublish.New(pool, producer, rmqpublish.TopicPrefixDefault, slog.New(slog.DiscardHandler))
+	if sent, err := pub.PublishOnce(ctx); err != nil || sent != 1 {
+		t.Fatalf("毒丸后的正常事件发布失败: sent=%d err=%v", sent, err)
+	}
+	waitUntil(t, "毒丸后正常事件落账并 Ack", 30*time.Second, func() bool {
+		return countPrefix(t, pool, goodKey) == 1 && sc.acknowledged(goodKey)[goodKey] != ""
+	})
+	stop()
 	var n int
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM usage_ledger WHERE event_key = $1`, poisonKey).Scan(&n); err != nil || n != 0 {

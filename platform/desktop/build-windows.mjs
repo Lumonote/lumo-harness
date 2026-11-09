@@ -4,6 +4,8 @@ import { dirname, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { stripVTControlCharacters } from 'node:util'
+import { readdirSync, readFileSync } from 'node:fs'
+import { finalizeInstaller } from './release-desktop.mjs'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
 const retryDelays = [5_000, 15_000]
@@ -59,6 +61,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       throw new Error('Windows NSIS 安装包需要在 Windows x64 构建机上生成')
     }
     const result = await buildWindows()
+    if (result.code === 0 && !result.signal && process.env.LUMO_RELEASE_SIGNING_REQUIRED === '1') {
+      const directory = resolve(desktopRoot, 'target/release/bundle/nsis')
+      const installers = readdirSync(directory).filter(name => name.endsWith('.exe'))
+      if (installers.length !== 1) throw Error('正式 Windows 发布需要唯一的当前 NSIS 安装包；请清理旧构建产物')
+      const runtimeReport = JSON.parse(readFileSync(resolve(desktopRoot, 'target/runtime-size/win-x64.json'), 'utf8'))
+      finalizeInstaller(resolve(directory, installers[0]), { runtimeReport })
+    }
     process.exitCode = result.code ?? (result.signal ? 128 + (constants.signals[result.signal] ?? 0) : 1)
   } catch (error) {
     console.error(error)

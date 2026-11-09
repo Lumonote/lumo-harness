@@ -405,11 +405,8 @@ terminalGateway:
   # 会把幽灵在线状态一直留在名单里。
   presenceTtl: 30s
   #
-  # 已知缺口（不是接线遗漏）：历史事件源（session/event）尚未接线。未配置来源时本网关对
-  # WS 接入**诚实返回 503**，而不是伪造一段空历史，因此 chart 刻意**不**设
-  # LUMO_TERMINAL_MEM_EVENTS（那是测试/演示用的内存源）。它与 session-control 的
-  # effectuation 恒为 recorded 同类：服务能起、能上报心跳、能过就绪闸门，但那个 WS 面
-  # 还没接上真实来源。部署成功 ≠ 终端可看历史。
+  # 历史事件源默认只读 PostgreSQL session_log；chart 不启用测试/演示用的
+  # LUMO_TERMINAL_MEM_EVENTS。PG 日志与授权仍须通过真实终端接入验收。
 
 # Each entry may also carry `replicas` to override the global replicaCount for
 # that one service; the cluster shape needs it because scheduler and

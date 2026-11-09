@@ -18,6 +18,12 @@ if [[ ! -d "${app}" ]]; then
   exit 1
 fi
 
+# Formal releases fail closed; development DMGs do not need signing credentials.
+# Sign/notarize the .app before copying it into the compressed disk image.
+if [[ "${LUMO_RELEASE_SIGNING_REQUIRED:-0}" == "1" ]]; then
+  node "${script_dir}/release-desktop.mjs" app "${app}"
+fi
+
 staging="$(mktemp -d)"
 trap 'rm -rf "${staging}" 2>/dev/null || true' EXIT
 # APFS clonefile 秒级完成且不占额外空间；非 APFS 回退 ditto。
@@ -27,4 +33,7 @@ ln -s /Applications "${staging}/Applications"
 mkdir -p "${dmg_dir}"
 rm -f "${dmg}"
 hdiutil create -srcfolder "${staging}" -volname "DeepSeek Harness" -fs HFS+ -format UDZO -ov "${dmg}"
+if [[ "${LUMO_RELEASE_SIGNING_REQUIRED:-0}" == "1" ]]; then
+  node "${script_dir}/release-desktop.mjs" installer "${dmg}"
+fi
 echo "dmg 完成：${dmg}（$(du -h "${dmg}" | cut -f1)）"

@@ -325,7 +325,8 @@ set -a; . platform/deploy/acceptance.env; set +a
 - **它拒绝空值**。缺任何一个 `LUMO_TEST_*` 都会立刻失败并点名该变量，而不是降级跑一半。
 - **它拒绝「零证据通过」**。每一步都断言真的执行了活体用例：`it.skip` /
   `describe.skipIf` / `t.Skip` 会让退出码保持 0，所以「脚本绿了」不足以证明有证据。
-  计数为 0 即失败，并在日志里打出跳过数，让部分覆盖至少是可见的。
+  实际执行计数为 0、任何测试 skip、缺包或执行未完成均失败；Go 的 `[no test files]`
+  只允许作为明确的无测试文件包记录，不能计作通过用例。
 
 ⚠️ 仓库自带的 cluster 拓扑**不发布任何基础设施端口**（只有 prometheus、dsh-web 与
 15 个控制面监听端口暴露到宿主机；多个监听端口可能属于同一个 bundle 容器）。要对着 compose 跑验收，用仓库自带的验收覆盖文件把
@@ -912,16 +913,20 @@ DSH object store 与 Registry 使用同一配置，并分别使用 `bucket`、`r
 ```sh
 # operator-values.yaml 由目标环境维护，不提交凭据。
 python3 -m pip install PyYAML==6.0.2
-./platform/deploy/production-preflight.py lumo lumo operator-values.yaml
+python3 platform/deploy/production-preflight.py lumo lumo operator-values.yaml \
+  --evidence-policy ops/evidence-policy.json \
+  --evidence ops/observations.json --evidence-root ops/evidence-bundle
 helm upgrade --install lumo platform/deploy/helm/lumo-platform -n lumo \
   -f platform/deploy/helm/lumo-platform/values.cluster.yaml \
   -f platform/deploy/helm/lumo-platform/values.production.yaml \
   -f operator-values.yaml
 ```
 
-preflight 只读检查真实 Secret 所需键、开发默认值、Registry 信任根，并让目标 API
-执行 `kubectl apply --dry-run=server`。它不打印 Secret 内容；证据引用是否有效、HA
-切换和恢复是否真的成功仍需运维验收。
+preflight 先验证明确版本、目标环境、时效、独立主机/卷、故障恢复场景、RPO/RTO 与证据
+文件摘要，固定一次捕获的 kubectl context，并核对策略中必填的 `cluster_uid`
+与目标 `kube-system` Namespace UID。通过后只读检查真实 Secret 所需键、开发默认值、Registry 信任根，并让目标 API
+执行 `kubectl apply --dry-run=server`。它不打印 Secret 内容；证据来源、HA 切换和恢复
+是否真的成功仍需运维验收。格式与故障矩阵见[生产证据合同](../../docs/production-evidence-contract.md)。
 
 ## 自动集群验收与故障证据
 

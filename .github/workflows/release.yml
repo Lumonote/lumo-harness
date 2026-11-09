@@ -13,7 +13,7 @@
 #       main / tag v*  → 正式产物（tag v* 另附到 GitHub Release）
 #       其他分支       → 桌面测试包（artifact 名带 -test）
 #
-# 基础门禁（typecheck / test / vet / 第一铁律）由 ci.yml 负责；正式 tag 额外依赖完整集群验收。
+# 基础门禁复用 ci.yml，正式 tag 必须等待基础 CI、完整集群验收与签名桌面包。
 #
 # Action 版本：统一取「首个声明 node24 运行时的主版本」，而不是各自的最新主版本。
 # 目标只是消除 GitHub 的 Node 20 弃用告警（Node 20 已从托管 runner 移除），而跨多个
@@ -47,12 +47,39 @@ permissions:
   contents: read
 
 jobs:
+  source-identity:
+    runs-on: ubuntu-latest
+    outputs:
+      upstream-sha: ${{ steps.upstream.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Require formal tag and product versions to agree
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node platform/tools/verify-release-version.mjs
+      - name: Resolve upstream master once for this release
+        id: upstream
+        run: node platform/tools/resolve-upstream-ref.mjs
+
+  basic-validation:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: source-identity
+    uses: ./.github/workflows/ci.yml
+    with:
+      upstream_ref: ${{ needs.source-identity.outputs.upstream-sha }}
+
   cluster-validation:
     if: startsWith(github.ref, 'refs/tags/v')
+    needs: source-identity
     uses: ./.github/workflows/cluster-acceptance.yml
+    with:
+      upstream_ref: ${{ needs.source-identity.outputs.upstream-sha }}
   # 桌面安装包。build.sh 的 build_desktop 要求 target == 宿主平台/架构
   # （native wheel 与 Rust 壳都不可跨架构），所以每个 target 必须有自己的 runner。
   desktop:
+    needs: source-identity
     strategy:
       fail-fast: false
       matrix:
@@ -81,7 +108,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: deepseek-ai/deepseek-harness
-          ref: master
+          ref: ${{ needs.source-identity.outputs.upstream-sha }}
           fetch-depth: 0
           path: deepseek-harness
 
@@ -191,9 +218,97 @@ jobs:
         shell: bash
         run: pnpm --dir deepseek-harness install --frozen-lockfile
 
+      - name: Locate Windows SDK signing tool
+        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+          $path = if ($tool) { $tool.Source } else {
+            $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+            $versions = Get-ChildItem $sdk -Directory | Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } | Sort-Object { [version]$_.Name } -Descending
+            $versions | ForEach-Object { Join-Path $_.FullName 'x64\signtool.exe' } | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $path) { throw 'Windows SDK signtool.exe is unavailable' }
+          "LUMO_WINDOWS_SIGNTOOL=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Prepare formal release signing credentials
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          LUMO_MACOS_SIGNING_P12: ${{ secrets.LUMO_MACOS_SIGNING_P12 }}
+          LUMO_MACOS_SIGNING_P12_PASSWORD: ${{ secrets.LUMO_MACOS_SIGNING_P12_PASSWORD }}
+          LUMO_MACOS_SIGNING_IDENTITY: ${{ secrets.LUMO_MACOS_SIGNING_IDENTITY }}
+          LUMO_MACOS_NOTARY_API_KEY: ${{ secrets.LUMO_MACOS_NOTARY_API_KEY }}
+          LUMO_MACOS_NOTARY_KEY_ID: ${{ secrets.LUMO_MACOS_NOTARY_KEY_ID }}
+          LUMO_MACOS_NOTARY_ISSUER: ${{ secrets.LUMO_MACOS_NOTARY_ISSUER }}
+          LUMO_WINDOWS_SIGNING_PFX: ${{ secrets.LUMO_WINDOWS_SIGNING_PFX }}
+          LUMO_WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.LUMO_WINDOWS_SIGNING_PFX_PASSWORD }}
+          LUMO_WINDOWS_TIMESTAMP_URL: ${{ vars.LUMO_WINDOWS_TIMESTAMP_URL }}
+        run: node platform/tools/prepare-release-signing.mjs
+
+      - name: Restore previous runtime size measurement
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/runtime-size-baseline/${{ matrix.target }}.json
+          key: runtime-size-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            runtime-size-${{ matrix.target }}-
+
+      - name: Select measured runtime size baseline
+        shell: bash
+        run: |
+          baseline="$RUNNER_TEMP/runtime-size-baseline/${{ matrix.target }}.json"
+          if [ -f "$baseline" ]; then
+            echo "LUMO_RUNTIME_SIZE_BASELINE=$baseline" >> "$GITHUB_ENV"
+          else
+            echo 'Runtime size bootstrap: no previous measured baseline; absolute budgets still apply.'
+          fi
+
       - name: Build desktop package
         shell: bash
+        env:
+          LUMO_RELEASE_SIGNING_REQUIRED: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}
         run: ./platform/build.sh --targets ${{ matrix.target }}
+
+      - name: Prepare next measured runtime size baseline
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/runtime-size-baseline"
+          cp 'platform/desktop/target/runtime-size/${{ matrix.target }}.json' "$RUNNER_TEMP/runtime-size-baseline/${{ matrix.target }}.json"
+
+      - name: Cache successful runtime size measurement
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/runtime-size-baseline/${{ matrix.target }}.json
+          key: runtime-size-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Record exact release source identities
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p platform/desktop/target/release/source-evidence
+          git rev-parse HEAD > platform/desktop/target/release/source-evidence/platform-commit.txt
+          git -C deepseek-harness rev-parse HEAD > platform/desktop/target/release/source-evidence/upstream-commit.txt
+          test "$(cat platform/desktop/target/release/source-evidence/upstream-commit.txt)" = '${{ needs.source-identity.outputs.upstream-sha }}'
+
+      - name: Preserve runtime size and release evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: desktop-evidence-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            platform/desktop/target/runtime-size/
+            platform/desktop/target/release/release-evidence/
+            platform/desktop/target/release/source-evidence/
+            platform/desktop/target/release/bundle/**/*.release.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Remove temporary signing credentials
+        if: always() && startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: node platform/tools/prepare-release-signing.mjs --cleanup
 
       # 非 main、非 tag 的分支产物是测试包，用 -test 后缀区分。
       - name: Compute artifact suffix
@@ -228,7 +343,7 @@ jobs:
   # 只在 tag 上运行：桌面包和完整集群验收全部成功后才发布 Release。
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [desktop, cluster-validation]
+    needs: [basic-validation, desktop, cluster-validation]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -248,7 +363,7 @@ jobs:
           set -euo pipefail
           files=()
           while IFS= read -r f; do files+=("$f"); done < <(
-            find artifacts -type f \( -name '*.dmg' -o -name '*.exe' \) | sort
+            find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.release.json' \) | sort
           )
           test "${#files[@]}" -gt 0 || { echo "没有可发布的安装包" >&2; exit 1; }
           printf '发布 %s 个文件：\n' "${#files[@]}"

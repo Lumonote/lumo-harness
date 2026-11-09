@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "growth": { "contentBytes": 1.1, "fileCount": 1.1 },
+  "targets": {
+    "darwin-arm64": { "total": { "contentBytes": 2147483648, "fileCount": 80000 }, "components": { "node_modules": 1717986918, "python": 536870912, "skills": 268435456 } },
+    "darwin-x64": { "total": { "contentBytes": 2147483648, "fileCount": 80000 }, "components": { "node_modules": 1717986918, "python": 536870912, "skills": 268435456 } },
+    "win-x64": { "total": { "contentBytes": 2147483648, "fileCount": 80000 }, "components": { "node_modules": 1717986918, "python": 536870912, "skills": 268435456 } }
+  }
+}

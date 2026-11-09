@@ -38,6 +38,16 @@ function alive(pid) {
   try { process.kill(pid, 0); return true } catch (error) { if (error.code === 'ESRCH') return false; throw error }
 }
 
+export function isAcceptanceDiagnostic(frame, issued) {
+  if (frame?.type !== 'diagnostic') return false
+  assert.ok(issued.has(frame.requestId), 'Native diagnostic belongs to an unissued request')
+  assert.ok(typeof frame.stage === 'string' && frame.stage.length > 0 && frame.stage.length <= 128)
+  assert.ok(typeof frame.elapsedMs === 'number' && Number.isFinite(frame.elapsedMs) && frame.elapsedMs >= 0)
+  assert.ok(Object.keys(frame).every(key => ['type', 'requestId', 'stage', 'elapsedMs', 'errorCode'].includes(key)))
+  if (frame.errorCode !== undefined) assert.ok(typeof frame.errorCode === 'string' && frame.errorCode.length <= 128)
+  return true
+}
+
 /** The private runtime directory makes the official launcher create an independent helper process. */
 export async function connectNativeHelper(executable, directory, signal) {
   signal?.throwIfAborted()
@@ -51,6 +61,7 @@ export async function connectNativeHelper(executable, directory, signal) {
   let buffer = Buffer.alloc(0)
   let waiting
   let failed
+  const issued = new Set()
   const finish = (error, value) => {
     if (!waiting) { failed = error ?? Error('Unsolicited native response'); socket.destroy(); return }
     const pending = waiting; waiting = undefined; clearTimeout(pending.timer)
@@ -59,11 +70,16 @@ export async function connectNativeHelper(executable, directory, signal) {
   socket.on('data', chunk => {
     buffer = Buffer.concat([buffer, chunk])
     if (buffer.length > 33_554_432) { finish(Error('Native response exceeds byte limit')); socket.destroy(); return }
-    const end = buffer.indexOf(10)
-    if (end === -1) return
-    const line = buffer.subarray(0, end); buffer = buffer.subarray(end + 1)
-    try { finish(undefined, JSON.parse(line.toString('utf8'))) } catch (error) { finish(error) }
-    if (buffer.length) { failed = Error('Unexpected additional native response'); socket.destroy() }
+    for (let end; (end = buffer.indexOf(10)) !== -1;) {
+      const line = buffer.subarray(0, end); buffer = buffer.subarray(end + 1)
+      try {
+        const frame = JSON.parse(line.toString('utf8'))
+        // Official screenshot traces share this socket and may follow the reply.
+        // They are metadata, never a completed capture or cancellation receipt.
+        if (isAcceptanceDiagnostic(frame, issued)) continue
+        finish(undefined, frame)
+      } catch (error) { finish(error); socket.destroy(); break }
+    }
   })
   socket.on('error', error => { failed = error; if (waiting) finish(error) })
   socket.on('close', () => { if (waiting) finish(Error('Native connection closed during request')) })
@@ -95,10 +111,19 @@ export async function connectNativeHelper(executable, directory, signal) {
   let nextId = 0
   return {
     pid: ready.pid,
-    async call(method, params) {
+    async call(method, params, { cancelAfterMs } = {}) {
       assert.ok(methods.has(method), `Acceptance method not permitted: ${method}`)
+      if (cancelAfterMs !== undefined) assert.ok(method === 'screenshot' && Number.isInteger(cancelAfterMs) && cancelAfterMs >= 0,
+        'Only read-only fixture captures may be cancelled by acceptance')
       const id = `acceptance-${++nextId}`
-      const response = await exchange({ id, method, params })
+      issued.add(id)
+      let timer
+      const responsePromise = exchange({ id, method, params })
+      if (cancelAfterMs !== undefined) timer = setTimeout(() => {
+        if (waiting && !signal?.aborted) socket.write(`${JSON.stringify({ type: 'cancel', id })}\n`)
+      }, cancelAfterMs)
+      let response
+      try { response = await responsePromise } finally { clearTimeout(timer) }
       assert.equal(response.id, id)
       if (response.error) throw Object.assign(Error(response.error.message), { code: response.error.code })
       assert.ok(Object.hasOwn(response, 'result'), 'Native result is missing')
@@ -106,6 +131,24 @@ export async function connectNativeHelper(executable, directory, signal) {
     },
     dispose,
   }
+}
+
+/** Verify native acknowledgement and a fresh capture after cancellation; no inputs. */
+export async function exerciseOwnedCaptureCancellation(client, fixture, { cancelAfterMs = 1 } = {}) {
+  checkFixtureState(fixture, await fixture.state())
+  const app = await client.call('getApp', { selector: String(fixture.pid) })
+  assert.equal(app.pid, fixture.pid); assert.equal(app.bundleId, fixture.bundleId)
+  assert.equal(realpathSync(app.authorization?.executablePath), fixture.executable)
+  const owner = { appHandle: app.appHandle, windowId: fixture.windowId }
+  let acknowledged = false
+  try { await client.call('screenshot', owner, { cancelAfterMs }) } catch (error) {
+    if (error.code !== 'NATIVE_CANCELLED') throw error
+    acknowledged = true
+  }
+  assert.equal(acknowledged, true, 'Capture finished before cancellation; rerun to observe the native cancellation acknowledgement')
+  checkFixtureState(fixture, await fixture.state())
+  nativePng(await client.call('screenshot', owner), fixture.windowId)
+  return { captureCancellationValidated: true, captureCancellationAcknowledged: true, freshCaptureAfterCancellation: true }
 }
 
 export async function passiveCatalog(client) {
@@ -271,6 +314,7 @@ export async function main(argv = process.argv.slice(2)) {
       fixture = await createFixture(directory, cancellation.signal)
       report = { ...report, ...await exerciseOwnedFixture(client, fixture,
         (name, image) => writeFileSync(join(output, name), image, { mode: 0o600 })), status: 'passed' }
+      report = { ...report, ...await exerciseOwnedCaptureCancellation(client, fixture) }
     }
   } catch (error) { report.status = 'failed'; report.error = { code: error.code ?? 'ACCEPTANCE_FAILED', message: error.message } }
   finally {

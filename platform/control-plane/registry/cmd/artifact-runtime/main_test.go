@@ -55,12 +55,19 @@ func TestRuntimeControllerLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	controller := &runtimeController{installer: installer, supervisor: artifactruntime.NewSupervisor(time.Second)}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := controller.supervisor.StopAll(ctx); err != nil {
+			t.Errorf("cleanup runtime: %v", err)
+		}
+	})
 	handler := controller.routes()
 
 	if response := call(handler, http.MethodPost, "/v1/runtimes/runtime-demo/1.0.0/start"); response.Code != http.StatusOK {
 		t.Fatalf("start: %d %s", response.Code, response.Body.String())
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		response := call(handler, http.MethodGet, "/v1/runtimes/runtime-demo/1.0.0/logs")
 		if response.Code == http.StatusOK && strings.Contains(response.Body.String(), "controller-ready") {

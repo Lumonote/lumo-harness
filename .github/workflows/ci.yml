@@ -6,14 +6,20 @@ name: platform-ci
 # （v4 仍是 node20）、setup-go v5→v6、azure/setup-helm v4→v5。
 
 on:
+  workflow_call:
+    inputs:
+      upstream_ref:
+        description: Immutable upstream commit selected by the release orchestrator
+        required: true
+        type: string
   push:
     paths:
       - 'platform/**'
-      - '.github/workflows/ci.yml'
+      - '.github/workflows/**'
   pull_request:
     paths:
       - 'platform/**'
-      - '.github/workflows/ci.yml'
+      - '.github/workflows/**'
 
 jobs:
   platform:
@@ -49,11 +55,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Validate upstream checkout identity
+        env:
+          LUMO_UPSTREAM_REF: ${{ inputs.upstream_ref || 'master' }}
+        run: node tools/resolve-upstream-ref.mjs --validate "$LUMO_UPSTREAM_REF"
+
       - name: Checkout upstream dsh
         uses: actions/checkout@v5
         with:
           repository: deepseek-ai/deepseek-harness
-          ref: master
+          ref: ${{ inputs.upstream_ref || 'master' }}
           fetch-depth: 0
           path: deepseek-harness
 
@@ -115,8 +126,17 @@ jobs:
       - name: Build upstream dsh host outputs
         run: node dsh-overrides/build-host.mjs ../deepseek-harness
 
+      - name: Verify CI evidence tools and release contracts
+        run: node --test tools/__tests__/*.test.mjs
+
       - name: Typecheck
         run: pnpm run typecheck
+
+      - name: Typecheck browser and evaluation entrypoints
+        run: |
+          pnpm run typecheck:client
+          pnpm exec tsc -p dsh-plugins/agent-teams/eval/tsconfig.json --noEmit
+          pnpm exec tsc -p dsh-plugins/knowledge/eval/tsconfig.json --noEmit
 
       - name: Full platform tests with live dependencies
         id: platform-tests
@@ -134,6 +154,24 @@ jobs:
         with:
           name: platform-vitest-${{ github.run_id }}
           path: ${{ runner.temp }}/platform-vitest.json
+          if-no-files-found: warn
+
+      - name: Install fixed browser acceptance runtime
+        run: |
+          npm install --prefix "$RUNNER_TEMP/lumo-ui-browser" --no-save --package-lock=false playwright@1.58.2
+          node "$RUNNER_TEMP/lumo-ui-browser/node_modules/playwright/cli.js" install --with-deps chromium
+
+      - name: Source UI browser, viewport, keyboard and error recovery acceptance
+        env:
+          LUMO_PLAYWRIGHT_MODULE: ${{ runner.temp }}/lumo-ui-browser/node_modules/playwright/index.mjs
+        run: node tools/ui-acceptance-fixture.mjs --output "$RUNNER_TEMP/lumo-ui-acceptance" --headless
+
+      - name: Preserve browser acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ui-source-acceptance-${{ github.run_id }}
+          path: ${{ runner.temp }}/lumo-ui-acceptance/
           if-no-files-found: warn
 
       - name: Readonly archive and recovery drill contracts
@@ -161,6 +199,13 @@ jobs:
 
   control-plane-go:
     runs-on: ubuntu-latest
+    env:
+      LUMO_TEST_PG_DSN: postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable
+      LUMO_TEST_REDIS_DSN: redis://127.0.0.1:6379
+      LUMO_TEST_REDIS_ADDR: 127.0.0.1:6379
+      LUMO_TEST_S3_ENDPOINT: 127.0.0.1:19000
+      LUMO_TEST_S3_ACCESS_KEY: lumo_ci
+      LUMO_TEST_S3_SECRET_KEY: lumo-ci-minio-test
     services:
       postgres:
         image: postgres:16-alpine
@@ -172,6 +217,12 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U lumo_test -d lumo_test"
           --health-interval 5s --health-timeout 5s --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 12
     strategy:
       fail-fast: false
       matrix:
@@ -198,6 +249,38 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Setup Node for structured evidence
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      - name: Start registry object-store dependency
+        if: matrix.module == 'registry'
+        run: |
+          set -euo pipefail
+          docker build --file ../../deploy/minio-source.Dockerfile --tag lumo-ci-minio ../../deploy
+          docker run --detach --name lumo-ci-go-minio --publish 127.0.0.1:19000:9000 \
+            --env MINIO_ROOT_USER=lumo_ci --env MINIO_ROOT_PASSWORD=lumo-ci-minio-test \
+            lumo-ci-minio server /data --console-address :9001
+          curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 2 --retry-max-time 120 \
+            --max-time 5 http://127.0.0.1:19000/minio/health/ready
+
+      - name: Start usage-ledger RocketMQ dependency
+        if: matrix.module == 'usage-ledger'
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/go-rmq-ports.yml" <<'YAML'
+          services:
+            rocketmq:
+              ports: ['127.0.0.1:8081:8081']
+          YAML
+          docker compose -p lumo-go-ci -f ../../deploy/compose.shared.yml -f "$RUNNER_TEMP/go-rmq-ports.yml" \
+            up -d --wait --wait-timeout 600 rocketmq
+          container="$(docker compose -p lumo-go-ci -f ../../deploy/compose.shared.yml -f "$RUNNER_TEMP/go-rmq-ports.yml" ps -q rocketmq)"
+          test -n "$container"
+          echo "LUMO_TEST_RMQ_ENDPOINT=127.0.0.1:8081" >> "$GITHUB_ENV"
+          echo "LUMO_TEST_RMQ_CONTAINER=$container" >> "$GITHUB_ENV"
+
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
@@ -214,9 +297,44 @@ jobs:
       # 验收脚本是同一个病：退出码不是证据，全 SKIP 与全通过无法从退出码区分。
       # 门控写在测试文件里，注入就该是全局的；别再收敛回枚举（下面的守卫会拦）。
       - name: Test
+        id: go-tests
         env:
           LUMO_TEST_PG_DSN: postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable
-        run: go test ./...
+        run: |
+          set -euo pipefail
+          go list ./... > "$RUNNER_TEMP/go-packages-${{ matrix.module }}.txt"
+          test_flags=()
+          case '${{ matrix.module }}' in
+            governance|session-control|scheduler|flows|registry|collaborator|ratelimit) test_flags+=(-race) ;;
+          esac
+          if ! go test "${test_flags[@]}" -count=1 -json ./... > "$RUNNER_TEMP/go-tests-${{ matrix.module }}.jsonl"; then
+            cat "$RUNNER_TEMP/go-tests-${{ matrix.module }}.jsonl"
+            exit 1
+          fi
+
+      - name: Require every discovered Go package and zero skipped tests
+        if: ${{ !cancelled() && steps.go-tests.outcome != 'skipped' }}
+        run: node ../../tools/verify-go-test-report.mjs "$RUNNER_TEMP/go-tests-${{ matrix.module }}.jsonl" --packages "$RUNNER_TEMP/go-packages-${{ matrix.module }}.txt"
+
+      - name: Preserve Go test evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: go-tests-${{ matrix.module }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/go-tests-${{ matrix.module }}.jsonl
+            ${{ runner.temp }}/go-packages-${{ matrix.module }}.txt
+          if-no-files-found: warn
+
+      - name: Clean up Go live dependencies
+        if: always()
+        run: |
+          if docker container inspect lumo-ci-go-minio >/dev/null 2>&1; then
+            docker rm --force lumo-ci-go-minio
+          fi
+          if [ -f "$RUNNER_TEMP/go-rmq-ports.yml" ]; then
+            docker compose -p lumo-go-ci -f ../../deploy/compose.shared.yml -f "$RUNNER_TEMP/go-rmq-ports.yml" down -v --remove-orphans
+          fi
 
       # 静态守卫：DSN 的注入必须是**无条件**的，且每个 Go 模块都必须在 matrix 里。
       # 不依赖数据库，所以它在「注入被收窄回枚举」「新模块没进 matrix」时先变红，
@@ -333,8 +451,8 @@ jobs:
         env:
           LUMO_REQUIRE_KUBECONFORM: '1'
         run: platform/deploy/helm-combinations-verify.sh
-      - name: Native model mounts, credentials and compact/full service isolation
-        run: python3 platform/deploy/tests/test_native_model_deployment.py -v
+      - name: Deployment contracts, production evidence and recovery safety
+        run: python3 -m unittest discover -s platform/deploy/tests -v
       # 联邦注册表的静态门禁：开了集群失联判定，就必须真的有上报方。判定开关在
       # scheduler 服务上、上报方在 dsh-node 服务上，**跨文件**的错法谁都不管——2026-09-16
       # 发现该开关在 compose 与 Helm 里一个都没有，判定在整个可部署拓扑里是关的，

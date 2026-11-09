@@ -54,9 +54,9 @@ type Config struct {
 	AuthMFAKey string
 	// WebAuthn holds an already validated RPID/origin allow-list.  Empty means
 	// passkeys are unavailable; partial configuration is rejected at startup.
-	WebAuthn      authcrypto.WebAuthnConfig
-	OIDC          authcrypto.OIDCConfig
-	DeviceGateway *device.Gateway
+	WebAuthn          authcrypto.WebAuthnConfig
+	OIDC              authcrypto.OIDCConfig
+	DeviceGateway     *device.Gateway
 	RemoteComputerUse bool
 }
 
@@ -114,7 +114,9 @@ func New(st *store.Store, cfg Config, log *slog.Logger) (*Server, error) {
 		}
 	}
 	server := &Server{store: st, cfg: cfg, log: log}
-	if cfg.RemoteComputerUse && cfg.DeviceGateway != nil { cfg.DeviceGateway.SetRemoteComputerAuthorizer(server.authorizeRemoteComputer) }
+	if cfg.RemoteComputerUse && cfg.DeviceGateway != nil {
+		cfg.DeviceGateway.SetRemoteComputerAuthorizer(server.authorizeRemoteComputer)
+	}
 	return server, nil
 }
 

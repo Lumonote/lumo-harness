@@ -130,7 +130,11 @@ func (s *Server) recoveryAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 503, "recovery_provider_unavailable", "恢复执行服务尚未配置或当前目标已被部署策略撤销")
 		return
 	}
-	claim, err := s.store.ClaimRecovery(r.Context(), c.realm, id, c.userID, req.ExpectedRevision, s.cfg.RecoveryProvider.ID, s.cfg.RecoveryProvider.Digest(), action)
+	policy := s.cfg.RecoveryProvider.Digest()
+	if action == "receipt" && current.ProviderProtocol == bg.LegacyProtocolVersion {
+		policy = s.cfg.RecoveryProvider.DigestForVersion(bg.LegacyProtocolVersion)
+	}
+	claim, err := s.store.ClaimRecovery(r.Context(), c.realm, id, c.userID, req.ExpectedRevision, s.cfg.RecoveryProvider.ID, policy, action)
 	if err != nil {
 		s.recoveryError(w, err)
 		return

@@ -15,7 +15,7 @@ func testProvider(endpoint string) ProviderConfig {
 	return ProviderConfig{ID: "mock", Endpoint: endpoint, Token: "service-token", ReceiptKey: base64.StdEncoding.EncodeToString([]byte(strings.Repeat("r", 32))), Operations: []Operation{Restore, DestroyKey}, Scopes: []TargetScope{{Operation: Restore, Realm: "r1", Namespace: "backups", Prefix: "tenant-a/"}, {Operation: DestroyKey, Realm: "r1", Namespace: "keys", Prefix: "tenant-a/"}}}
 }
 func testExecution() Execution {
-	return Execution{Version: ProtocolVersion, ProviderID: "mock", RequestID: "request-1", Realm: "r1", Target: Target{Operation: Restore, Namespace: "backups", TargetID: "tenant-a/db", RecoveryPoint: "snapshot-1"}, RequestDigest: strings.Repeat("a", 64), ExecutionID: "exec-1", IdempotencyKey: "lumo-recovery:exec-1", FencingToken: 1, Mode: "execute"}
+	return Execution{Version: ProtocolVersion, ProviderID: "mock", RequestID: "request-1", Realm: "r1", Target: Target{Operation: Restore, Namespace: "backups", TargetID: "tenant-a/db", RecoveryPoint: "snapshot-1"}, RequestDigest: strings.Repeat("a", 64), ExecutionID: "exec-1", IdempotencyKey: "lumo-recovery:exec-1", FencingToken: 1, Mode: "execute", ExpiresAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)}
 }
 func TestDurableRecoveryTargetAndConfigFailClosed(t *testing.T) {
 	if err := (ProviderConfig{}).Validate(); err != nil {
@@ -157,5 +157,44 @@ func TestRecoveryProviderRejectsForgedMismatchedOversizedAndRedirectedReceipts(t
 	defer redirect.Close()
 	if _, err := testProvider(redirect.URL+"/v1/recovery").Call(context.Background(), testExecution()); err == nil || redirected {
 		t.Fatal("followed provider redirect")
+	}
+}
+
+func TestLegacyReceiptPreservesV1PayloadAndCannotExecute(t *testing.T) {
+	var config ProviderConfig
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var execution Execution
+		if err := json.NewDecoder(r.Body).Decode(&execution); err != nil {
+			t.Fatal(err)
+		}
+		if execution.Version != LegacyProtocolVersion || execution.Mode != "receipt" || execution.ExpiresAt != "" {
+			t.Error("legacy execution payload changed")
+		}
+		receipt := Receipt{Execution: execution, Outcome: "succeeded", ReceiptID: "legacy-receipt", CompletedAt: time.Now().UTC()}
+		key, _ := base64.StdEncoding.DecodeString(config.ReceiptKey)
+		receipt.Signature, _ = SignReceipt(receipt, key)
+		_ = json.NewEncoder(w).Encode(receipt)
+	}))
+	defer upstream.Close()
+	config = testProvider(upstream.URL)
+	execution := testExecution()
+	execution.Version = LegacyProtocolVersion
+	execution.ExpiresAt = ""
+	execution.Mode = "receipt"
+	if _, err := config.Call(context.Background(), execution); err != nil {
+		t.Fatal(err)
+	}
+	execution.Mode = "execute"
+	if _, err := config.Call(context.Background(), execution); err == nil || calls != 1 {
+		t.Fatal("legacy request executed")
+	}
+	if config.Digest() == config.DigestForVersion(LegacyProtocolVersion) {
+		t.Fatal("protocol upgrade did not change policy identity")
+	}
+	raw, _ := json.Marshal(execution)
+	if strings.Contains(string(raw), "expires_at") {
+		t.Fatal("legacy HMAC payload gained a field")
 	}
 }

@@ -1,5 +1,14 @@
 # Implementation status (2026-09-15)
 
+## 2026-11-10 发布、附件、评测与生产验收能力
+
+本批新增统一 upstream SHA 的正式发行门禁、产品版本校验、Mac/Windows 签名入口与失败清理、
+运行时体积预算；附件活跃名额与历史逻辑配额分离，支持分页及大历史分叉。
+团队质量门禁、自定义知识评测、生产证据验证、v2恢复协议和冻结快照参考 Provider 已落盘，
+UI 按领域拆分并接入真实 Chromium 源码验收。最终平台 **2892 PASS / 0 FAIL / 0 SKIP**。
+Go 控制面16模块共 **2022 PASS / 0 FAIL / 0 SKIP**；生产预检另固定集群 UID 和 kubectl context。
+准确范围、Go验证和未执行的外部验收见[本批交付](platform-development-delivery-2026-11-09.md)。
+
 ## 2026-11-09 剩余实现收尾
 
 Windows/远程电脑操作、显式会话迁移、Office/PDF 有界预览、受控仓库审核与草稿发布、

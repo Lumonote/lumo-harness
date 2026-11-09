@@ -21,7 +21,7 @@ import { SessionMeterRegistry } from '../../../shared/seam-contracts/meter-attri
 import type { SessionOwner } from '../../../shared/session-owners.ts'
 import type { Principal } from '../src/client.ts'
 import { createSessionTransport } from '../src/session-transport.ts'
-import { attachmentBytes, attachmentMediaType, attachmentName, attachmentReferences, attachmentText, parsePublicAttachmentReceipt, USER_SESSION_ATTACHMENT_TOOL, validateSessionAttachments } from '../src/session-attachments.ts'
+import { attachmentBytes, attachmentMediaType, attachmentName, attachmentReferences, attachmentText, parsePublicAttachmentReceipt, parseAttachmentInventory, USER_SESSION_ATTACHMENT_TOOL, validateSessionAttachments } from '../src/session-attachments.ts'
 import { SESSION_ATTACHMENT_DOCUMENT_TYPES } from '../../../shared/seam-contracts/session-attachments.ts'
 
 const closers:Array<()=>Promise<unknown>>=[]
@@ -61,6 +61,16 @@ async function fixture(durable:Storage,enabled=true){
    if(!owner||owner.owner_user_id!==body.owner_user_id||owner.realm!==body.realm||owner.project_id!==body.project_id)return new Response('{}',{status:404})
    await beforeReceiptOperation?.(body.operation)
    if(body.operation==='list')return new Response(JSON.stringify({receipts:[...durable.receipts].filter(([key,r])=>key.startsWith(ref+':')&&!r.retired_at).map(([,r])=>r)}))
+   if(body.operation==='inventory'){
+    const all=[...durable.receipts].filter(([key])=>key.startsWith(ref+':')).map(([,r])=>r),active=all.filter(r=>!r.retired_at),retired=all.filter(r=>r.retired_at),sum=(rows:typeof all)=>rows.reduce((a,r)=>a+Number(r.bytes),0)
+    const limit=body.limit||50,filtered=all.filter(r=>String(r.receipt_id)>String(body.after||'')&&(body.status==='all'||body.status==='retired'?body.status==='all'||!!r.retired_at:!r.retired_at)).sort((a,b)=>String(a.receipt_id).localeCompare(String(b.receipt_id))),rows=filtered.slice(0,limit)
+    return new Response(JSON.stringify({receipts:rows,next_cursor:filtered.length>limit?rows.at(-1)!.receipt_id:'',usage:{total_count:all.length,active_count:active.length,retired_count:retired.length,total_bytes:sum(all),active_bytes:sum(active),retired_bytes:sum(retired),active_limit:100,accounting:'logical-retained-reference-bytes',retirement_releases_quota:false}}))
+   }
+   if(body.operation==='abort-inheritance'){
+    if(owner.state==='active'||owner.parent_session_ref!==body.source_session)return new Response('{}',{status:409})
+    owner.state='failed';for(const key of durable.receipts.keys())if(key.startsWith(ref+':'))durable.receipts.delete(key)
+    return new Response(JSON.stringify({receipts:[]}))
+   }
    if(body.operation==='retire'){const r=durable.receipts.get(ref+':'+body.receipt_id);if(!r)return new Response('{}',{status:404});r.retired_at??='2026-11-09T01:00:00Z';return new Response(JSON.stringify({receipts:[r]}))}
    if(body.operation==='create'){const r={...body.receipt,receipt_id:'att_'+String(++durable.uploads).padStart(48,'0'),created_at:'2026-11-07T00:00:00Z'};durable.receipts.set(ref+':'+r.receipt_id,r);return new Response(JSON.stringify({receipts:[r]}))}
    if(body.operation==='get'){const r=durable.receipts.get(ref+':'+body.receipt_id);return new Response(JSON.stringify({receipts:r?[r]:[]}),{status:r?200:404})}
@@ -113,6 +123,47 @@ describe('owned attachment receipt application with real AgentLoop and JSONL res
   await resumed.send(fork.sessionId,[{type:'text',text:'read inherited retired history'}],{name:USER_SESSION_ATTACHMENT_TOOL,args:{receipt_id:r.receipt_id}})
   expect(JSON.stringify(resumed.events(fork.sessionId))).toContain('RETIRED-HISTORY')
   await expect(resumed.send(fork.sessionId,[{type:'attachment',receipt_id:r.receipt_id}])).rejects.toMatchObject({code:'session_attachment_retired'})
+ })
+ it('forks more than 100 completed attachment markers in bounded exact batches, retaining retired history',async()=>{
+  const d=await storage(),f=await fixture(d),id=await f.create(),sent:string[]=[]
+  for(let batch=0;batch<26;batch++){
+   const receipts=[]
+   for(let i=0;i<4;i++){const r=await f.upload(id,'HISTORY-'+batch+'-'+i);receipts.push(r);sent.push(r.receipt_id)}
+   await f.send(id,receipts.map(r=>({type:'attachment',receipt_id:r.receipt_id})))
+   for(const r of receipts)await f.transport.execute(alice,'retireAttachment',{sessionId:id,receipt_id:r.receipt_id},signal,f.authority)
+  }
+  const unsent=await f.upload(id,'UNSENT')
+  const fork=await f.transport.execute(alice,'fork',{sessionId:id},signal,f.authority) as {sessionId:string}
+  expect(d.inherited.map(ids=>ids.length)).toEqual([100,4]);expect(d.inherited.flat()).toEqual(sent)
+  expect(d.receipts.has(fork.sessionId+':'+unsent.receipt_id)).toBe(false)
+  expect(attachmentReferences(f.events(fork.sessionId))).toEqual(sent)
+  const first=await f.transport.execute(alice,'attachmentInventory',{sessionId:fork.sessionId,status:'retired',limit:100},signal,f.authority) as {receipts:unknown[];next_cursor:string;usage:unknown}
+  expect(first.receipts).toHaveLength(100);expect(first.usage).toMatchObject({total_count:104,active_count:0,retired_count:104,retirement_releases_quota:false,accounting:'logical-retained-reference-bytes'})
+  const second=await f.transport.execute(alice,'attachmentInventory',{sessionId:fork.sessionId,status:'retired',after:first.next_cursor,limit:100},signal,f.authority) as {receipts:unknown[];next_cursor:string}
+  expect(second.receipts).toHaveLength(4);expect(second.next_cursor).toBe('');expect(JSON.stringify(first)).not.toContain('native_ref')
+  await f.send(fork.sessionId,[{type:'text',text:'read oldest retained attachment'}],{name:USER_SESSION_ATTACHMENT_TOOL,args:{receipt_id:sent[0]}})
+  expect(JSON.stringify(f.events(fork.sessionId))).toContain('HISTORY-0-0')
+ },30000)
+ it('rejects inconsistent inventory accounting and strips private fields from public views',()=>{
+  const usage={total_count:0,active_count:0,retired_count:0,total_bytes:0,active_bytes:0,retired_bytes:0,active_limit:100,accounting:'logical-retained-reference-bytes',retirement_releases_quota:false}
+  expect(parseAttachmentInventory({receipts:[],next_cursor:'',usage:{...usage,object_key:'/private'}})).toEqual({receipts:[],next_cursor:'',usage})
+  for(const page of [{receipts:[],next_cursor:'private',usage},{receipts:[],next_cursor:'',usage:{...usage,total_count:1}},{receipts:[],next_cursor:'',usage:{...usage,total_bytes:1}},{receipts:[],next_cursor:'',usage:{...usage,retirement_releases_quota:true}}])expect(()=>parseAttachmentInventory(page)).toThrow()
+ })
+ it('abandons partial inheritance after revocation without exposing the reserved child',async()=>{
+  const d=await storage(),f=await fixture(d),id=await f.create(),r=await f.upload(id,'PARENT')
+  await f.send(id,[{type:'attachment',receipt_id:r.receipt_id}]);let inherited=false
+  f.onReceiptOperation(async operation=>{if(operation==='inherit'){inherited=true;f.revokeProject()}})
+  await expect(f.transport.execute(alice,'fork',{sessionId:id},signal,f.authority)).rejects.toThrow('revoked')
+  expect(inherited).toBe(true)
+  const child=[...d.owners.values()].find(o=>o.parent_session_ref===id)!
+  expect(child.state).toBe('failed');expect([...d.receipts.keys()].filter(key=>key.startsWith(child.session_ref+':'))).toEqual([])
+  expect(d.receipts.has(id+':'+r.receipt_id)).toBe(true)
+ })
+ it('validates inventory cursors, bounds and post-read authority',async()=>{
+  const d=await storage(),f=await fixture(d),id=await f.create();await f.upload(id,'CAPACITY')
+  for(const options of [{limit:101},{limit:0},{after:'private'},{status:'hidden'},{url:'https://private'}])await expect(f.transport.execute(alice,'attachmentInventory',{sessionId:id,...options},signal,f.authority)).rejects.toMatchObject({code:'session_attachment_invalid'})
+  f.onReceiptOperation(async operation=>{if(operation==='inventory')f.revokeProject()})
+  await expect(f.transport.execute(alice,'attachmentInventory',{sessionId:id},signal,f.authority)).rejects.toThrow('revoked')
  })
  it.each(['prompt','retireAttachment'] as const)('serializes attachment retirement with an in-flight %s and releases the admission guard',async action=>{
   const d=await storage(),f=await fixture(d),id=await f.create(),r=await f.upload(id,'SERIAL')

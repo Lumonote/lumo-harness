@@ -56,4 +56,10 @@ describe('scoreRun', () => {
     expect(m.recallAt1).toBe(0.5)
     expect(m.mrr).toBe(0.5)
   })
+
+  it('deduplicates repeated chunk hits before scoring documents', () => {
+    const m = scoreRun([{ expected: ['a'], ranked: ['a', 'a', 'x'] }])
+    expect(m.recallAt5).toBe(1)
+    expect(m.ndcgAt5).toBe(1)
+  })
 })

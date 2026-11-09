@@ -35,6 +35,7 @@ function ensureWindowsIcon() {
 
 // macOS 需要由 CoreGraphics 生成 icns；Windows 直接复用已提交的 PNG 图标，
 // 不让 Tauri 的 beforeBuildCommand 依赖 bash、swiftc 或 iconutil。
+if (process.env.LUMO_RELEASE_SIGNING_REQUIRED === '1') run(process.execPath, [resolve(desktopRoot, 'release-desktop.mjs'), 'preflight'])
 if (process.platform === 'darwin') run('sh', [resolve(desktopRoot, 'make-icons.sh')])
 ensureWindowsIcon()
 run(process.execPath, [resolve(desktopRoot, 'build-runtime.mjs')])

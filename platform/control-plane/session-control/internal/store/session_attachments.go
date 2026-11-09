@@ -25,11 +25,34 @@ CREATE TABLE IF NOT EXISTS session_attachment_receipts (
 ALTER TABLE session_attachment_receipts DROP CONSTRAINT IF EXISTS session_attachment_receipts_kind_check;
 ALTER TABLE session_attachment_receipts ADD CONSTRAINT session_attachment_receipts_kind_check CHECK(kind IN ('text','image','document'));
 ALTER TABLE session_attachment_receipts ADD COLUMN IF NOT EXISTS retired_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS session_attachment_receipts_active ON session_attachment_receipts(realm,session_ref,receipt_id) WHERE retired_at IS NULL;
 `
 
 var attachmentID = regexp.MustCompile(`^att_[a-f0-9]{48}$`)
 var attachmentHash = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var managedSession = regexp.MustCompile(`^session-[a-f0-9]{32}$`)
+var ErrAttachmentCapacity = errors.New("active attachment capacity reached")
+
+const ActiveAttachmentLimit = 100
+
+type AttachmentUsage struct {
+	TotalCount   int64 `json:"total_count"`
+	ActiveCount  int64 `json:"active_count"`
+	RetiredCount int64 `json:"retired_count"`
+	TotalBytes   int64 `json:"total_bytes"`
+	ActiveBytes  int64 `json:"active_bytes"`
+	RetiredBytes int64 `json:"retired_bytes"`
+	ActiveLimit  int   `json:"active_limit"`
+	// Logical reference accounting includes retired receipts and forks. It is
+	// deliberately not an estimate of deduplicated physical storage.
+	Accounting              string `json:"accounting"`
+	RetirementReleasesQuota bool   `json:"retirement_releases_quota"`
+}
+type AttachmentInventory struct {
+	Receipts   []AttachmentReceipt `json:"receipts"`
+	NextCursor string              `json:"next_cursor"`
+	Usage      AttachmentUsage     `json:"usage"`
+}
 
 type AttachmentNativeRef struct {
 	AttachmentID       string `json:"attachmentId"`
@@ -62,6 +85,24 @@ type AttachmentRequest struct {
 	Receipt       *AttachmentReceipt `json:"receipt,omitempty"`
 	SourceSession string             `json:"source_session,omitempty"`
 	ReceiptIDs    []string           `json:"receipt_ids,omitempty"`
+	After         string             `json:"after,omitempty"`
+	Status        string             `json:"status,omitempty"`
+	Limit         int                `json:"limit,omitempty"`
+	CreationToken string             `json:"creation_token,omitempty"`
+	inventory     *AttachmentInventory
+}
+
+// Inventory shares the exact owner/lease authorization and transaction used by
+// mutations. No caller may enumerate metadata with only a receipt ID.
+func (s *Store) SessionAttachmentInventory(ctx context.Context, ref string, in AttachmentRequest) (AttachmentInventory, error) {
+	page := AttachmentInventory{Receipts: []AttachmentReceipt{}}
+	if in.Operation != "inventory" {
+		return page, ErrOwnerInvalid
+	}
+	in.inventory = &page
+	rows, err := s.SessionAttachments(ctx, ref, in)
+	page.Receipts = rows
+	return page, err
 }
 
 func validAttachmentReceipt(realm string, r AttachmentReceipt) bool {
@@ -111,6 +152,12 @@ func (s *Store) SessionAttachments(ctx context.Context, ref string, in Attachmen
 	if !managedSession.MatchString(ref) || !validExecutionNode(in.ExecutionNodeRequest) || in.OwnerUserID == "" || len(in.OwnerUserID) > 256 || in.WriterHolder == "" || in.FencingToken < 1 {
 		return nil, ErrOwnerInvalid
 	}
+	if in.Operation != "inventory" && (in.After != "" || in.Status != "" || in.Limit != 0) {
+		return nil, ErrOwnerInvalid
+	}
+	if in.Operation != "abort-inheritance" && in.CreationToken != "" {
+		return nil, ErrOwnerInvalid
+	}
 	switch in.Operation {
 	case "create":
 		if in.Receipt == nil || in.ReceiptID != "" || len(in.ReceiptIDs) > 0 || in.SourceSession != "" || !validAttachmentReceipt(in.Realm, *in.Receipt) {
@@ -124,6 +171,10 @@ func (s *Store) SessionAttachments(ctx context.Context, ref string, in Attachmen
 		if in.ReceiptID != "" || in.Receipt != nil || len(in.ReceiptIDs) > 0 || in.SourceSession != "" {
 			return nil, ErrOwnerInvalid
 		}
+	case "inventory":
+		if in.inventory == nil || in.ReceiptID != "" || in.Receipt != nil || len(in.ReceiptIDs) > 0 || in.SourceSession != "" || (in.After != "" && !attachmentID.MatchString(in.After)) || in.Limit < 0 || in.Limit > 100 || (in.Status != "" && in.Status != "active" && in.Status != "retired" && in.Status != "all") {
+			return nil, ErrOwnerInvalid
+		}
 	case "inherit":
 		if !managedSession.MatchString(in.SourceSession) || in.SourceSession == ref || len(in.ReceiptIDs) > 100 || in.Receipt != nil || in.ReceiptID != "" {
 			return nil, ErrOwnerInvalid
@@ -134,6 +185,10 @@ func (s *Store) SessionAttachments(ctx context.Context, ref string, in Attachmen
 				return nil, ErrOwnerInvalid
 			}
 			seen[id] = true
+		}
+	case "abort-inheritance":
+		if !attachmentHash.MatchString(in.CreationToken) || !managedSession.MatchString(in.SourceSession) || in.SourceSession == ref || len(in.ReceiptIDs) > 0 || in.Receipt != nil || in.ReceiptID != "" {
+			return nil, ErrOwnerInvalid
 		}
 	default:
 		return nil, ErrOwnerInvalid
@@ -158,7 +213,7 @@ func (s *Store) SessionAttachments(ctx context.Context, ref string, in Attachmen
 	if err != nil {
 		return nil, err
 	}
-	if o.Realm != in.Realm || o.OwnerUserID != in.OwnerUserID || o.ProjectID != in.ProjectID || o.NodeID != in.NodeID || (o.State != "active" && !(in.Operation == "inherit" && o.State == "reserved")) {
+	if o.Realm != in.Realm || o.OwnerUserID != in.OwnerUserID || o.ProjectID != in.ProjectID || o.NodeID != in.NodeID || (o.State != "active" && !(in.Operation == "inherit" && o.State == "reserved") && !(in.Operation == "abort-inheritance" && (o.State == "reserved" || o.State == "failed"))) {
 		return nil, ErrNotFound
 	}
 	valid := func() error {
@@ -177,13 +232,39 @@ func (s *Store) SessionAttachments(ctx context.Context, ref string, in Attachmen
 	}
 	out := []AttachmentReceipt{}
 	switch in.Operation {
-	case "create":
-		var count int
-		if err = tx.QueryRow(ctx, `SELECT count(*) FROM session_attachment_receipts WHERE realm=$1 AND session_ref=$2`, in.Realm, ref).Scan(&count); err != nil {
+	case "abort-inheritance":
+		// Only the holder of this reservation token may abandon a not-yet-active
+		// child. Activation and abort serialize on the owner row; an uncertain
+		// activation can therefore never release an active Session's references.
+		if o.State == "active" || o.ParentSessionRef != in.SourceSession {
+			return nil, ErrOwnerConflict
+		}
+		var matches bool
+		if err = tx.QueryRow(ctx, `SELECT creation_token_hash=$2 FROM session_owners WHERE session_ref=$1`, ref, ownerTokenHash(in.CreationToken)).Scan(&matches); err != nil {
 			return nil, err
 		}
-		if count >= 100 {
+		if !matches {
 			return nil, ErrOwnerConflict
+		}
+		if err = storageledger.Lock(ctx, tx, in.Realm, in.ProjectID); err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE platform_storage_charges c SET released_at=COALESCE(c.released_at,clock_timestamp()) FROM session_attachment_receipts a WHERE a.realm=$1 AND a.session_ref=$2 AND a.inherited_from_session=$3 AND c.realm=a.realm AND c.kind='session-attachment' AND c.project_id=a.project_id AND c.reference_id=a.session_ref||'/'||a.receipt_id`, in.Realm, ref, in.SourceSession); err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(ctx, `DELETE FROM session_attachment_receipts WHERE realm=$1 AND session_ref=$2 AND inherited_from_session=$3`, in.Realm, ref, in.SourceSession); err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE session_owners SET state='failed' WHERE session_ref=$1 AND state IN ('reserved','failed')`, ref); err != nil {
+			return nil, err
+		}
+	case "create":
+		var count int
+		if err = tx.QueryRow(ctx, `SELECT count(*) FROM session_attachment_receipts WHERE realm=$1 AND session_ref=$2 AND retired_at IS NULL`, in.Realm, ref).Scan(&count); err != nil {
+			return nil, err
+		}
+		if count >= ActiveAttachmentLimit {
+			return nil, ErrAttachmentCapacity
 		}
 		id, e := randomOwnerToken(24)
 		if e != nil {
@@ -216,9 +297,24 @@ func (s *Store) SessionAttachments(ctx context.Context, ref string, in Attachmen
 		if err == nil {
 			out = append(out, r)
 		}
-	case "list":
+	case "inventory", "list":
+		limit, after, status := 100, "", "active"
+		if in.Operation == "inventory" {
+			limit, after, status = in.Limit, in.After, in.Status
+			if limit == 0 {
+				limit = 50
+			}
+			if status == "" {
+				status = "active"
+			}
+			u := &in.inventory.Usage
+			u.ActiveLimit, u.Accounting = ActiveAttachmentLimit, "logical-retained-reference-bytes"
+			if err = tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE retired_at IS NULL),count(*) FILTER(WHERE retired_at IS NOT NULL),COALESCE(sum(bytes),0),COALESCE(sum(bytes) FILTER(WHERE retired_at IS NULL),0),COALESCE(sum(bytes) FILTER(WHERE retired_at IS NOT NULL),0) FROM session_attachment_receipts WHERE realm=$1 AND session_ref=$2`, in.Realm, ref).Scan(&u.TotalCount, &u.ActiveCount, &u.RetiredCount, &u.TotalBytes, &u.ActiveBytes, &u.RetiredBytes); err != nil {
+				return nil, err
+			}
+		}
 		var rows pgx.Rows
-		rows, err = tx.Query(ctx, `SELECT `+attachmentColumns+` FROM session_attachment_receipts WHERE realm=$1 AND session_ref=$2 AND owner_user_id=$3 AND project_id=$4 AND retired_at IS NULL ORDER BY created_at,receipt_id LIMIT 100`, in.Realm, ref, in.OwnerUserID, in.ProjectID)
+		rows, err = tx.Query(ctx, `SELECT `+attachmentColumns+` FROM session_attachment_receipts WHERE realm=$1 AND session_ref=$2 AND owner_user_id=$3 AND project_id=$4 AND receipt_id>$5 AND ($6='all' OR ($6='active' AND retired_at IS NULL) OR ($6='retired' AND retired_at IS NOT NULL)) ORDER BY receipt_id LIMIT $7`, in.Realm, ref, in.OwnerUserID, in.ProjectID, after, status, limit+1)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -233,6 +329,13 @@ func (s *Store) SessionAttachments(ctx context.Context, ref string, in Attachmen
 				err = rows.Err()
 			}
 			rows.Close()
+		}
+		if in.Operation == "inventory" && len(out) > limit {
+			out = out[:limit]
+			in.inventory.NextCursor = out[len(out)-1].ReceiptID
+		}
+		if in.Operation == "list" && len(out) > limit {
+			out = out[:limit]
 		}
 	case "inherit":
 		if o.State != "reserved" || o.ParentSessionRef != in.SourceSession {
@@ -257,7 +360,7 @@ func (s *Store) SessionAttachments(ctx context.Context, ref string, in Attachmen
 			if err = storageledger.Register(ctx, tx, storageledger.Charge{Realm: in.Realm, ProjectID: in.ProjectID, Kind: "session-attachment", ReferenceID: ref + "/" + r.ReceiptID, Bytes: r.Bytes, ObjectKey: r.NativeRef.AttachmentID}); err != nil {
 				return nil, err
 			}
-			_, err = tx.Exec(ctx, `INSERT INTO session_attachment_receipts(realm,session_ref,receipt_id,owner_user_id,project_id,kind,name,media_type,bytes,sha256,native_ref,inherited_from_session,retired_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, in.Realm, ref, r.ReceiptID, in.OwnerUserID, in.ProjectID, r.Kind, r.Name, r.MediaType, r.Bytes, r.SHA256, raw, in.SourceSession, r.RetiredAt)
+			_, err = tx.Exec(ctx, `INSERT INTO session_attachment_receipts(realm,session_ref,receipt_id,owner_user_id,project_id,kind,name,media_type,bytes,sha256,native_ref,inherited_from_session,retired_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(realm,session_ref,receipt_id) DO UPDATE SET retired_at=COALESCE(session_attachment_receipts.retired_at,EXCLUDED.retired_at)`, in.Realm, ref, r.ReceiptID, in.OwnerUserID, in.ProjectID, r.Kind, r.Name, r.MediaType, r.Bytes, r.SHA256, raw, in.SourceSession, r.RetiredAt)
 			if err != nil {
 				return nil, err
 			}

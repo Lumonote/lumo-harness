@@ -432,7 +432,9 @@ func interruptDeviceCommands(ctx context.Context, tx pgx.Tx, realm, id, connecti
 	// Remote desktop outcomes are never replayed or silently moved to a new
 	// connection. A lost device may have delivered input before disconnecting.
 	if _, err := tx.Exec(ctx, `UPDATE governance_remote_computer_requests SET state='unknown',revision=revision+1,updated_at=now()
-	 WHERE realm=$1 AND node_id=$2 AND state IN ('pending','running') AND ($3='' OR connection_id=$3)`, realm, id, connection); err != nil { return err }
+	 WHERE realm=$1 AND node_id=$2 AND state IN ('pending','running') AND ($3='' OR connection_id=$3)`, realm, id, connection); err != nil {
+		return err
+	}
 	query := `UPDATE governance_device_commands SET state='interrupted',updated_at=now()
 	 WHERE realm=$1 AND node_id=$2 AND state IN ('queued','delivered')`
 	args := []any{realm, id}
