@@ -82,7 +82,9 @@ Windows 包内使用 `runtime/lumo-runtime.cmd`、`node.exe` 和 `python/python.
 架构、内容摘要和签名；构建机需要 Xcode/Swift 和 Python 3，最终用户无需安装开发工具。
 默认 ad-hoc 签名，可设置 `LUMO_CUA_SIGNING_IDENTITY` 和可选的
 `LUMO_CUA_SIGNING_KEYCHAIN`；正式发布仍需完成 Developer ID 签名、公证与系统权限验收。
-Windows 页面明确显示暂不支持，构建不会运行 Swift。
+Windows 可通过 `LUMO_WINDOWS_CUA=1` 显式加载隔离 Provider，仍需在面板授权当前会话；
+构建使用 Rust Job Object supervisor 与固定版本原生 SDK，跳过 Swift。原生桌面输入与截图
+仍需在已登录的 Windows 设备上按[验收说明](../dsh-plugins/computer-use/README.md#windows-原生桌面验收)实测。
 
 同一轮 Agent 独占桌面，停止时等待原生调用结束后才释放，不自动重放动作。详细配置、
 验证范围与远程 Bot 边界见 [本机电脑操作记录](../../docs/computer-use-2026-11-08.md)。

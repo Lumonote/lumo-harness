@@ -33,7 +33,7 @@ Agent 预设选择“受控仓库修改”，清空系统提示引用、连接�
 
 ## 发布草稿 PR
 
-当前发布支持 GitHub，使用当前用户关联的账号。连接器需提供官方 Git API 的 `get_ref`、`get_commit`、`create_tree`、`create_commit`、`create_ref` 和 `create_pull_request` 操作，示例见 `platform/shared/connectors/github.oauth.example.json`。浏览器不接受仓库、路径、文件内容或基础提交覆盖。
+当前发布支持 GitHub，使用当前用户关联的账号。连接器需提供官方 Git API 的 `get_ref`、`get_commit`、`create_tree`、`create_commit`、`create_ref` 和 `create_pull_request` 操作；显式核对另需只读的 `get_tree`、`list_pull_requests` 和 `get_pull_request`，示例见 `platform/shared/connectors/github.oauth.example.json`。浏览器不接受仓库、路径、文件内容或基础提交覆盖。
 
 流程先在 PG 为精确已审 manifest 创建唯一 `pending` 许可，再原子消耗为 `publishing`。只有一个调用能成功 claim；每次重新检查当前角色、任务访问权限、任务状态和审核有效性。claim 持久提交后，host 才能请求 GitHub。
 
@@ -43,6 +43,14 @@ host 使用基础提交的不可变 tree，提交且只提交已审路径的完�
 
 PG 事务无法与 GitHub 外部写入形成跨服务原子事务。`publishing` 不会因超时重新变为 `pending`，也不允许自动再次 claim。基础分支移动、连接器失败、进程退出或治理最终确认失败，可能留下 Git 对象、唯一分支或草稿 PR。界面会提示核对任务审计；已获得草稿 URL 时一并显示。
 
-操作员应先按许可 ID 检查对应分支和 PR，再决定人工保留或清理。不要盲目重试旧许可。要发布修改后的内容，应准备新的基础快照、执行结果及独立审核。现阶段没有自动恢复写入或外部状态对账作业；这种中断只允许人工核对，保留持久 fence。
+执行证据面板读取已有许可状态。`publishing` 或 `draft` 提供“核对”按钮：host 从 Governance 取得原许可及完整已审文本，只读检查 `lumo/review-<许可 ID>` 的实际分支、提交和 PR。核对不会创建 Git 对象、重写分支、重复发布或合并。
+
+核对先要求当前基础分支仍指向批准提交，发布提交只能有这一父提交且提交消息绑定 manifest digest。读取完整基础 tree 后，按已审 before/after blob 计算 Git 对象哈希，逐层重建预期根 tree 并与实际发布提交比较。未审文件、隐藏目录和未修改子树的哈希同样进入比较；不依赖可能截断的文件 diff。树响应若截断、哈希不符、超出读取上限或内容含歧义，均视为不明。
+
+PR 必须唯一、未关闭、未合并且仍为草稿，仓库、head/base 分支、提交和 URL 都必须精确匹配。读取结束前再读 head/base 引用和 PR。Governance 在外部读取前后重验当前用户、角色、任务、执行代次及独立审核；任何授权或审核失效均不能确认结果。每次记录递增核对版本，较早的并发读取不能覆盖更新的记录。
+
+确认时保存 `confirmed` 和草稿 URL；不匹配或连接器不可用时保存 `unknown` 及固定原因码，保留此前 URL 和原发布围栏。`draft` 只表示历史上报告过草稿，当前有效性以最近一次核对为准。迁移 `043_repository_publication_reconciliation.sql` 新增核对元数据，不改变 `pending → publishing → draft` 一次性写入状态。授权撤销导致结果无法记录时，界面显示请求失败并保留围栏。
+
+操作员可按许可 ID 决定人工保留或清理。不要盲目重试旧许可。要发布修改后的内容，应准备新的基础快照、执行结果及独立审核。平台不执行自动恢复写入或后台对账。
 
 普通工具、终端、外部连接器和旧执行记录仍为未知影响范围。受控仓库模式不会替这些记录补造“完整枚举”或追认审核。

@@ -18,6 +18,13 @@ on:
 jobs:
   platform:
     runs-on: ubuntu-latest
+    env:
+      # 全平台一次发现并执行；所有现有活依赖门控统一开启，报告再拒绝任何 skip。
+      LUMO_TEST_PG_DSN: postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable
+      SESSION_LOG_TEST_REDIS: redis://127.0.0.1:6379
+      OBJECT_STORE_TEST_ENDPOINT: 127.0.0.1:19000
+      OBJECT_STORE_TEST_CREDS: lumo_ci:lumo-ci-minio-test
+      LUMO_AUTH_PROXY_TEST: '1'
     services:
       postgres:
         # Knowledge integration tests need vector/HNSW, as in Compose deployments.
@@ -30,6 +37,12 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U lumo_test -d lumo_test"
           --health-interval 5s --health-timeout 5s --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 12
     defaults:
       run:
         working-directory: platform
@@ -65,6 +78,34 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install isolated document runtime
+        env:
+          LUMO_PPT_PYTHON: ${{ runner.temp }}/lumo-test-python/bin/python
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/lumo-test-python"
+          "$LUMO_PPT_PYTHON" -m pip install --only-binary=:all: --constraint upstream/ppt-constraints.txt -r upstream/skills/ppt-master/requirements.txt
+          "$LUMO_PPT_PYTHON" -m pip check
+          "$LUMO_PPT_PYTHON" -I -c 'import fitz, openpyxl, pptx'
+          echo "LUMO_PPT_PYTHON=$LUMO_PPT_PYTHON" >> "$GITHUB_ENV"
+
+      # 官方旧镜像和二进制归档已下线；复用部署使用的固定源码/commit 构建。
+      # runner 独享容器与临时数据，测试用例再通过随机 realm 隔离对象键。
+      - name: Build and start isolated MinIO
+        run: |
+          set -euo pipefail
+          docker build --file deploy/minio-source.Dockerfile --tag lumo-ci-minio deploy
+          docker run --detach --name lumo-ci-minio --publish 127.0.0.1:19000:9000 \
+            --env MINIO_ROOT_USER=lumo_ci --env MINIO_ROOT_PASSWORD=lumo-ci-minio-test \
+            lumo-ci-minio server /data --console-address :9001
+          curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 2 --retry-max-time 120 \
+            --max-time 5 http://127.0.0.1:19000/minio/health/ready
+
       # 只装依赖不构建上游 dsh 时，@deepseek-ai/* 的 package.json types 指向的
       # lib/types 不存在，平台 typecheck 会全线 TS2307。上游 master 重构期
       # `pnpm run build` 的 tsdown 主机面是坏的（见 dsh-overrides/prepare-runtime.mjs），
@@ -77,16 +118,23 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
-      - name: Unit tests
-        run: pnpm run test
+      - name: Full platform tests with live dependencies
+        id: platform-tests
+        run: |
+          pnpm exec vitest run --maxWorkers=2 --testTimeout=30000 --hookTimeout=30000 \
+            --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/platform-vitest.json"
 
-      - name: Storage quota, startup concurrency and shared DDL
-        env:
-          LUMO_TEST_PG_DSN: postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable
-        run: >-
-          pnpm exec vitest run
-          dsh-plugins/knowledge/__tests__/pg-storage-quota.spec.ts
-          shared/__tests__/ddl-ownership.spec.ts
+      - name: Require actual execution with zero skipped tests
+        if: ${{ !cancelled() && steps.platform-tests.outcome != 'skipped' }}
+        run: node tools/verify-platform-test-report.mjs "$RUNNER_TEMP/platform-vitest.json"
+
+      - name: Preserve full platform test evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: platform-vitest-${{ github.run_id }}
+          path: ${{ runner.temp }}/platform-vitest.json
+          if-no-files-found: warn
 
       - name: Readonly archive and recovery drill contracts
         env:
@@ -96,28 +144,20 @@ jobs:
           node --test tools/archive-governance-results.test.mjs tools/archive-governance-results.pg.test.mjs
           python3 -m unittest discover -s deploy/tests -p test_recovery_drill.py
 
-      - name: Governed dispatch, team migration, metering and recovery
-        env:
-          LUMO_TEST_PG_DSN: postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable
-        run: >-
-          pnpm exec vitest run
-          dsh-plugins/subagent-host/__tests__/governed-dispatch.pg.spec.ts
-          dsh-plugins/subagent-remote/__tests__/receipts.pg.spec.ts
-          dsh-plugins/subagent-host/__tests__/durable-start-guard.pg.spec.ts
-          dsh-plugins/subagent-host/__tests__/boot-recovery.pg.spec.ts
-          dsh-plugins/subagent-remote/__tests__/placement-recovery.pg.spec.ts
-          dsh-plugins/session-log/__tests__/spool-recovery.pg.spec.ts
-          dsh-plugins/subagent-host/__tests__/listener-fence.spec.ts
-          dsh-plugins/agent-teams/__tests__/concurrency.pg.spec.ts
-          dsh-plugins/agent-teams/__tests__/migration.pg.spec.ts
-          dsh-plugins/subagent-host/__tests__/metering.pg.spec.ts
-
       - name: Verify upstream dsh tree is pristine (第一铁律)
+        if: always()
         run: |
           describe="$(git -C ../deepseek-harness describe --always --tags --dirty)"
           echo "$describe"
           test "${describe%-dirty}" = "$describe"
           test -z "$(git -C ../deepseek-harness status --porcelain -uno)"
+
+      - name: Stop isolated MinIO
+        if: always()
+        run: |
+          if docker container inspect lumo-ci-minio >/dev/null 2>&1; then
+            docker rm --force lumo-ci-minio
+          fi
 
   control-plane-go:
     runs-on: ubuntu-latest

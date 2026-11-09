@@ -1,5 +1,6 @@
 /** Authenticated first-party Session transport. Never forwards a browser as the
  * shared carrier owner. Attachments require an explicit receipt policy. */
+import { SessionRequestError } from './session-request-errors.ts'
 import { OwnedSessionAttachments, USER_SESSION_ATTACHMENT_TOOL, validateSessionAttachments } from './session-attachments.ts'
 import type { SessionAttachmentConfig, SessionAttachmentUpload, SessionAttachmentReceipt, SessionAttachmentDownload } from '../../../shared/seam-contracts/session-attachments.ts'
 import type {} from '@deepseek-ai/dsh-attachment'
@@ -128,6 +129,7 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
   const pendingInputs = new Set<string>()
   const prepared = new WeakSet<Agent>()
   const authorities = new Map<string, SessionAuthority>()
+  const attachmentAdmissions = new Set<string>()
   const polls = new Map<string, ReturnType<typeof setInterval>>()
   const handles = new Set<AgentHandle>()
   const resuming = new Map<string, Promise<void>>()
@@ -313,7 +315,13 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
         return migration.execute(principal, action, request, signal, authority)
       }
       const leave = migration && action !== 'create' && action !== 'list' ? migration.enter(target(request)) : undefined
+      let admittedAttachment: string | undefined
       try {
+      if (attachments && (action === 'prompt' || action === 'retireAttachment')) {
+        const ref = target(request)
+        if (attachmentAdmissions.has(ref)) throw new SessionRequestError('session_attachment_busy')
+        attachmentAdmissions.add(ref); admittedAttachment = ref
+      }
       if (execution && principal.realm !== execution.realm) throw new Error('Session Realm does not match this execution node')
       await authorizeProject(principal)
       await runtime?.check()
@@ -339,9 +347,15 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
         const page = await owners.list(principal.realm, principal.user_id, config.nodeId, request.after as string | undefined)
         return { ...page, owners: page.owners.filter(owner => owner.project_id === config.projectId) }
       }
-      if (!unary.has(action) && !['models', 'selectModel', 'interactionList', 'interactionAnswer'].includes(action)) throw new Error('Session action is not available in the authenticated text profile')
+      if (!unary.has(action) && !['models', 'selectModel', 'interactionList', 'interactionAnswer', 'attachmentList', 'retireAttachment'].includes(action)) throw new Error('Session action is not available in the authenticated text profile')
       const ref = target(request)
       await own(principal, ref)
+      if (action === 'attachmentList' || action === 'retireAttachment') {
+        if (!attachments || !authority) throw new SessionRequestError('session_attachment_denied')
+        if (Object.keys(request).some(key => key !== 'sessionId' && !(action === 'retireAttachment' && key === 'receipt_id'))) throw new SessionRequestError('session_attachment_invalid')
+        const authorize = async () => { signal.throwIfAborted(); await authority(); await authorizeProject(principal); await own(principal, ref) }
+        return action === 'attachmentList' ? { receipts: await attachments.list(principal, ref, authorize) } : { receipt: await attachments.retire(principal, ref, request.receipt_id, authorize) }
+      }
       if (action === 'interactionList' || action === 'interactionAnswer') {
         if (!authority) throw new Error('Session interaction requires current login authority')
         await authority()
@@ -396,7 +410,7 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
         throw error
       }
       finally { await call.close() }
-      } finally { leave?.() }
+      } finally { if (admittedAttachment) attachmentAdmissions.delete(admittedAttachment); leave?.() }
     },
     async stream(principal, action, request, signal, authority) {
       await authorizeProject(principal)

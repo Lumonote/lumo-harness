@@ -805,21 +805,39 @@ export function TaskEvidencePanel({ taskID, request, runID, result, error, busy,
 }) {
   const { present: hasOutput, text: output } = readTaskOutput(result?.output)
   const[publicationBusy,setPublicationBusy]=useState(false),[publicationError,setPublicationError]=useState(''),[publicationURL,setPublicationURL]=useState('')
+  const[publicationStatus,setPublicationStatus]=useState('loading'),[publicationReconciliation,setPublicationReconciliation]=useState(''),[publicationAction,setPublicationAction]=useState('')
   const publicationGeneration=useRef(0),publicationPending=useRef(false)
-  useEffect(()=>{publicationGeneration.current++;publicationPending.current=false;setPublicationBusy(false);setPublicationError('');setPublicationURL('');return()=>{publicationGeneration.current++}},[taskID,runID])
-  const publishRepository=async()=>{
+  type PublicationStatus={status:string;url?:string;reconciliation?:string}
+  const publicationPath=`/lumo/api/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/repository-publication`
+  const applyPublicationStatus=(value:PublicationStatus)=>{
+    setPublicationStatus(['unpublished','pending','publishing','draft'].includes(value.status)?value.status:'unavailable')
+    setPublicationReconciliation(value.reconciliation||'')
+    if(value.reconciliation==='unknown')setPublicationError('核对结果不明，发布许可仍保持锁定。请检查对应分支及草稿 PR。')
+    if(value.url&&/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/u.test(value.url))setPublicationURL(value.url)
+  }
+  useEffect(()=>{
+    const generation=++publicationGeneration.current
+    publicationPending.current=false;setPublicationBusy(false);setPublicationError('');setPublicationURL('');setPublicationReconciliation('');setPublicationStatus('loading')
+    if(result?.review_scope===REPOSITORY_OUTPUT_PROFILE)void request<PublicationStatus>(publicationPath).then(value=>{if(generation===publicationGeneration.current)applyPublicationStatus(value)}).catch(()=>{if(generation===publicationGeneration.current){setPublicationStatus('unavailable');setPublicationError('发布状态读取失败，请重新打开证据后核对。')}})
+    return()=>{publicationGeneration.current++}
+  },[taskID,runID,result?.review_scope])
+  const publishRepository=async(reconcile=false)=>{
     if(publicationPending.current)return
     const generation=publicationGeneration.current
-    publicationPending.current=true;setPublicationBusy(true);setPublicationError('')
+    publicationPending.current=true;setPublicationBusy(true);setPublicationAction(reconcile?'reconcile':'publish');setPublicationError('')
+    if(!reconcile)setPublicationStatus('publishing')
     try{
-      const value=await request<{url:string}>(`/lumo/api/tasks/${encodeURIComponent(taskID)}/runs/${encodeURIComponent(runID)}/repository-publication`,{method:'POST',body:'{}'})
-      if(generation===publicationGeneration.current)setPublicationURL(value.url)
+      const value=await request<PublicationStatus>(publicationPath+(reconcile?'/reconcile':''),{method:'POST',body:'{}'})
+      if(generation===publicationGeneration.current)applyPublicationStatus({...value,status:reconcile?value.status:'draft'})
     }catch(reason){
       if(generation===publicationGeneration.current){
         setPublicationError(message(reason))
         const body=reason instanceof Error&&'body' in reason?reason.body:undefined
         const url=body&&typeof body==='object'&&'url' in body?body.url:undefined
         if(typeof url==='string'&&/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/u.test(url))setPublicationURL(url)
+        // A rejected authorization may never have created a permit; only an
+        // authority status read can reopen the publication action safely.
+        if(!reconcile)try{const status=await request<PublicationStatus>(publicationPath);if(generation===publicationGeneration.current)applyPublicationStatus(status)}catch{/* Keep the consumed/uncertain fence until status can be read. */}
       }
     }finally{if(generation===publicationGeneration.current){publicationPending.current=false;setPublicationBusy(false)}}
   }
@@ -827,7 +845,7 @@ export function TaskEvidencePanel({ taskID, request, runID, result, error, busy,
     <div className="lumo-section-title"><div><b>执行证据</b><span>{result ? `${label(result.state)} · ${result.run_id}` : runID}</span></div><Button onClick={close}>关闭证据</Button></div>
     {error ? <div className="lumo-cluster-feedback error" role="alert">{error}</div> : null}
     {busy ? <p className="lumo-inline-empty">正在读取结果全文。</p> : null}
-    {result?.review_scope===REPOSITORY_OUTPUT_PROFILE?<div className="lumo-cluster-feedback"><p>受控仓库变更 · {result.manifest_digest?.slice(0,12)}。独立审核通过后可创建草稿 PR。</p><Button disabled={publicationBusy||!!publicationURL} onClick={()=>void publishRepository()}>{publicationBusy?'正在发布…':'审核通过后发布草稿 PR'}</Button>{publicationError?<p role="alert">{publicationError}</p>:null}{publicationURL?<a href={publicationURL} target="_blank" rel="noreferrer">查看草稿 PR</a>:null}</div>:null}
+    {result?.review_scope===REPOSITORY_OUTPUT_PROFILE?<div className="lumo-cluster-feedback"><p>受控仓库变更 · {result.manifest_digest?.slice(0,12)}。独立审核通过后可创建草稿 PR。</p><Button disabled={publicationBusy||publicationStatus!=='unpublished'||!!publicationURL} onClick={()=>void publishRepository()}>{publicationBusy&&publicationAction==='publish'?'正在发布…':'审核通过后发布草稿 PR'}</Button>{['publishing','draft'].includes(publicationStatus)?<Button disabled={publicationBusy} onClick={()=>void publishRepository(true)}>{publicationBusy&&publicationAction==='reconcile'?'正在核对…':'核对'}</Button>:null}{publicationStatus==='pending'?<p>发布许可已创建；请检查任务审计，避免重复发布。</p>:null}{publicationReconciliation==='confirmed'?<p role="status">已核对：分支、完整提交树及草稿 PR 与已审内容一致。</p>:null}{publicationError?<p role="alert">{publicationError}</p>:null}{publicationURL?<a href={publicationURL} target="_blank" rel="noreferrer">查看草稿 PR</a>:null}</div>:null}
     {result ? <>
       <div className="lumo-device-facts">
         <span><small>结果状态</small><b>{label(result.state)}</b></span>

@@ -50,7 +50,7 @@ async function storage(){
 type Storage=Awaited<ReturnType<typeof storage>>
 async function fixture(durable:Storage,enabled=true){
  const ctx=new Context();let alive=true;const dispose=async()=>{if(alive){alive=false;await ctx.fiber.dispose()}};closers.push(dispose)
- const requests:GenerateOptions[]=[];let revoked=false,projectRevoked=false,executionRevoked=false,nextCall:{name:string;args:object;before?:()=>void}|undefined,onRead:(()=>void)|undefined,onSave:((ref:{attachmentId:string;name:string;bytes:number})=>void)|undefined
+ const requests:GenerateOptions[]=[];let revoked=false,projectRevoked=false,executionRevoked=false,nextCall:{name:string;args:object;before?:()=>void}|undefined,onRead:(()=>void)|undefined,beforeReceiptOperation:((operation:string)=>Promise<void>)|undefined,onSave:((ref:{attachmentId:string;name:string;bytes:number})=>void)|undefined
  const authority=Object.assign(async()=>{if(revoked)throw Error('revoked');return {...alice,roles:[...alice.roles]}},{credential:'login-secret'})
  const fetcher=async(url:string|URL|Request,init?:RequestInit)=>{
   const path=new URL(String(url)).pathname,body=init?.body?JSON.parse(String(init.body)):{}
@@ -59,6 +59,9 @@ async function fixture(durable:Storage,enabled=true){
   if(path.startsWith('/v1/session-attachments/')){
    const ref=path.split('/')[3]!,owner=durable.owners.get(ref)
    if(!owner||owner.owner_user_id!==body.owner_user_id||owner.realm!==body.realm||owner.project_id!==body.project_id)return new Response('{}',{status:404})
+   await beforeReceiptOperation?.(body.operation)
+   if(body.operation==='list')return new Response(JSON.stringify({receipts:[...durable.receipts].filter(([key,r])=>key.startsWith(ref+':')&&!r.retired_at).map(([,r])=>r)}))
+   if(body.operation==='retire'){const r=durable.receipts.get(ref+':'+body.receipt_id);if(!r)return new Response('{}',{status:404});r.retired_at??='2026-11-09T01:00:00Z';return new Response(JSON.stringify({receipts:[r]}))}
    if(body.operation==='create'){const r={...body.receipt,receipt_id:'att_'+String(++durable.uploads).padStart(48,'0'),created_at:'2026-11-07T00:00:00Z'};durable.receipts.set(ref+':'+r.receipt_id,r);return new Response(JSON.stringify({receipts:[r]}))}
    if(body.operation==='get'){const r=durable.receipts.get(ref+':'+body.receipt_id);return new Response(JSON.stringify({receipts:r?[r]:[]}),{status:r?200:404})}
    if(body.operation==='inherit'){durable.inherited.push(body.receipt_ids);for(const id of body.receipt_ids){const r=durable.receipts.get(body.source_session+':'+id);if(!r)return new Response('{}',{status:404});durable.receipts.set(ref+':'+id,r)};return new Response(JSON.stringify({receipts:body.receipt_ids.map((id:string)=>durable.receipts.get(ref+':'+id))}))}
@@ -89,10 +92,49 @@ async function fixture(durable:Storage,enabled=true){
  const upload=async(ref:string,text:string|Uint8Array,name='notes.txt',mime='text/plain')=>transport.uploadAttachment!(alice,ref,{name,mediaType:mime},source(text),signal,authority)
  let promptID=0
  const send=async(ref:string,content:unknown[],call?:{name:string;args:object;before?:()=>void})=>{nextCall=call;await transport.execute(alice,'prompt',{sessionId:ref,requestId:'prompt-'+(++promptID)+'-'+Date.now(),content,mode:'queue'},signal,authority);await ctx.agents.get(SessionId(ref))!.whenIdle();await ctx.sessionPersistence.flush()}
- return {ctx,transport,authority,create,upload,send,requests,dispose,revoke:()=>{revoked=true},revokeProject:()=>{projectRevoked=true},revokeExecution:()=>{executionRevoked=true},onRead:(cb:()=>void)=>{onRead=cb},onSave:(cb:typeof onSave)=>{onSave=cb},events:(id:string)=>ctx.agents.get(SessionId(id))!.session.snapshotEvents()}
+ return {ctx,transport,authority,create,upload,send,requests,dispose,onReceiptOperation:(cb:typeof beforeReceiptOperation)=>{beforeReceiptOperation=cb},revoke:()=>{revoked=true},revokeProject:()=>{projectRevoked=true},revokeExecution:()=>{executionRevoked=true},onRead:(cb:()=>void)=>{onRead=cb},onSave:(cb:typeof onSave)=>{onSave=cb},events:(id:string)=>ctx.agents.get(SessionId(id))!.session.snapshotEvents()}
 }
 
 describe('owned attachment receipt application with real AgentLoop and JSONL restart',()=>{
+ it('retires future admission while retaining native history reads and inherited receipts after restart',async()=>{
+  const d=await storage(),f=await fixture(d),id=await f.create(),r=await f.upload(id,'RETIRED-HISTORY')
+  await f.send(id,[{type:'attachment',receipt_id:r.receipt_id}])
+  const retired=await f.transport.execute(alice,'retireAttachment',{sessionId:id,receipt_id:r.receipt_id},signal,f.authority) as {receipt:{retired_at:string}}
+  expect(retired.receipt.retired_at).toBeTruthy();expect(retired.receipt).not.toHaveProperty('native_ref')
+  await expect(f.transport.execute(alice,'retireAttachment',{sessionId:id,receipt_id:r.receipt_id},signal,f.authority)).resolves.toEqual(retired)
+  await expect(f.transport.execute(alice,'attachmentList',{sessionId:id},signal,f.authority)).resolves.toEqual({receipts:[]})
+  await expect(f.send(id,[{type:'attachment',receipt_id:r.receipt_id}])).rejects.toMatchObject({code:'session_attachment_retired'})
+  expect(Buffer.from((await f.transport.readAttachment!(alice,id,r.receipt_id,signal,f.authority)).data).toString()).toBe('RETIRED-HISTORY')
+  await f.dispose();const resumed=await fixture(d)
+  await resumed.send(id,[{type:'text',text:'read retired history'}],{name:USER_SESSION_ATTACHMENT_TOOL,args:{receipt_id:r.receipt_id}})
+  expect(JSON.stringify(resumed.events(id))).toContain('RETIRED-HISTORY')
+  const fork=await resumed.transport.execute(alice,'fork',{sessionId:id},signal,resumed.authority) as {sessionId:string}
+  expect(d.receipts.get(fork.sessionId+':'+r.receipt_id)).toHaveProperty('retired_at')
+  await resumed.send(fork.sessionId,[{type:'text',text:'read inherited retired history'}],{name:USER_SESSION_ATTACHMENT_TOOL,args:{receipt_id:r.receipt_id}})
+  expect(JSON.stringify(resumed.events(fork.sessionId))).toContain('RETIRED-HISTORY')
+  await expect(resumed.send(fork.sessionId,[{type:'attachment',receipt_id:r.receipt_id}])).rejects.toMatchObject({code:'session_attachment_retired'})
+ })
+ it.each(['prompt','retireAttachment'] as const)('serializes attachment retirement with an in-flight %s and releases the admission guard',async action=>{
+  const d=await storage(),f=await fixture(d),id=await f.create(),r=await f.upload(id,'SERIAL')
+  let entered!:()=>void,release!:()=>void
+  const waiting=new Promise<void>(resolve=>{entered=resolve}),held=new Promise<void>(resolve=>{release=resolve})
+  f.onReceiptOperation(async operation=>{if(operation===(action==='prompt'?'get':'retire')){entered();await held}})
+  const pending=action==='prompt'?f.send(id,[{type:'attachment',receipt_id:r.receipt_id}]):f.transport.execute(alice,'retireAttachment',{sessionId:id,receipt_id:r.receipt_id},signal,f.authority)
+  try{await waiting
+   const competing=action==='prompt'?f.transport.execute(alice,'retireAttachment',{sessionId:id,receipt_id:r.receipt_id},signal,f.authority):f.send(id,[{type:'attachment',receipt_id:r.receipt_id}])
+   await expect(competing).rejects.toMatchObject({code:'session_attachment_busy'})
+  }finally{release();await pending;f.onReceiptOperation(undefined)}
+  await expect(f.transport.execute(alice,'retireAttachment',{sessionId:id,receipt_id:r.receipt_id},signal,f.authority)).resolves.toHaveProperty('receipt.retired_at')
+ })
+ it('refuses attachment management after owner/project revocation and validates exact fields',async()=>{
+  const d=await storage(),f=await fixture(d),id=await f.create(),r=await f.upload(id,'SCOPED')
+  await expect(f.transport.execute(alice,'retireAttachment',{sessionId:id,receipt_id:r.receipt_id,url:'https://private'},signal,f.authority)).rejects.toMatchObject({code:'session_attachment_invalid'})
+  await expect(f.transport.execute({...alice,user_id:'bob'},'retireAttachment',{sessionId:id,receipt_id:r.receipt_id},signal,f.authority)).rejects.toThrow('ownership')
+  expect(d.receipts.get(id+':'+r.receipt_id)).not.toHaveProperty('retired_at')
+  f.revokeProject()
+  await expect(f.transport.execute(alice,'retireAttachment',{sessionId:id,receipt_id:r.receipt_id},signal,f.authority)).rejects.toThrow('revoked')
+  expect(d.receipts.get(id+':'+r.receipt_id)).not.toHaveProperty('retired_at')
+ })
  it('uses durable opaque receipts and restricts the read tool to submitted files',async()=>{
   const d=await storage(),f=await fixture(d),id=await f.create(),r=await f.upload(id,'PRIVATE-ALICE')
   expect(r).not.toHaveProperty('native_ref');expect(JSON.stringify(r)).not.toContain('file-content')

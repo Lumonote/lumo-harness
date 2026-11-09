@@ -53,7 +53,7 @@ macOS 构建机需要 Xcode/Swift 工具链和 Python 3。Windows 构建跳过 S
 - 本地 API：浏览器认证、API Peer 拒绝、同源校验、请求大小/格式、部署模式隔离和异常状态。
 - 页面：真实前台会话选择、授权与停止、停止中状态、缺少 Provider 和不支持平台；4185 隔离实例中实际确认侧边栏入口、状态读取、未启用时禁止授权，以及跳转官方插件页。
 - 打包：TypeScript 运行依赖闭包、helper 构建参数、receipt/摘要/架构/签名和平台分支。
-- 真实官方 helper：arm64、x64 均完成 release 编译、ad-hoc 签名与验证；arm64 迁移到包含空格的 `.app/Contents/Resources/runtime` 路径后验证仍通过。没有启动 helper 或申请 OS 权限。
+- 真实官方 helper：arm64、x64 均完成 release 编译、ad-hoc 签名与验证；arm64 迁移到包含空格的 `.app/Contents/Resources/runtime` 路径后验证仍通过。11 月 8 日未启动 helper；11 月 9 日新增的只读原生检查结果见下文，均未申请 OS 权限。
 
 本次不把模型模拟响应或工具 mock 当作实际电脑任务验收。真实模型观察、系统权限、逐应用授权、点击/输入/截图闭环，以及 Developer ID 公证后安装仍需专门验收。
 
@@ -70,3 +70,11 @@ macOS 构建机需要 Xcode/Swift 工具链和 Python 3。Windows 构建跳过 S
 本机 broker 在等待远端批准回执前先保留全局批准位，防止不同请求同时通过空闲检查。等待期间撤销、卸载、立即停止或本机授权变更均令旧批准失效；已确认的远端批准转为 cancel，再解除本机等待，不启动 Agent。控制版本覆盖“原来已经关闭，再次点击停止”的情况，避免仅检查 disabled 状态漏掉停止意图。
 
 本批定向 TypeScript/打包测试为 9 文件、56 PASS、0 FAIL、0 SKIP；平台 `tsc -b --noEmit` 通过。Registry computerbridge 与 desktop-agent 在 macOS 合计 17 PASS、0 FAIL、0 SKIP 的 race 测试通过（包括真实 Unix socket runner）；报告为 `/private/tmp/lumo-desktop-agent-race-unsandboxed-20261109.jsonl`。补齐公开依赖后，完整 desktop-agent 本机构建及 Windows amd64/arm64 交叉构建均通过，computerbridge 两种 Windows 架构的测试二进制也完成交叉编译。真实 Windows Job Object 测试在 macOS 上明确跳过，不作为 Windows 实机通过证据。
+
+## 2026-11-09 macOS 原生验收入口
+
+新增 `platform/tools/macos-cua-acceptance.mjs`，命令与完整边界见[插件说明](../platform/dsh-plugins/computer-use/README.md#macos-原生验收)。`--catalog` 只查询官方 helper 的能力、已有权限与 helper 身份，保留稳定 helper 的系统权限身份，为随机私有 runtime 目录创建独立进程与 socket，并确认最后连接关闭后进程退出；不注销或删除指定 helper。`--desktop` 只接受工具自己编译并创建的 Swift 测试应用，以随机 bundle ID/nonce、准确 PID、窗口 ID、标题和 executable 身份约束；不接受外部应用或动作计划。权限不足时直接记录 blocked，不启动测试窗口、不请求授权、不输入。
+
+本机实际完成 arm64 官方 release helper 编译、receipt/摘要/签名验证与 `--catalog` 原生执行，`nativeCatalogValidated: true`、`helperCleanupConfirmed: true`。已有 Accessibility 与 Screen Recording 均为 false；`--desktop` 实际返回 `status: "blocked"`、退出码 2，并确认独立 helper 退出，没有创建输入窗口。证据保存在 `/private/tmp/lumo-macos-stable-catalog-native-20261109/` 和 `/private/tmp/lumo-macos-stable-desktop-native-20261109/` 的 `catalog.json`、`acceptance.json`；另外实际确认被动连接中止后 helper 退出，记录为 `/private/tmp/lumo-macos-stable-cleanup-native-20261109.json`，不等同于在途截图取消验收。这些是本机临时产物，不进入仓库。
+
+专用 Swift fixture 已实际编译；安全契约 fixture 与 helper 打包测试共 32 PASS、0 FAIL、0 SKIP，平台 TypeScript 检查通过。身份/窗口变化、原生身份不匹配和无独立输入效果均拒绝；结果未知的输入不重放。fixture 测试不构成真实点击/输入证据。本轮仍未验收真实桌面点击/文字输入、模型视觉、产品 UI 的逐应用授权、截图取消或 Developer ID 签名/公证。

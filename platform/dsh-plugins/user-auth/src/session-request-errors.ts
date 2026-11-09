@@ -5,6 +5,7 @@ const failures = {
   session_attachment_unsupported: [415, 'Only supported safe UTF-8 text, images and bounded PDF/Office documents are accepted', false],
   session_attachment_too_large: [413, 'Attachment exceeds the upload byte limit', false],
   session_attachment_busy: [429, 'Attachment transfer capacity reached', true],
+  session_attachment_retired: [409, 'Attachment is retired; choose another receipt for future messages', false],
   session_attachment_denied: [403, 'Attachment ownership or execution lease is unavailable', false],
   session_attachment_unavailable: [503, 'Attachment dependency or integrity verification is unavailable', true],
   session_connector_denied: [403, 'Connector request was refused by current authorization', false],

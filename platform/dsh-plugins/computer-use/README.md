@@ -35,6 +35,40 @@
 
 在 `platform/` 下运行 `node node_modules/vitest/vitest.mjs run dsh-plugins/computer-use/__tests__`。测试使用假 Provider，不操作真实桌面，覆盖真实工具管线、最终拒绝规则、嵌套工具调用、整轮占用、会话隔离、取消与卸载、审计脱敏及独立子进程持锁。
 
+## macOS 原生验收
+
+`tools/macos-cua-acceptance.mjs` 使用已打包、通过 receipt/摘要/架构/签名验证的官方 Provider 包，
+保留指定 helper 的稳定系统权限身份，使用随机私有 runtime 目录与专属 socket；官方 launcher 为该目录创建独立 helper 进程，不复用用户正在运行的通道。先运行被动检查；不会枚举用户应用、启动目标应用、
+发送输入、申请系统授权或打开权限设置。
+
+```sh
+node tools/macos-cua-acceptance.mjs --catalog /absolute/runtime/node_modules/@deepseek-ai/dsh-experimental-cua-macos /tmp/lumo-macos-catalog
+```
+
+输出目录必须尚不存在。命令保存真实 `catalog.json` 与 `acceptance.json`，后者包括 helper 摘要、
+已有系统权限、独立 helper 清理结果；权限不足仍可完成 catalog，不能据此声明桌面交互通过。
+
+显式输入验收要求 macOS 14+、已解锁桌面和 helper 已有 Accessibility/Screen Recording 权限。
+它只编译并启动仓库内的 `macos-cua-fixture.swift` 临时应用，不接受外部 PID、窗口、动作或任意计划。
+测试以随机 bundle ID、随机 nonce、准确子进程 PID、窗口 ID、标题和原生返回的 executable 身份约束目标；
+每次动作前重新核对该窗口。原生点击准备按钮后，由测试应用独立确认收到点击、再接收 PID 定向文字输入，
+随后校验独立状态、最新 AX 树和前后真实 PNG。
+
+```sh
+LUMO_MACOS_CUA_E2E=1 node tools/macos-cua-acceptance.mjs --desktop /absolute/runtime/node_modules/@deepseek-ai/dsh-experimental-cua-macos /tmp/lumo-macos-desktop
+```
+
+权限不足或桌面锁定返回 `status: "blocked"`、退出码 2，不启动测试窗口、不发送输入、不弹授权框。
+测试不会重放失败或结果未知的输入。所有权检查失败、无独立输入效果或截图未变化均失败；
+仅在全部检查通过后保存 `before.png`、`after.png`。退出时关闭自有窗口，等待独立 helper 连接关闭与进程退出。
+临时窗口会显示在当前桌面，验收期间避免同时手动操作它。不会注销或删除指定 Provider 的 helper；
+若 helper 原来位于另一 `.app` 内，官方 launcher 按产品规则使用自己的独立缓存位置，系统权限也归属于该稳定 helper。
+
+此入口验证官方原生协议与隔离测试目标，不替代产品 UI 的当前会话授权或逐应用 consent 验收。
+报告始终明确 `modelVisionValidated: false`、`applicationConsentUiValidated: false`、
+`captureCancellationValidated: false`；模型视觉、真实 UI 授权、截图取消以及正式签名/公证仍需各自实测。
+`desktop/__tests__/macos-cua-acceptance.spec.ts` 是安全边界的协议 fixture 测试，不是原生验收证据。
+
 ## Windows 隔离 Provider（显式启用，待实机验收）
 
 本地 Windows Web profile 可通过 `LUMO_WINDOWS_CUA=1` 加载 `@lumo/computer-use/windows`。这只加载能力，用户仍须在 UI 中选择有访问权的真实 Session 并启用。Provider 名称为 `lumo-cua-windows`，工具名称为 `lumo_cua_windows__*`。远端 worker 不加载此本机桌面能力；Linux 也不提供本机输入驱动。

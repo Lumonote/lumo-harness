@@ -49,11 +49,11 @@ export async function attachmentBytes(source: AsyncIterable<Uint8Array>, max: nu
 }
 function abortable<T>(promise:Promise<T>,signal:AbortSignal):Promise<T>{if(signal.aborted){void promise.catch(()=>{});return Promise.reject(signal.reason)}return new Promise((resolve,reject)=>{const abort=()=>reject(signal.reason);signal.addEventListener('abort',abort,{once:true});promise.then(resolve,reject).finally(()=>signal.removeEventListener('abort',abort))})}
 export function attachmentText(bytes:Uint8Array):string{try{const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);if(!text.length||/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/u.test(text))throw new SessionRequestError('session_attachment_unsupported');return text}catch{throw new SessionRequestError('session_attachment_unsupported')}}
-function publicReceipt(r:StoredReceipt):SessionAttachmentReceipt{return {receipt_id:r.receipt_id,kind:r.kind,name:r.name,media_type:r.media_type,bytes:r.bytes,sha256:r.sha256,created_at:r.created_at}}
+function publicReceipt(r:StoredReceipt):SessionAttachmentReceipt{return {receipt_id:r.receipt_id,kind:r.kind,name:r.name,media_type:r.media_type,bytes:r.bytes,sha256:r.sha256,created_at:r.created_at,...(r.retired_at?{retired_at:r.retired_at}:{})}}
 export function parsePublicAttachmentReceipt(value:unknown):SessionAttachmentReceipt {
  const r=value as SessionAttachmentReceipt
- if(!r||typeof r!=='object'||Array.isArray(r)||!sessionAttachmentID.test(r.receipt_id)||!['text','image','document'].includes(r.kind)||typeof r.name!=='string'||attachmentName(r.name)!==r.name||typeof r.media_type!=='string'||attachmentMediaType(r.media_type)!==r.media_type||r.kind==='text'&&r.media_type!=='text/plain'||r.kind==='image'&&!imageTypes.has(r.media_type)||r.kind==='document'&&!Object.entries(SESSION_ATTACHMENT_DOCUMENT_TYPES).some(([ext,mime])=>r.name.toLowerCase().endsWith(ext)&&r.media_type===mime)||!Number.isSafeInteger(r.bytes)||r.bytes<1||r.bytes>SESSION_ATTACHMENT_MAX_BYTES||!/^[a-f0-9]{64}$/u.test(r.sha256)||typeof r.created_at!=='string'||!Number.isFinite(Date.parse(r.created_at)))throw new Error('Invalid public attachment receipt')
- return {receipt_id:r.receipt_id,kind:r.kind,name:r.name,media_type:r.media_type,bytes:r.bytes,sha256:r.sha256,created_at:r.created_at}
+ if(!r||typeof r!=='object'||Array.isArray(r)||!sessionAttachmentID.test(r.receipt_id)||!['text','image','document'].includes(r.kind)||typeof r.name!=='string'||attachmentName(r.name)!==r.name||typeof r.media_type!=='string'||attachmentMediaType(r.media_type)!==r.media_type||r.kind==='text'&&r.media_type!=='text/plain'||r.kind==='image'&&!imageTypes.has(r.media_type)||r.kind==='document'&&!Object.entries(SESSION_ATTACHMENT_DOCUMENT_TYPES).some(([ext,mime])=>r.name.toLowerCase().endsWith(ext)&&r.media_type===mime)||!Number.isSafeInteger(r.bytes)||r.bytes<1||r.bytes>SESSION_ATTACHMENT_MAX_BYTES||!/^[a-f0-9]{64}$/u.test(r.sha256)||typeof r.created_at!=='string'||!Number.isFinite(Date.parse(r.created_at))||r.retired_at!==undefined&&(typeof r.retired_at!=='string'||!Number.isFinite(Date.parse(r.retired_at))))throw new Error('Invalid public attachment receipt')
+ return {receipt_id:r.receipt_id,kind:r.kind,name:r.name,media_type:r.media_type,bytes:r.bytes,sha256:r.sha256,created_at:r.created_at,...(r.retired_at?{retired_at:r.retired_at}:{})}
 }
 function receipt(value:unknown,realm:string):StoredReceipt{
   const r=value as StoredReceipt
@@ -80,6 +80,15 @@ export class OwnedSessionAttachments {
  }
  private async storage<T>(read:()=>Promise<T>,signal:AbortSignal):Promise<T>{try{return await read()}catch(error){signal.throwIfAborted();if(error instanceof SessionRequestError)throw error;throw new SessionRequestError('session_attachment_unavailable')}}
  async get(principal:Principal,ref:string,id:unknown):Promise<StoredReceipt>{if(!sessionAttachmentID.test(String(id)))throw new Error('A server attachment receipt is required');const rows=await this.call(principal,ref,'get',{receipt_id:id});if(rows.length!==1)throw new Error('Attachment receipt unavailable');return rows[0]!}
+ async list(principal:Principal,ref:string,authorize:()=>Promise<void>):Promise<SessionAttachmentReceipt[]>{
+  await authorize();const rows=await this.call(principal,ref,'list');await authorize();return rows.map(publicReceipt)
+ }
+ async retire(principal:Principal,ref:string,id:unknown,authorize:()=>Promise<void>):Promise<SessionAttachmentReceipt>{
+  if(typeof id!=='string'||!sessionAttachmentID.test(id))throw new SessionRequestError('session_attachment_invalid')
+  await authorize();const rows=await this.call(principal,ref,'retire',{receipt_id:id});await authorize()
+  if(rows.length!==1||rows[0]!.receipt_id!==id||!rows[0]!.retired_at)throw new SessionRequestError('session_attachment_unavailable')
+  return publicReceipt(rows[0]!)
+ }
  async upload(principal:Principal,ref:string,metadata:SessionAttachmentUpload,source:AsyncIterable<Uint8Array>,signal:AbortSignal,authorize:()=>Promise<void>):Promise<SessionAttachmentReceipt>{
   if(this.transfers>=2)throw new SessionRequestError('session_attachment_busy');this.transfers++
   const active=AbortSignal.any([signal,this.runtime.signal,AbortSignal.timeout(30_000)])
@@ -118,6 +127,7 @@ export class OwnedSessionAttachments {
    if(part.type==='text'&&typeof part.text==='string'&&!part.text.includes('[lumo-attachment:')&&Object.keys(part).every(k=>['type','text'].includes(k))){result.push({type:'text',text:part.text});continue}
    if(part.type!=='attachment'||typeof part.receipt_id!=='string'||Object.keys(part).some(k=>!['type','receipt_id'].includes(k))||seen.has(part.receipt_id)||seen.size>=(this.config.maxPerMessage??4))throw new Error('Message attachments require unique server receipts')
    seen.add(part.receipt_id);await authorize();const r=await this.get(principal,ref,part.receipt_id)
+   if(r.retired_at)throw new SessionRequestError('session_attachment_retired')
    result.push({type:'text',text:'\n[lumo-attachment:'+r.receipt_id+'] '+r.name+' ('+r.media_type+', '+r.bytes+' bytes)'+(r.kind==='text'?' — use user_attachment_read with this receipt_id to read the attached UTF-8 text.':r.kind==='document'?' — use user_attachment_read with this receipt_id for a bounded extracted text preview. It does not prove the complete document was read; inspect coverage warnings.':'')+'\n'})
    if(r.kind==='image'){const binary=await this.download(principal,ref,r.receipt_id,signal,authorize);result.push({type:'image',mediaType:r.media_type,name:r.name,data:Buffer.from(binary.data).toString('base64')})}
   }

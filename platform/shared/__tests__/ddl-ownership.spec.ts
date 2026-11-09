@@ -286,8 +286,8 @@ function tablesIn(ddl: string): string[] {
  */
 const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequisites?: DdlSource | DdlSource[] }> = [
   {
-    label: '受控仓库快照与发布回执（Go governance ↔ 迁移 040）',
-    a: { files: [`${MIGRATION_DIR}/040_governance_controlled_repository.sql`] },
+    label: '受控仓库快照与发布回执（Go governance ↔ 迁移 040/043）',
+    a: { files: [`${MIGRATION_DIR}/040_governance_controlled_repository.sql`, `${MIGRATION_DIR}/043_repository_publication_reconciliation.sql`] },
     b: { files: ['control-plane/governance/internal/store/run_repository.go'], constName: 'runRepositoryDDL' },
     prerequisites: [
       { files: ['control-plane/governance/internal/store/store.go'], constName: 'DDL' },
@@ -330,8 +330,8 @@ const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequis
     b: { files: ['control-plane/connector-gateway/internal/owned/store.go'], constName: 'DDL' },
   },
   {
-    label: '动态 Session attachment receipts（Go session-control ↔ 迁移 028/035）',
-    a: { files: [`${MIGRATION_DIR}/028_session_attachment_receipts.sql`, `${MIGRATION_DIR}/035_session_document_attachments.sql`] },
+    label: '动态 Session attachment receipts（Go session-control ↔ 迁移 028/035/044）',
+    a: { files: [`${MIGRATION_DIR}/028_session_attachment_receipts.sql`, `${MIGRATION_DIR}/035_session_document_attachments.sql`, `${MIGRATION_DIR}/044_session_attachment_retirement.sql`] },
     b: { files: ['control-plane/session-control/internal/store/session_attachments.go'], constName: 'sessionAttachmentDDL' },
     prerequisites: { files: ['control-plane/session-control/internal/store/session_owners.go'], constName: 'sessionOwnerDDL' },
   },

@@ -32,6 +32,12 @@ export function validatePublicationPermit(value: RepositoryPublicationPermit) {
     }
 }
 type GitCall = (operation: string, path: Record<string, string>, body?: Record<string, unknown>) => Promise<unknown>;
+export type RepositoryReadCall = (operation: string, path: Record<string, string>, body?: Record<string, unknown>, query?: Record<string, string>) => Promise<unknown>;
+export interface RepositoryReconciliation {
+    outcome: 'confirmed' | 'unknown';
+    reason: 'confirmed' | 'provider_unavailable' | 'evidence_mismatch';
+    url?: string;
+}
 function field(value: unknown, path: string): unknown { let current = value; for (const key of path.split('.'))
     current = typeof current === 'object' && current !== null ? (current as Record<string, unknown>)[key] : undefined; return current; }
 /** The permit and complete change set are authority responses, never browser
@@ -68,4 +74,93 @@ export async function publishReviewedRepository(permit: RepositoryPublicationPer
     if (field(result, 'draft') !== true || field(result, 'base.sha') !== permit.base_commit || field(result, 'head.sha') !== commitSHA || field(result, 'head.ref') !== branch || field(result, 'head.repo.full_name') !== permit.repository || typeof url !== 'string' || !url.startsWith(prefix) || !/^\d+$/u.test(url.slice(prefix.length)))
         throw new Error('Repository provider did not confirm the exact reviewed draft pull request');
     return { url, branch, manifest_digest: permit.manifest_digest };
+}
+
+class RepositoryEvidenceMismatch extends Error {}
+function evidence(condition: unknown): asserts condition { if (!condition) throw new RepositoryEvidenceMismatch(); }
+const gitSHA = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{40}$/u.test(value);
+function gitObject(kind: 'blob' | 'tree', content: Buffer) { return createHash('sha1').update(`${kind} ${content.length}\0`).update(content).digest('hex'); }
+interface GitTreeEntry { path: string; mode: string; type: string; sha: string; }
+function treeHash(entries: GitTreeEntry[]) {
+    const sorted = [...entries].sort((a, b) => Buffer.compare(Buffer.from(a.path + (a.type === 'tree' ? '/' : '')), Buffer.from(b.path + (b.type === 'tree' ? '/' : ''))));
+    return gitObject('tree', Buffer.concat(sorted.map(entry => Buffer.concat([Buffer.from(`${entry.mode === '040000' ? '40000' : entry.mode} ${entry.path}\0`), Buffer.from(entry.sha, 'hex')]))));
+}
+
+/** Reconciliation never creates Git objects, refs or pull requests. Rebuilding
+ * the expected tree hash from complete base trees proves that hidden and
+ * unreviewed paths were retained byte-for-byte, without a truncated diff API. */
+export async function reconcileReviewedRepository(value: RepositoryPublicationPermit, call: RepositoryReadCall): Promise<RepositoryReconciliation> {
+    if (!value || !['publishing', 'draft'].includes(value.status)) throw new Error('Invalid authority repository reconciliation permit');
+    validatePublicationPermit({ ...value, status: 'publishing' });
+    const permit = { ...value, changes: value.changes.map(change => ({ ...change })) };
+    const [owner, repo] = permit.repository.split('/'), path = { owner: owner!, repo: repo! }, branch = `lumo/review-${permit.id}`;
+    const readRef = async (name: string) => {
+        const ref = await call('get_ref', { ...path, ref: `heads/${name}` });
+        evidence(field(ref, 'ref') === `refs/heads/${name}` && field(ref, 'object.type') === 'commit' && gitSHA(field(ref, 'object.sha')));
+        return field(ref, 'object.sha') as string;
+    };
+    try {
+        evidence(await readRef(permit.base_branch) === permit.base_commit);
+        const commitSHA = await readRef(branch);
+        const base = await call('get_commit', { ...path, commit_sha: permit.base_commit }), baseTree = field(base, 'tree.sha');
+        evidence(field(base, 'sha') === permit.base_commit && gitSHA(baseTree));
+        const commit = await call('get_commit', { ...path, commit_sha: commitSHA }), parents = field(commit, 'parents');
+        evidence(field(commit, 'sha') === commitSHA && field(commit, 'message') === `Lumo independently reviewed changes ${permit.manifest_digest}` && gitSHA(field(commit, 'tree.sha')) && Array.isArray(parents) && parents.length === 1 && field(parents[0], 'sha') === permit.base_commit);
+        let treeReads = 0, entryCount = 0;
+        const trees = new Map<string, GitTreeEntry[]>();
+        const readTree = async (sha: string) => {
+            const cached = trees.get(sha);
+            if (cached) return cached.map(entry => ({ ...entry }));
+            evidence(++treeReads <= 128);
+            const result = await call('get_tree', { ...path, tree_sha: sha }), raw = field(result, 'tree');
+            evidence(field(result, 'sha') === sha && field(result, 'truncated') === false && Array.isArray(raw) && raw.length <= 4096);
+            entryCount += raw.length;
+            evidence(entryCount <= 16384);
+            const seen = new Set<string>(), entries: GitTreeEntry[] = [];
+            for (const item of raw) {
+                const name = field(item, 'path'), mode = field(item, 'mode'), type = field(item, 'type'), objectSHA = field(item, 'sha');
+                evidence(typeof name === 'string' && !!name && name !== '.' && name !== '..' && !/[\0/]/u.test(name) && Buffer.byteLength(name) <= 1024 && Buffer.from(name).toString('utf8') === name && !seen.has(name) && gitSHA(objectSHA));
+                evidence((mode === '040000' && type === 'tree') || (['100644', '100755', '120000'].includes(String(mode)) && type === 'blob') || (mode === '160000' && type === 'commit'));
+                seen.add(name);
+                entries.push({ path: name, mode: mode as string, type: type as string, sha: objectSHA });
+            }
+            evidence(treeHash(entries) === sha);
+            trees.set(sha, entries);
+            return entries.map(entry => ({ ...entry }));
+        };
+        const rebuild = async (sha: string, changes: { segments: string[]; before: string; after: string }[]): Promise<string> => {
+            const entries = await readTree(sha), groups = new Map<string, typeof changes>();
+            for (const change of changes) { const name = change.segments[0]!; const group = groups.get(name) ?? []; group.push(change); groups.set(name, group); }
+            for (const [name, group] of groups) {
+                const entry = entries.find(item => item.path === name);
+                evidence(entry);
+                if (group[0]!.segments.length === 1) {
+                    evidence(group.length === 1 && entry.mode === '100644' && entry.type === 'blob' && entry.sha === gitObject('blob', Buffer.from(group[0]!.before)));
+                    entry.sha = gitObject('blob', Buffer.from(group[0]!.after));
+                } else {
+                    evidence(group.every(change => change.segments.length > 1) && entry.mode === '040000' && entry.type === 'tree');
+                    entry.sha = await rebuild(entry.sha, group.map(change => ({ ...change, segments: change.segments.slice(1) })));
+                }
+            }
+            return treeHash(entries);
+        };
+        evidence(await rebuild(baseTree, permit.changes.map(change => ({ segments: change.path.split('/'), before: change.before, after: change.after }))) === field(commit, 'tree.sha'));
+        // Two results suffice to detect ambiguity; one result on the first
+        // page cannot hide additional pages under GitHub's pagination contract.
+        const pulls = await call('list_pull_requests', path, undefined, { state: 'all', head: `${owner}:${branch}`, base: permit.base_branch, per_page: '2', page: '1' });
+        evidence(Array.isArray(pulls) && pulls.length === 1);
+        const number = field(pulls[0], 'number');
+        evidence(typeof number === 'number' && Number.isSafeInteger(number) && number > 0);
+        const url = `https://github.com/${permit.repository}/pull/${number}`;
+        const checkPull = async () => {
+            const pull = await call('get_pull_request', { ...path, pull_number: String(number) });
+            evidence(field(pull, 'number') === number && field(pull, 'html_url') === url && field(pull, 'state') === 'open' && field(pull, 'draft') === true && field(pull, 'merged') === false && field(pull, 'merged_at') === null && field(pull, 'base.sha') === permit.base_commit && field(pull, 'base.ref') === permit.base_branch && field(pull, 'base.repo.full_name') === permit.repository && field(pull, 'head.sha') === commitSHA && field(pull, 'head.ref') === branch && field(pull, 'head.repo.full_name') === permit.repository);
+        };
+        await checkPull();
+        evidence(await readRef(branch) === commitSHA && await readRef(permit.base_branch) === permit.base_commit);
+        await checkPull();
+        return { outcome: 'confirmed', reason: 'confirmed', url };
+    } catch (error) {
+        return { outcome: 'unknown', reason: error instanceof RepositoryEvidenceMismatch ? 'evidence_mismatch' : 'provider_unavailable' };
+    }
 }

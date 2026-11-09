@@ -162,3 +162,39 @@ it('opens a newly created session even when the list refresh fails', async () =>
   await waitFor(() => expect(byId('status').textContent).toContain('会话已创建，列表刷新失败'))
   expect(f.fetcher.mock.calls.filter(([url]) => url.endsWith('/create'))).toHaveLength(1)
 })
+
+it('persists staged attachment retirement before removing its chip and fences sending until the response', async () => {
+  let finish!: (value: Response) => void
+  const f=mount((url,_init,action)=>url.startsWith('/lumo/session-attachments/')?Promise.resolve(new Response(JSON.stringify(receipt))):action==='retireAttachment'?new Promise(resolve=>{finish=resolve}):undefined)
+  await f.open();fireEvent.change(byId('attachment-files'),{target:{files:[new File(['ready'],'ready.txt')]}})
+  await waitFor(()=>expect(byId('attachments').childElementCount).toBe(1))
+  fireEvent.click(byId('attachments').querySelector('button')!)
+  await waitFor(()=>expect(finish).toBeDefined())
+  expect(byId<HTMLButtonElement>('send').disabled).toBe(true)
+  expect(byId('attachments').childElementCount).toBe(1)
+  fireEvent.submit(byId('prompt'))
+  expect(f.fetcher.mock.calls.some(([url])=>url.endsWith('/prompt'))).toBe(false)
+  finish(new Response(JSON.stringify({receipt:{...receipt,retired_at:'2026-11-09'}})))
+  await waitFor(()=>expect(byId('attachments').childElementCount).toBe(0))
+  expect(byId('status').textContent).toContain('已发送的历史附件仍可读取')
+})
+
+it('recovers uploaded receipts after switching views and reconciles an uncertain retirement using the active list', async () => {
+  let retired=false
+  const f=mount((url,_init,action)=>{
+    if (url.startsWith('/lumo/session-attachments/')) return Promise.resolve(new Response(JSON.stringify(receipt)))
+    if (action==='attachmentList') return Promise.resolve(new Response(JSON.stringify({receipts:retired?[]:[receipt]})))
+    if (action==='retireAttachment') { retired=true;return Promise.reject(Error('response lost')) }
+  })
+  await f.open();fireEvent.click(byId('attachment-refresh'))
+  await screen.findByText('加入待发送')
+  fireEvent.click(screen.getByText('加入待发送'))
+  expect(byId('attachments').textContent).toContain(receipt.name)
+  fireEvent.click(byId('attachments').querySelector('button')!)
+  await screen.findByText('response lost')
+  expect(byId('attachments').childElementCount).toBe(1)
+  fireEvent.click(byId('attachment-refresh'))
+  await screen.findByText('没有可再次发送的附件。')
+  expect(byId('attachments').childElementCount).toBe(0)
+  expect(byId('status').textContent).toContain('已退役的待发送项已移除')
+})

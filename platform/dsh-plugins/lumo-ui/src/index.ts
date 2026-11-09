@@ -23,7 +23,7 @@ import { allowedAssetUrl, createUpstreamDemoService, type GallerySkill, type Ups
 import { loadCatalog, installItem, searchCatalog, type SkillHubConfig, type SkillHubKind } from './skillhub.ts'
 import { registerSkillHubRuntime, type SkillHubRuntime } from './skillhub-runtime.ts'
 import { LocalAssetError, LocalAssetStore } from './local-assets.ts'
-import {publishReviewedRepository,type RepositoryPublicationPermit} from './repository-publication.ts'
+import {publishReviewedRepository,reconcileReviewedRepository,type RepositoryPublicationPermit} from './repository-publication.ts'
 
 interface ProjectBudgetService {
   readProjectBudget(input: { realm: string; projectId: string; actorUserId: string }): Promise<unknown>
@@ -1966,12 +1966,28 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     return
   }
 
-  const repositoryPublication=pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/runs\/([^/]+)\/repository-publication$/u)
+  const repositoryPublication=pathname.match(/^\/lumo\/api\/tasks\/([^/]+)\/runs\/([^/]+)\/repository-publication(?:\/(reconcile))?$/u)
   if(repositoryPublication){
-    if(req.method!=='POST'){writeJson(res,405,{error:'method_not_allowed'});return}
+    if(req.method!=='POST'&&(req.method!=='GET'||repositoryPublication[3])){writeJson(res,405,{error:'method_not_allowed'});return}
     if(!requireClusterReady(config,res))return
     const task=safeID(repositoryPublication[1]),run=safeRunID(repositoryPublication[2]);if(!task||!run){writeJson(res,400,{error:'invalid_task_run'});return}
     const target=`/v1/tasks/${encodeURIComponent(task)}/runs/${encodeURIComponent(run)}/repository-publication`
+    if(req.method==='GET'){writeUpstream(res,await upstream(config,identity,'governance',target,req));return}
+    if(repositoryPublication[3]==='reconcile'){
+      // Browser input cannot select a publication, repository, commit or result.
+      const prepared=await upstream(config,identity,'governance',`${target}/reconcile`,req,'POST',Buffer.from('{}'),'application/json')
+      if(!prepared.ok){writeUpstream(res,prepared);return}
+      try{
+        const permit=prepared.data as RepositoryPublicationPermit&{reconciliation_revision:number}
+        if(!Number.isSafeInteger(permit.reconciliation_revision)||permit.reconciliation_revision<0)throw Error('invalid reconciliation revision')
+        const observed=await reconcileReviewedRepository(permit,(operation,path,body,query)=>invokeGitConnector(config,identity,req,'github',operation,path,query,body))
+        const saved=await upstream(config,identity,'governance',`${target}/${encodeURIComponent(permit.id)}/reconcile`,req,'PUT',Buffer.from(JSON.stringify({manifest_digest:permit.manifest_digest,revision:permit.reconciliation_revision,...observed})),'application/json')
+        // Recheck current account, role, task and review after provider reads.
+        if(!saved.ok){writeUpstream(res,saved);return}
+        writeUpstream(res,saved)
+      }catch{writeJson(res,502,{error:'仓库核对未完成，请稍后显式核对；已消费的发布许可仍保持锁定。'})}
+      return
+    }
     const authority=await upstream(config,identity,'governance',target,req,'POST',Buffer.from('{}'),'application/json')
     if(!authority.ok){writeUpstream(res,authority);return}
     try{

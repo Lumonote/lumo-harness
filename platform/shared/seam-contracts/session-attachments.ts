@@ -7,6 +7,8 @@ export interface SessionAttachmentReceipt {
   bytes: number
   sha256: string
   created_at: string
+  /** Stops future admission; immutable history remains readable and charged. */
+  retired_at?: string
 }
 export interface SessionAttachmentConfig { realm: string; maxUploadBytes?: number; maxTextBytes?: number; maxPerMessage?: number }
 export interface SessionAttachmentUpload { name: string; mediaType: string }

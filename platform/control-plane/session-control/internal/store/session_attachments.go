@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS session_attachment_receipts (
 );
 ALTER TABLE session_attachment_receipts DROP CONSTRAINT IF EXISTS session_attachment_receipts_kind_check;
 ALTER TABLE session_attachment_receipts ADD CONSTRAINT session_attachment_receipts_kind_check CHECK(kind IN ('text','image','document'));
+ALTER TABLE session_attachment_receipts ADD COLUMN IF NOT EXISTS retired_at TIMESTAMPTZ;
 `
 
 var attachmentID = regexp.MustCompile(`^att_[a-f0-9]{48}$`)
@@ -51,6 +52,7 @@ type AttachmentReceipt struct {
 	SHA256    string              `json:"sha256"`
 	NativeRef AttachmentNativeRef `json:"native_ref"`
 	CreatedAt time.Time           `json:"created_at"`
+	RetiredAt *time.Time          `json:"retired_at,omitempty"`
 }
 type AttachmentRequest struct {
 	ExecutionLeaseRequest
@@ -63,7 +65,7 @@ type AttachmentRequest struct {
 }
 
 func validAttachmentReceipt(realm string, r AttachmentReceipt) bool {
-	if r.ReceiptID != "" || !attachmentHash.MatchString(r.SHA256) || r.Bytes < 1 || r.Bytes > 8*1024*1024 || r.NativeRef.Bytes != r.Bytes || !utf8.ValidString(r.Name) || strings.TrimSpace(r.Name) == "" || len(r.Name) > 200 || strings.ContainsAny(r.Name, "/\\\x00\r\n") || strings.Contains(r.Name, "[lumo-attachment:") || r.NativeRef.Name != r.Name {
+	if r.ReceiptID != "" || r.RetiredAt != nil || !attachmentHash.MatchString(r.SHA256) || r.Bytes < 1 || r.Bytes > 8*1024*1024 || r.NativeRef.Bytes != r.Bytes || !utf8.ValidString(r.Name) || strings.TrimSpace(r.Name) == "" || len(r.Name) > 200 || strings.ContainsAny(r.Name, "/\\\x00\r\n") || strings.Contains(r.Name, "[lumo-attachment:") || r.NativeRef.Name != r.Name {
 		return false
 	}
 	if r.Kind == "text" {
@@ -88,12 +90,12 @@ func validAttachmentReceipt(realm string, r AttachmentReceipt) bool {
 	return r.MediaType == "image/png" || r.MediaType == "image/jpeg" || r.MediaType == "image/webp" || r.MediaType == "image/gif"
 }
 
-const attachmentColumns = `receipt_id,kind,name,media_type,bytes,sha256,native_ref,created_at`
+const attachmentColumns = `receipt_id,kind,name,media_type,bytes,sha256,native_ref,created_at,retired_at`
 
 func scanAttachment(row pgx.Row) (AttachmentReceipt, error) {
 	var r AttachmentReceipt
 	var raw []byte
-	err := row.Scan(&r.ReceiptID, &r.Kind, &r.Name, &r.MediaType, &r.Bytes, &r.SHA256, &raw, &r.CreatedAt)
+	err := row.Scan(&r.ReceiptID, &r.Kind, &r.Name, &r.MediaType, &r.Bytes, &r.SHA256, &raw, &r.CreatedAt, &r.RetiredAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, ErrNotFound
 	}
@@ -114,7 +116,7 @@ func (s *Store) SessionAttachments(ctx context.Context, ref string, in Attachmen
 		if in.Receipt == nil || in.ReceiptID != "" || len(in.ReceiptIDs) > 0 || in.SourceSession != "" || !validAttachmentReceipt(in.Realm, *in.Receipt) {
 			return nil, ErrOwnerInvalid
 		}
-	case "get":
+	case "get", "retire":
 		if !attachmentID.MatchString(in.ReceiptID) || in.Receipt != nil || len(in.ReceiptIDs) > 0 || in.SourceSession != "" {
 			return nil, ErrOwnerInvalid
 		}
@@ -206,9 +208,17 @@ func (s *Store) SessionAttachments(ctx context.Context, ref string, in Attachmen
 		if err == nil {
 			out = append(out, r)
 		}
+	case "retire":
+		// Logical retirement only: native content is shared with append-only
+		// history and legacy references. Keep both bytes and quota charged.
+		var r AttachmentReceipt
+		r, err = scanAttachment(tx.QueryRow(ctx, `UPDATE session_attachment_receipts SET retired_at=COALESCE(retired_at,clock_timestamp()) WHERE realm=$1 AND session_ref=$2 AND receipt_id=$3 AND owner_user_id=$4 AND project_id=$5 RETURNING `+attachmentColumns, in.Realm, ref, in.ReceiptID, in.OwnerUserID, in.ProjectID))
+		if err == nil {
+			out = append(out, r)
+		}
 	case "list":
 		var rows pgx.Rows
-		rows, err = tx.Query(ctx, `SELECT `+attachmentColumns+` FROM session_attachment_receipts WHERE realm=$1 AND session_ref=$2 AND owner_user_id=$3 AND project_id=$4 ORDER BY created_at,receipt_id LIMIT 100`, in.Realm, ref, in.OwnerUserID, in.ProjectID)
+		rows, err = tx.Query(ctx, `SELECT `+attachmentColumns+` FROM session_attachment_receipts WHERE realm=$1 AND session_ref=$2 AND owner_user_id=$3 AND project_id=$4 AND retired_at IS NULL ORDER BY created_at,receipt_id LIMIT 100`, in.Realm, ref, in.OwnerUserID, in.ProjectID)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -247,7 +257,7 @@ func (s *Store) SessionAttachments(ctx context.Context, ref string, in Attachmen
 			if err = storageledger.Register(ctx, tx, storageledger.Charge{Realm: in.Realm, ProjectID: in.ProjectID, Kind: "session-attachment", ReferenceID: ref + "/" + r.ReceiptID, Bytes: r.Bytes, ObjectKey: r.NativeRef.AttachmentID}); err != nil {
 				return nil, err
 			}
-			_, err = tx.Exec(ctx, `INSERT INTO session_attachment_receipts(realm,session_ref,receipt_id,owner_user_id,project_id,kind,name,media_type,bytes,sha256,native_ref,inherited_from_session) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, in.Realm, ref, r.ReceiptID, in.OwnerUserID, in.ProjectID, r.Kind, r.Name, r.MediaType, r.Bytes, r.SHA256, raw, in.SourceSession)
+			_, err = tx.Exec(ctx, `INSERT INTO session_attachment_receipts(realm,session_ref,receipt_id,owner_user_id,project_id,kind,name,media_type,bytes,sha256,native_ref,inherited_from_session,retired_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, in.Realm, ref, r.ReceiptID, in.OwnerUserID, in.ProjectID, r.Kind, r.Name, r.MediaType, r.Bytes, r.SHA256, raw, in.SourceSession, r.RetiredAt)
 			if err != nil {
 				return nil, err
 			}

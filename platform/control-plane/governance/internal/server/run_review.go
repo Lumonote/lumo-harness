@@ -19,6 +19,9 @@ func (s *Server) registerRunReviewRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/reviews", s.bindRunReview)
 	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/review-tasks", s.createRunReview)
 	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/repository-publication", s.authorizeRepositoryPublication)
+	mux.HandleFunc("GET /v1/tasks/{taskID}/runs/{runID}/repository-publication", s.repositoryPublicationStatus)
+	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/repository-publication/reconcile", s.prepareRepositoryReconciliation)
+	mux.HandleFunc("PUT /v1/tasks/{taskID}/runs/{runID}/repository-publication/{publicationID}/reconcile", s.recordRepositoryReconciliation)
 	mux.HandleFunc("POST /v1/tasks/{taskID}/runs/{runID}/repository-publication/{publicationID}/claim", s.claimRepositoryPublication)
 	mux.HandleFunc("PUT /v1/tasks/{taskID}/runs/{runID}/repository-publication/{publicationID}/complete", s.completeRepositoryPublication)
 }

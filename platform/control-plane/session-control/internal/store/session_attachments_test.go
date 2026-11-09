@@ -130,14 +130,18 @@ func TestAttachmentReceiptsPersistAndFenceEveryAccess(t *testing.T) {
 		if _, err := s.SessionAttachments(ctx, o.SessionRef, bad); err == nil {
 			t.Fatalf("accepted forged %s", field)
 		}
+		bad.Operation = "retire"
+		if _, err := s.SessionAttachments(ctx, o.SessionRef, bad); err == nil {
+			t.Fatalf("accepted forged retirement %s", field)
+		}
 	}
 	if _, err = s.pool.Exec(ctx, `UPDATE session_execution_leases SET expires_at=clock_timestamp()-interval '1 second'`); err != nil {
 		t.Fatal(err)
 	}
-	for _, op := range []string{"get", "list", "create"} {
+	for _, op := range []string{"get", "list", "create", "retire"} {
 		bad := in
 		bad.Operation = op
-		if op != "get" {
+		if op != "get" && op != "retire" {
 			bad.ReceiptID = ""
 		}
 		if op == "create" {
@@ -161,6 +165,10 @@ func TestAttachmentForkCopiesOnlyExplicitParentReceipts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	in.Operation, in.Receipt, in.ReceiptID = "retire", nil, first[0].ReceiptID
+	if _, err = s.SessionAttachments(ctx, o.SessionRef, in); err != nil {
+		t.Fatal(err)
+	}
 	child, token, err := s.ReserveSessionOwner(ctx, ReserveSessionOwner{Realm: "r", OwnerUserID: "alice", ProjectID: "p", NodeID: "node", ParentSessionRef: o.SessionRef})
 	if err != nil {
 		t.Fatal(err)
@@ -173,6 +181,7 @@ func TestAttachmentForkCopiesOnlyExplicitParentReceipts(t *testing.T) {
 	fork.FencingToken = lease.FencingToken
 	fork.Operation = "inherit"
 	fork.Receipt = nil
+	fork.ReceiptID = ""
 	fork.SourceSession = o.SessionRef
 	fork.ReceiptIDs = []string{first[0].ReceiptID}
 	if _, err = s.SessionAttachments(ctx, child.SessionRef, fork); err != nil {
@@ -185,8 +194,8 @@ func TestAttachmentForkCopiesOnlyExplicitParentReceipts(t *testing.T) {
 	fork.SourceSession = ""
 	fork.ReceiptIDs = nil
 	fork.ReceiptID = first[0].ReceiptID
-	if _, err = s.SessionAttachments(ctx, child.SessionRef, fork); err != nil {
-		t.Fatal(err)
+	if inherited, e := s.SessionAttachments(ctx, child.SessionRef, fork); e != nil || len(inherited) != 1 || inherited[0].RetiredAt == nil {
+		t.Fatalf("retired history lost on fork: %+v %v", inherited, e)
 	}
 	fork.ReceiptID = second[0].ReceiptID
 	if _, err = s.SessionAttachments(ctx, child.SessionRef, fork); !errors.Is(err, ErrNotFound) {
@@ -251,5 +260,81 @@ func TestAttachmentMetadataRejectsArbitraryReferences(t *testing.T) {
 		if validAttachmentReceipt("r", r) {
 			t.Fatalf("accepted %s", field)
 		}
+	}
+}
+
+func TestAttachmentRetirementKeepsHistoryAndQuotaAcrossRestart(t *testing.T) {
+	s, owner, request := attachmentFixture(t)
+	ctx := context.Background()
+	request.Operation, request.Receipt = "create", textAttachment()
+	created, err := s.SessionAttachments(ctx, owner.SessionRef, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Operation, request.Receipt, request.ReceiptID = "retire", nil, created[0].ReceiptID
+	forged := request
+	forged.OwnerUserID = "bob"
+	if _, err = s.SessionAttachments(ctx, owner.SessionRef, forged); err == nil {
+		t.Fatal("foreign retirement accepted")
+	}
+	retired, err := s.SessionAttachments(ctx, owner.SessionRef, request)
+	if err != nil || len(retired) != 1 || retired[0].RetiredAt == nil {
+		t.Fatalf("retire: %+v %v", retired, err)
+	}
+	repeated, err := New(s.pool).SessionAttachments(ctx, owner.SessionRef, request)
+	if err != nil || len(repeated) != 1 || !repeated[0].RetiredAt.Equal(*retired[0].RetiredAt) {
+		t.Fatalf("retirement is not idempotent: %+v %v", repeated, err)
+	}
+	request.Operation = "get"
+	history, err := s.SessionAttachments(ctx, owner.SessionRef, request)
+	if err != nil || len(history) != 1 || history[0].RetiredAt == nil || history[0].NativeRef != created[0].NativeRef {
+		t.Fatalf("history changed: %+v %v", history, err)
+	}
+	request.Operation, request.ReceiptID = "list", ""
+	active, err := s.SessionAttachments(ctx, owner.SessionRef, request)
+	if err != nil || len(active) != 0 {
+		t.Fatalf("retired receipt is still selectable: %+v %v", active, err)
+	}
+	var charged int64
+	if err = s.pool.QueryRow(ctx, `SELECT COALESCE(sum(bytes),0) FROM platform_storage_charges WHERE realm='r' AND kind='session-attachment' AND released_at IS NULL`).Scan(&charged); err != nil || charged != created[0].Bytes {
+		t.Fatalf("retirement released retained quota: %d %v", charged, err)
+	}
+}
+
+func TestAttachmentRetirementRollsBackWhenLeaseExpiresAtOwnerLock(t *testing.T) {
+	s, owner, request := attachmentFixture(t)
+	ctx := context.Background()
+	request.Operation, request.Receipt = "create", textAttachment()
+	created, err := s.SessionAttachments(ctx, owner.SessionRef, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Operation, request.Receipt, request.ReceiptID = "retire", nil, created[0].ReceiptID
+	if _, err = s.pool.Exec(ctx, `UPDATE session_execution_leases SET expires_at=clock_timestamp()+interval '1 second'`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT 1 FROM session_owners WHERE session_ref=$1 FOR UPDATE`, owner.SessionRef); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, e := s.SessionAttachments(ctx, owner.SessionRef, request); done <- e }()
+	waitExecutionLock(t, ctx, tx)
+	if _, err = tx.Exec(ctx, `SELECT pg_sleep(1.1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; !errors.Is(err, ErrExecutionFenced) {
+		t.Fatalf("expired retirement: %v", err)
+	}
+	var retained bool
+	if err = s.pool.QueryRow(ctx, `SELECT retired_at IS NULL FROM session_attachment_receipts WHERE receipt_id=$1`, request.ReceiptID).Scan(&retained); err != nil || !retained {
+		t.Fatalf("partial retirement committed: %v %v", retained, err)
 	}
 }

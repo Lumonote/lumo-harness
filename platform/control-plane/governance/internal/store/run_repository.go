@@ -11,6 +11,7 @@ import (
 	"github.com/lumo-harness/platform/governance/internal/domain"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const runRepositoryDDL = `
@@ -26,7 +27,11 @@ CREATE TABLE IF NOT EXISTS governance_repository_publications (
  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','publishing','draft')),
  url TEXT NOT NULL DEFAULT '',created_at TIMESTAMPTZ NOT NULL DEFAULT now(),published_at TIMESTAMPTZ,
  UNIQUE(realm,run_id,manifest_digest)
-);`
+);
+ALTER TABLE governance_repository_publications ADD COLUMN IF NOT EXISTS reconciliation TEXT NOT NULL DEFAULT '' CHECK(reconciliation IN ('','confirmed','unknown'));
+ALTER TABLE governance_repository_publications ADD COLUMN IF NOT EXISTS reconciliation_reason TEXT NOT NULL DEFAULT '' CHECK(reconciliation_reason IN ('','confirmed','provider_unavailable','evidence_mismatch'));
+ALTER TABLE governance_repository_publications ADD COLUMN IF NOT EXISTS reconciliation_revision BIGINT NOT NULL DEFAULT 0 CHECK(reconciliation_revision >= 0);
+ALTER TABLE governance_repository_publications ADD COLUMN IF NOT EXISTS checked_at TIMESTAMPTZ;`
 
 func repositorySnapshotTx(ctx context.Context, tx pgx.Tx, realm, runID string) (domain.RepositorySnapshot, error) {
 	var out domain.RepositorySnapshot
@@ -139,14 +144,18 @@ func verifyRepositorySetTx(ctx context.Context, tx pgx.Tx, realm, runID string, 
 }
 
 type RepositoryPublication struct {
-	ID             string                    `json:"id"`
-	ManifestDigest string                    `json:"manifest_digest"`
-	Repository     string                    `json:"repository"`
-	BaseCommit     string                    `json:"base_commit"`
-	BaseBranch     string                    `json:"base_branch"`
-	Changes        []domain.RepositoryChange `json:"changes"`
-	Status         string                    `json:"status"`
-	URL            string                    `json:"url,omitempty"`
+	ID                     string                    `json:"id"`
+	ManifestDigest         string                    `json:"manifest_digest"`
+	Repository             string                    `json:"repository"`
+	BaseCommit             string                    `json:"base_commit"`
+	BaseBranch             string                    `json:"base_branch"`
+	Changes                []domain.RepositoryChange `json:"changes"`
+	Status                 string                    `json:"status"`
+	URL                    string                    `json:"url,omitempty"`
+	Reconciliation         string                    `json:"reconciliation,omitempty"`
+	ReconciliationReason   string                    `json:"reconciliation_reason,omitempty"`
+	ReconciliationRevision int64                     `json:"reconciliation_revision"`
+	CheckedAt              *time.Time                `json:"checked_at,omitempty"`
 }
 
 // The host receives exact immutable bytes only after all independent reads,
@@ -229,6 +238,12 @@ func (s *Store) CompleteRepositoryPublication(ctx context.Context, realm, taskID
 	if err = authorizeArtifactWrite(ctx, tx, realm, taskID, actor, admin); err != nil {
 		return err
 	}
+	if task == domain.BusinessRejected || task == domain.BusinessArchived {
+		return ErrConflict
+	}
+	if _, err = repositoryReconciliationPermitTx(ctx, tx, realm, taskID, runID, actor); err != nil {
+		return err
+	}
 	var issuer string
 	if err = tx.QueryRow(ctx, `SELECT actor FROM governance_repository_publications WHERE realm=$1 AND task_id=$2 AND run_id=$3 AND id=$4::uuid AND manifest_digest=$5 FOR UPDATE`, realm, taskID, runID, id, digest).Scan(&issuer); err != nil {
 		return err
@@ -244,7 +259,7 @@ func (s *Store) CompleteRepositoryPublication(ctx context.Context, realm, taskID
 	if !strings.HasPrefix(url, prefix) || !repositoryPullNumber.MatchString(strings.TrimPrefix(url, prefix)) {
 		return ErrBadRequest
 	}
-	tag, err := tx.Exec(ctx, `UPDATE governance_repository_publications SET status='draft',url=$6,published_at=COALESCE(published_at,now()) WHERE realm=$1 AND task_id=$2 AND run_id=$3 AND id=$4::uuid AND manifest_digest=$5 AND (status='publishing' OR (status='draft' AND url=$6))`, realm, taskID, runID, id, digest, url)
+	tag, err := tx.Exec(ctx, `UPDATE governance_repository_publications SET status='draft',url=$6,published_at=COALESCE(published_at,now()),reconciliation_revision=reconciliation_revision+1 WHERE realm=$1 AND task_id=$2 AND run_id=$3 AND id=$4::uuid AND manifest_digest=$5 AND (status='publishing' OR (status='draft' AND url=$6))`, realm, taskID, runID, id, digest, url)
 	if err != nil {
 		return err
 	}

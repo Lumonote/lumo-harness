@@ -2,7 +2,7 @@
 
 本批在已有未提交实现上继续开发，保留此前改动，通过公开插件、Provider、工具、事件和持久化接口接线。没有修改 `deepseek-harness/` 源码或锁文件。
 
-## 本批实现范围
+## 已提交批次：972bc71
 
 | 能力 | 当前行为 |
 | --- | --- |
@@ -29,7 +29,7 @@
 
 ## 验证与环境边界
 
-最终冻结代码后的统一验证如下。Go 计数包含子测试，未把“包中无测试”的 skip 计为测试跳过；Windows 专用原生测试单列。
+972bc71 提交前冻结代码后的统一验证如下。Go 计数包含子测试，未把“包中无测试”的 skip 计为测试跳过；Windows 专用原生测试单列。
 
 | 检查范围 | 通过 | 失败 | 跳过 | 本机报告 |
 | --- | ---: | ---: | ---: | --- |
@@ -51,3 +51,33 @@ Windows Job Object 的真实进程终止、已安装桌面的权限与输入闭�
 真实模型供应商、实际 IdP、生产 PITR/HA/SLO 与 KMS 仍需要目标环境。没有执行真实租户密钥销毁、发布外部草稿 PR或修改生产部署。Session 附件、Spill、备份和旧共享内容没有完整生命周期权威，继续保留，不按未登记推断无引用。
 
 受控仓库档位不运行代码测试，草稿 PR 不自动合并；任意宿主操作、历史未知附件及连接器副作用也不因此获得完整影响证明。真实部署逐页视觉验收仍需另行核对。
+
+
+## 后续推进：仓库核对、附件退役与原生验收
+
+本节为 `972bc71` 之后的增量。主机重启后重新建立隔离 PostgreSQL 16/pgvector、Redis 7、MinIO，重新准备 Go 1.25.5 与 Python 文档运行时；没有复用已清除的旧 `/private/tmp` 报告作为本轮测试证据。
+
+| 增量 | 已实现的行为 |
+| --- | --- |
+| 仓库发布结果核对 | 证据面板显示持久发布状态，显式“核对”只读查询 Git 分支、单父提交、完整 Git tree 与唯一未合并草稿 PR。由批准 manifest 重建目标 tree，保留未修改子树和文件 mode；再读分支与 PR 检查观察期间是否变化。核对前后重新授权，CAS revision 阻止旧观察覆盖新结果；confirmed/unknown 持久化，不释放发布围栏、不重试外部发布。 |
+| Session 附件逻辑退役 | 管理已上传附件、重新加入待发送或显式退役；退役阻止后续消息选用，保留历史下载、模型按历史 marker 读取与分支继承。精确执行租约和锁后/提交前重验仍生效，发送与退役在当前执行节点互斥。退役保持共享内容及配额，结果不明可重新读取可用列表核对。 |
+| Mac 原生验收 | 新工具通过官方稳定 helper 身份和独立 runtime/socket 做只读 catalog，或在已授权条件下操作自己创建的 Swift 测试窗口；核对准确 PID、窗口与 executable，独立记录点击和文字效果。缺权限直接 blocked；SIGINT/SIGTERM、连接中止与正常完成均清理自建进程。 |
+| 常规 CI 活依赖 | push/PR 的完整平台发现统一接通 PG、Redis、源码固定版本 MinIO、HTTP 认证代理与固定约束的 Python 文档依赖。每个文件的实际 assertion 和总计数必须全部通过，任何 skipped/todo、空报告、重复文件或计数不一致都会失败；保留 JSON 报告并清理测试容器。 |
+
+迁移 `043_repository_publication_reconciliation.sql` 和 `044_session_attachment_retirement.sql` 与服务启动 DDL 对齐，真实 PG 共表结构检查已覆盖两条升级路径。详细合同见[受控仓库审核](controlled-repository-review.md)、[动态会话附件](dynamic-session-attachments-2026-11-07.md)及[电脑操作](computer-use-2026-11-08.md)。
+
+### 本轮冻结后的验证
+
+| 检查 | 通过 | 失败 | 用例跳过 | 本机报告 |
+| --- | ---: | ---: | ---: | --- |
+| 完整平台（302 文件） | 2836 | 0 | 0 | `/private/tmp/lumo-validation/platform-final.json` |
+| Governance 全包真实 PG race | 417 | 0 | 0 | `/private/tmp/lumo-validation/governance-full.jsonl` |
+| Session-control 全包真实 PG race | 302 | 0 | 0 | `/private/tmp/lumo-validation/session-control-full.jsonl` |
+
+完整平台开启所有当前活依赖门控，以两路 worker、30 秒 test/hook 期限运行；文档用 PyMuPDF 1.27.2、openpyxl 与 python-pptx，包括真实导出 XLSX/PPTX。初轮缺 openpyxl 导致两项明确跳过，零跳过校验器确实拒绝该报告；补齐后最终报告 2836/0/0，校验器 CLI 通过。完整运行包含仓库核对、实际 AgentLoop/JSONL 附件退役/历史/分支/并发、浏览器 DOM 交互、原生验收工具和 CI 报告正反例。
+
+平台及客户端 TypeScript、Host/Client bundle、两个变更 Go 模块的 vet/build 通过。Go 计数包含子测试，“无测试文件”的两个包不作为用例 skip。上游 Git porcelain 为空，`describe --always --dirty` 为 `fcc0ad4621`；`deepseek-harness/` 源码及锁文件没有修改。
+
+Mac 官方 arm64 release helper 实编译、签名/receipt 校验及原生 catalog 均通过，helper 清理得到实际确认。当前稳定 helper 的 Accessibility/Screen Recording 均未授权，因此桌面实机验收实际返回 blocked，没有创建测试输入窗口，没有申请权限或输入。Swift fixture 真编译和工具契约测试不替代实际桌面点击、输入、产品授权 UI 或模型视觉验收。
+
+常规 CI 工作流和报告守卫已本地验证，尚未取得本次 GitHub hosted run 结果；GitHub CLI 当前未登录。Windows 实机、物理多主机、真实供应商/IdP、生产恢复/HA/KMS、公证安装，以及 Session 快照、Spill、备份与旧共享内容的完整物理生命周期，仍需要对应环境或独立权威设计。本轮附件退役不宣称释放容量。
