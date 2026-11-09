@@ -19,7 +19,7 @@ use tauri::{
 pub const WINDOW: &str = "pet";
 const SCHEME: &str = "lumo-pet";
 const COMPACT_SIZE: (f64, f64) = (320.0, 280.0);
-const EXPANDED_SIZE: (f64, f64) = (380.0, 560.0);
+const EXPANDED_SIZE: (f64, f64) = (360.0, 500.0);
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 // Navigation callbacks do not expose whether the navigation came from a user

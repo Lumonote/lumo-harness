@@ -25,7 +25,7 @@ import { dshClientTypeConfigs, hasUsableDshClientTypes } from './dsh-client-type
 import { prepareSkillHubArchive, stageSkillHub } from './skillhub-tooling.mjs'
 import { acquireBuildLock } from './build-lock.mjs'
 import { prepareSourcePlugins } from '../tools/prepare-source-plugins.mjs'
-import { assertWindowsRuntimePaths, copyRuntimePackage, planRuntimePackages, resolveInstalledPackage } from './runtime-dependencies.mjs'
+import { assertRuntimePackageTargets, assertWindowsRuntimePaths, copyRuntimePackage, isOptionalRuntimeDependency, planRuntimePackages, resolveInstalledPackage, shouldStageRuntimeDependency } from './runtime-dependencies.mjs'
 import { compilePackagedTypeScriptPlugin, packagedTypeScriptPluginDirectories } from './packaged-typescript.mjs'
 import { stageDshNode } from './stage-dsh-node.mjs'
 import { cuaProviderPackage, stageCuaHelper, verifyCuaHelper } from './cua-helper.mjs'
@@ -493,9 +493,8 @@ for (let index = 0; index < packageQueue.length; index += 1) {
   for (const [name] of Object.entries(dependencies)) {
     if (bundled.has(name)) continue
     const root = packagePath(name, current.root)
-    const optional = current.manifest.optionalDependencies?.[name] !== undefined
-      || current.manifest.peerDependenciesMeta?.[name]?.optional === true
-      || isGracefullyOptionalDependency(name)
+    const targetOptional = isOptionalRuntimeDependency(current.manifest, name)
+    const optional = targetOptional || isGracefullyOptionalDependency(name)
     if (root === undefined) {
       if (optional) continue
       // 换台机器（或依赖被裁过）时闭包会撞上缺包：先按工作区自愈一次，再判失败。
@@ -505,18 +504,26 @@ for (let index = 0; index < packageQueue.length; index += 1) {
         repairWorkspaceDependencies(owner, name)
         const repaired = packagePath(name, current.root)
         if (repaired !== undefined) {
-          current.dependencies.set(name, queuePackage(repaired))
+          const repairedManifest = readManifest(repaired)
+          if (shouldStageRuntimeDependency(repairedManifest, { platform: targetPlatform, arch: targetArch }, { optional: targetOptional, importer: current.manifest.name })) {
+            current.dependencies.set(name, queuePackage(repaired))
+          }
           continue
         }
       }
       throw new Error(`无法构建桌面 runtime：${current.manifest.name} 缺少依赖 ${name}`)
     }
+    const dependencyManifest = readManifest(root)
+    // Missing-package fallbacks do not authorize removing a present required
+    // dependency. Only the manifest's explicit optional edges may be skipped.
+    if (!shouldStageRuntimeDependency(dependencyManifest, { platform: targetPlatform, arch: targetArch }, { optional: targetOptional, importer: current.manifest.name })) continue
     current.dependencies.set(name, queuePackage(root))
   }
 }
 
 assertDshPackagesCameFromSnapshot()
 const runtimePackages = planRuntimePackages(modulesRoot, packageSources)
+assertRuntimePackageTargets(runtimePackages, { platform: targetPlatform, arch: targetArch })
 for (const { root, destination, manifest } of runtimePackages) {
   copyRuntimePackage(root, destination, {
     exclude: manifest.name === cuaProviderPackage ? [join('native', '.build'), join('native', 'bin')]

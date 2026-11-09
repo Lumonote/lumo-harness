@@ -1,6 +1,66 @@
 import { cpSync, existsSync, readdirSync, realpathSync } from 'node:fs'
 import { basename, dirname, relative, resolve, sep } from 'node:path'
 
+// npm's os/cpu/libc fields are package eligibility constraints, not a list of
+// files that can be removed after copying. Keep the check here so the build
+// can reject a required dependency before its transitive closure is staged.
+function constraintValues(values) {
+  if (typeof values === 'string') return [values]
+  return Array.isArray(values) ? values.filter((value) => typeof value === 'string') : []
+}
+
+function matchesConstraint(values, target) {
+  const constraints = constraintValues(values)
+  if (constraints.length === 0) return true
+  if (constraints.length === 1 && constraints[0] === 'any') return true
+  if (constraints.some((value) => value === `!${target}`)) return false
+  const positive = constraints.filter((value) => !value.startsWith('!'))
+  // A target omitted from a negative-only constraint is allowed. For a
+  // positive constraint, an unknown target is conservatively incompatible.
+  return positive.length === 0 || (target !== undefined && positive.includes(target))
+}
+
+/**
+ * Return whether an npm package manifest is eligible for a desktop target.
+ * Like npm, libc constraints only apply on Linux. A Linux package with a
+ * positive libc constraint cannot be treated as portable if that target libc
+ * is unknown. This function only classifies metadata and never inspects files.
+ */
+export function isPackageTargetCompatible(manifest, { platform, arch, libc } = {}) {
+  return matchesConstraint(manifest?.os, platform)
+    && matchesConstraint(manifest?.cpu, arch)
+    && (platform !== 'linux' || matchesConstraint(manifest?.libc, libc))
+}
+
+export function isOptionalRuntimeDependency(manifest, name) {
+  // optionalDependencies override dependencies; optional peer metadata does
+  // not override a separately declared required dependency of the same name.
+  return Object.hasOwn(manifest.optionalDependencies ?? {}, name)
+    || (!Object.hasOwn(manifest.dependencies ?? {}, name)
+      && manifest.peerDependenciesMeta?.[name]?.optional === true)
+}
+
+// An explicit optional dependency may be absent on this platform. A required
+// one must fail the build instead of producing a smaller but broken runtime.
+export function shouldStageRuntimeDependency(manifest, target, { optional = false, importer = '?' } = {}) {
+  if (isPackageTargetCompatible(manifest, target)) return true
+  if (optional) return false
+  throw new Error(`无法构建桌面 runtime：${importer} 的必需依赖 ${manifest.name}@${manifest.version ?? '?'} 不兼容目标 ${target.platform}-${target.arch}`)
+}
+
+/**
+ * Validate every package placement after dependency planning. A package that
+ * declares an incompatible target must have been filtered before planning;
+ * throwing here prevents an accidental cross-platform native payload from
+ * silently entering a release.
+ */
+export function assertRuntimePackageTargets(entries, target) {
+  const incompatible = entries.filter(({ manifest }) => !isPackageTargetCompatible(manifest, target))
+  if (incompatible.length === 0) return
+  const details = incompatible.map(({ manifest, destination }) => `${manifest.name}@${manifest.version ?? '?'} (${destination})`)
+  throw new Error(`桌面 runtime 包含目标平台不兼容依赖：${details.join(', ')}`)
+}
+
 // Resolve from the importer before considering any shared fallback. A package
 // name alone is not an identity: pnpm can install several incompatible versions.
 export function resolveInstalledPackage(name, fromRoot) {

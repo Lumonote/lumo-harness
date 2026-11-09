@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { assertWindowsRuntimePaths, copyRuntimePackage, planRuntimePackages, resolveInstalledPackage } from '../runtime-dependencies.mjs'
+import { assertRuntimePackageTargets, assertWindowsRuntimePaths, copyRuntimePackage, isOptionalRuntimeDependency, isPackageTargetCompatible, planRuntimePackages, resolveInstalledPackage, shouldStageRuntimeDependency } from '../runtime-dependencies.mjs'
 
 type Package = {
   root: string
@@ -42,6 +42,69 @@ function fixture() {
 }
 
 describe('desktop runtime dependency layout', () => {
+  it('matches npm platform constraints including negative-only lists and any', () => {
+    const mac = { platform: 'darwin', arch: 'arm64' }
+    expect(isPackageTargetCompatible({}, mac)).toBe(true)
+    expect(isPackageTargetCompatible({ os: ['darwin'], cpu: ['arm64'] }, mac)).toBe(true)
+    expect(isPackageTargetCompatible({ os: ['!win32'], cpu: ['!x64'] }, mac)).toBe(true)
+    expect(isPackageTargetCompatible({ os: ['any'], cpu: ['any'] }, mac)).toBe(true)
+    expect(isPackageTargetCompatible({ os: 'darwin', cpu: 'arm64' }, mac)).toBe(true)
+    expect(isPackageTargetCompatible({ os: ['darwin', '!darwin'] }, mac)).toBe(false)
+    expect(isPackageTargetCompatible({ os: ['linux'], cpu: ['arm64'] }, mac)).toBe(false)
+    expect(isPackageTargetCompatible({ os: ['darwin'], cpu: ['x64'] }, mac)).toBe(false)
+    expect(isPackageTargetCompatible({ os: ['any', '!darwin'] }, mac)).toBe(false)
+    expect(isPackageTargetCompatible({ os: ['linux'], libc: ['glibc'] }, { platform: 'linux', arch: 'x64', libc: 'glibc' })).toBe(true)
+    expect(isPackageTargetCompatible({ os: ['linux'], libc: ['musl'] }, { platform: 'linux', arch: 'x64', libc: 'glibc' })).toBe(false)
+    expect(isPackageTargetCompatible({ libc: ['glibc'] }, { platform: 'linux', arch: 'x64' })).toBe(false)
+    expect(isPackageTargetCompatible({ libc: ['glibc'] }, mac)).toBe(true)
+  })
+
+  it('omits only incompatible optional dependency edges and keeps portable WASM packages', () => {
+    const { add, run } = fixture()
+    const target = { platform: 'darwin', arch: 'arm64' }
+    const app = add('optional-native-app', '1.0.0', 'module.exports = [require("native-darwin-arm64"), require("portable-wasm")]')
+    const native = add('native-darwin-arm64', '1.0.0', 'module.exports = "native"')
+    const wasm = add('portable-wasm', '1.0.0', 'module.exports = "wasm-fallback"')
+    app.dependencies.set('native-darwin-arm64', native)
+    app.dependencies.set('portable-wasm', wasm)
+    const foreign = { name: 'native-win32-x64', version: '1.0.0', os: ['win32'], cpu: ['x64'] }
+    // Even a polluted package store may contain this optional package. The
+    // closure must skip the edge, so its exclusive children are never queued.
+    expect(shouldStageRuntimeDependency(foreign, target, { optional: true, importer: app.manifest.name })).toBe(false)
+    expect(shouldStageRuntimeDependency({ ...wasm.manifest }, target, { optional: true })).toBe(true)
+    const { value, layout } = run('console.log(JSON.stringify(require("optional-native-app")))')
+    expect(value).toEqual(['native', 'wasm-fallback'])
+    expect(() => assertRuntimePackageTargets(layout, target)).not.toThrow()
+  })
+
+  it('fails for an incompatible required dependency instead of silently dropping it', () => {
+    const manifest = { name: 'required-native', version: '2.0.0', os: ['win32'], cpu: ['x64'] }
+    expect(() => shouldStageRuntimeDependency(manifest, { platform: 'darwin', arch: 'arm64' }, { importer: 'real-importer' }))
+      .toThrow(/real-importer.*必需依赖 required-native@2.0.0.*darwin-arm64/)
+  })
+
+  it('does not let optional peer metadata remove a separately required dependency', () => {
+    const target = { platform: 'darwin', arch: 'arm64' }
+    const foreign = { name: 'native-addon', version: '1.0.0', os: ['win32'] }
+    const importer = { dependencies: { 'native-addon': '1' }, peerDependencies: { 'native-addon': '1' }, peerDependenciesMeta: { 'native-addon': { optional: true } } }
+    expect(() => shouldStageRuntimeDependency(foreign, target, { optional: isOptionalRuntimeDependency(importer, foreign.name) })).toThrow(/必需依赖/)
+    expect(shouldStageRuntimeDependency(foreign, target, { optional: isOptionalRuntimeDependency({ ...importer, optionalDependencies: { 'native-addon': '1' } }, foreign.name) })).toBe(false)
+    expect(shouldStageRuntimeDependency(foreign, target, { optional: isOptionalRuntimeDependency({ peerDependenciesMeta: importer.peerDependenciesMeta }, foreign.name) })).toBe(false)
+  })
+
+  it('validates every planned placement, including a nested conflicting version', () => {
+    const { add, packages, modulesRoot } = fixture()
+    const portable = add('native-addon', '1.0.0', 'module.exports = "portable"')
+    const foreign = add('native-addon', '2.0.0', 'module.exports = "foreign"')
+    Object.assign(foreign.manifest, { os: ['win32'], cpu: ['x64'] })
+    const app = add('nested-addon-consumer', '1.0.0', 'module.exports = require("native-addon")')
+    app.dependencies.set('native-addon', foreign)
+    const layout = planRuntimePackages(modulesRoot, packages)
+    expect(layout.filter(entry => entry.manifest.name === portable.manifest.name)).toHaveLength(2)
+    expect(() => assertRuntimePackageTargets(layout, { platform: 'darwin', arch: 'arm64' }))
+      .toThrow(/native-addon@2.0.0.*nested-addon-consumer/)
+  })
+
   it('keeps the callable signal-exit 3 API for proper-lockfile alongside the signal-exit 4 API', () => {
     const { add, run } = fixture()
     const modern = add('signal-exit', '4.1.0', 'exports.onExit = () => "modern"')
