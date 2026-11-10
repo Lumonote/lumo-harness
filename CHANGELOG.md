@@ -3,6 +3,104 @@
 本文件记录本项目所有值得注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.1] - 2026-11-10
+
+自 v1.1.1 起的 49 条变更（未单独发布 1.2.0，版本号直接对齐分支 `v1.2.1`）：平台侧补齐受治理的
+分布式执行、管理工作流与持久恢复，桌面端加入受治理的电脑操作与原生鲸鱼伙伴，发布流水线
+改为「标签与产品版本一致 + 基础 CI + 集群验收 + 桌面包」全部通过才发布。
+
+### 版本亮点
+
+- **受治理的分布式执行与管理工作流**：governance / scheduler / collaborator 与
+  `@lumo/agent-teams` 补齐受治理分布式执行与原生模型部署；新增知识组织、项目预算与资源、
+  用户目录分页、受管 Space 授权和可配置的任务角色继承；自有会话支持历史分叉与当前用户
+  只读知识查询，并收紧事务期撤权与 Space 复用边界、补内容引用审计。
+- **持久恢复与会话 fencing**：持久恢复与带 fencing 的会话工作流、已校验的文件评审、
+  配额与质量评测、恢复验收；恢复协议 v2 携带期限，新增冻结快照克隆 Provider 与 Vault
+  只读核对（**冻结快照克隆不是 PITR；新 Provider 默认不部署**）。
+- **会话附件改为活跃名额制**：100 项限制改为「活跃可发送附件」，退役释放名额并保留历史与
+  逻辑配额，提供状态筛选、分页、容量和历史下载；仓库交付对账与评审草稿同步落地。
+- **桌面端**：受治理的电脑操作（Windows 与远程控制需本地显式同意，停止控制可靠生效）、
+  原生鲸鱼伙伴与更稳的弹窗定位、桌面宠物消息与回执加固；运行时按组件记录字节/文件数/
+  链接并执行绝对预算与 10% 增长限制；完整暂存 dsh-node 运行时依赖图并适配 Windows
+  路径长度限制。
+- **发布门禁**：正式标签必须与 `package.json`、Tauri、Chart `version`/`appVersion` 一致；
+  基础 CI、集群验收、桌面包共用一次解析的 upstream SHA，全部成功后才发布。Go 活依赖测试
+  接通 PG/Redis/MinIO/RocketMQ，逐包 JSONL 校验拒绝 skip、重复终态与缺包，关键模块开启 race。
+- **Lumo UI**：按账户、知识、目录、导航、请求和共享 shell 拆分；加入宽窄屏、键盘焦点、
+  命令菜单与读取失败恢复的 Chromium 验收；工作工具与原生「更多」菜单区分开。
+
+> **升级须知**：在线升级需按部署流程应用迁移 `045_session_attachment_inventory.sql` 与
+> `046_recovery_provider_protocol.sql`；046 为旧记录保留 v1 回执核对，未执行的旧批准不会
+> 自动升级为 v2 执行。
+>
+> **未验收边界（勿当作已通过）**：真实模型/TEI 与业务语料的质量分数尚未产出；Mac/Windows
+> 正式证书、公证及安装后的原生交互未以正式凭据验证；独立物理主机/卷、生产 HA/PITR、
+> IdP/KMS 与容量演练未在生产执行；新工作流的 GitHub hosted run 与完整集群发行验收以
+> 远端实际运行结果为准。详见
+> [`docs/platform-development-delivery-2026-11-09.md`](docs/platform-development-delivery-2026-11-09.md)。
+
+### 新功能（11）
+
+- **platform**: 补齐受治理的分布式执行与原生模型部署 (`43366c7b`)
+- **platform**: 补齐管理工作流与按范围的角色策略 (`62a43a72`)
+- **platform**: 补齐持久恢复与带 fencing 的会话工作流 (`47427222`)
+- **platform**: 新增自有会话工作流与已校验的文件评审 (`932672d9`)
+- **platform**: 新增配额、质量评测与恢复验收 (`0b932dd9`)
+- **desktop**: 新增原生鲸鱼伙伴与更稳的弹窗定位 (`cdf59a86`)
+- **desktop**: 新增受治理的电脑操作与可靠的停止控制 (`f29f1a62`)
+- **platform**: 改进管理协作与桌面宠物消息 (`d15c4850`)
+- **platform**: 补齐受治理交付与桌面执行 —— Windows/远程电脑控制、会话迁移、有界文档预览与仓库评审草稿 (`972bc713`)
+- **platform**: 仓库交付对账并退役会话附件 (`a0a8c202`)
+- **release**: 加固发布门禁并完成平台交付 (`aa17da51`)
+
+### 修复（33）
+
+- **desktop**: 兼容上游移除 invariant 后的 tsdown 入口 (`ca32ffc6`)
+- **desktop**: SkillHub 归档下载加同源备用地址与换源诊断 (`12390b21`)
+- **desktop**: 流韧性补丁只锚 send() 骨架，不再依赖上游回调体 (`15dc6d18`)
+- **desktop**: @types/react 改从 registry 取，不再 link 上游 ui-jobs 的副本 (`e01fae95`)
+- **desktop**: 先出 typert 投影再编 host，修全新克隆的 remote 子路径 TS2307 (`0d818200`)
+- **desktop**: 类型编译堆上限提到 8 GiB，修全新克隆的 V8 堆耗尽 (`74a884cb`)
+- **desktop**: git() 给足输出缓冲区，修 copyTrackedTree 的 ENOBUFS (`280d3daf`)
+- **desktop**: 修复上游 overlay 并默认打包固定版本的 Superagent (`b2743082`)
+- **desktop**: 保留相互冲突的运行时依赖版本 (`d751de11`)
+- **desktop**: 输出共享插件的传递运行时依赖 (`0c74a27c`)
+- **desktop**: 完整暂存 dsh-node 运行时依赖图 (`f80fff52`)
+- **desktop**: 在 Windows 路径长度限制内安全提升依赖 (`a3f897ec`)
+- **desktop**: 瞬时 NSIS 下载失败可重试，无需重建桌面包 (`b1d999c9`)
+- **desktop**: 收紧桌面伙伴体积并过滤运行时目标 (`920116fa`)
+- **desktop**: 固定源码拉取可重试，并缓存完整的插件构建 (`70124438`)
+- **plugins**: 隔离 Superagent 源码依赖安装 (`34057a88`)
+- **plugins**: PPT 依赖限定为可移植的二进制 wheel (`6c079bc6`)
+- **deploy**: 分体形态避开 api-bundle 的宿主端口并让探针派生认识 profile (`10cf1738`)
+- **deploy**: 修 rocketmq 入口顺序反例 (`831ed7b5`)
+- **scheduler**: 注册时间戳只在数据库采样一次 (`024a2f9a`)
+- **platform**: 协调项目、员工与知识管理流程 (`67183ab6`)
+- **shared**: 登记任务进度 DDL 的归属合同 (`04f4968e`)
+- **ui**: 区分工作工具与原生「更多」菜单 (`bf105cdb`)
+- **ci**: 共享宿主前置依赖，RocketMQ fixture 改在 dash 下运行 (`83a27f7e`)
+- **ci**: 对齐平台 API 并保留已暂存的 Typert 产物 (`3653974a`)
+- **ci**: 隔离技能 fixture 并推导原生 composer 草稿类型 (`a5bfefde`)
+- **ci**: 用 Python 调用 Corepack 版本固定门禁 (`59094ef4`)
+- **ci**: 平台测试前先构建宿主原生 flock 插件 (`9008360d`)
+- **ci**: 为知识集成测试提供 pgvector (`a01182ee`)
+- **ci**: 归档测试改用可移植的临时路径 (`de9011a1`)
+- **ci**: 预备固定版本的技能并重试 MinIO 启动期连接重置 (`320274f8`)
+- **ci**: 构建 overlay 客户端类型并校准运行时预算 (`7940db46`)
+- **ci**: 浏览器验收 runner 固定为 Ubuntu 24.04 (`94a3cbf8`)
+
+### 文档（2）
+
+- **platform**: 记录 GitHub 平台构建验收通过 (`fc2a7399`)
+- **desktop**: 桌面安装体积审计 (`7a19bec1`)
+
+### 工程与杂项（3）
+
+- **release**: dev 分支 push 自动出测试包 (`61ff582b`)
+- **release**: arm64 桌面包改用 macos-15，macos-14 镜像已进 brownout (`09bcb2d3`)
+- **observability**: 格式化 alerts-verify 的指标契约映射 (`4c00ef88`)
+
 ## [1.1.1] - 2026-10-01
 
 自 v1.1.0 起的 2 条变更：集群协同把节点失联判定换成真实存活来源，并补齐线程重派谱系；
@@ -361,6 +459,7 @@ README 补充 AI 定制服务与联系方式。
 - **lumo-ui**: 放大 SkillHub 市场字号与控件尺寸 (`c6d963d0`)
 - Initial commit (`41dbf440`)
 
+[1.2.1]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.2.1
 [1.1.1]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.1.1
 [1.1.0]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.0.0
