@@ -11,16 +11,19 @@ version="$(sed -n 's/^  "version": "\([^"]*\)".*/\1/p' "${script_dir}/tauri.conf
 arch="$(uname -m)"
 [ "${arch}" = "arm64" ] && arch="aarch64" || arch="x64"
 dmg_dir="${script_dir}/target/release/bundle/dmg"
-dmg="${dmg_dir}/DeepSeek-Harness_${version}_${arch}.dmg"
+signing_mode="$(node "${script_dir}/release-desktop.mjs" mode)"
+suffix=""
+[[ "${signing_mode}" == "unsigned" ]] && suffix="-unsigned"
+dmg="${dmg_dir}/DeepSeek-Harness_${version}_${arch}${suffix}.dmg"
 
 if [[ ! -d "${app}" ]]; then
   echo "DeepSeek Harness.app 不存在，请先在 platform/desktop 执行：cargo tauri build --bundles app" >&2
   exit 1
 fi
 
-# Formal releases fail closed; development DMGs do not need signing credentials.
-# Sign/notarize the .app before copying it into the compressed disk image.
-if [[ "${LUMO_RELEASE_SIGNING_REQUIRED:-0}" == "1" ]]; then
+# Signed builds require certificate signing and notarization before copying the
+# .app into the disk image. Unsigned builds retain the application's ad-hoc signature.
+if [[ "${signing_mode}" == "signed" ]]; then
   node "${script_dir}/release-desktop.mjs" app "${app}"
 fi
 
@@ -33,7 +36,5 @@ ln -s /Applications "${staging}/Applications"
 mkdir -p "${dmg_dir}"
 rm -f "${dmg}"
 hdiutil create -srcfolder "${staging}" -volname "DeepSeek Harness" -fs HFS+ -format UDZO -ov "${dmg}"
-if [[ "${LUMO_RELEASE_SIGNING_REQUIRED:-0}" == "1" ]]; then
-  node "${script_dir}/release-desktop.mjs" installer "${dmg}"
-fi
+node "${script_dir}/release-desktop.mjs" installer "${dmg}"
 echo "dmg 完成：${dmg}（$(du -h "${dmg}" | cut -f1)）"

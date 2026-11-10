@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
-import { buildWindows } from '../build-windows.mjs'
+import { buildWindows, finalizeWindowsBundle } from '../build-windows.mjs'
 
 interface CommandResult { code: number | null; signal?: string | null; output: string }
 
@@ -30,6 +30,36 @@ function harness(results: Array<CommandResult | Error>) {
 }
 
 describe('Windows desktop build and NSIS download recovery', () => {
+  it('always records a unique unsigned installer without Windows signing tools', () => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo unsigned NSIS '))
+    const run = vi.fn(() => { throw Error('Signing tools must not run') })
+    try {
+      writeFileSync(join(root, 'App.exe'), 'NSIS payload')
+      const result = finalizeWindowsBundle({ directory: root, env: { LUMO_RELEASE_SIGNING_REQUIRED: '0' }, run,
+        runtimeReport: { target: 'win-x64', version: '1.2.1', total: { contentBytes: 123, fileCount: 4 }, sourceRevision: 'a'.repeat(40), upstreamRevision: 'b'.repeat(40) } })
+      expect(result.artifact).toBe('App-unsigned.exe')
+      expect(existsSync(join(root, 'App.exe'))).toBe(false)
+      expect(JSON.parse(readFileSync(join(root, 'App-unsigned.exe.release.json'), 'utf8')).receipt.status).toBe('unsigned')
+      expect(run).not.toHaveBeenCalled()
+      writeFileSync(join(root, 'another.exe'), 'stale payload')
+      expect(() => finalizeWindowsBundle({ directory: root, env: {} })).toThrow(/唯一/)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('keeps the signed Windows bundle path strict and leaves its installer name intact', () => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo signed NSIS '))
+    const run = vi.fn(() => ({ status: 0, stdout: '' }))
+    const report = { target: 'win-x64', version: '1.2.1', total: { contentBytes: 123, fileCount: 4 }, sourceRevision: 'a'.repeat(40), upstreamRevision: 'b'.repeat(40) }
+    try {
+      writeFileSync(join(root, 'App.exe'), 'NSIS payload')
+      expect(() => finalizeWindowsBundle({ directory: root, env: { LUMO_RELEASE_SIGNING_REQUIRED: '1' }, run, runtimeReport: report })).toThrow(/LUMO_WINDOWS_CERT_THUMBPRINT/)
+      expect(run).not.toHaveBeenCalled()
+      const result = finalizeWindowsBundle({ directory: root, env: { LUMO_RELEASE_SIGNING_REQUIRED: '1', LUMO_WINDOWS_CERT_THUMBPRINT: 'a'.repeat(40), LUMO_WINDOWS_TIMESTAMP_URL: 'https://timestamp.example.test' }, run, runtimeReport: report })
+      expect(result.artifact).toBe('App.exe')
+      expect(result.receipt.status).toBe('signed')
+      expect(run.mock.calls.map(([, args]) => args[0])).toEqual(['verify', '-NoProfile', 'sign', 'verify'])
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
   it('builds once and bundles once when the download succeeds', async () => {
     const bundled = success()
     const f = harness([success(), bundled])

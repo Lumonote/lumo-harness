@@ -13,7 +13,8 @@
 #       main / tag v*  → 正式产物（tag v* 另附到 GitHub Release）
 #       其他分支       → 桌面测试包（artifact 名带 -test）
 #
-# 基础门禁复用 ci.yml，正式 tag 必须等待基础 CI、完整集群验收与签名桌面包。
+# 基础门禁复用 ci.yml，正式 tag 必须等待基础 CI、完整集群验收与桌面包。
+# 桌面包可使用发行证书签名，或明确标识为 unsigned；签名失败不会降级。
 #
 # Action 版本：统一取「首个声明 node24 运行时的主版本」，而不是各自的最新主版本。
 # 目标只是消除 GitHub 的 Node 20 弃用告警（Node 20 已从托管 runner 移除），而跨多个
@@ -30,6 +31,15 @@ name: release
 
 on:
   workflow_dispatch:
+    inputs:
+      signing_mode:
+        description: 'auto: sign when credentials are configured; otherwise build unsigned'
+        type: choice
+        default: auto
+        options:
+          - auto
+          - signed
+          - unsigned
   push:
     branches:
       - dev
@@ -123,6 +133,22 @@ jobs:
           node-version: '24'
           cache: 'pnpm'
           cache-dependency-path: platform/pnpm-lock.yaml
+
+      - name: Select signed or unsigned desktop packaging
+        id: signing-mode
+        shell: bash
+        env:
+          LUMO_RELEASE_SIGNING_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.signing_mode || vars.LUMO_RELEASE_SIGNING_MODE || 'auto' }}
+          LUMO_MACOS_SIGNING_P12: ${{ secrets.LUMO_MACOS_SIGNING_P12 }}
+          LUMO_MACOS_SIGNING_P12_PASSWORD: ${{ secrets.LUMO_MACOS_SIGNING_P12_PASSWORD }}
+          LUMO_MACOS_SIGNING_IDENTITY: ${{ secrets.LUMO_MACOS_SIGNING_IDENTITY }}
+          LUMO_MACOS_NOTARY_API_KEY: ${{ secrets.LUMO_MACOS_NOTARY_API_KEY }}
+          LUMO_MACOS_NOTARY_KEY_ID: ${{ secrets.LUMO_MACOS_NOTARY_KEY_ID }}
+          LUMO_MACOS_NOTARY_ISSUER: ${{ secrets.LUMO_MACOS_NOTARY_ISSUER }}
+          LUMO_WINDOWS_SIGNING_PFX: ${{ secrets.LUMO_WINDOWS_SIGNING_PFX }}
+          LUMO_WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.LUMO_WINDOWS_SIGNING_PFX_PASSWORD }}
+          LUMO_WINDOWS_TIMESTAMP_URL: ${{ vars.LUMO_WINDOWS_TIMESTAMP_URL }}
+        run: node platform/tools/resolve-release-signing.mjs
 
       - name: Check all DSH overlay anchors before expensive build setup
         shell: bash
@@ -219,7 +245,7 @@ jobs:
         run: pnpm --dir deepseek-harness install --frozen-lockfile
 
       - name: Locate Windows SDK signing tool
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+        if: runner.os == 'Windows' && steps.signing-mode.outputs.mode == 'signed'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -232,8 +258,8 @@ jobs:
           if (-not $path) { throw 'Windows SDK signtool.exe is unavailable' }
           "LUMO_WINDOWS_SIGNTOOL=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Prepare formal release signing credentials
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Prepare release signing credentials
+        if: steps.signing-mode.outputs.mode == 'signed'
         shell: bash
         env:
           LUMO_MACOS_SIGNING_P12: ${{ secrets.LUMO_MACOS_SIGNING_P12 }}
@@ -268,7 +294,7 @@ jobs:
       - name: Build desktop package
         shell: bash
         env:
-          LUMO_RELEASE_SIGNING_REQUIRED: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}
+          LUMO_RELEASE_SIGNING_REQUIRED: ${{ steps.signing-mode.outputs.required }}
         run: ./platform/build.sh --targets ${{ matrix.target }}
 
       - name: Prepare next measured runtime size baseline
@@ -306,7 +332,7 @@ jobs:
           retention-days: 30
 
       - name: Remove temporary signing credentials
-        if: always() && startsWith(github.ref, 'refs/tags/v')
+        if: always() && steps.signing-mode.outputs.mode == 'signed'
         shell: bash
         run: node platform/tools/prepare-release-signing.mjs --cleanup
 
@@ -315,9 +341,13 @@ jobs:
         id: suffix
         shell: bash
         run: |
+          signing_suffix=''
+          if [ '${{ steps.signing-mode.outputs.mode }}' = 'unsigned' ]; then
+            signing_suffix='-unsigned'
+          fi
           case "${GITHUB_REF}" in
-            refs/heads/main|refs/tags/v*) echo "suffix=" >> "$GITHUB_OUTPUT" ;;
-            *) echo "suffix=-test" >> "$GITHUB_OUTPUT" ;;
+            refs/heads/main|refs/tags/v*) echo "suffix=$signing_suffix" >> "$GITHUB_OUTPUT" ;;
+            *) echo "suffix=$signing_suffix-test" >> "$GITHUB_OUTPUT" ;;
           esac
 
       - name: Upload macOS dmg
@@ -329,7 +359,7 @@ jobs:
           if-no-files-found: error
           # dev 每次 push 出三份 1.3GB 级产物，默认 90 天会把存储配额吃光。测试包 7 天、
           # 正式产物 30 天足够：Release 本身另存安装包，artifact 只是中间件。
-          retention-days: ${{ steps.suffix.outputs.suffix == '-test' && 7 || 30 }}
+          retention-days: ${{ endsWith(steps.suffix.outputs.suffix, '-test') && 7 || 30 }}
 
       - name: Upload Windows installers
         if: runner.os == 'Windows'
@@ -338,7 +368,7 @@ jobs:
           name: lumo-desktop-${{ matrix.target }}${{ steps.suffix.outputs.suffix }}
           path: platform/desktop/target/release/bundle/nsis/*.exe
           if-no-files-found: error
-          retention-days: ${{ steps.suffix.outputs.suffix == '-test' && 7 || 30 }}
+          retention-days: ${{ endsWith(steps.suffix.outputs.suffix, '-test') && 7 || 30 }}
 
   # 只在 tag 上运行：桌面包和完整集群验收全部成功后才发布 Release。
   release:

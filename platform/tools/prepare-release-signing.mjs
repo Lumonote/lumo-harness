@@ -13,9 +13,13 @@ const nonempty = (env, key) => {
 const macKeys = ['LUMO_MACOS_SIGNING_P12', 'LUMO_MACOS_SIGNING_P12_PASSWORD', 'LUMO_MACOS_SIGNING_IDENTITY', 'LUMO_MACOS_NOTARY_API_KEY', 'LUMO_MACOS_NOTARY_KEY_ID', 'LUMO_MACOS_NOTARY_ISSUER']
 const windowsKeys = ['LUMO_WINDOWS_SIGNING_PFX', 'LUMO_WINDOWS_SIGNING_PFX_PASSWORD', 'LUMO_WINDOWS_TIMESTAMP_URL']
 
-export function signingInputs(env, platform) {
+export function signingInputKeys(platform) {
   assert.ok(['darwin', 'win32'].includes(platform), 'Only macOS and Windows release signing is supported')
-  for (const key of platform === 'darwin' ? macKeys : windowsKeys) {
+  return [...(platform === 'darwin' ? macKeys : windowsKeys)]
+}
+
+export function signingInputs(env, platform) {
+  for (const key of signingInputKeys(platform)) {
     if (key === 'LUMO_MACOS_NOTARY_API_KEY') assert.ok(typeof env[key] === 'string' && env[key].trim() && !/[\0]/u.test(env[key]), `Missing or invalid ${key}`)
     else nonempty(env, key)
   }

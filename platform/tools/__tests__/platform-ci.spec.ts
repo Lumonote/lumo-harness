@@ -46,6 +46,28 @@ describe('actual zero-skip Vitest report guard', () => {
   it('counts actual per-file assertions in a passing report', () => {
     expect(verifyPlatformTestReport(report())).toEqual({ files: 1, passed: 2, failed: 0, skipped: 0, todo: 0 })
   })
+  it('reports the failing file, test and original error when Vitest marks the run unsuccessful', () => {
+    const r = report(); r.success = false; r.testResults[0]!.status = 'failed'
+    const test = r.testResults[0]!.assertionResults[1]!
+    test.status = 'failed'; test.failureMessages.push('AssertionError: expected 2 to equal 1' as never)
+    expect(() => verifyPlatformTestReport(r)).toThrow('/platform/first.spec.ts: actual live IO (failed)\nAssertionError: expected 2 to equal 1')
+  })
+  it('reports collection failures that have no per-test assertions', () => {
+    const r = { ...report(), success: false, testResults: [
+      { name: '/platform/broken.spec.ts', status: 'failed', assertionResults: [], message: 'Cannot find module required-by-test' },
+    ] }
+    expect(() => verifyPlatformTestReport(r)).toThrow('/platform/broken.spec.ts (failed)\nCannot find module required-by-test')
+  })
+  it('retains the failed-run error for incomplete or malformed file evidence', () => {
+    const invalidLabel = { toString: null }
+    for (const testResults of [undefined, 'invalid', [null], [
+      { name: invalidLabel, status: invalidLabel, assertionResults: [
+        { fullName: invalidLabel, title: invalidLabel, status: invalidLabel, failureMessages: [] },
+      ] },
+    ]]) {
+      expect(() => verifyPlatformTestReport({ success: false, testResults })).toThrow('Vitest reported a failed or incomplete run')
+    }
+  })
   it.each(['pending', 'skipped', 'todo', 'disabled', 'failed'])('rejects %s even when the process and top-level report claim success', status => {
     const r = report(); r.testResults[0]!.assertionResults[1]!.status = status
     expect(() => verifyPlatformTestReport(r)).toThrow('actual live IO')

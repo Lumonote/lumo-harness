@@ -301,6 +301,25 @@ build_desktop() {
     # native Python wheels 与 Rust 壳都要求宿主平台/架构一致。
     die "$target 不能在 $host_desktop_target 宿主上构建：PPT venv 与 Rust 壳都要求宿主平台和架构一致。"
   fi
+  case "${LUMO_RELEASE_SIGNING_MODE:-}" in
+    signed)
+      [[ "${LUMO_RELEASE_SIGNING_REQUIRED:-1}" == "1" ]] || die "signed 模式必须要求发行证书签名（LUMO_RELEASE_SIGNING_REQUIRED=1）"
+      export LUMO_RELEASE_SIGNING_REQUIRED=1
+      ;;
+    unsigned|'')
+      [[ "${LUMO_RELEASE_SIGNING_REQUIRED:-0}" == "0" || "${LUMO_RELEASE_SIGNING_REQUIRED:-0}" == "1" ]] || die "LUMO_RELEASE_SIGNING_REQUIRED 必须为 0 或 1"
+      ;;
+    *) die "桌面打包的 LUMO_RELEASE_SIGNING_MODE 必须为 signed 或 unsigned；CI 会先解析 auto" ;;
+  esac
+  if [[ "${LUMO_RELEASE_SIGNING_MODE:-}" == "unsigned" ]]; then
+    [[ "${LUMO_RELEASE_SIGNING_REQUIRED:-0}" != "1" ]] || die "unsigned 模式不能同时要求发行证书签名（LUMO_RELEASE_SIGNING_REQUIRED=1）"
+    # Tauri 先读取 APPLE_CERTIFICATE，再考虑 signing identity；空字符串也会被视为
+    # 已配置，必须 unset。隔离在父构建入口完成，beforeBuild 子进程无法清理 Tauri 环境。
+    unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_PROVIDER_SHORT_NAME
+    unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH
+    unset LUMO_CUA_SIGNING_KEYCHAIN LUMO_MACOS_SIGNING_KEYCHAIN LUMO_MACOS_SIGNING_IDENTITY LUMO_MACOS_NOTARY_PROFILE
+    export LUMO_RELEASE_SIGNING_REQUIRED=0 APPLE_SIGNING_IDENTITY=- LUMO_CUA_SIGNING_IDENTITY=-
+  fi
   ensure_dsh_source_unless_dry
   run bash "$platform_root/upstream/install-components.sh" --target "$target"
   # tauri 的 beforeBuildCommand 调 build-runtime.mjs；target 经环境变量传入。

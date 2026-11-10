@@ -48,9 +48,30 @@ test('Go CI supplies live gates, structured package coverage and concurrency che
   assert.match(acceptance, /verify-go-test-report\.mjs/u)
   assert.doesNotMatch(acceptance, /grep -c '\^--- PASS/u)
 })
-test('formal tags require signing and preserve installer evidence', () => {
-  const body = job(read('.github/workflows/release.yml'), 'desktop')
-  for (const value of ['LUMO_RELEASE_SIGNING_REQUIRED:', 'prepare-release-signing.mjs', 'prepare-release-signing.mjs --cleanup', 'target/runtime-size/', 'target/release/release-evidence/', 'bundle/**/*.release.json']) assert.ok(body.includes(value))
+function desktopSigningContract(workflow) {
+  const body = job(workflow, 'desktop')
+  const step = name => body.match(new RegExp(`      - name: ${name}\\n([\\s\\S]*?)(?=      - (?:name:|uses:)|$(?![\\s\\S]))`, 'u'))?.[1] ?? ''
+  assert.match(workflow, /signing_mode:\n\s+description:.*\n\s+type: choice\n\s+default: auto/u)
+  assert.match(step('Select signed or unsigned desktop packaging'), /vars\.LUMO_RELEASE_SIGNING_MODE \|\| 'auto'/u)
+  assert.match(step('Select signed or unsigned desktop packaging'), /node platform\/tools\/resolve-release-signing\.mjs/u)
+  for (const name of ['Prepare release signing credentials', 'Remove temporary signing credentials', 'Locate Windows SDK signing tool']) {
+    const signingStep = step(name)
+    assert.match(signingStep, /if: .*steps\.signing-mode\.outputs\.mode == 'signed'/u)
+    assert.doesNotMatch(signingStep, /startsWith\(github\.ref/u)
+  }
+  assert.match(step('Remove temporary signing credentials'), /if: always\(\)/u)
+  assert.match(step('Build desktop package'), /LUMO_RELEASE_SIGNING_REQUIRED: \$\{\{ steps\.signing-mode\.outputs\.required \}\}/u)
+  assert.match(step('Compute artifact suffix'), /signing_suffix='-unsigned'/u)
+  for (const value of ['prepare-release-signing.mjs --cleanup', 'target/runtime-size/', 'target/release/release-evidence/', 'bundle/**/*.release.json']) assert.ok(body.includes(value), value)
+}
+test('both signed and unsigned packaging preserve evidence and use the resolved per-platform mode', () => desktopSigningContract(read('.github/workflows/release.yml')))
+test('desktop signing contract rejects tag-forced signing and bypassed credential cleanup', () => {
+  const workflow = read('.github/workflows/release.yml')
+  for (const mutation of [
+    workflow.replace("LUMO_RELEASE_SIGNING_REQUIRED: ${{ steps.signing-mode.outputs.required }}", "LUMO_RELEASE_SIGNING_REQUIRED: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}"),
+    workflow.replace("if: steps.signing-mode.outputs.mode == 'signed'", "if: startsWith(github.ref, 'refs/tags/v')"),
+    workflow.replace("if: always() && steps.signing-mode.outputs.mode == 'signed'", "if: steps.signing-mode.outputs.mode == 'signed'"),
+  ]) assert.throws(() => desktopSigningContract(mutation))
 })
 
 const macEnv = () => ({ LUMO_MACOS_SIGNING_P12: 'YWJj', LUMO_MACOS_SIGNING_P12_PASSWORD: 'P12-password-unique', LUMO_MACOS_SIGNING_IDENTITY: 'Developer ID Application: Lumo (ABCDE12345)', LUMO_MACOS_NOTARY_API_KEY: '-----BEGIN PRIVATE KEY-----\nfixture-private-key\n-----END PRIVATE KEY-----', LUMO_MACOS_NOTARY_KEY_ID: 'ABCDE12345', LUMO_MACOS_NOTARY_ISSUER: '12345678-1234-1234-1234-123456789012' })

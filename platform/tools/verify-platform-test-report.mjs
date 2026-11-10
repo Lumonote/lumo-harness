@@ -4,9 +4,31 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+function failedRunMessage(report) {
+  const details = ['Vitest reported a failed or incomplete run']
+  const label = (value, fallback) => typeof value === 'string' && value.trim() ? value : fallback
+  for (const file of Array.isArray(report.testResults) ? report.testResults : []) {
+    if (!file || typeof file !== 'object') continue
+    const fileName = label(file.name, '(unnamed file)')
+    const tests = Array.isArray(file.assertionResults) ? file.assertionResults : []
+    const failures = tests.filter(test => test && typeof test === 'object' && test.status !== 'passed')
+    for (const test of failures) {
+      details.push(`${fileName}: ${label(test.fullName, label(test.title, '(unnamed test)'))} (${label(test.status, 'unknown')})`)
+      for (const message of Array.isArray(test.failureMessages) ? test.failureMessages : []) {
+        if (typeof message === 'string' && message.trim()) details.push(message.trim())
+      }
+    }
+    if (file.status !== 'passed') {
+      if (failures.length === 0) details.push(`${fileName} (${label(file.status, 'unknown')})`)
+      if (typeof file.message === 'string' && file.message.trim()) details.push(file.message.trim())
+    }
+  }
+  return details.join('\n')
+}
+
 export function verifyPlatformTestReport(report) {
   assert.ok(report && typeof report === 'object' && !Array.isArray(report), 'Expected a Vitest JSON report')
-  assert.equal(report.success, true, 'Vitest reported a failed or incomplete run')
+  assert.equal(report.success, true, failedRunMessage(report))
   for (const key of ['numTotalTests', 'numPassedTests', 'numTotalTestSuites', 'numPassedTestSuites']) {
     assert.ok(Number.isSafeInteger(report[key]) && report[key] > 0, `${key} must contain actual executed tests`)
   }

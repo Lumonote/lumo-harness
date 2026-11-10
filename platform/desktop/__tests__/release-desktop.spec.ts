@@ -1,13 +1,17 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { finalizeInstaller, notarizeArtifact, preflightRelease, releaseConfiguration, signMacApplication } from '../release-desktop.mjs'
+import { finalizeBuiltInstaller, finalizeInstaller, installerSigningMode, loadInstallerRuntimeReport, notarizeArtifact, preflightRelease, recordUnsignedInstaller, releaseConfiguration, signMacApplication } from '../release-desktop.mjs'
 import { cuaBundleDigest, cuaProviderPackage } from '../cua-helper.mjs'
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 const identity = 'Developer ID Application: Lumo (&) (ABCDE12345)'
 const env = { LUMO_MACOS_SIGNING_IDENTITY: identity, LUMO_CUA_SIGNING_IDENTITY: identity, LUMO_MACOS_NOTARY_PROFILE: 'release (&) profile' }
+const unsignedReport = (target = 'darwin-arm64') => ({ target, version: '1.2.1', total: { contentBytes: 123, fileCount: 4 }, sourceRevision: 'a'.repeat(40), upstreamRevision: 'b'.repeat(40) })
 describe('formal desktop release boundary', () => {
   it.skipIf(process.platform === 'win32')('signs native payloads from inside out without mutating the content-addressed helper or Java resources', () => {
     const root = mkdtempSync(join(tmpdir(), 'lumo signed app ')); roots.push(root)
@@ -75,6 +79,7 @@ describe('formal desktop release boundary', () => {
     const result = finalizeInstaller(artifact, { env, platform: 'darwin', run })
     expect(result.bytes).toBe(9); expect(result.sha256).toMatch(/^[a-f0-9]{64}$/)
     expect(JSON.parse(readFileSync(`${artifact}.release.json`, 'utf8')).receipt.status).toBe('Accepted')
+    expect(result.signing).toEqual({ status: 'signed', certificate: true })
     expect(run.mock.calls.some(([, args]) => args.join(' ') === `stapler validate ${artifact}`)).toBe(true)
   })
   it('requires an existing-store Windows certificate and validates the signed installer', () => {
@@ -84,5 +89,93 @@ describe('formal desktop release boundary', () => {
     expect(finalizeInstaller(artifact, { env: win, platform: 'win32', run }).receipt.status).toBe('signed')
     expect(run.mock.calls.map(([, args]) => args[0])).toEqual(['verify', '-NoProfile', 'sign', 'verify'])
     expect(() => releaseConfiguration({ ...win, LUMO_WINDOWS_TIMESTAMP_URL: 'https://user:secret@timestamp.example.test' }, 'win32')).toThrow(/无凭据/)
+  })
+})
+
+describe('desktop installers without distribution certificates', () => {
+  it.each([
+    ['darwin', '.dmg', 'darwin-arm64'], ['win32', '.exe', 'win-x64'],
+  ])('records the actual %s installer and source identity without invoking signing tools', (platform, extension, target) => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo unsigned ')); roots.push(root)
+    const artifact = join(root, `App (&)${extension}`), body = Buffer.from('actual installer bytes')
+    writeFileSync(artifact, body)
+    const run = vi.fn(() => { throw Error('A signing tool must not run') })
+    const report = unsignedReport(target)
+    const result = finalizeBuiltInstaller(artifact, { env: { LUMO_RELEASE_SIGNING_MODE: 'unsigned', LUMO_RELEASE_SIGNING_REQUIRED: '0' }, platform, run, runtimeReport: report })
+    const output = join(root, `App (&)-unsigned${extension}`)
+    expect(existsSync(artifact)).toBe(false)
+    expect(readFileSync(output)).toEqual(body)
+    expect(result).toMatchObject({ artifact: `App (&)-unsigned${extension}`, bytes: body.length,
+      sha256: createHash('sha256').update(body).digest('hex'), receipt: { status: 'unsigned' }, signing: { status: 'unsigned', certificate: false },
+      target, version: report.version, runtime: report.total, sourceRevision: report.sourceRevision, upstreamRevision: report.upstreamRevision })
+    expect(JSON.parse(readFileSync(`${output}.release.json`, 'utf8'))).toEqual(result)
+    if (platform === 'darwin') expect(result.notarization).toEqual({ status: 'not-performed' })
+    expect(JSON.stringify(result)).not.toContain('Accepted')
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  it('requires runtime measurements and source identities before renaming an unsigned artifact', () => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo unsigned invalid ')); roots.push(root)
+    const artifact = join(root, 'App.dmg'); writeFileSync(artifact, 'installer')
+    for (const runtimeReport of [undefined, { ...unsignedReport(), target: 'win-x64' }, { ...unsignedReport(), sourceRevision: null },
+      { ...unsignedReport(), total: { contentBytes: -1, fileCount: 4 } }]) {
+      expect(() => recordUnsignedInstaller(artifact, { platform: 'darwin', runtimeReport })).toThrow(/runtime/)
+      expect(existsSync(artifact)).toBe(true)
+    }
+    writeFileSync(join(root, 'App-unsigned.dmg'), 'previous build')
+    expect(() => recordUnsignedInstaller(artifact, { platform: 'darwin', runtimeReport: unsignedReport() })).toThrow(/旧构建/)
+    expect(readFileSync(join(root, 'App-unsigned.dmg'), 'utf8')).toBe('previous build')
+  })
+
+  it('retains the strict signed API and rejects conflicting mode selections', () => {
+    const run = vi.fn()
+    expect(() => finalizeInstaller('/tmp/no-installer.dmg', { env: {}, platform: 'darwin', run })).toThrow(/LUMO_MACOS_SIGNING_IDENTITY/)
+    expect(() => finalizeBuiltInstaller('/tmp/no-installer.dmg', { env: { LUMO_RELEASE_SIGNING_REQUIRED: '1' }, platform: 'darwin', run })).toThrow(/LUMO_MACOS_SIGNING_IDENTITY/)
+    expect(installerSigningMode({})).toBe('unsigned')
+    expect(installerSigningMode({ LUMO_RELEASE_SIGNING_REQUIRED: '1' })).toBe('signed')
+    for (const selection of [
+      { LUMO_RELEASE_SIGNING_REQUIRED: '1', LUMO_RELEASE_SIGNING_MODE: 'unsigned' },
+      { LUMO_RELEASE_SIGNING_REQUIRED: '0', LUMO_RELEASE_SIGNING_MODE: 'signed' },
+      { LUMO_RELEASE_SIGNING_REQUIRED: 'maybe' }, { LUMO_RELEASE_SIGNING_MODE: 'auto' },
+    ]) expect(() => installerSigningMode(selection)).toThrow()
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  it('loads unsigned measurements directly and signed Mac measurements from the post-signing evidence', () => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo installer report ')); roots.push(root)
+    mkdirSync(join(root, 'lumo-runtime'), { recursive: true }); mkdirSync(join(root, 'target/runtime-size'), { recursive: true })
+    mkdirSync(join(root, 'target/release/release-evidence'), { recursive: true })
+    writeFileSync(join(root, 'lumo-runtime/runtime-manifest.json'), JSON.stringify({ target: 'darwin-arm64', version: '1.2.1' }))
+    const unsigned = unsignedReport(), signed = { ...unsigned, total: { contentBytes: 140, fileCount: 4 } }
+    writeFileSync(join(root, 'target/runtime-size/darwin-arm64.json'), JSON.stringify(unsigned))
+    writeFileSync(join(root, 'target/release/release-evidence/darwin-arm64.json'), JSON.stringify({ runtimeSize: signed }))
+    expect(loadInstallerRuntimeReport({ root, platform: 'darwin', mode: 'unsigned' })).toEqual(unsigned)
+    expect(loadInstallerRuntimeReport({ root, platform: 'darwin', mode: 'signed' })).toEqual(signed)
+    writeFileSync(join(root, 'target/runtime-size/darwin-arm64.json'), JSON.stringify({ ...unsigned, version: 'old' }))
+    expect(() => loadInstallerRuntimeReport({ root, platform: 'darwin', mode: 'unsigned' })).toThrow(/版本或目标/)
+  })
+
+  it.skipIf(process.platform === 'win32')('builds an unsigned DMG through the real script from another working directory and writes matching evidence', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'lumo dmg (&) '))); roots.push(root)
+    const bin = join(root, 'tools'), app = join(root, 'target/release/bundle/macos/DeepSeek Harness.app')
+    mkdirSync(bin); mkdirSync(app, { recursive: true }); writeFileSync(join(app, 'payload.txt'), 'app')
+    for (const name of ['make-dmg.sh', 'release-desktop.mjs', 'cua-helper.mjs', 'runtime-size.mjs']) copyFileSync(fileURLToPath(new URL(`../${name}`, import.meta.url)), join(root, name))
+    writeFileSync(join(root, 'tauri.conf.json'), '{\n  "version": "1.2.1"\n}\n')
+    mkdirSync(join(root, 'lumo-runtime'), { recursive: true }); mkdirSync(join(root, 'target/runtime-size'), { recursive: true })
+    writeFileSync(join(root, 'lumo-runtime/runtime-manifest.json'), JSON.stringify({ target: 'darwin-arm64', version: '1.2.1' }))
+    writeFileSync(join(root, 'target/runtime-size/darwin-arm64.json'), JSON.stringify(unsignedReport()))
+    writeFileSync(join(root, 'darwin-fixture.mjs'), "Object.defineProperty(process, 'platform', { value: 'darwin' })\n")
+    writeFileSync(join(bin, 'node'), `#!${process.execPath}\nconst { spawnSync } = require('node:child_process');\nconst result = spawnSync(process.execPath, ['--import', ${JSON.stringify(join(root, 'darwin-fixture.mjs'))}, ...process.argv.slice(2)], { stdio: 'inherit' });\nprocess.exit(result.status ?? 1);\n`, { mode: 0o755 })
+    writeFileSync(join(bin, 'cp'), `#!${process.execPath}\nrequire('node:fs').cpSync(process.argv.at(-2), process.argv.at(-1), { recursive: true });\n`, { mode: 0o755 })
+    writeFileSync(join(bin, 'uname'), '#!/bin/sh\nprintf "arm64\\n"\n', { mode: 0o755 })
+    writeFileSync(join(bin, 'hdiutil'), '#!/bin/sh\nfor artifact do :; done\nprintf "disk image fixture" > "$artifact"\n', { mode: 0o755 })
+    const result = spawnSync('bash', [join(root, 'make-dmg.sh')], { cwd: tmpdir(), encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`,
+      LUMO_RELEASE_SIGNING_REQUIRED: '0', LUMO_RELEASE_SIGNING_MODE: 'unsigned' } })
+    expect(result.status, result.stderr).toBe(0)
+    const artifact = join(root, 'target/release/bundle/dmg/DeepSeek-Harness_1.2.1_aarch64-unsigned.dmg')
+    const evidence = JSON.parse(readFileSync(`${artifact}.release.json`, 'utf8'))
+    expect(evidence.artifact).toBe('DeepSeek-Harness_1.2.1_aarch64-unsigned.dmg')
+    expect(evidence.bytes).toBe(readFileSync(artifact).length)
+    expect(evidence.notarization.status).toBe('not-performed')
   })
 })

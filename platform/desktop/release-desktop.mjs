@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { verifyCuaHelper, cuaProviderPackage } from './cua-helper.mjs'
 import { measureRuntime, enforceRuntimeBudget } from './runtime-size.mjs'
@@ -69,6 +69,58 @@ function macho(path) {
   return ['cefaedfe', 'cffaedfe', 'feedface', 'feedfacf'].includes(magic)
 }
 function hash(path) { return createHash('sha256').update(readFileSync(path)).digest('hex') }
+
+/** Select build output policy without changing the strict signed-only API below. */
+export function installerSigningMode(env = process.env) {
+  const required = env.LUMO_RELEASE_SIGNING_REQUIRED, mode = env.LUMO_RELEASE_SIGNING_MODE
+  if (required !== undefined && !['0', '1'].includes(required)) throw Error('LUMO_RELEASE_SIGNING_REQUIRED 必须为 0 或 1')
+  if (mode !== undefined && !['signed', 'unsigned'].includes(mode)) throw Error('LUMO_RELEASE_SIGNING_MODE 必须为 signed 或 unsigned')
+  const selected = required === undefined ? mode ?? 'unsigned' : required === '1' ? 'signed' : 'unsigned'
+  if (mode !== undefined && mode !== selected) throw Error('发行签名模式与 LUMO_RELEASE_SIGNING_REQUIRED 冲突')
+  return selected
+}
+
+export function loadInstallerRuntimeReport({ root = desktop, platform = process.platform, mode = installerSigningMode() } = {}) {
+  const manifest = JSON.parse(readFileSync(join(root, 'lumo-runtime/runtime-manifest.json'), 'utf8'))
+  const report = platform === 'darwin' && mode === 'signed'
+    ? JSON.parse(readFileSync(join(root, 'target/release/release-evidence', `${manifest.target}.json`), 'utf8')).runtimeSize
+    : JSON.parse(readFileSync(join(root, 'target/runtime-size', `${manifest.target}.json`), 'utf8'))
+  const targets = platform === 'darwin' ? ['darwin-arm64', 'darwin-x64'] : platform === 'win32' ? ['win-x64'] : []
+  if (!report || !targets.includes(manifest.target) || report.target !== manifest.target || report.version !== manifest.version) throw Error('安装包与 runtime 尺寸证据版本或目标不一致')
+  return report
+}
+
+function writeInstallerEvidence(artifact, { receipt, runtimeReport, signing, notarization }) {
+  const result = { schemaVersion: 1, artifact: artifact.split(/[\\/]/u).at(-1), bytes: lstatSync(artifact).size, sha256: hash(artifact), receipt, signing,
+    ...(notarization ? { notarization } : {}),
+    ...(runtimeReport ? { target: runtimeReport.target, version: runtimeReport.version, runtime: runtimeReport.total, sourceRevision: runtimeReport.sourceRevision, upstreamRevision: runtimeReport.upstreamRevision } : {}) }
+  writeFileSync(`${artifact}.release.json`, `${JSON.stringify(result, null, 2)}\n`)
+  return result
+}
+
+/** No distribution certificate is claimed; macOS application ad-hoc signatures remain intact. */
+export function recordUnsignedInstaller(artifact, { platform = process.platform, runtimeReport } = {}) {
+  const extension = platform === 'darwin' ? '.dmg' : platform === 'win32' ? '.exe' : null
+  if (!extension || extname(artifact) !== extension || !lstatSync(artifact).isFile()) throw Error('需要当前平台的现有安装包文件')
+  const targets = platform === 'darwin' ? ['darwin-arm64', 'darwin-x64'] : ['win-x64']
+  if (!runtimeReport || !targets.includes(runtimeReport.target) || typeof runtimeReport.version !== 'string' || !runtimeReport.version.trim()
+    || !Number.isSafeInteger(runtimeReport.total?.contentBytes) || runtimeReport.total.contentBytes < 0
+    || !Number.isSafeInteger(runtimeReport.total?.fileCount) || runtimeReport.total.fileCount < 0
+    || ![runtimeReport.sourceRevision, runtimeReport.upstreamRevision].every(value => typeof value === 'string' && /^[a-f0-9]{40}$/u.test(value))) throw Error('无证书安装包必须保留有效的 runtime 与源码身份报告')
+  const destination = artifact.endsWith(`-unsigned${extension}`) ? artifact : `${artifact.slice(0, -extension.length)}-unsigned${extension}`
+  if (destination !== artifact) {
+    if (existsSync(destination) || existsSync(`${artifact}.release.json`)) throw Error('无证书安装包目标或旧发行证据已存在；请清理旧构建产物')
+    renameSync(artifact, destination)
+  }
+  return writeInstallerEvidence(destination, { receipt: { status: 'unsigned' }, signing: { status: 'unsigned', certificate: false },
+    ...(platform === 'darwin' ? { notarization: { status: 'not-performed' } } : {}), runtimeReport })
+}
+
+export function finalizeBuiltInstaller(artifact, { env = process.env, ...options } = {}) {
+  return installerSigningMode(env) === 'signed'
+    ? finalizeInstaller(artifact, { ...options, env })
+    : recordUnsignedInstaller(artifact, options)
+}
 
 /** Sign nested code explicitly, preserving the official content-addressed helper.
  * The helper is signed by its own builder before its receipt is frozen. Re-signing
@@ -163,25 +215,21 @@ export function finalizeInstaller(artifact, { env = process.env, platform = proc
     checked(run, config.tool, ['verify', '/pa', '/all', '/v', artifact])
     receipt = { status: 'signed', thumbprint: config.thumbprint }
   }
-  const result = { schemaVersion: 1, artifact: artifact.split(/[\\/]/u).at(-1), bytes: lstatSync(artifact).size, sha256: hash(artifact), receipt,
-    ...(runtimeReport ? { target: runtimeReport.target, version: runtimeReport.version, runtime: runtimeReport.total, sourceRevision: runtimeReport.sourceRevision, upstreamRevision: runtimeReport.upstreamRevision } : {}) }
-  writeFileSync(`${artifact}.release.json`, `${JSON.stringify(result, null, 2)}\n`)
-  return result
+  return writeInstallerEvidence(artifact, { receipt, runtimeReport, signing: { status: 'signed', certificate: true },
+    ...(platform === 'darwin' ? { notarization: receipt } : {}) })
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [action, artifact] = process.argv.slice(2)
-    if (action === 'preflight') preflightRelease()
+    if (action === 'mode') console.log(installerSigningMode())
+    else if (action === 'preflight') preflightRelease()
     else if (action === 'app' && artifact && process.platform === 'darwin') finalizeMacRelease(resolve(artifact))
     else if (action === 'installer' && artifact) {
-      const manifest = JSON.parse(readFileSync(join(desktop, 'lumo-runtime/runtime-manifest.json'), 'utf8'))
-      const report = process.platform === 'darwin'
-        ? JSON.parse(readFileSync(join(desktop, 'target/release/release-evidence', `${manifest.target}.json`), 'utf8')).runtimeSize
-        : JSON.parse(readFileSync(join(desktop, 'target/runtime-size', `${manifest.target}.json`), 'utf8'))
-      if (report.target !== manifest.target || report.version !== manifest.version) throw Error('安装包与 runtime 尺寸证据版本不一致')
-      finalizeInstaller(resolve(artifact), { runtimeReport: report })
+      const mode = installerSigningMode()
+      const report = loadInstallerRuntimeReport({ mode })
+      finalizeBuiltInstaller(resolve(artifact), { runtimeReport: report })
     }
-    else throw Error('用法：node release-desktop.mjs preflight | app APPLICATION.app | installer INSTALLER.dmg/exe')
+    else throw Error('用法：node release-desktop.mjs mode | preflight | app APPLICATION.app | installer INSTALLER.dmg/exe')
   } catch (error) { console.error(error.message); process.exitCode = 1 }
 }

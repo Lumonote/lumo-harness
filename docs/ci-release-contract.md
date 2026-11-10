@@ -2,9 +2,29 @@
 
 正式 `v*` tag 必须是规范语义版本，并与 `platform/package.json`、桌面 Tauri 版本、Chart version/appVersion 四处相同；错误标签在构建前失败。通过后只解析一次 upstream `master` 的完整 Git SHA。基础 CI、集群验收和三种桌面安装器均使用该 SHA；任一基础检查、集群验收或桌面构建失败，发布 job 都不会执行。普通 push/PR 与夜间集群工作流继续验证最新 `master`，不将上游长期冻结。
 
-## 正式桌面凭据
+## 桌面签名模式与凭据
 
-GitHub Actions 的正式 tag 构建要求以下配置，缺失时失败，不回落到 ad-hoc：
+桌面安装包支持有发行证书和无发行证书两种构建。手动运行 `release` 工作流时，
+`signing_mode` 可选 `auto`（默认）、`signed` 或 `unsigned`；推送正式 `v*` tag 时读取
+Repository variable `LUMO_RELEASE_SIGNING_MODE`，未配置时使用 `auto`。
+
+| 模式 | 每个平台的行为 |
+| --- | --- |
+| `auto` | 该平台全部签名输入均未配置时生成无发行证书包；输入完整且有效时签名；只配置部分或输入无效时失败 |
+| `signed` | 要求该平台完整且有效的签名输入，缺失或无效即失败 |
+| `unsigned` | 明确生成无发行证书包，忽略已配置的签名输入 |
+
+`auto` 对 macOS 和 Windows 独立判断，因此可同时产出已签名的 Mac 包和无证书的 Windows 包。
+模式只选择桌面签名方式；正式 tag 仍须通过完整基础 CI、集群验收和三平台桌面构建，
+且全部使用本次解析的同一个 upstream SHA。
+
+无发行证书安装器的文件名及 artifact 名带 `unsigned`，旁附的 `*.release.json` 仍记录
+最终 SHA-256、下载字节、runtime 测量和平台/upstream 提交身份；
+`signing.status` 为 `unsigned`，`signing.certificate` 为 `false`。
+macOS 使用本地 ad-hoc 签名，包含 CUA helper，不执行 Developer ID 签名或 Apple 公证；
+Windows 不执行 Authenticode 签名。系统可能提示无法验证开发者或未识别的发行者。
+
+`signed` 模式或 `auto` 检测到签名输入时，需要以下对应平台的配置：
 
 | 配置 | 类型 | 内容 |
 | --- | --- | --- |
@@ -18,7 +38,11 @@ GitHub Actions 的正式 tag 构建要求以下配置，缺失时失败，不回
 | `LUMO_WINDOWS_SIGNING_PFX_PASSWORD` | Secret | PFX 密码 |
 | `LUMO_WINDOWS_TIMESTAMP_URL` | Repository variable | RFC 3161 时间戳 HTTP(S) 服务 |
 
-`prepare-release-signing.mjs` 在 runner 临时目录创建隔离 Keychain 或导入 `CurrentUser\My`。P12/PFX 密码由子进程环境读取，不写入命令参数；`.p8` 只通过私有临时文件提供。原始文件在 setup 的 finally 中删除，构建后的 always 步骤删除 Keychain/证书。工具错误不回显可能含凭据的输出。
+Mac 的 Developer ID Application 证书通过 Apple Developer 获取，并与对应私钥一起导出为 P12；
+公证 API Key 从 App Store Connect 获取。Windows 使用代码签名证书及对应私钥导出的 PFX。
+证书、私钥和密码保存为上表的 Repository secrets，不提交到仓库。
+
+选择签名后，`prepare-release-signing.mjs` 在 runner 临时目录创建隔离 Keychain 或导入 `CurrentUser\My`。P12/PFX 密码由子进程环境读取，不写入命令参数；`.p8` 只通过私有临时文件提供。原始文件在 setup 的 finally 中删除，构建后的 always 步骤删除 Keychain/证书。工具错误不回显可能含凭据的输出。
 
 Windows 先以 `EphemeralKeySet` 解析 PFX，拒绝预存同指纹证书、已有私钥公钥复用和非唯一 signer。
 完整证书集合与受保护的预存指纹先写入公开回执；修改证书仓库前再次检查碰撞，原子更新导入状态。
@@ -27,7 +51,7 @@ Windows 先以 `EphemeralKeySet` 解析 PFX，拒绝预存同指纹证书、已�
 真实 Windows Certificate Provider、证书导入和私钥删除，以及 Mac ACL、签名、公证和时间戳服务，
 仍须在对应 runner 验证，故障 fixture 不提供该原生证明。
 
-正式产物保留 runtime 体积、签名/公证回执、安装器 SHA-256 及平台/upstream 提交身份。体积缓存只来自成功构建的实测报告；没有旧报告时明确 bootstrap，仍执行绝对预算。已有基线时执行同目标平台增长预算。
+有发行证书的产物另外保留签名/公证回执。两种产物均保留 runtime 体积、安装器 SHA-256 及平台/upstream 提交身份。体积缓存只来自成功构建的实测报告；没有旧报告时明确 bootstrap，仍执行绝对预算。已有基线时执行同目标平台增长预算。
 
 ## Go 活依赖与执行证据
 

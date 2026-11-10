@@ -47,6 +47,9 @@ import (
 // exec mqadmin（容器由 resolveBrokerContainer 解析：显式变量 > compose 服务标签反查，
 // 见其注释）；不可用则警告降级（套件变慢但语义不变）。LUMO_TEST_RMQ_RESET=0 可显式关闭。
 func TestMain(m *testing.M) {
+	// SDK 在后台创建连接时无锁读取这个进程级开关。只在启动任何客户端前设置，
+	// 不在 producer/consumer helper 中重写，否则会与已有客户端的拨号产生 data race。
+	rmq.EnableSsl = false // 本地 proxy TLS permissive；生产 TLS 随 helm 形态
 	if endpoint := os.Getenv("LUMO_TEST_RMQ_ENDPOINT"); endpoint != "" {
 		topics, err := rmqpublish.Topics(rmqpublish.TopicPrefixDefault)
 		if err != nil {
@@ -204,7 +207,6 @@ func rmqEndpoint(t *testing.T) string {
 
 func newProducer(t *testing.T, endpoint string) rmq.Producer {
 	t.Helper()
-	rmq.EnableSsl = false // 本地 proxy TLS permissive；生产 TLS 随 helm 形态
 	p, err := rmq.NewProducer(&rmq.Config{
 		Endpoint:    endpoint,
 		Credentials: &credentials.SessionCredentials{AccessKey: "", AccessSecret: ""},
@@ -221,7 +223,6 @@ func newProducer(t *testing.T, endpoint string) rmq.Producer {
 
 func newSimpleConsumer(t *testing.T, endpoint, group string, topics ...string) rmq.SimpleConsumer {
 	t.Helper()
-	rmq.EnableSsl = false
 	all, err := rmqconsume.SubscriptionExpressions(rmqpublish.TopicPrefixDefault)
 	if err != nil {
 		t.Fatalf("构造订阅: %v", err)

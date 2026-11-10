@@ -75,14 +75,37 @@ Windows 包内使用 `runtime/lumo-runtime.cmd`、`node.exe` 和 `python/python.
 从仓库根目录只读统计；加 `--hash-duplicates` 核对大文件副本。跨平台原因、历史样本和优化边界见
 [安装体积排查](../../docs/desktop-installation-size-audit-2026-11-09.md)。
 
-### 正式签名与公证
+### 有证书与无证书打包
 
-普通开发构建继续允许无发行凭据。正式发布设置 `LUMO_RELEASE_SIGNING_REQUIRED=1`，
+两种方式均可生成完整桌面安装器。无发行证书包的文件名及 artifact 名带 `unsigned`；
+macOS 使用本地 ad-hoc 签名，包含 CUA helper，不执行 Developer ID 签名或 Apple 公证；
+Windows 不执行 Authenticode 签名。系统可能提示无法验证开发者或未识别的发行者。
+
+本机构建默认 `LUMO_RELEASE_SIGNING_REQUIRED=0`，不要求发行凭据。
+要明确生成无证书包并隔离继承的 Apple/CUA 签名配置，在仓库根目录指定：
+
+```sh
+LUMO_RELEASE_SIGNING_MODE=unsigned LUMO_RELEASE_SIGNING_REQUIRED=0 ./platform/build.sh --targets darwin-arm64
+# Windows 构建机的 Git Bash 使用相同入口
+LUMO_RELEASE_SIGNING_MODE=unsigned LUMO_RELEASE_SIGNING_REQUIRED=0 ./platform/build.sh --targets win-x64
+```
+
+GitHub Actions 的 `release` 工作流提供 `signing_mode`：`auto`（默认）按每个平台的输入独立选择，
+没有该平台的任何签名输入时构建无证书包，全部完整且有效时签名，只配置部分或输入无效时失败；
+`signed` 强制完整凭据；`unsigned` 明确忽略证书并构建无证书包。
+推送正式 tag 时通过 Repository variable `LUMO_RELEASE_SIGNING_MODE` 选择相同三种模式，未配置时为 `auto`。
+无证书模式同样执行正式 tag 的完整基础 CI、集群验收和三平台桌面构建，统一使用本次选定的 upstream SHA。
+CI 的证书获取方式、Secret 字段和临时凭据清理见[CI 发布合同](../../docs/ci-release-contract.md#桌面签名模式与凭据)。
+
+### 有证书签名与公证
+
+本机有证书构建设置 `LUMO_RELEASE_SIGNING_MODE=signed` 和 `LUMO_RELEASE_SIGNING_REQUIRED=1`，
 `before-build.mjs` 在昂贵构建前校验凭据，缺失时明确失败。
 
 Mac 使用已有、已解锁 Keychain 内的 Developer ID Application 证书与 notarytool profile：
 
 ```sh
+export LUMO_RELEASE_SIGNING_MODE=signed
 export LUMO_RELEASE_SIGNING_REQUIRED=1
 export LUMO_MACOS_SIGNING_IDENTITY='Developer ID Application: Your Company (TEAMID1234)'
 export LUMO_CUA_SIGNING_IDENTITY="$LUMO_MACOS_SIGNING_IDENTITY"
@@ -100,13 +123,15 @@ hardened runtime 和时间戳；helper 已在其官方构建器中签名，不�
 没有给所有宿主二进制统一放宽。失败的命令不会输出签名/公证凭据诊断。
 
 Windows 使用 `CurrentUser\\My` 内已导入、有效且含私钥和代码签名用途的证书：
-设置 `LUMO_RELEASE_SIGNING_REQUIRED=1`、`LUMO_WINDOWS_CERT_THUMBPRINT` 和
+设置 `LUMO_RELEASE_SIGNING_MODE=signed`、`LUMO_RELEASE_SIGNING_REQUIRED=1`、`LUMO_WINDOWS_CERT_THUMBPRINT` 和
 `LUMO_WINDOWS_TIMESTAMP_URL`，可通过 `LUMO_WINDOWS_SIGNTOOL` 指定工具路径。
 构建验证唯一当前 NSIS 产物，使用 SHA-256 摘要与 RFC3161 时间戳签名，再运行 Authenticode
 验证。不接受 argv 上的 PFX 密码，也不会把本机证书导出到仓库。
 
-应用公证/尺寸证据输出至 `target/release/release-evidence/<target>.json`；最终安装器旁
-`*.release.json` 记录公证或签名回执、最终 SHA-256、下载字节及对应 runtime 大小与版本。
+有证书构建的应用公证/尺寸证据输出至 `target/release/release-evidence/<target>.json`。
+两种安装器旁均有 `*.release.json`，记录实际签名状态、最终 SHA-256、下载字节、runtime 大小与版本，
+以及平台/upstream 提交身份。无证书包记录 `signing.status: "unsigned"`、`signing.certificate: false`；
+Mac 另记录 `notarization.status: "not-performed"`。有证书构建包含公证或签名回执。
 这些脚本提供发行门禁；没有真实证书、Apple 服务及全新系统安装的成功证据时，不能宣称已完成实机验收。
 
 ### 运行时尺寸门禁与 Python 去重
@@ -139,7 +164,8 @@ Python 复制只在 Mac 保留目标仍在包内、会被复制的相对文件�
 目前原生 Provider 支持 macOS 14 及以上。macOS 构建会使用官方 Swift 脚本准备 release helper，并验证
 架构、内容摘要和签名；构建机需要 Xcode/Swift 和 Python 3，最终用户无需安装开发工具。
 默认 ad-hoc 签名，可设置 `LUMO_CUA_SIGNING_IDENTITY` 和可选的
-`LUMO_CUA_SIGNING_KEYCHAIN`；正式发布仍需完成 Developer ID 签名、公证与系统权限验收。
+`LUMO_CUA_SIGNING_KEYCHAIN`；有证书发行模式完成 Developer ID 签名与公证，
+无证书发行模式保留 ad-hoc。系统权限与实际电脑操作仍须各自验收。
 Windows 可通过 `LUMO_WINDOWS_CUA=1` 显式加载隔离 Provider，仍需在面板授权当前会话；
 构建使用 Rust Job Object supervisor 与固定版本原生 SDK，跳过 Swift。原生桌面输入与截图
 仍需在已登录的 Windows 设备上按[验收说明](../dsh-plugins/computer-use/README.md#windows-原生桌面验收)实测。
