@@ -143,9 +143,8 @@ func (p *PgEventSource) LatestSeq(ctx context.Context, sessionRef string) (int64
 
 // Subscribe 按游标轮询并推送增量；返回的 channel 在 ctx 取消时关闭。
 func (p *PgEventSource) Subscribe(ctx context.Context, sessionRef string) (<-chan Event, error) {
-	// 起点取当前水位：调用方刚刚 replay 过历史，重复推一遍历史不是「实时」。
-	// 两者之间新增的事件由 History→Subscribe 的竞态窗口兜底（见 server 的注释：
-	// 本网关是视图层，重连 replay 会补回）。
+	// 起点取当前水位，只推订阅之后的增量。网关先 Subscribe 再读取 History，
+	// 并按实际回放的序号过滤重叠部分，以免回放转实时之间漏掉新事件。
 	start, err := p.LatestSeq(ctx, sessionRef)
 	if err != nil {
 		return nil, err

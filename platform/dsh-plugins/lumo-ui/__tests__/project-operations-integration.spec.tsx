@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
+import { act, cleanup, configure, fireEvent, getConfig, render, screen, waitFor, within } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { LumoOverlay } from '../src/client/index.tsx'
 
@@ -11,8 +11,11 @@ const overview = {
 }
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 
-async function mount(status = 'active', overviewReady?: Promise<void>) {
+async function mount(status = 'active', options: {
+  overviewReady?: Promise<void>; directoryReady?: () => Promise<void>; changingOverview?: boolean
+} = {}) {
   let dashboardReads = 0
+  let overviewReads = 0
   let failRefresh = false
   let failLifecycle = true
   const calls: string[] = []
@@ -21,12 +24,20 @@ async function mount(status = 'active', overviewReady?: Promise<void>) {
     const path = String(input)
     const method = init?.method ?? 'GET'
     calls.push(`${method} ${path}`)
-    if (path === '/lumo/api/overview') { if (overviewReady) await overviewReady; return json(overview) }
-    if (new URL(path, 'https://lumo.test').pathname === '/lumo/api/projects/directory') return json({
-      projects: [{ ...project, status, yourRole: 'owner', memberCount: 1, createdAt: overview.generatedAt }],
-      summary: { total: 1, active: status === 'active' ? 1 : 0, archived: status === 'archived' ? 1 : 0 },
-      total: 1, limit: 20, offset: 0, hasMore: false,
-    })
+    if (path === '/lumo/api/overview') {
+      if (options.overviewReady) await options.overviewReady
+      return json(options.changingOverview
+        ? { ...overview, generatedAt: new Date(Date.parse(overview.generatedAt) + ++overviewReads).toISOString() }
+        : overview)
+    }
+    if (new URL(path, 'https://lumo.test').pathname === '/lumo/api/projects/directory') {
+      if (options.directoryReady) await options.directoryReady()
+      return json({
+        projects: [{ ...project, status, yourRole: 'owner', memberCount: 1, createdAt: overview.generatedAt }],
+        summary: { total: 1, active: status === 'active' ? 1 : 0, archived: status === 'archived' ? 1 : 0 },
+        total: 1, limit: 20, offset: 0, hasMore: false,
+      })
+    }
     if (path === '/auth/account') return json({ realm: 'realm-a', userId: 'owner', roles: ['realm_admin'] })
     if (path === '/lumo/api/capabilities') return json({ organization: true })
     if (path === '/lumo/api/governance') return json({})
@@ -44,16 +55,20 @@ async function mount(status = 'active', overviewReady?: Promise<void>) {
     throw new Error(`Unexpected request ${method} ${path}`)
   }))
   const view = render(<LumoOverlay {...{} as never} />)
-  // The overview refreshes the independently loaded directory. Wait for both
-  // reads, then resolve the button synchronously with the click: findByRole's
-  // async wrapper can otherwise return a preliminary row that was replaced.
+  // waitFor's async wrapper drains pending updates before resolving. The
+  // directory can disappear during that gap, so check and click in one callback.
+  // Mark the action first: observer callbacks must never replay the click.
+  let opened = false
   await waitFor(() => {
+    if (opened) return
     expect((screen.getByRole('button', { name: '重新读取' }) as HTMLButtonElement).disabled).toBe(false)
     const directory = screen.getByRole('region', { name: '项目目录' })
     expect(directory.querySelector('[aria-busy]')?.getAttribute('aria-busy')).toBe('false')
-    expect((within(directory).getByRole('button', { name: '打开项目 团队项目' }) as HTMLButtonElement).disabled).toBe(false)
+    const button = within(directory).getByRole('button', { name: '打开项目 团队项目' }) as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+    opened = true
+    fireEvent.click(button)
   })
-  fireEvent.click(screen.getByRole('button', { name: '打开项目 团队项目' }))
   const sheet = await screen.findByRole('complementary', { name: '项目详情' })
   return { ...view, calls, sheet: () => within(sheet), failRefresh: () => { failRefresh = true }, allowLifecycle: () => { failLifecycle = false }, reads: () => dashboardReads }
 }
@@ -64,7 +79,7 @@ describe('project operations parent callbacks', () => {
   it('opens the current project row when the overview replaces the preliminary directory', async () => {
     let releaseOverview!: () => void
     const overviewReady = new Promise<void>(resolve => { releaseOverview = resolve })
-    const mounting = mount('active', overviewReady)
+    const mounting = mount('active', { overviewReady })
     const preliminary = await screen.findByRole('button', { name: '打开项目 团队项目' })
     const overviewLoading = (screen.getByRole('button', { name: '重新读取' }) as HTMLButtonElement).disabled
     const openedPreliminary = vi.mocked(fetch).mock.calls.some(([path]) => String(path) === '/lumo/api/projects/project-a/dashboard')
@@ -75,6 +90,38 @@ describe('project operations parent callbacks', () => {
     expect(preliminary.isConnected).toBe(false)
     expect(f.reads()).toBe(1)
     expect(f.sheet().getByRole('heading', { name: '团队项目' })).toBeTruthy()
+  })
+
+  it('opens only once when the directory is refreshed before the readiness wait returns', async () => {
+    const asyncWrapper = getConfig().asyncWrapper
+    let refreshed = false
+    let releaseDirectory!: () => void
+    const directoryReady = new Promise<void>(resolve => { releaseDirectory = resolve })
+    // Reproduce pending UI work between waitFor's successful callback and its
+    // awaited return, using the public wrapper hook and real parent refresh.
+    configure({ asyncWrapper: async callback => {
+      const result = await asyncWrapper(callback)
+      if (!refreshed) {
+        refreshed = true
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: '重新读取' })) })
+      }
+      return result
+    } })
+    try {
+      const f = await mount('active', { changingOverview: true,
+        directoryReady: () => refreshed ? directoryReady : Promise.resolve(),
+      })
+      expect(refreshed).toBe(true)
+      expect(screen.queryByRole('button', { name: '打开项目 团队项目' })).toBeNull()
+      expect(f.sheet().getByRole('heading', { name: '团队项目' })).toBeTruthy()
+      expect(f.reads()).toBe(1)
+      await act(async () => { releaseDirectory(); await directoryReady })
+      expect(screen.getByRole('button', { name: '打开项目 团队项目' })).toBeTruthy()
+      expect(f.reads()).toBe(1)
+    } finally {
+      releaseDirectory()
+      configure({ asyncWrapper })
+    }
   })
 
   it('shows dashboard refresh errors inside the open project sheet', async () => {

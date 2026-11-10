@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -232,6 +234,127 @@ func TestWS_LivePush(t *testing.T) {
 	}
 	if live["renderer"] != "table" {
 		t.Fatalf("cli 应协商出 table，得到 renderer=%v", live["renderer"])
+	}
+}
+
+// handoffSource pauses after taking the replay snapshot. Its subscription also
+// appends an event, so the same event appears in both replay and the live buffer.
+type handoffSource struct {
+	*events.MemoryEventSource
+	snapshotReady chan struct{}
+	resumeHistory chan struct{}
+	unsubscribed  chan struct{}
+}
+
+func (s *handoffSource) Subscribe(ctx context.Context, sessionRef string) (<-chan events.Event, error) {
+	sub, err := s.MemoryEventSource.Subscribe(ctx, sessionRef)
+	if err != nil {
+		return nil, err
+	}
+	s.Append(sessionRef, events.Event{Type: "overlap", Payload: json.RawMessage(`{}`)})
+	go func() {
+		<-ctx.Done()
+		close(s.unsubscribed)
+	}()
+	return sub, nil
+}
+
+func (s *handoffSource) History(ctx context.Context, sessionRef string, cursor int64) ([]events.Event, error) {
+	history, err := s.MemoryEventSource.History(ctx, sessionRef, cursor)
+	close(s.snapshotReady)
+	select {
+	case <-s.resumeHistory:
+		return history, err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// Events arriving after the replay snapshot must survive the transition to live;
+// events present in both sources must not repeat. The cursor filters replay;
+// even a cursor ahead of the log must continue receiving newly subscribed events.
+func TestWS_ReplayLiveHandoff(t *testing.T) {
+	for _, cursor := range []int64{0, 2, 100} {
+		t.Run(fmt.Sprintf("cursor=%d", cursor), func(t *testing.T) {
+			source := &handoffSource{MemoryEventSource: events.NewMemory(), snapshotReady: make(chan struct{}),
+				resumeHistory: make(chan struct{}), unsubscribed: make(chan struct{})}
+			source.Append("s1", events.Event{Type: "history", Payload: json.RawMessage(`{}`)})
+			source.Append("s1", events.Event{Type: "history", Payload: json.RawMessage(`{}`)})
+			var resume sync.Once
+			release := func() { resume.Do(func() { close(source.resumeHistory) }) }
+			t.Cleanup(release)
+			ts := newTestServer(t, Options{Source: source})
+			cli := dialWS(t, ts, fmt.Sprintf("/v1/terminals/s1?cursor=%d", cursor))
+			defer cli.Close()
+			cli.write(`{"terminal_id":"t1","capabilities":{"kind":"cli","renderers":["table"]}}`)
+			if neg := cli.read(t); neg["type"] != "capability_negotiated" {
+				t.Fatalf("first frame must negotiate capabilities: %v", neg)
+			}
+			select {
+			case <-source.snapshotReady:
+			case <-time.After(3 * time.Second):
+				t.Fatal("replay snapshot was not taken")
+			}
+			source.Append("s1", events.Event{Type: "handoff", Payload: json.RawMessage(`{}`)})
+			release()
+			first := int64(1)
+			if cursor == 2 {
+				first = cursor + 1
+			} else if cursor > 2 {
+				first = 3
+			}
+			for seq := first; seq <= 4; seq++ {
+				frame := cli.read(t)
+				ev, ok := frame["event"].(map[string]any)
+				if frame["type"] != "session_event" || !ok || ev["seq"] != float64(seq) {
+					t.Fatalf("expected event seq=%d exactly once, got %v", seq, frame)
+				}
+			}
+			// A further live event exposes any duplicate still queued after the handoff.
+			source.Append("s1", events.Event{Type: "after", Payload: json.RawMessage(`{}`)})
+			frame := cli.read(t)
+			if ev, ok := frame["event"].(map[string]any); !ok || ev["seq"] != float64(5) {
+				t.Fatalf("expected the next live event seq=5, got %v", frame)
+			}
+			_ = cli.Close()
+			select {
+			case <-source.unsubscribed:
+			case <-time.After(3 * time.Second):
+				t.Fatal("closing the client did not cancel its subscription")
+			}
+		})
+	}
+}
+
+type zeroSeqLiveSource struct {
+	sub chan events.Event
+}
+
+func (s *zeroSeqLiveSource) Subscribe(context.Context, string) (<-chan events.Event, error) {
+	return s.sub, nil
+}
+
+func (*zeroSeqLiveSource) History(context.Context, string, int64) ([]events.Event, error) {
+	return nil, nil
+}
+
+func (*zeroSeqLiveSource) LatestSeq(context.Context, string) (int64, error) {
+	return 0, nil
+}
+
+func TestWS_EmptyReplayKeepsZeroSeqLiveEvent(t *testing.T) {
+	source := &zeroSeqLiveSource{sub: make(chan events.Event, 1)}
+	ts := newTestServer(t, Options{Source: source})
+	cli := dialWS(t, ts, "/v1/terminals/s1")
+	defer cli.Close()
+	cli.write(`{"terminal_id":"t1","capabilities":{"kind":"cli","renderers":["table"]}}`)
+	if neg := cli.read(t); neg["type"] != "capability_negotiated" {
+		t.Fatalf("first frame must negotiate capabilities: %v", neg)
+	}
+	source.sub <- events.Event{Seq: 0, SessionRef: "s1", Type: "first", Payload: json.RawMessage(`{}`)}
+	frame := cli.read(t)
+	if ev, ok := frame["event"].(map[string]any); !ok || ev["seq"] != float64(0) {
+		t.Fatalf("empty replay must not filter the first live event: %v", frame)
 	}
 }
 

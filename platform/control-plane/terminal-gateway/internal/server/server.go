@@ -138,9 +138,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request, sessionRef str
 // replay 历史 → 转 live，并负责读客户端帧（ping/pong、业务消息）。
 func (s *Server) serveConn(parent context.Context, hj *ws.Conn, sessionRef string, cursor int64) {
 	ctx, cancel := context.WithCancel(parent)
-	// defer 顺序（LIFO）：先 cancel 停掉 live 推送 goroutine，再关连接。
-	defer cancel()
+	// defer 顺序（LIFO）：先取消订阅，再关连接。
 	defer hj.Close()
+	defer cancel()
 
 	decl, err := s.readCapabilities(hj)
 	if err != nil {
@@ -159,6 +159,14 @@ func (s *Server) serveConn(parent context.Context, hj *ws.Conn, sessionRef strin
 		Renderers:  decl.Cap.Renderers,
 	})
 
+	// 先建立订阅，再取历史快照；两者重叠的事件在回放后按实际发送的序号去重。
+	// 协商帧发出之前订阅已就绪，因此客户端随即触发的新事件不会落入交接窗口。
+	sub, err := s.opts.Source.Subscribe(ctx, sessionRef)
+	if err != nil {
+		hj.CloseWith("订阅实时事件失败: " + err.Error())
+		return
+	}
+
 	// 回协商结果，让终端知道它会被如何渲染。
 	neg, _ := json.Marshal(map[string]any{
 		"type":        "capability_negotiated",
@@ -170,26 +178,23 @@ func (s *Server) serveConn(parent context.Context, hj *ws.Conn, sessionRef strin
 		return
 	}
 
-	// 先 replay 历史（按游标增量），再转 live。两者间存在极小竞态窗口
-	// （History 之后、Subscribe 之前追加的事件可能漏掉）；本网关是「看」的视图层，
-	// 漏一条不影响正确性——重连 replay 会补回，且这里不做精确去重。
+	// 游标只筛选历史。即使请求游标领先于现有日志，订阅后的新事件仍按原语义推送，
+	// 因此去重水位从实际已回放的事件计算，不直接使用请求游标。
 	hist, err := s.opts.Source.History(ctx, sessionRef, cursor)
 	if err != nil {
 		hj.CloseWith("历史回放失败: " + err.Error())
 		return
 	}
+	var replayedThrough int64
 	for _, ev := range hist {
 		if err := s.pushEvent(hj, decl.Cap, ev); err != nil {
 			return
 		}
+		replayedThrough = ev.Seq
 	}
+	hasReplayed := len(hist) > 0
 
-	sub, err := s.opts.Source.Subscribe(ctx, sessionRef)
-	if err != nil {
-		hj.CloseWith("订阅实时事件失败: " + err.Error())
-		return
-	}
-	// 实时推送 goroutine：从 sub 读到就推给客户端。
+	// 实时推送 goroutine：忽略已回放的重叠部分，其余增量推给客户端。
 	go func() {
 		for {
 			select {
@@ -198,6 +203,9 @@ func (s *Server) serveConn(parent context.Context, hj *ws.Conn, sessionRef strin
 			case ev, ok := <-sub:
 				if !ok {
 					return
+				}
+				if hasReplayed && ev.Seq <= replayedThrough {
+					continue
 				}
 				if err := s.pushEvent(hj, decl.Cap, ev); err != nil {
 					cancel()
