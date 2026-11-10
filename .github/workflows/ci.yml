@@ -23,7 +23,9 @@ on:
 
 jobs:
   platform:
-    runs-on: ubuntu-latest
+    # Playwright 1.58.2 supports Ubuntu 24.04; ubuntu-latest has moved to
+    # 26.04, which its browser/dependency installer rejects.
+    runs-on: ubuntu-24.04
     env:
       # 全平台一次发现并执行；所有现有活依赖门控统一开启，报告再拒绝任何 skip。
       LUMO_TEST_PG_DSN: postgres://lumo_test:lumo_test@127.0.0.1:5432/lumo_test?sslmode=disable

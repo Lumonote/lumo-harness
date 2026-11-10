@@ -49,6 +49,8 @@ bash -n platform/deploy/acceptance-cluster.sh
 
 基础 CI 同时编译 Node、浏览器及两套 eval 入口，执行全部 deploy Python 合同测试，
 并以固定 `playwright@1.58.2` 与匹配 Chromium 运行 headless 源码工作台验收。
+平台任务固定在该版本支持的 `ubuntu-24.04`；`ubuntu-latest` 切换到26.04后，
+Playwright 的浏览器与系统依赖安装器会拒绝执行，因此不使用浮动 OS 标签。
 该浏览器证据标识为源码 fixture，与目标部署、模型、原生系统验收分别记录。
 
 ## 全新 checkout 的准备与依赖就绪
