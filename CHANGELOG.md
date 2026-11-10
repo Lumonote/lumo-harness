@@ -3,6 +3,30 @@
 本文件记录本项目所有值得注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.2] - 2026-11-10
+
+桌面发行同时支持有证书和无证书打包，并修复 v1.2.1 发布验收中发现的测试竞态与诊断缺失。
+
+### 新功能
+
+- **release**: 新增 `auto`、`signed`、`unsigned` 三种打包模式。`auto` 按 macOS、Windows
+  分别判断：没有签名输入时生成无证书包，凭据完整时签名，部分或无效配置明确失败。
+  GitHub Actions 支持手动选择模式，tag 构建可通过仓库变量 `LUMO_RELEASE_SIGNING_MODE` 配置。
+- **desktop**: 无证书安装器的文件名和 artifact 名带 `unsigned`，仍生成 SHA-256、下载大小、
+  runtime 测量和平台/upstream 提交身份记录。macOS 保留 ad-hoc 签名且不执行 Apple 公证，
+  Windows 不执行 Authenticode 签名；有证书模式保留原有签名、公证和验证流程。
+
+### 修复
+
+- **build**: 显式无证书模式清除继承的 Apple/CUA 签名、公证及 Keychain 配置；签名模式冲突
+  在准备依赖前失败。两种模式均保留正式 tag 的完整 CI、集群验收与桌面构建门禁。
+- **ci**: RocketMQ 集成测试在启动客户端前统一初始化 TLS 开关，避免与 SDK 后台连接产生数据竞态。
+- **ui tests**: 项目详情测试等待概览和目录均完成加载后再同步点击当前按钮，避免目录刷新替换旧节点。
+- **ci**: 平台测试报告校验失败时输出具体文件、用例名和原始错误，继续拒绝失败、跳过和不完整执行。
+
+本地签名/打包及相关回归共 120 项通过；三平台原生安装器、正式凭据与完整集群发行验收以
+GitHub Actions 实际运行结果为准。
+
 ## [1.2.1] - 2026-11-10
 
 自 v1.1.1 起的 49 条变更（未单独发布 1.2.0，版本号直接对齐分支 `v1.2.1`）：平台侧补齐受治理的
@@ -459,6 +483,7 @@ README 补充 AI 定制服务与联系方式。
 - **lumo-ui**: 放大 SkillHub 市场字号与控件尺寸 (`c6d963d0`)
 - Initial commit (`41dbf440`)
 
+[1.2.2]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.2.2
 [1.2.1]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.2.1
 [1.1.1]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.1.1
 [1.1.0]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.1.0
