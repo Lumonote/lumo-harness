@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "target": "darwin-x64",
+  "version": "1.1.1",
+  "sourceRevision": "aa17da51ad72eb05059f940c1da1dc8919d2e414",
+  "upstreamRevision": "fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159",
+  "generatedAt": "2026-11-09T17:04:54.835Z",
+  "total": {
+    "contentBytes": 1769954201,
+    "uniqueBytes": 1769954201,
+    "allocatedBytes": 2130980864,
+    "fileCount": 89010,
+    "linkCount": 8
+  },
+  "components": {
+    "bin": {
+      "contentBytes": 1729,
+      "fileCount": 6,
+      "linkCount": 0
+    },
+    "dsh-node": {
+      "contentBytes": 289060,
+      "fileCount": 38,
+      "linkCount": 0
+    },
+    "lib": {
+      "contentBytes": 12673640,
+      "fileCount": 1975,
+      "linkCount": 0
+    },
+    "lumo-runtime.sh": {
+      "contentBytes": 3077,
+      "fileCount": 1,
+      "linkCount": 0
+    },
+    "node": {
+      "contentBytes": 123666640,
+      "fileCount": 1,
+      "linkCount": 0
+    },
+    "node_modules": {
+      "contentBytes": 1298056471,
+      "fileCount": 67875,
+      "linkCount": 0
+    },
+    "python": {
+      "contentBytes": 246209448,
+      "fileCount": 5990,
+      "linkCount": 8
+    },
+    "runtime-manifest.json": {
+      "contentBytes": 2363,
+      "fileCount": 1,
+      "linkCount": 0
+    },
+    "skillhub": {
+      "contentBytes": 258599,
+      "fileCount": 9,
+      "linkCount": 0
+    },
+    "skills": {
+      "contentBytes": 88793174,
+      "fileCount": 13114,
+      "linkCount": 0
+    }
+  }
+}

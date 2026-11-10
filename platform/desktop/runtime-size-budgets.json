@@ -2,8 +2,41 @@
   "schemaVersion": 1,
   "growth": { "contentBytes": 1.1, "fileCount": 1.1 },
   "targets": {
-    "darwin-arm64": { "total": { "contentBytes": 2147483648, "fileCount": 80000 }, "components": { "node_modules": 1717986918, "python": 536870912, "skills": 268435456 } },
-    "darwin-x64": { "total": { "contentBytes": 2147483648, "fileCount": 80000 }, "components": { "node_modules": 1717986918, "python": 536870912, "skills": 268435456 } },
-    "win-x64": { "total": { "contentBytes": 2147483648, "fileCount": 80000 }, "components": { "node_modules": 1717986918, "python": 536870912, "skills": 268435456 } }
+    "darwin-arm64": {
+      "total": { "contentBytes": 2147483648, "fileCount": 98626 },
+      "components": { "node_modules": 1717986918, "python": 536870912, "skills": 268435456 },
+      "fileCountCalibration": {
+        "observed": 89660,
+        "headroomRatio": 1.1,
+        "evidence": "docs/verification/runtime-size-darwin-arm64-2026-11-10.json",
+        "sourceRevision": "aa17da51ad72eb05059f940c1da1dc8919d2e414",
+        "upstreamRevision": "fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159",
+        "stage": "staged-runtime-before-installer"
+      }
+    },
+    "darwin-x64": {
+      "total": { "contentBytes": 2147483648, "fileCount": 97911 },
+      "components": { "node_modules": 1717986918, "python": 536870912, "skills": 268435456 },
+      "fileCountCalibration": {
+        "observed": 89010,
+        "headroomRatio": 1.1,
+        "evidence": "docs/verification/runtime-size-darwin-x64-2026-11-10.json",
+        "sourceRevision": "aa17da51ad72eb05059f940c1da1dc8919d2e414",
+        "upstreamRevision": "fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159",
+        "stage": "staged-runtime-before-installer"
+      }
+    },
+    "win-x64": {
+      "total": { "contentBytes": 2147483648, "fileCount": 99561 },
+      "components": { "node_modules": 1717986918, "python": 536870912, "skills": 268435456 },
+      "fileCountCalibration": {
+        "observed": 90510,
+        "headroomRatio": 1.1,
+        "evidence": "docs/verification/runtime-size-win-x64-2026-11-10.json",
+        "sourceRevision": "aa17da51ad72eb05059f940c1da1dc8919d2e414",
+        "upstreamRevision": "fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159",
+        "stage": "staged-runtime-before-installer"
+      }
+    }
   }
 }

@@ -58,6 +58,32 @@ bash -n platform/deploy/acceptance-cluster.sh
 提交重建快照及 PPT Master 的 `requirements.txt`；此模式不创建桌面 venv 或安装原生组件。
 之后仍使用隔离 venv、平台 constraints、wheel-only 安装、`pip check` 和必要模块导入检查。
 
+Host与Client是不同的 TypeScript 编译图。基础 CI 在Host构建之后调用
+`dsh-overrides/build-client.mjs`，在独立暂存树应用现有 Lumo 覆盖层，按Client聚合配置的
+项目引用及桌面客户端发现规则生成声明，再仅将各包的 `lib/types` 产物投影到依赖解析目录。
+这样平台浏览器及评测入口可读取 sidebar、conversation 和文档预览的实际覆盖层 API。
+工具不编译聚合中的测试/脚本，不用类型断言或忽略诊断绕过缺失声明；生成前后都核对上游
+源码洁净，已有 Host bundle 保留。
+
 平台与 Registry 的 MinIO 就绪探针绕过代理，并在120秒重试预算内接受启动期连接重置后重试；
 持续不健康仍失败。回归从空快照目录执行实际引导脚本，校验固定提交，并用本机 HTTP 服务
 验证连接重置后的恢复和持续503的有界失败。
+
+## 三平台文件数预算的实测校准（2026-11-10）
+
+首次三平台报告来自[发行运行42655744891](https://github.com/Lumonote/lumo-harness/actions/runs/42655744891)。
+以下原始 JSON 保留下载内容；三个构建均因文件数超过初始80,000上限而失败。
+源码为 `aa17da51ad72eb05059f940c1da1dc8919d2e414`，上游为
+`fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159`。
+
+| 目标及原始报告 | artifact ID | 文件数 | 内容字节 | 校准上限 |
+| --- | ---: | ---: | ---: | ---: |
+| [Windows x64](verification/runtime-size-win-x64-2026-11-10.json) | 13691809215 | 90,510 | 1,801,629,977 | 99,561 |
+| [macOS ARM64](verification/runtime-size-darwin-arm64-2026-11-10.json) | 13693928151 | 89,660 | 1,734,024,459 | 98,626 |
+| [macOS Intel](verification/runtime-size-darwin-x64-2026-11-10.json) | 13694171870 | 89,010 | 1,769,954,201 | 97,911 |
+
+原先统一的80,000文件初始上限未经三平台实测；各目标仅 Node 依赖和技能就超过它。
+各目标绝对文件数预算分别按实测值加10%余量校准。2 GiB总字节、各组件字节上限和
+已有成功基线的10%增长限制均继续执行。
+这些报告来自运行时暂存完成、预算拒绝之后的失败构建，不证明安装器构建、签名或安装验收成功；
+顶层组件计数也不能证明某个依赖包可安全删除。

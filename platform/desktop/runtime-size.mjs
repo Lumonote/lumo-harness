@@ -58,7 +58,17 @@ export function enforceRuntimeBudget(report, budgets, baseline) {
       if (report.total[metric] > Math.ceil(baseline.total[metric] * ratio)) failures.push(`${metric} 超过 ${baseline.version} 基线的 ${ratio} 倍`)
     }
   }
-  if (failures.length) throw Error(`runtime 尺寸预算超限：${failures.join('；')}`)
+  if (failures.length) {
+    // A bounded component summary survives build log collection even when the
+    // report artifact has not been downloaded yet. Counts remain exhaustive;
+    // this is diagnostic output, never a reason to exclude runtime resources.
+    const components = Object.entries(report.components ?? {})
+      .sort(([, left], [, right]) => right.fileCount - left.fileCount)
+      .slice(0, 8)
+      .map(([name, value]) => `${name}: ${value.fileCount} files / ${value.contentBytes} bytes`)
+      .join('；')
+    throw Error(`runtime 尺寸预算超限（${report.target}）：${failures.join('；')}${components ? `。组件：${components}` : ''}`)
+  }
 }
 
 export function writeRuntimeSizeReport(root, { target, version, output, budgetPath = resolve(desktop, 'runtime-size-budgets.json'), baselinePath } = {}) {

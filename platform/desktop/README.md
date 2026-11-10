@@ -114,8 +114,10 @@ Windows 使用 `CurrentUser\\My` 内已导入、有效且含私钥和代码签�
 每次 runtime 构建都会生成 `target/runtime-size/<target>.json`，记录版本、当前仓库与上游 SHA、
 文件数、链接数、内容/独占 inode 字节、可用时分配字节和顶层组件占用。它不跟随链接统计，
 也不把 APFS clone 共享块当作已证实的可回收空间。
-`runtime-size-budgets.json` 提供三平台的 2 GiB/80,000 文件上限和组件上限；这些是初始保护线，
-不是本次新版产物的测量或瘦身承诺。设置 `LUMO_RUNTIME_SIZE_BASELINE=/path/previous.json`
+`runtime-size-budgets.json` 提供三平台的 2 GiB内容上限和组件上限；文件上限按2026-11-10
+首次暂存产物各加10%余量校准：Windows 99,561、Mac ARM64 98,626、Mac Intel 97,911。
+来源与原始报告见[CI合同](../../docs/ci-release-contract.md#三平台文件数预算的实测校准2026-11-10)。
+该测量不证明安装器成功，也不承诺瘦身。设置 `LUMO_RUNTIME_SIZE_BASELINE=/path/previous.json`
 可对同平台历史报告执行内容和文件数至多增长 10% 的门禁；目标不一致或报告畸形会失败。
 需要调整绝对预算时，显式指定 `LUMO_RUNTIME_SIZE_BUDGET` 或审阅提交默认预算修改。
 失败报告仍保留，CI 应上传，不以删除报告消除失败。

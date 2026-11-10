@@ -129,6 +129,9 @@ jobs:
       - name: Build upstream dsh host outputs
         run: node dsh-overrides/build-host.mjs ../deepseek-harness
 
+      - name: Build client artifacts
+        run: node dsh-overrides/build-client.mjs ../deepseek-harness
+
       - name: Verify CI evidence tools and release contracts
         run: node --test tools/__tests__/*.test.mjs
 
