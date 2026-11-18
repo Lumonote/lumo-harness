@@ -25,7 +25,7 @@ Istio SDS 管理，不应创建或挂载通用私钥 Secret。上线前还应启
 | `compose.control-plane.bundle.yml` | 服务器单例 / 集群 | Docker Compose 基础文件 | 10 个控制面 API 进程共用一个 `api-bundle` 容器和镜像 |
 | `compose.standalone.yml` | 服务器单例 | Docker Compose 形态覆盖 | 将 10 个 API、单实例调度与协作进程合并到 `api-bundle`，另运行 DSH Web |
 | `compose.cluster.yml` | 服务器集群 | Docker Compose 形态覆盖 | 声明集群专属中间件、DSH Web、策略与模型服务；共享组件只覆盖差异项 |
-| `compose.cluster.compact.yml` | Cluster 默认开发 | Compose 叠加文件 | 将双 Scheduler、双 Collaborator 并入 `api-bundle`；每集群一个 DSH bundle 容器 |
+| `compose.cluster.compact.yml` | Cluster 默认开发 | Compose 叠加文件 | `api-bundle` 内运行 `scheduler-0` 和 `collaborator-0`，每个执行集群的 DSH bundle 另运行一个 Scheduler |
 | `compose.models.standalone.yml` / `compose.models.cluster.yml` / `compose.models.cluster.compact.yml` | 原生模型配置 | Compose 可选叠加文件 | 按形态挂载官方 home patch，并注入原生供应商凭据环境文件 |
 | `compose.cluster.devices.yml` | Cluster 设备接入 | Compose 叠加文件 | 独立设备 TLS 监听、服务端证书和设备签发 CA 挂载 |
 | `helm/` | Cluster | 生产 | 控制面服务 Helm chart、健康探针和依赖配置 |
@@ -245,7 +245,9 @@ pnpm --dir platform desktop:dev
 由同一个 `rocketmq` 容器启动。10 个 API、Scheduler 和 Collaborator 在单例与 Cluster compact 下
 都由一个 `api-bundle` 容器托管；进程仍保留独立端口、逻辑服务名和健康检查。
 
-Cluster 默认 compact 拓扑将双 Scheduler、双 Collaborator 与 10 个 API 合并在 `api-bundle`；
+Cluster 默认 compact 拓扑在 `api-bundle` 运行 10 个 API、`scheduler-0` 和 `collaborator-0`。
+控制面和 DSH 执行进程应使用相同的 `LUMO_IDENTITY_ASSERTION_SECRET`（至少 32 字节）。
+Compact 首次启动会依次为 node 和 agent 安装插件，两者共用从容器启动起算的 10 分钟就绪期限。
 每集群的 agent 父节点、node 承载节点、本地 Scheduler 合并在 cluster-a、cluster-b 各自的
 bundle 容器，内部进程身份、端口、Nacos 上报和网络 alias 保留。默认启动 16 个容器；完整
 故障域拓扑启动 24 个容器；Standalone 启动 8 个容器。计数包含共享基础组件、应用和监控，
@@ -281,7 +283,7 @@ Cluster 全部容器启动后执行统一冒烟验收；脚本会等待全部服
   compact overlay 中容器端口落在控制面段（默认 `8080-8099`）的逻辑服务。脚本会将物理
   bundle 端口映射回 edge-gateway、Scheduler 等逻辑名。新增一个控制面服务会自动多一条探针，删掉/改名会
   报 `probe-targets-not-derived` 而不是静默少跑一条。`probes-cluster-verify.sh` 会用
-  写死的期望条数（cluster compact 15 / standalone 12）与它对照，并验证「容器端口挪出控制面段
+  写死的期望条数（cluster compact 14 / standalone 12）与它对照，并验证「容器端口挪出控制面段
   就跟着少一条」。
 - **区分「服务没起来」与「服务起来了但行为不对」。** 前者是 curl 传输错误
   （exit 7/28/6），后者是 HTTP 2xx/4xx/5xx。两者退出码都非零，所以报出来的是**分类文案**
@@ -677,8 +679,9 @@ DATABASE_URL=postgres://... ./migrate.sh
 ```
 
 Local-lite 仍保留服务自带的幂等建表；生产环境用 `lumo_schema_migrations` 记录迁移
-状态。Prometheus 抓取配置分别在 `prometheus.yml`（cluster）和
-`prometheus-standalone.yml`（standalone），告警规则在 `prometheus-alerts.yml`；两套
+状态。Prometheus 抓取配置分别在 `prometheus.yml`（cluster full）、
+`prometheus-cluster-compact.yml`（cluster compact，不含不存在的 `scheduler-1` /
+`collaborator-1`）和 `prometheus-standalone.yml`（standalone），告警规则在 `prometheus-alerts.yml`；两套
 Compose 都会启动 Prometheus（端口可由 `LUMO_PROMETHEUS_PORT` 覆盖），服务需暴露
 `/metrics` 后启用对应告警。
 
@@ -772,24 +775,139 @@ python3 platform/deploy/shell-portability-check.py --self-test
 
 ### 停滞任务收割
 
-Scheduler 的两个开关：
+Scheduler 的三个开关：
 
 | 开关 | 环境变量 | 默认 | 说明 |
 |---|---|---|---|
-| `-max-stall-ms` | `LUMO_MAX_STALL_MS` | `28800000`（8h） | 停滞判定宽限期。**负值 = 关闭收割** |
+| `-max-stall-ms` | `LUMO_MAX_STALL_MS` | `28800000`（8h） | 无条件兜底：节点从目录消失超过它即收割。**负值 = 关闭收割**（连同快速通道） |
+| `-node-lost-ms` | `LUMO_NODE_LOST_MS` | `600000`（10m） | 快速通道：节点从目录消失超过它**且直连探测不通**即收割。**负值 = 关闭快速通道** |
 | `-stall-reap-ms` | `LUMO_STALL_REAP_MS` | `300000`（5m） | 收割周期 |
 
-收割把「所属节点已不在目录中、且该 attempt 静默超过宽限期」的活跃任务转成死信
+收割把「所属节点已不在目录中、且**节点消失**超过宽限期」的活跃任务转成死信
 （`state = FAILED` + `scheduler_dead_letters` 台账），这样被卡住的任务才能重新提交——
 在此之前，重新提交会因为「已有活跃 attempt」而被幂等地拒掉。
 
-三道闸门缺一不可：目录快照必须新鲜、节点必须不在目录中、静默时长必须超界。**判据里没有
-「任务跑了多久」这一项**，因为控制面的 `updated_at` 只在状态跃迁时前进，长任务与卡死任务
-在它眼里一样。宽限期是宽限，不是主判据。
+三道闸门缺一不可：目录快照必须新鲜、节点必须不在目录中、节点消失的时长必须超界。
+
+**时钟量的是「节点消失多久」，不是「任务多久没动」。** 起点取「节点最后一次出现在目录里」
+（`scheduler_nodes.last_seen_at`，每轮快照刷新写入）与 attempt 最近一次写入的较晚者。
+控制面的 `updated_at` 只在状态跃迁时前进，长任务与卡死任务在它眼里一样，所以不能拿它当
+时钟——那样一个跑了 9 小时的任务，节点在一次快照里缺席就会被判死。节点重新出现会把时钟
+归零。
+
+「在目录中」按**存活**算，不按「可放置」算：Nacos 里健康但 `enabled=false` 的节点
+（就绪检查未过，或排空刚开始）不接新放置，但仍算在目录中——它还在跑已有任务。
+同一个存活集合也用于任务漂移的前置判定与 `LumoTaskLost` 的孤儿计数。
+
+两条判死路径，差别在证据：
+
+- **`max_stall`（8h，§7.4.2 的规定值）** 只凭「目录里没有它」这一个证据，所以等得久。
+  节点与 Nacos 之间断连但仍在执行时，短于断连时长的值会把还在跑的任务判死，且节点事后
+  回报的结果会被丢弃——这是它不宜调小的原因。
+- **节点失联快速通道（10min）** 要两个独立证据：目录里消失够久，**并且**调度器直连节点
+  控制地址的 `/healthz` 探不通（探两次）。它解决的是「节点永久消失后任务要挂满 8 小时、
+  期间既没有结果也无法重试」。节点只是与 Nacos 断连、自己还活着时探测是通的，不会被这条
+  路径收割（日志里会有一条「节点不在目录中但直连可达」）。台账原因是 `node_lost:`，
+  与 `max_stall:` 分开。
+
+快速通道的两条启动期约束（不满足即拒绝启动）：阈值不得短于 3 × `LUMO_METRICS_MS`
+（节点消失时长靠快照刷新打点量出）；集群漂移启用时必须晚于 `down + grace + 一个漂移周期`
+——整个集群失联时它的节点也一起从目录消失，漂移是把任务搬走继续跑，收割是放弃它，
+收割不能抢在前面。默认值下是 10min 对 7min。
+
+快速通道有三种情况不动手、交还给 `max_stall`：节点没有目击记录（升级前的行）、
+节点没有控制地址、直连探测通。探测只可能错在「把死节点当成活的」（它的地址被别的
+Pod 复用），后果是退回 8 小时兜底，不会误杀。
 
 关掉收割（`LUMO_MAX_STALL_MS=-1`）时会在启动日志里显式警告：一个静默不工作的收割循环，
 会让「没有任何死信」被读成「没有卡死的任务」。关掉之后 `LumoTaskLost` 仍然会响，只是没有
 自动兜底。
+
+### 调度器放置并发与升级
+
+放置不再全局串行。此前每个放置事务都对全局租约行取 `FOR UPDATE`，跨集群、跨 realm、落在
+不同节点上的放置排成一队，吞吐 = 1 / 单个事务时长，与并发数无关。现在：
+
+| 路径 | 准入锁（事务级咨询锁） | 还锁什么 |
+|---|---|---|
+| 全局 leader 的放置（`PlaceTask`） | **共享** | 该任务的单飞锁 + 任务行 + 目标节点行 |
+| 集群本地租约的降级放置 | **排他** | 同上，另加租约行 |
+| 取队列、排队、对账、终态清理、`CancelUnseen` | **排他** | 租约行（只为与旧版本互斥，见下） |
+| 易主、过期租约重新生效（含集群本地租约） | **排他** | — |
+| 续一把仍然有效的租约 | 不取 | — |
+
+围栏的依据是一句话：**「此刻谁有权决策」的每一次变更都在排他锁内发生**，所以它一定等所有
+在途的放置落定。续租不改变这件事，所以不排队——放置再忙，leader 也续得上租。
+降级放置是例外：它的决策权随全局租约**到期**自动生效，不经过任何排他锁，所以由它自己取
+排他档来等全局 leader 在途的那几笔，两条准入路径才不重叠。
+
+**冻结后的接管。** PostgreSQL 将每个调度器运行期事务的单条语句和空闲等待各限制为
+`LUMO_TTL_MS` 的一半（默认各 5 秒），并保留数据库已有的更短超时。进程冻结后，数据库仍能
+取消阻塞语句或关闭空闲事务连接并释放锁，其他副本可在租约过期后接管。启动建表事务沿用
+数据库配置的超时。
+
+没有采用「租约行降成 `FOR SHARE`」：PostgreSQL 的共享行锁不排在等待的排他方后面，压测里
+16 并发放置就让续租和取队列 2s 超时（leader 续不上租、drain 停摆）。咨询锁的等待队列是公平的。
+
+**压测数字**（`internal/store/admission_bench_test.go`，本机 PG 16 + 模拟 1ms 往返的转发器，
+64 节点，每档 5s。11 月 16 日测量时一次放置为 11 次往返，11 月 18 日合并写入后又省去两次。这是开发机上的相对比较，不是容量承诺）：
+
+| 并发放置 | 改前 条/秒 | 改后 条/秒 | 改前 续租最大耗时 | 改后 续租最大耗时 |
+|---|---|---|---|---|
+| 1 | 62 | 56 | 15ms | 9ms |
+| 4 | 74 | 227 | 62ms | 6ms |
+| 16 | 69 | 1049 | 392ms | 3ms |
+| 64 | 58 | 4590 | 1.76s（单次期限 2s） | 4ms |
+| 16，连接池 4 | 74 | 234 | 220ms | 72ms |
+| 16，全落同一节点 | 70 | 81 | 385ms | 9ms |
+
+读这张表要注意三件事：
+
+- **受益的是并发到达的提交**（`POST /v1/placements`）。leader 的 drain 循环是顺序放置的，
+  它的吞吐仍然是「1 / 单个事务时长」（表里并发 1 那一行，改前改后在噪声内）。
+- **连接池是下一个上限。** pgxpool 默认 `MaxConns = max(4, CPU 数)`，续租与请求共用。
+  要让并发放置真的并发，在 `LUMO_PG_DSN` 上加 `pool_max_conns=<n>`（表里「连接池 4」一行
+  就是没调的结果）。调大前先核对 PG 的 `max_connections` 与副本数。
+- **同一节点上的放置仍然串行**（节点行锁保容量），这是有意的。
+
+复跑：
+
+```sh
+cd platform/control-plane/scheduler
+LUMO_ADMISSION_BENCH=1 LUMO_TEST_PG_DSN=... go test ./internal/store -run TestAdmissionLockBench -v -count=1
+```
+
+### Compose 与 PgBouncer 实测（2026-11-18）
+
+正常放置先由全局 leader 处理。持有本地租约的 follower 也会转发给全局 leader，只有全局租约失效后才会
+尝试按本地租约降级放置。全局租约有效但没有可用的转发地址时，调用方应按 `503` 重试。
+
+`cluster-full` 的四个调度器容器使用 PostgreSQL 16 和 Nacos，并加载了两个合成执行节点注册。
+三个 follower 并发提交 36 次，12 个任务各产生一条派发。测试租约 TTL 为 3 秒，暂停旧 leader 后
+2.60 秒接管，恢复后的旧 leader 能按新任期转发。缩短集群失联和迁移阈值后，摘除 `cluster-b` 注册并
+暂停心跳，在 6.22 秒内验证了向 `cluster-a` 重派。
+
+将四个调度器的 DSN 指向 PgBouncer 1.24.0，使用 `pool_mode=transaction` 和
+`max_prepared_statements=200`，仍使用 pgx 的默认协议配置。相同的转发和去重测试通过，冻结后的
+接管耗时 2.52 秒。生产设置继续由部署环境提供。
+
+`cluster-compact` 的三个调度器都可持有全局租约。使用两个由 DSH 自行注册的执行节点验证时，
+三个副本都能访问 `scheduler-0:8083`、`scheduler-cluster-a:8083`、`scheduler-cluster-b:8083`。
+最终镜像从空卷启动后，两个执行 bundle 均零重启。两次冻结换主耗时 3.78 秒和 2.68 秒，
+跨三个任期的 26 次提交共生成 20 条派发，每个任务只有一条。
+
+**滚动升级（新旧版本混跑）有一个已知窗口。** 旧版本只认租约行锁，不认咨询锁：
+
+- 旧版 leader + 新版 follower：安全。新版接管要先拿排他咨询锁再改租约行，而旧版放置握着
+  租约行锁，接管会等它。
+- **新版 leader + 旧版 follower：有窗口。** 新版放置不再锁租约行，旧版 follower 的接管
+  不会等它。触发条件是新版 leader 的租约恰好在某个放置事务**中途**过期（进程在事务里停顿
+  超过一个租约 TTL，默认 10s），且旧版 follower 在该事务提交前接管——此时旧任期的这一笔
+  放置会落在新任期开始之后。行锁里没有「挡住旧版的接管、又放过续租」的档位，所以无法兼容。
+
+窗口只在混跑期间存在。要彻底避开：升级调度器时先缩到 0 再拉起新版本（期间新放置
+不可用，已放置的任务不受影响），或接受上述窗口做滚动升级。全部副本升级完成后，
+排他路径上保留的那把租约行锁不再有作用。
 
 ## 约定
 

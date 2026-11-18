@@ -182,6 +182,20 @@ spec:
                    拿到更高的 token，把旧进程挡在外面。 */}}
             - name: LUMO_INSTANCE
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            {{- if eq $name "scheduler" }}
+            {{- /* follower 把需要决策者的请求转发给 leader（Service 会把请求轮询到
+                   follower）。地址必须是**单个 Pod** 的：Service 名指向所有副本，
+                   用它等于转发给随机副本。
+
+                   只给裸 Pod IP，URL 由调度器自己拼（domain.ResolveAdvertiseURL）：
+                   `$(VAR)` 展开做不了「IPv6 加方括号」，在这里拼 URL 的话 IPv6
+                   单栈集群里得到的是 `http://fd00::1:8083`——非法地址。不要同时
+                   再设 LUMO_ADVERTISE_URL，两者并存时调度器拒绝启动。 */}}
+            - name: LUMO_ADVERTISE_HOST
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: LUMO_ADVERTISE_PORT
+              value: {{ $cfg.port | quote }}
+            {{- end }}
             - name: LUMO_CONTROL_PLANE_TOKEN
               valueFrom: { secretKeyRef: { name: {{ $.Values.controlPlaneAuth.tokenSecret }}, key: {{ $.Values.controlPlaneAuth.tokenKey }}, optional: false } }
             {{- /* 空名字必须整条省略。渲染成 `name: ` 会产出一份非法清单，而

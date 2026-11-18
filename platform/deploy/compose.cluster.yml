@@ -336,6 +336,7 @@ services:
       - DSH_HOME=/root/.dsh
       - LUMO_COLLABORATOR_URL=http://collaborator-0:8081
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
+      - "LUMO_IDENTITY_ASSERTION_SECRET=${LUMO_IDENTITY_ASSERTION_SECRET:-}"
       - LUMO_CLUSTER_ID=cluster-a
       - LUMO_ROLE=agent
       - LUMO_REALM=dev
@@ -385,6 +386,7 @@ services:
       - DSH_HOME=/root/.dsh
       - LUMO_COLLABORATOR_URL=http://collaborator-0:8081
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
+      - "LUMO_IDENTITY_ASSERTION_SECRET=${LUMO_IDENTITY_ASSERTION_SECRET:-}"
       - LUMO_CLUSTER_ID=cluster-a
       - LUMO_ROLE=node
       # 承载节点是本集群的**上报方**：调度的联邦注册表只按自报判存活，而一个调度实例
@@ -452,6 +454,7 @@ services:
       - DSH_HOME=/root/.dsh
       - LUMO_COLLABORATOR_URL=http://collaborator-0:8081
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
+      - "LUMO_IDENTITY_ASSERTION_SECRET=${LUMO_IDENTITY_ASSERTION_SECRET:-}"
       - LUMO_CLUSTER_ID=cluster-b
       - LUMO_ROLE=agent
       - LUMO_REALM=dev
@@ -506,6 +509,7 @@ services:
       - DSH_HOME=/root/.dsh
       - LUMO_COLLABORATOR_URL=http://collaborator-0:8081
       - "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
+      - "LUMO_IDENTITY_ASSERTION_SECRET=${LUMO_IDENTITY_ASSERTION_SECRET:-}"
       - LUMO_CLUSTER_ID=cluster-b
       - LUMO_ROLE=node
       # 同上：cluster-b 的存活由它自己的承载节点自报，不能靠 scheduler 实例认领。
@@ -568,7 +572,7 @@ services:
     # 复用 api-bundle 构建的控制面镜像。
     command: ["/usr/local/bin/scheduler"]
     image: lumo/control-plane:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-0", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-0", "LUMO_LISTEN=:8083", "LUMO_ADVERTISE_URL=http://scheduler-0:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
     depends_on:
       postgres: { condition: service_healthy }
       nacos: { condition: service_healthy }
@@ -579,7 +583,7 @@ services:
     # 复用 api-bundle 构建的控制面镜像。
     command: ["/usr/local/bin/scheduler"]
     image: lumo/control-plane:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-1", "LUMO_LISTEN=:8184", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-1", "LUMO_LISTEN=:8184", "LUMO_ADVERTISE_URL=http://scheduler-1:8184", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
     depends_on:
       postgres: { condition: service_healthy }
       nacos: { condition: service_healthy }
@@ -604,7 +608,7 @@ services:
     # 复用 api-bundle 构建的控制面镜像。
     command: ["/usr/local/bin/scheduler"]
     image: lumo/control-plane:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-cluster-a", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_SCHEDULER_CLUSTER_ID=cluster-a", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-cluster-a", "LUMO_LISTEN=:8083", "LUMO_ADVERTISE_URL=http://scheduler-cluster-a:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_SCHEDULER_CLUSTER_ID=cluster-a", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
     depends_on:
       postgres: { condition: service_healthy }
       nacos: { condition: service_healthy }
@@ -615,7 +619,7 @@ services:
     # 复用 api-bundle 构建的控制面镜像。
     command: ["/usr/local/bin/scheduler"]
     image: lumo/control-plane:dev
-    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-cluster-b", "LUMO_LISTEN=:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_SCHEDULER_CLUSTER_ID=cluster-b", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
+    environment: ["LUMO_PG_DSN=${LUMO_PG_DSN:-postgres://lumo:lumo@postgres:5432/lumo}", "LUMO_CONTROL_PLANE_TOKEN=${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}", "LUMO_INSTANCE=scheduler-cluster-b", "LUMO_LISTEN=:8083", "LUMO_ADVERTISE_URL=http://scheduler-cluster-b:8083", "LUMO_NACOS_ADDR=http://nacos:8848", "LUMO_GOVERNANCE_URL=http://governance:8089", "LUMO_CORS_ORIGIN=${LUMO_CORS_ORIGIN:-http://127.0.0.1:4173}", "LUMO_CLUSTER_ENFORCE=true", "LUMO_SCHEDULER_CLUSTER_ID=cluster-b", "LUMO_CLUSTER_VERSION_GATE=${LUMO_CLUSTER_VERSION_GATE:-false}", "LUMO_PLACEMENT_LOAD_WEIGHT=${LUMO_PLACEMENT_LOAD_WEIGHT:-1}", "LUMO_PLACEMENT_AFFINITY_WEIGHT=${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"]
     depends_on:
       postgres: { condition: service_healthy }
       nacos: { condition: service_healthy }

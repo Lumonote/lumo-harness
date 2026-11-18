@@ -22,14 +22,19 @@ x-cluster-bundle-environment: &cluster-bundle-environment
   LUMO_NACOS_SERVICE: lumo-dsh-node
   LUMO_NACOS_GROUP: DEFAULT_GROUP
   LUMO_SUBAGENT_HOST_TOKEN: "${LUMO_SUBAGENT_HOST_TOKEN:-dev-subagent-token}"
+  # DSH seam-host uses this secret for runtime identity assertions. Keep it
+  # explicit so compact children receive the same signing contract as full mode.
+  LUMO_IDENTITY_ASSERTION_SECRET: "${LUMO_IDENTITY_ASSERTION_SECRET:-}"
   LUMO_CLUSTER_VERSION_GATE: "${LUMO_CLUSTER_VERSION_GATE:-false}"
   LUMO_PLACEMENT_LOAD_WEIGHT: "${LUMO_PLACEMENT_LOAD_WEIGHT:-1}"
   LUMO_PLACEMENT_AFFINITY_WEIGHT: "${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"
   PROVISIONER_ARTIFACT_NAME: "${PROVISIONER_ARTIFACT_NAME:-}"
 
 services:
-  # Compact 控制面将 10 个 API、2 个 Scheduler、2 个 Collaborator 放进一个容器。
-  # Scheduler-1 / Collaborator-1 使用独立容器端口，避免与 API 端口冲突；逻辑实例名不变。
+  # Compact 控制面将 10 个 API、1 个 Scheduler（scheduler-0）、1 个 Collaborator 放进一个容器
+  # （打包启动器的 platform-cluster 只起 -0 这一组；-1 那组已在 1ad7c49 收敛掉，
+  # 所以这里没有 scheduler-1 / collaborator-1 的别名、端口与环境变量，Prometheus 也换成
+  # 不抓那两个目标的 prometheus-cluster-compact.yml）。
   api-bundle:
     command: ["/usr/local/bin/lumo-control-plane-bundle", "platform-cluster"]
     environment:
@@ -46,14 +51,16 @@ services:
       LUMO_CLUSTER_VERSION_GATE: "${LUMO_CLUSTER_VERSION_GATE:-false}"
       LUMO_PLACEMENT_LOAD_WEIGHT: "${LUMO_PLACEMENT_LOAD_WEIGHT:-1}"
       LUMO_PLACEMENT_AFFINITY_WEIGHT: "${LUMO_PLACEMENT_AFFINITY_WEIGHT:-0.25}"
+      # 全局租约有三个竞争者：这里的 scheduler-0 与两个集群 bundle 里的
+      # scheduler-cluster-a/b（它们同样跑全局选主）。谁当上 leader，其余副本都要能
+      # 把放置请求转发过去，所以三者各自广播自己的网络别名。带实例前缀是为了不让
+      # 同容器的 collaborator 继承到这个值。
+      LUMO_BUNDLE_SCHEDULER_0_LUMO_ADVERTISE_URL: http://scheduler-0:8083
       LUMO_BUNDLE_COLLABORATOR_0_LUMO_NODE_ADVERTISE_HOST: collaborator-0
       LUMO_BUNDLE_COLLABORATOR_0_LUMO_NACOS_PORT: "8081"
-      LUMO_BUNDLE_COLLABORATOR_1_LUMO_NODE_ADVERTISE_HOST: collaborator-1
-      LUMO_BUNDLE_COLLABORATOR_1_LUMO_NACOS_PORT: "8182"
     ports:
       - "18081:8081"
       - "18083:8083"
-      - "18093:8184"
     healthcheck:
       test: ["CMD", "/usr/local/bin/lumo-control-plane-bundle", "healthcheck", "platform-cluster"]
       interval: 10s
@@ -62,7 +69,13 @@ services:
       start_period: 180s
     networks:
       default:
-        aliases: [scheduler-0, scheduler-1, collaborator-0, collaborator-1]
+        aliases: [scheduler-0, collaborator-0]
+
+  # 紧凑档没有 scheduler-1 / collaborator-1 进程。沿用 prometheus.yml 会让这两个抓取目标
+  # 恒为 up==0，LumoControlPlaneInstanceDown（P1）常响。同一容器路径的挂载在合并时覆盖基底。
+  prometheus:
+    volumes:
+      - ./prometheus-cluster-compact.yml:/etc/prometheus/prometheus.yml:ro
 
   cluster-a-bundle:
     stop_grace_period: 180s
@@ -102,7 +115,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 180s
+      start_period: 10m
     networks:
       default:
         aliases: [scheduler-cluster-a, cluster-a-dsh-0, cluster-a-dsh-1]
@@ -142,7 +155,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 180s
+      start_period: 10m
     networks:
       default:
         aliases: [scheduler-cluster-b, cluster-b-dsh-0, cluster-b-dsh-1]

@@ -1,5 +1,190 @@
 # Implementation status (2026-09-15)
 
+## 2026-11-18 调度器放置写入合并与 Docker 换主验证
+
+`PlaceTask` 在写入任务和 attempt 时一并保存集群信息，每次成功的新放置省去两条独立 `UPDATE`。
+回归用例从指定集群的首次放置开始，经迁移、排队退避和跨集群重派，核对原始请求集群、两代 attempt
+各自的实际集群以及退避标记清理。任务、attempt 和派发 outbox 仍在同一个事务内提交。
+
+使用控制面 Dockerfile 构建镜像，以容器内的 PostgreSQL 16 运行调度器测试。`go vet` 通过，
+含子用例共 433 项通过、0 失败、0 跳过，包含放置压测与三进程换主测试。三进程运行同一镜像里的
+调度器二进制，数据库开启 `track_commit_timestamp`。395 个任务各提交两次，得到 790 次 HTTP 201。
+经历 3 次强杀、3 次冻结和 7 个任期，库中派发唯一，旧任期写入的提交时间均通过围栏核对。
+
+### 主进程冻结后的接管
+
+旧镜像在租约 TTL 为 1.5 秒时，三次冻结的 6 秒窗口内均未接管。冻结进程仍连接着 PostgreSQL，
+数据库继续替它持有事务锁。调度器现在在开始运行期事务时，将单条语句和事务空闲超时各限制为
+TTL 的一半，并保留数据库已有的更短设置。超时由 PostgreSQL 执行，作用域为当前事务。
+
+新镜像 `lumo/control-plane:scheduler-20261118-ttl` 在 Docker PostgreSQL 16 上通过全部 434 项调度器测试
+（含子用例），无失败或跳过。两轮三进程测试共 8 次冻结，均在解冻前接管，实测约 1.09–1.67 秒。
+数据库提交时间核对通过，未出现重复派发、节点超额放置或旧任期在新任期开始后提交。
+
+### Full Compose 转发、换主和跨集群重派
+
+持有本地租约的 follower 现在优先查询并转发给持有有效租约的全局 leader。全局租约有效但没有广播地址时，
+本地降级保持关闭。如果全局 leader 在路由和本地写入之间出现，放置与排队路径收到事务围栏拒绝后均会尝试
+转发一次。`TestClusterFollowerPrefersGlobalLeaderOverLocalLease` 在修复前复现了
+`503 global-leader-active`，修复后通过。
+
+用 `lumo/control-plane:scheduler-20261118-compose` 在 `cluster-full` 启动四个独立调度器容器、
+PostgreSQL 16 和 Nacos。执行节点使用合成的目录注册。三个 follower 并发提交 36 次、涉及 12 个任务，
+数据库恰好新增 12 条派发。租约 TTL 设为 3 秒时，旧 leader 冻结后 **2.60 秒**接管，旧 leader 恢复后
+按新任期转发。摘除 `cluster-b` 的 Nacos 注册并暂停其心跳后，使用缩短的测试阈值，**6.22 秒**后在
+`cluster-a` 生成第二次 attempt。数据库保留原请求集群 `cluster-b`，清除旧的未认领派发并记录迁移台账。
+
+同样的四容器转发、去重及冻结测试经 PgBouncer 1.24.0 复跑，使用 `pool_mode=transaction` 和
+`max_prepared_statements=200`，新 leader 在 **2.52 秒**接管。调度器进程继续用默认 pgx 配置。
+控制面镜像构建及 Docker 内 `go vet` 通过，全部 **435 项**调度器测试（含子用例）通过，无失败或跳过。
+
+### Compact 三副本转发与执行节点启动
+
+Compose 现在将部署指定的 `LUMO_IDENTITY_ASSERTION_SECRET` 传给两个 Compact 执行 bundle 和 Full 的
+四个 DSH 进程。此前控制面接受了专用签名密钥，执行节点却回退到控制面令牌，本轮短令牌配置使
+Seam Host 在启动时因签名密钥不足 32 字节而退出。部署回归测试覆盖两种拓扑的最终渲染配置。
+
+实测启动了 Compact 的 `api-bundle`、两个执行 bundle，以及 PostgreSQL、Redis、MinIO、Nacos、
+RocketMQ、OPA 和 Vault。两个执行 bundle 都运行了 Scheduler、DSH node 和 agent，两个 DSH 承载节点
+自行注册到 Nacos。三个调度器互访三个广播别名的 9 次健康检查均通过。测试租约 TTL 为 3 秒，
+依次让 `scheduler-0`、`scheduler-cluster-a` 和 `scheduler-cluster-b` 持有全局租约。后两个副本分别在
+2.49 秒、2.70 秒接管。在三个任期向 follower 提交 24 次，并向新 leader 直写 2 次。20 个不同任务
+各产生 1 条派发，数据库中三个任期分别为 6、7、7 条。验收范围到放置与派发为止，Web、模型推理及
+真实 Istio STRICT mTLS 和 IPv6 集群仍待验证。
+
+在 Compact 空卷冷启动中，原有的 180 秒等待期限曾在 agent 安装插件时触发重启。node 和 agent 现在共享
+10 分钟启动期限，调度器仍有单独的 180 秒上限。两个执行 bundle 从新卷首次启动到健康时重启数均为 0。
+最终使用仓库 Dockerfile 构建 `lumo/dsh-cluster-bundle:scheduler-20261118-verified` 并再次从空卷启动。
+两个执行 bundle 均零重启，两个集群分别在 3.78 秒、2.68 秒接管，26 次放置请求生成 20 条唯一派发。
+镜像运行时复用构建阶段的 Corepack 缓存。断网核对的 pnpm 版本为平台与独立 profile 11.7.0、上游工作区 11.28.5。
+部署测试 38 项全部通过。
+
+## 2026-11-16 调度器放置不再全局串行（未提交，未做真实集群验收）
+
+调度器分析结论第 4 项的后半（前半「取队列窗口化」已于 11-13 完成）。原结论给的方向是
+「租约行可评估降为共享锁，需要先压测再定」。压测做了，**结论是不采用原方向**。
+
+- **原方向（租约行 `FOR UPDATE` → `FOR SHARE`）实测会让 leader 续不上租。** PostgreSQL 的
+  共享行锁不排在等待的排他方后面；只要并发放置的共享锁持续有重叠，续租的 `UPDATE` 与取队列
+  就一直等。16 并发放置时二者 2s 超时（4 次里失败 2 次），本机回环与模拟 1ms 往返下都复现。
+  它还丢了一条没人写下来的性质：**同一个新 task_id 的并发放置只派发一次**——任务行还不存在
+  时行锁锁不到东西，此前是全局串行顺带保住的。
+- **实际做法**：准入锁从租约行锁换成事务级咨询锁（`internal/store/admission.go`）。放置取
+  共享档外加该任务的单飞锁；取队列、排队、对账、终态清理、`CancelUnseen`、集群本地租约的
+  降级放置取排他档；
+  **易主与过期租约重新生效在排他档内完成，续一把仍然有效的租约不取锁**。容量仍由节点行锁
+  保住（同一节点上的放置照旧串行）。围栏的依据：改变「此刻谁有权决策」的操作都在排他档内，
+  因此必然等在途放置落定。
+- **取锁与读租约是两条语句、一次往返**（管线）。不能合成一条：那样读用的是等锁之前的快照，
+  等到的恰恰是它看不见的那次任期变更。
+- **压测结果**（本机 PG 16 + 模拟 1ms 往返，64 节点，每档 5s，一次放置 11 次往返；开发机上的
+  相对比较，不是容量数字）：并发 1/4/16/64 的放置吞吐由 62/74/69/58 变为 56/227/1049/4590
+  条/秒；并发 64 时续租最大耗时由 1.76s（单次期限 2s）降到 4ms。完整表格与复跑命令见
+  `platform/deploy/README.md`「调度器放置并发与升级」。
+
+**这次改动没有带来的**：
+
+- leader 的 drain 循环是顺序放置，吞吐不变（并发 1 那一档，改前改后在噪声内）。受益的只是
+  并发到达的 `POST /v1/placements`。
+- 默认连接池（pgxpool `MaxConns = max(4, CPU 数)`）下 16 并发只到 234 条/秒。要再往上需在
+  `LUMO_PG_DSN` 加 `pool_max_conns`；**默认值与各档 compose / Helm 的 DSN 都没有改**。
+
+验证：新增 11 条并发语义测试（`internal/integration/admission_lock_test.go`），手法是用旁路
+连接锁住节点行把一次放置停在事务中途，再观察其他路径是被挡住还是通过。其中 4 条先红后绿
+（续租不等在途放置、不同节点的放置互不等待、follower 询问不排队、降级放置等全局 leader 的
+在途放置——最后一条是实现过程中自查出的缺口：降级决策权随全局租约到期自动生效，不经过
+排他锁）；其余 7 条是护栏，各自用一次变异确认咬得住（易主不取排他锁、续租不要求租约仍
+有效、先任务锁后准入锁、取锁与读租约同一快照、朴素 `FOR SHARE`）。调度器全量（带真实 PG）
+**430 PASS / 0 FAIL**，唯一 SKIP 是默认不跑的压测台；`-race` 通过。
+
+**未验证 / 已知边界**：
+
+- 11 月 16 日只完成了单进程锁验证。11 月 18 日补跑三进程及四容器换主，见上文。
+- 压测的往返时延是转发器模拟的，没有包含真实部署里 PG 的磁盘刷写与网络抖动。
+- **滚动升级有一个已知窗口**：新版 leader + 旧版 follower 混跑时，旧版的接管不认咨询锁，
+  不会等新版的在途放置；需要新版 leader 的租约恰在某个放置事务中途过期才会触发。
+  反向组合（旧版 leader + 新版 follower）是安全的，因为排他路径保留了租约行锁。
+  处置办法见 README 同一节。
+- PgBouncer transaction 模式已于 11 月 18 日通过四容器转发、去重及冻结换主测试，配置见上文。
+
+## 2026-11-14 调度器高可用与公平性收尾（未提交，未做真实集群验收）
+
+范围是调度器分析结论的 6 项加若干较小项，逐项裁定与依据见工作台账
+`.superpowers/sdd/scheduler-ha-fairness-2026-11-13/progress.md`。本节只记**改变了既有文档结论**的部分。
+
+- **节点消失后的收割多了一条快速通道**。`max_stall`（§7.4.2，默认 8h）不变，仍是无条件兜底；
+  新增 `LUMO_NODE_LOST_MS`（默认 10min，负值关闭）：节点从目录缺席达到阈值，**并且**调度器
+  直连其 `control_url` 的 `/healthz` 两次都不通，才把任务转死信（台账原因 `node_lost:`，
+  与 `max_stall:` 分开）。没有目击记录或没有控制地址的节点不走这条路径。
+  默认行为因此改变：节点永久消失后任务约 10–15 分钟即 FAILED，此前是 8 小时。
+  本文与 `cluster-gap-analysis.md` 中「8 小时后转死信」的旧表述以本节为准。
+- **阈值有启动期校验**：不能为 0；须 ≥ 3 × `LUMO_METRICS_MS`；开启集群判定与漂移时须晚于
+  `down + grace + 一个漂移周期`（默认 420s），否则整集群失联时任务会先被判死而不是被搬走。
+  不满足即拒绝启动。
+- **停滞时钟量的是「节点消失多久」**，不再是 attempt 静默多久；健康但 `enabled=false`
+  的节点（主要是就绪检查未过）计为存活，不推进时钟，也不计入 `LumoTaskLost`。
+- **follower→leader 转发的广播地址**：`LUMO_ADVERTISE_URL`（compose 各档）或
+  `LUMO_ADVERTISE_HOST` + 可选 `LUMO_ADVERTISE_PORT`（Helm，只给裸 Pod IP，进程拼 URL 并给
+  IPv6 加方括号），二者互斥；非法或并存时拒绝启动。
+- **deadline 只在本 (realm, queue) 内排先后**，跨队列由公平序决定。此前带 deadline 的任务
+  排在所有 realm 之前，任何调用方带一个很小的值即可插队。
+- **抢占腾出的槽位为发起者预留 60s**，只对发起者与严格更高优先级放行；仅在 leader 的 drain
+  路径生效，集群本地降级放置不看预留。
+
+验证：调度器全量（带真实 PG）**419 PASS / 0 FAIL / 0 SKIP**，flows **253 PASS / 0 FAIL / 0 SKIP**；
+`helm-verify` 96 项、`helm-combinations-verify`、compose 端口/镜像门禁、`alerts-verify` 通过。
+
+**后续验证**：11 月 18 日已实跑 Docker Compose 调度集群。真实 Istio 网格及 IPv6 集群仍待验证，
+包括 STRICT mTLS 下调度器直连节点 Pod IP 的 `/healthz` 是否可达——若不通，探测恒失败，快速通道退化为「只凭目录
+缺席 10 分钟判死」；确认前可设 `LUMO_NODE_LOST_MS=-1`。节点与 Nacos 和调度器同时断连但仍在
+执行时，其事后回报的结果会被丢弃（与集群漂移接受的风险同类）。
+
+**仍未做**：~~租约锁 `FOR UPDATE` → `FOR SHARE`（需压测）~~（已于 2026-11-16 压测并以另一种
+做法完成，见上一节）。紧凑档 compose 残留的 `scheduler-1` /
+`collaborator-1` 别名与端口映射已于 2026-11-14 清掉；governance 直接写调度器表的处置见下一小节。
+
+### governance 直写调度器表：不改成 RPC，把边界写下来并上门禁（2026-11-15）
+
+**事实**。调度器之外有两处生产代码直接 `UPDATE` 调度器的三张表（`scheduler_dispatch_outbox`、
+`scheduler_task_attempts`、`scheduler_tasks`）：
+
+| 写入方 | 语句数 | 做什么 |
+|---|---|---|
+| `control-plane/governance/internal/store/devices.go` | 7（outbox 3 / attempts 2 / tasks 2） | 设备通道：认领 outbox 并置 `delivered_at`、命令中断或过期后重开同一行、设备接受/拒绝时把任务与 attempt 从 PLACED 推到 RUNNING / FAILED |
+| `dsh-plugins/subagent-host/src/governed-dispatch.ts` | 5（outbox 1 / attempts 2 / tasks 2） | 受治理执行（Agent 路径）：认领 outbox 并置 RUNNING / CANCELLING，结果送达后结算终态、释放槽位 |
+
+这是有记录的设计而不是疏漏：两个消费者都在**同一事务**内完成「认领 + 准入门禁 + 置
+`delivered_at`」（`cluster-gap-analysis.md` E3），前提是与 Scheduler 共库（本文 2026-09-17
+设备链路一节里那条「没有写下来的前提」，现在算写下来了）。
+
+**裁定：不改成 HTTP，也不再新增直写。** 换成 RPC 等于用「恰好一次交接」换「至少一次 + 认领
+租约 + 对账」，要同时动 governance、scheduler、subagent-host 三处，而设备链路没有任何端到端
+夹具可以验证改动；且按下面的 H2，设备那一半目前在生产里走不到。
+
+**门禁**。`platform/shared/__tests__/ddl-ownership.spec.ts` 新增「调度器表的写入方归属」一组
+（常跑，不依赖 DSN）：调度器独占的表从建表扫描推导；调度器之外对这些表的写语句必须与认领清单
+`EXTERNAL_SCHEDULER_WRITES` **逐文件、逐语句、逐条数**一致；表名靠插值拼出来的写语句直接拒绝。
+已做反向验证：在 governance 里临时放一条未认领的 `UPDATE scheduler_tasks`，门禁变红并指出文件。
+
+门禁**不覆盖**的：只读联查（同样依赖列名）；语句在调度器真实表结构上能不能跑——governance 的
+集成测试对着手抄的最小 scheduler 表运行，从没见过调度器的真实 DDL；调度器反向读插件的
+`lumo_governed_executions`。
+
+**两条静态结论（只读代码得出，没有实跑，待裁定）**：
+
+- **H1 设备执行的任务没有人把调度器那一行写成终态。** 设备回报最终结果走
+  `RecordDeviceTaskResult` → `recordTaskResultTx`，只写 `governance_*`；调度器的
+  `POST /v1/tasks/{id}/result` 在生产代码里唯一的调用方是 `subagent-remote/src/client.ts`
+  （另有 smoke 与故障注入脚本）。Agent 路径由插件自己结算，设备路径没有对应物。若设备真能被
+  放置：该行永远 RUNNING 并占着设备槽位，而停滞收割要求节点此刻不在目录——设备在线就永不收割。
+- **H2 没找到把桌面设备登记进调度目录的生产路径。** 目录来源只有 Nacos（dsh 节点自注册；
+  `desktop/src/main.rs` 对本机 runtime 显式移除 `LUMO_NACOS_ADDR`）与 `POST /v1/nodes`（调用方
+  只有 `smoke-parent.ts` 与测试）。`WorkerDirectory.Filter` 取「目录节点 ∩ governance 允许的
+  设备」，交集为空，`user:` 任务放不到设备上，上表 governance 那 7 条写在生产里不可达。
+  **若存在运维手工登记或漏看的登记路径，H2 不成立，H1 立即生效。**
+
+两条的先决问题是同一个——「设备怎么进调度目录」，属于产品/设计决定，本轮没有替它做决定。
+
 ## 2026-11-10 发布、附件、评测与生产验收能力
 
 本批新增统一 upstream SHA 的正式发行门禁、产品版本校验、Mac/Windows 签名入口与失败清理、
@@ -932,6 +1117,8 @@ required-on-read，没打该 patch 的构建读不了它，上游架构笔记已
 
 - **任务侧已经被兜住了**：节点消失时 `LumoTaskLost`（P1）已经在报，8 小时后 `max_stall`
   会把任务转死信，用户可重试。真正缺的只是执行台账那一行。
+  （2026-11-14 更新：另有 `LUMO_NODE_LOST_MS` 快速通道，默认约 10–15 分钟即转死信，见文首当日记录；
+  本节「只补可观测」的结论不受影响。）
 - **`recover()` 的正当性不可移植**。它现在只在 `h.node_id = e.node_id`（同节点出现新实例）
   时动手——那个条件**可证**：旧进程已经不在了。跨节点（3d）或节点永久消失（3c）都没有
   等价物：A 节点凭什么判定 B 节点的在途执行已丢失？而 `save()` 要求 `instance_id` 匹配，

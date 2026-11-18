@@ -92,8 +92,7 @@ function childAlive(child) {
   return child.exitCode === null && child.signalCode === null
 }
 
-async function waitFor(name, predicate, timeoutMs = 180_000) {
-  const deadline = Date.now() + timeoutMs
+async function waitFor(name, predicate, deadline) {
   while (Date.now() < deadline) {
     if (stopping) throw new Error(`bundle is stopping while waiting for ${name}`)
     for (const [childName, child] of children) {
@@ -110,6 +109,9 @@ function schedulerEnv() {
     ...process.env,
     LUMO_INSTANCE: `scheduler-${clusterId}`,
     LUMO_LISTEN: ':8083',
+    // 集群本地调度器同样参与全局选主；当上全局 leader 时，其他副本按这个地址转发。
+    // 主机名是 compose 给本 bundle 容器挂的网络别名（scheduler-cluster-a/b）。
+    LUMO_ADVERTISE_URL: process.env.LUMO_ADVERTISE_URL || `http://scheduler-${clusterId}:8083`,
     LUMO_CLUSTER_ENFORCE: 'true',
     LUMO_SCHEDULER_CLUSTER_ID: clusterId,
     LUMO_CLUSTER_VERSION_GATE: process.env.LUMO_CLUSTER_VERSION_GATE || 'false',
@@ -207,12 +209,15 @@ if (process.argv[2] === 'healthcheck') {
   await healthcheck()
 } else {
   try {
+    // A cold DSH home installs plugins for the node and then the agent. Both
+    // share the Compose startup grace period, including scheduler startup.
+    const startupDeadline = Date.now() + 10 * 60_000
     const scheduler = start('scheduler', '/usr/local/bin/scheduler', [], schedulerEnv())
-    await waitFor('scheduler health', () => checkHttp('http://127.0.0.1:8083/healthz'))
+    await waitFor('scheduler health', () => checkHttp('http://127.0.0.1:8083/healthz'), Date.now() + 180_000)
     const node = start('node', 'pnpm', ['--filter', '@lumo/dsh-node', 'start'], nodeEnv())
-    await waitFor('node seam and host listeners', async () => (await checkHttp('http://127.0.0.1:8090/healthz')) && await checkTcp(8091))
+    await waitFor('node seam and host listeners', async () => (await checkHttp('http://127.0.0.1:8090/healthz')) && await checkTcp(8091), startupDeadline)
     const agent = start('agent', 'pnpm', ['--filter', '@lumo/dsh-node', 'start'], agentEnv())
-    await waitFor('agent callback listener', () => checkTcp(8093))
+    await waitFor('agent callback listener', () => checkTcp(8093), startupDeadline)
     await writeFile(pidFile, JSON.stringify([scheduler.pid, node.pid, agent.pid]), { mode: 0o600 })
     console.info(`cluster-bundle: ${clusterId} scheduler, node and agent are ready`)
   } catch (error) {

@@ -622,6 +622,113 @@ render_rejected_saying "edge-gateway enabled with an empty route table" "require
 render_rejected_saying "a route entry that is not a mapping" "must be a mapping" \
   -f "$cluster_profile" --set edgeGateway.routes={}
 
+# --- scheduler follower -> leader forwarding ---------------------------------
+# The scheduler Service spreads requests over every replica, but only the lease
+# holder may place. A follower therefore forwards to the leader, at the address
+# the leader wrote next to its lease. A render that gets this wrong still
+# renders, lints and starts: the only symptom is a 503 on every placement that
+# happened to land on a follower. Three things have to line up:
+#
+#   * the address names **one pod**. The Service name points at every replica,
+#     so advertising it would forward to a random one. The chart hands the
+#     scheduler the bare pod IP (LUMO_ADVERTISE_HOST) and lets the process build
+#     the URL: `$(VAR)` expansion cannot bracket an IPv6 address, so a URL
+#     assembled in the chart is `http://fd00::1:8083` on an IPv6 single-stack
+#     cluster — not an address. For the same reason the chart must not also set
+#     LUMO_ADVERTISE_URL (the scheduler refuses to start when both are given);
+#   * under mesh mTLS a bare pod IP is routable only if a headless Service covers
+#     those pods on a port whose name declares **no protocol**. Istio builds one
+#     outbound listener per endpoint only for TCP-class and undeclared ports; on
+#     an `http` port it matches the Host header on a shared listener instead, a
+#     pod IP matches no host, and the request leaves as plaintext passthrough
+#     that a STRICT peer refuses. `tcp-` would also get the per-pod listener,
+#     but the main Service already declares this same pod port as HTTP, and for
+#     a port two Services disagree about the sidecar's *inbound* side takes the
+#     protocol of whichever Service is older: were that ever the `tcp-` one,
+#     every request to the scheduler would be handled as opaque TCP. An
+#     undeclared port is sniffed, so it is HTTP whichever Service wins;
+#   * that headless host carries its own ISTIO_MUTUAL DestinationRule — the same
+#     arrangement the node pool already uses (headless, undeclared port names),
+#     which is addressed per pod for the same reason.
+#
+# Expected values are written down, not read back out of the render.
+check_scheduler_peer_addressing() {
+  python3 - "$1" "$2" <<'PY'
+import re, sys
+
+render = open(sys.argv[1], encoding="utf-8").read()
+mesh = sys.argv[2] == "mesh"
+docs = re.split(r"^---\s*$", render, flags=re.M)
+
+def report(ok, label, detail=""):
+    print(("ok" if ok else "fail") + "\t" + label + ("\t" + detail if detail else ""))
+
+def named(kind, name):
+    for doc in docs:
+        if re.search(rf"^kind: {kind}\s*$", doc, re.M) and re.search(rf"^  name: {re.escape(name)}\s*$", doc, re.M):
+            return doc
+    return ""
+
+scheduler = named("Deployment", "lumo-platform-scheduler")
+host = re.search(r"- name: LUMO_ADVERTISE_HOST\s*\n\s*valueFrom: \{ fieldRef: \{ fieldPath: status\.podIP \} \}", scheduler)
+port = re.search(r"- name: LUMO_ADVERTISE_PORT\s*\n\s*value: \"?([^\"\n]*)\"?", scheduler)
+report(bool(host), "the scheduler advertises a single-pod address (its own pod IP)",
+       "LUMO_ADVERTISE_HOST must come from status.podIP")
+report(bool(port) and port.group(1) == "8083",
+       "the advertised port is the scheduler's container port",
+       f"LUMO_ADVERTISE_PORT is {port.group(1) if port else 'missing'}")
+report("LUMO_ADVERTISE_URL" not in scheduler,
+       "the chart does not assemble the URL itself (IPv6 pod IPs need brackets)",
+       "LUMO_ADVERTISE_URL is rendered; with LUMO_ADVERTISE_HOST also set the scheduler refuses to start")
+
+peers = named("Service", "lumo-platform-scheduler-peers")
+if not mesh:
+    report(not peers, "no peer Service is rendered without a mesh (a pod IP is routable as-is)")
+    sys.exit(0)
+
+report(bool(peers), "mesh render carries the scheduler peer Service")
+report(bool(re.search(r"^  clusterIP: None\s*$", peers, re.M)),
+       "the peer Service is headless (one endpoint per pod, no virtual IP)")
+report(bool(re.search(r"^  publishNotReadyAddresses: true\s*$", peers, re.M)),
+       "the peer Service keeps unready pods addressable (leadership does not follow readiness)")
+report(bool(re.search(r"lumo\.dev/service: scheduler\b", peers)),
+       "the peer Service selects the scheduler pods")
+port = re.search(r"\{ name: (\S+), port: (\d+), targetPort: http \}", peers)
+report(bool(port) and port.group(2) == "8083", "the peer Service publishes the scheduler port",
+       f"got {port.group(2) if port else 'no port'}")
+# Istio reads the protocol from the port name up to its first hyphen (or from
+# appProtocol when set). Anything it does not recognise is sniffed.
+declared = {"tcp", "udp", "http", "http2", "https", "tls", "grpc", "mongo", "redis", "mysql", "http_proxy"}
+prefix = port.group(1).split("-", 1)[0].lower() if port else ""
+report(bool(port) and prefix not in declared and "appProtocol" not in peers,
+       "the peer port declares no protocol, so the mesh builds a listener per pod and sniffs HTTP",
+       f"port name is {port.group(1) if port else 'missing'}")
+
+rule = ""
+for doc in docs:
+    if re.search(r"^kind: DestinationRule\s*$", doc, re.M) and \
+            'host: "lumo-platform-scheduler-peers.default.svc.cluster.local"' in doc:
+        rule = doc
+report("ISTIO_MUTUAL" in rule, "the peer host has an ISTIO_MUTUAL DestinationRule",
+       "without it the per-pod listener originates plaintext and STRICT rejects it")
+PY
+}
+
+for peer_case in plain mesh; do
+  peer_render="$report_dir/scheduler-peers-$peer_case.yaml"
+  peer_flags=(-f "$cluster_profile")
+  [[ "$peer_case" == plain ]] || peer_flags+=(--set serviceMesh.istio.enabled=true --set serviceMesh.istio.trustDomain=cluster.local)
+  if render_ok "scheduler peer addressing ($peer_case)" "$peer_render" "${peer_flags[@]}"; then
+    while IFS=$'\t' read -r verdict label detail; do
+      if [[ "$verdict" == "ok" ]]; then
+        pass "scheduler forwarding ($peer_case): $label"
+      else
+        fail "scheduler forwarding ($peer_case): $label — $detail"
+      fi
+    done < <(check_scheduler_peer_addressing "$peer_render" "$peer_case")
+  fi
+done
+
 # The per-service Service type exists so an entry point can be exposed without
 # flipping the global default, which would expose every internal face at once.
 # Asserted as "exactly one Service changed type", not just "the named one did":

@@ -91,8 +91,6 @@ function logical_service(svc, cont) {
     if (cont == 8089) return "governance"
     if (cont == 8090) return "terminal-gateway"
     if (cont == 8092) return "session-control"
-    if (cont == 8182) return "collaborator-1"
-    if (cont == 8184) return "scheduler-1"
   }
   if (svc == "cluster-a-bundle") return "scheduler-cluster-a"
   if (svc == "cluster-b-bundle") return "scheduler-cluster-b"
@@ -126,10 +124,7 @@ function emit(svc, raw,   e, parts, n, last, cont, host, hp, logical) {
   last = parts[n]
   if (last !~ /^[0-9]+$/) return     # 末段不是端口号（长语法 `target:` 等）→ 不猜
   cont = last + 0
-  # Compact bundle 的第二个 Scheduler / Collaborator 使用独立的 818x 监听。
-  if (cont < LO || cont > HI) {
-    if (svc != "api-bundle" || (cont != 8182 && cont != 8184)) return
-  }
+  if (cont < LO || cont > HI) return
   host = ""
   hp = parts[n - 1]
   if (hp ~ /[0-9]+$/) {              # 含 `:-18080}` 这类默认值形态

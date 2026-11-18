@@ -40,7 +40,11 @@ type acquireFunc func(ctx context.Context, holder string, ttlMs int64) (*domain.
 
 func run(ctx context.Context, st *State, acquire acquireFunc, holder string, ttl time.Duration, onChange func(bool)) {
 	try := func() {
-		l, err := acquire(ctx, holder, ttl.Milliseconds())
+		// 每次尝试自带期限（一个续租周期）：续租与请求共用连接池，库变慢时一次
+		// 挂住的续租会挡住后面所有续租，租约在本进程不知情的情况下过期。
+		attempt, cancel := context.WithTimeout(ctx, ttl/3)
+		defer cancel()
+		l, err := acquire(attempt, holder, ttl.Milliseconds())
 		if err != nil && !errors.Is(err, domain.ErrNotAcquired) {
 			return
 		}

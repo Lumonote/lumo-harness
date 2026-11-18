@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -216,5 +218,98 @@ func TestRunStallReaperNegativeMaxStallDisables(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("max-stall 为负时应立即返回（关闭），实际进了收割循环")
+	}
+}
+
+const testNodeLost = 10 * time.Minute
+
+func lostRow(nodeID string, ms int64) store.StalledActive {
+	row := stalled(nodeID, ms)
+	row.NodeSeen = true
+	row.ControlURL = "http://" + nodeID + ":8090"
+	return row
+}
+
+// TestNodeLostBySelectsAbsentNodeWithinFastWindow 快速通道的正向用例：节点不在
+// 新鲜快照里、消失时长落在 [nodeLost, maxStall) 之间、有目击记录、有可探测的地址。
+func TestNodeLostBySelectsAbsentNodeWithinFastWindow(t *testing.T) {
+	now := time.Now()
+	rows := []store.StalledActive{lostRow("gone", testNodeLost.Milliseconds()+1000)}
+	got := nodeLostBy(rows, freshSnap(now, "alive"), now, testNodeLost, testMaxStall, maxStallSnapshotAge)
+	if len(got) != 1 || got[0].row.TaskID != "t-gone" {
+		t.Fatalf("应选中 t-gone，实际 %+v", got)
+	}
+}
+
+// 快速通道比 max_stall 激进得多，所以它的每一道闸门都要单独钉住。
+func TestNodeLostByGates(t *testing.T) {
+	now := time.Now()
+	over := testNodeLost.Milliseconds() + 1000
+	fresh := freshSnap(now, "alive")
+	stale := nodeSnapshot{at: now.Add(-time.Hour), ok: true, ids: map[string]struct{}{}}
+
+	noSighting := lostRow("gone", over)
+	noSighting.NodeSeen = false
+	noURL := lostRow("gone", over)
+	noURL.ControlURL = ""
+	noNode := lostRow("", over)
+	noNode.NodeID = ""
+
+	cases := []struct {
+		name string
+		row  store.StalledActive
+		snap nodeSnapshot
+		lost time.Duration
+	}{
+		{"节点仍在目录里", lostRow("alive", over), fresh, testNodeLost},
+		{"快照不新鲜", lostRow("gone", over), stale, testNodeLost},
+		{"消失时长未到", lostRow("gone", testNodeLost.Milliseconds()-1), fresh, testNodeLost},
+		{"已到 max_stall：归无条件兜底那条路径，不重复选", lostRow("gone", testMaxStall.Milliseconds()), fresh, testNodeLost},
+		{"没有目击记录：时钟量的不是节点消失时长", noSighting, fresh, testNodeLost},
+		{"没有控制地址：拿不到第二个证据", noURL, fresh, testNodeLost},
+		{"任务没有绑定节点", noNode, fresh, testNodeLost},
+		{"快速通道关闭（0）", lostRow("gone", over), fresh, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := nodeLostBy([]store.StalledActive{tc.row}, tc.snap, now, tc.lost, testMaxStall, maxStallSnapshotAge)
+			if len(got) != 0 {
+				t.Fatalf("不应选中，实际 %+v", got)
+			}
+		})
+	}
+}
+
+// 直连探测：只有 2xx 算「还活着」。连不上、超时、非 2xx（含网格 sidecar 对死掉的
+// 上游返回的 503）都不是生命迹象。
+func TestProbeNodeAlive(t *testing.T) {
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ok.Close()
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer bad.Close()
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := closed.URL
+	closed.Close()
+
+	ctx := context.Background()
+	if !probeNodeAlive(ctx, ok.URL+"/") {
+		t.Fatal("/healthz 返回 200 的节点应判为存活（尾斜杠不影响）")
+	}
+	if probeNodeAlive(ctx, bad.URL) {
+		t.Fatal("返回 503 的不是生命迹象")
+	}
+	if probeNodeAlive(ctx, closedURL) {
+		t.Fatal("连不上的节点不应判为存活")
+	}
+	if probeNodeAlive(ctx, "") || probeNodeAlive(ctx, "::not a url") {
+		t.Fatal("没有可用地址时不应判为存活")
 	}
 }

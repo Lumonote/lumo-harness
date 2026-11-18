@@ -83,6 +83,18 @@ class NativeModelDeploymentTests(unittest.TestCase):
                         self.assertFalse(patch.get('bind', {}).get('create_host_path', False))
                 self.assertEqual(len(home_volumes), len(set(home_volumes)), 'DSH homes must not be shared')
 
+    def test_cluster_execution_services_receive_configured_identity_secret(self):
+        secret = 'fixture-identity-signing-key-for-compose'
+        env = dict(self.env, LUMO_IDENTITY_ASSERTION_SECRET=secret)
+        for shape, names in [('compact', ['cluster-a-bundle', 'cluster-b-bundle']), ('full', NODE_NAMES)]:
+            with self.subTest(shape=shape):
+                result = self.render(shape, env, overlay=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                services = json.loads(result.stdout)['services']
+                for name in names:
+                    self.assertEqual(services[name]['environment'].get('LUMO_IDENTITY_ASSERTION_SECRET'),
+                                     secret, name)
+
     def test_default_topologies_preserve_service_selection(self):
         for shape in SHAPES:
             with self.subTest(shape=shape):

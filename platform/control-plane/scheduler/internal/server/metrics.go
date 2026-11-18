@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/lumo-harness/platform/observability"
+	"github.com/lumo-harness/platform/scheduler/internal/catalog"
 	"github.com/lumo-harness/platform/scheduler/internal/domain"
 	"github.com/lumo-harness/platform/scheduler/internal/store"
 )
@@ -140,6 +141,14 @@ var nonTerminalStates = []string{
 }
 
 // nodeSnapshot 目录里健康节点的一份快照。
+//
+// 两个集合回答两个不同的问题，不要混用：
+//
+//   - counts：每个集群有多少节点**可放置**（目录的 List）。排空中的节点不计入。
+//   - ids：哪些节点**还活着**——放置候选，加上目录报告为存活但不可放置的节点
+//     （健康但 enabled=false：就绪检查未过或排空刚开始，见 catalog.AliveLister）。
+//     停滞收割、任务漂移、孤儿指标问的都是「原节点是否已不可能再推进这个任务」，
+//     对这类节点的回答是「它还在」。
 type nodeSnapshot struct {
 	// at 是最近一次**成功**读取的时刻，不是最近一次尝试。目录挂掉时它不前进，
 	// 于是 age 一直涨——「节点数没变」与「根本没读到」必须在图上分得开。
@@ -171,9 +180,38 @@ func (s *Server) RefreshNodeSnapshot(ctx context.Context) {
 	}
 	counts := make(map[string]int, len(nodes))
 	ids := make(map[string]struct{}, len(nodes))
+	seen := make([]string, 0, len(nodes))
 	for _, node := range nodes {
 		counts[node.ClusterID]++
 		ids[node.NodeID] = struct{}{}
+		seen = append(seen, node.NodeID)
+	}
+	// 存活但不可放置的节点（排空中）并入 ids 与目击列表，不计入 counts。
+	//
+	// 读取失败时退回「只认放置候选」并照常发布快照，而不是让整份快照作废：候选集合
+	// 是已经成功读到的事实。退回期间排空节点会被当作缺席（与引入存活集合之前一致），
+	// 方向是偏向误报；下游的不可逆动作各自还有时长闸门。必须留日志——否则「排空期间
+	// 任务被判孤儿」事后无从解释。
+	if lister, ok := s.catalog.(catalog.AliveLister); ok {
+		alive, err := lister.ListAlive(ctx)
+		if err != nil {
+			s.log.Warn("读取存活节点集合失败，本轮只把放置候选视为存活（排空中的节点会被当作缺席）", "err", err)
+		}
+		for _, id := range alive {
+			if _, dup := ids[id]; dup {
+				continue
+			}
+			ids[id] = struct{}{}
+			seen = append(seen, id)
+		}
+	}
+	// 停滞判定的时钟（见 store.StalledActiveTasks）。写失败只记日志：时钟不前进
+	// 只会让停滞时长偏大，而收割还要求节点此刻不在**新鲜**快照里，不会因此误杀
+	// 仍在目录中的节点。
+	if s.store != nil {
+		if err := s.store.TouchNodes(ctx, seen); err != nil {
+			s.log.Warn("记录节点目击时刻失败", "err", err)
+		}
 	}
 	// 每次整体换一份新 map，已发布出去的那份不会再被改：读取方不需要加锁
 	// 就能安全遍历，也不会看到刷新到一半的中间状态。

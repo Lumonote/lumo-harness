@@ -111,6 +111,7 @@ services:
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       LUMO_LISTEN: ":8083"
       LUMO_INSTANCE: scheduler-0
+      LUMO_ADVERTISE_URL: http://scheduler-0:8083
     ports:
       - "58083:8083"
     depends_on:
@@ -126,6 +127,7 @@ services:
       LUMO_CONTROL_PLANE_TOKEN: "${LUMO_CONTROL_PLANE_TOKEN:?LUMO_CONTROL_PLANE_TOKEN must be set}"
       LUMO_LISTEN: ":8083"
       LUMO_INSTANCE: scheduler-1
+      LUMO_ADVERTISE_URL: http://scheduler-1:8083
     ports:
       - "58084:8083"
     depends_on:

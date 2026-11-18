@@ -158,6 +158,38 @@ func ValidateMigrationGrace(graceMS int64) error {
 	return nil
 }
 
+// ValidateNodeLostAfter 校验节点失联快速收割的阈值（`LUMO_NODE_LOST_MS`）。
+//
+// 这条路径把任务**不可逆**地判死，比 max_stall 早得多，所以配错必须在启动时拦下：
+//
+//   - 负值 = 关闭快速通道（只剩 max_stall 那条无条件兜底）。0 既不是「关闭」也不是
+//     「默认」，拒绝——同 ValidateMigrationGrace 的理由，两个含义不挤进一个数值；
+//   - 不得短于三个快照刷新周期（refreshMS）：「消失多久」是靠每轮快照刷新打点量
+//     出来的，阈值小于量具的分辨率时，一两次目录抖动就足以越线；
+//   - 集群漂移启用时必须**晚于**漂移时间线（migrateAfterMS = down + grace + 一个
+//     漂移周期；0 表示漂移未启用）：整个集群失联时它的节点也会从目录里一起消失，
+//     漂移是把任务搬去别处继续跑，收割是放弃它。收割抢在前面，本可以搬走的任务
+//     就被判死了。
+func ValidateNodeLostAfter(nodeLostMS, refreshMS, migrateAfterMS int64) error {
+	if nodeLostMS < 0 {
+		return nil
+	}
+	if nodeLostMS == 0 {
+		return fmt.Errorf("LUMO_NODE_LOST_MS 不能为 0（关闭节点失联快速收割请用负值），当前 0")
+	}
+	if nodeLostMS < 3*refreshMS {
+		return fmt.Errorf(
+			"LUMO_NODE_LOST_MS 必须 ≥ 3 × LUMO_METRICS_MS（节点消失时长靠快照刷新打点量出），当前 %d < 3 × %d",
+			nodeLostMS, refreshMS)
+	}
+	if migrateAfterMS > 0 && nodeLostMS <= migrateAfterMS {
+		return fmt.Errorf(
+			"LUMO_NODE_LOST_MS 必须晚于集群漂移时间线（down + grace + 一个漂移周期 = %dms），否则整集群失联时任务会先被判死而不是被搬走，当前 %d",
+			migrateAfterMS, nodeLostMS)
+	}
+	return nil
+}
+
 // ClusterEnforcement 本实例是否参与失联判定（闸门 + 集群维度指标）的生效值。
 type ClusterEnforcement struct {
 	// Enabled 生效值。false 时闸门恒放行、不出集群维度指标。

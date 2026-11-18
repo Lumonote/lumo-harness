@@ -575,6 +575,160 @@ describe('建表方归属（常跑，不依赖 DSN）', () => {
   })
 })
 
+/**
+ * 第二条仓库级契约：**调度器的表只有调度器自己写；调度器之外的直写必须逐条认领。**
+ *
+ * 为什么需要它：建表方唯一并不等于写入方唯一。governance 的设备通道与 subagent-host 的
+ * 受治理执行都**直接 UPDATE 调度器的表**——认领派发 outbox、把任务从 PLACED 推到
+ * RUNNING、结算终态——并且与各自的行在同一事务内提交。这是有记录的设计（同库是前提，
+ * 见 `docs/implementation-status.md` 的「governance 直写调度器表」一节），不是疏漏；但它
+ * 意味着调度器的状态机在调度器之外还有两份手写的实现，而这两份在各自的测试里都对着
+ * **手抄的最小 scheduler 表**跑，从没见过调度器的真实 DDL。
+ *
+ * 这份清单因此有两个读者：
+ *   - 改调度器的人：动这三张表的列、状态名或「状态跃迁必须同时做什么」之前，清单里的
+ *     每一处都要看一遍——它们不会随调度器的测试一起变红；
+ *   - 想再加一条直写的人：这里会拦下来。先问能不能走调度器的接口
+ *     （`POST /v1/tasks/{id}/result`、`POST /v1/reconcile`），不能再认领，并写明理由。
+ *
+ * 没有断言的地方（写出来，免得被读成「已覆盖」）：
+ *   - **只读联查不在清单里**（`JOIN scheduler_tasks …`）。读不会写坏调度器的状态，但同样
+ *     依赖列名；调度器改列名时仍要全仓检索；
+ *   - **语句本身对不对不在这里判**：这里只数「谁在写哪张表、写了几处」，不验证这些语句
+ *     在调度器的真实表结构上能不能跑；
+ *   - 反方向（调度器读插件的 `lumo_governed_executions`）不在范围内；
+ *   - 只扫生产的 Go / TS / SQL。运维脚本（deploy 下的 .py / .sh）目前只读这些表。
+ */
+const SCHEDULER_ROOT = 'control-plane/scheduler/'
+
+const EXTERNAL_SCHEDULER_WRITES: Record<string, { writes: Record<string, number>; reason: string }> = {
+  'control-plane/governance/internal/store/devices.go': {
+    writes: {
+      'UPDATE scheduler_dispatch_outbox': 3,
+      'UPDATE scheduler_task_attempts': 2,
+      'UPDATE scheduler_tasks': 2,
+    },
+    reason:
+      '设备通道把调度器的派发 outbox 桥成设备命令：认领时置 delivered_at（dispatchDeviceTask）、' +
+      '命令中断或过期后重开同一行（interruptDeviceCommands / dispatchDeviceTask）、设备接受或拒绝时' +
+      '把任务与 attempt 从 PLACED 推到 RUNNING / FAILED（CompleteDeviceCommand）。每一处都与 ' +
+      'governance 自己的命令行、run 行在同一事务内提交——这正是它没有走 HTTP 的原因。',
+  },
+  'dsh-plugins/subagent-host/src/governed-dispatch.ts': {
+    writes: {
+      'UPDATE scheduler_dispatch_outbox': 1,
+      'UPDATE scheduler_task_attempts': 2,
+      'UPDATE scheduler_tasks': 2,
+    },
+    reason:
+      '受治理执行（Agent 路径）：take() 在写准入回执的同一事务内认领 outbox 并把任务置 ' +
+      'RUNNING / CANCELLING；settle() 在结果送达 governance 之后结算调度器的任务与 attempt、' +
+      '释放槽位。',
+  },
+}
+
+type WriteCounts = Record<string, Record<string, number>>
+
+/**
+ * 调度器独占的表：每一个非迁移建表方都在调度器模块里。
+ *
+ * 从建表扫描推导，不手抄——手抄的表清单会在调度器加表的那一刻过期，而且过期的方向是
+ * 「新表没人看」。
+ */
+async function schedulerOwnedTables(): Promise<Set<string>> {
+  const owned = new Set<string>()
+  for (const [table, files] of await declarations()) {
+    const services = [...files].filter((file) => !file.startsWith(`${MIGRATION_DIR}/`))
+    if (services.length > 0 && services.every((file) => file.startsWith(SCHEDULER_ROOT))) owned.add(table)
+  }
+  return owned
+}
+
+/**
+ * 写语句的目标表。`ON CONFLICT … DO UPDATE SET`、`FOR UPDATE OF / SKIP LOCKED` 也会命中，
+ * 但取到的「表名」是 SET / OF / SKIP，过不了「调度器独占」那道筛，所以不必在这里排除。
+ */
+const WRITE_TARGET = /\b(UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+(?:ONLY\s+)?(?:[A-Za-z_][A-Za-z0-9_]*\.)?"?([A-Za-z_][A-Za-z0-9_]*)/giu
+
+/** 目标表不是字面量的写语句：`${…}` 插值、`%s` 占位、或引号后紧跟 `+` 的字符串拼接。 */
+const DYNAMIC_WRITE_TARGET = /\b(?:UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+(?:ONLY\s+)?"?(?:\$\{|%[sv]|["'`]\s*\+)/iu
+
+/** 各文件里以调度器独占表为目标的写语句计数；`include` 决定扫哪些文件。 */
+async function schedulerTableWrites(include: (file: string) => boolean): Promise<WriteCounts> {
+  const owned = await schedulerOwnedTables()
+  const files = scannedFiles.filter(include)
+  const texts = await readAll(files)
+  const out: WriteCounts = {}
+  for (const file of files) {
+    for (const m of texts.get(file)!.matchAll(WRITE_TARGET)) {
+      const table = m[2]!
+      if (!owned.has(table)) continue
+      const statement = `${m[1]!.replace(/\s+/gu, ' ').toUpperCase()} ${table}`
+      const counts = (out[file] ??= {})
+      counts[statement] = (counts[statement] ?? 0) + 1
+    }
+  }
+  return out
+}
+
+/** 既提到调度器独占表、又有「表名不是字面量」的写语句的文件。 */
+async function dynamicWritersMentioningSchedulerTables(include: (file: string) => boolean): Promise<string[]> {
+  const owned = [...await schedulerOwnedTables()]
+  const files = scannedFiles.filter(include)
+  const texts = await readAll(files)
+  return files.filter((file) => {
+    const text = texts.get(file)!
+    return DYNAMIC_WRITE_TARGET.test(text) && owned.some((table) => new RegExp(`\\b${table}\\b`, 'u').test(text))
+  })
+}
+
+const outsideScheduler = (file: string): boolean =>
+  !file.startsWith(SCHEDULER_ROOT) && !file.startsWith(`${MIGRATION_DIR}/`)
+
+describe('调度器表的写入方归属（常跑，不依赖 DSN）', () => {
+  it('调度器独占的表是从建表扫描里推导出来的，且确实包含被外部写入的那三张', async () => {
+    const owned = await schedulerOwnedTables()
+    expect(
+      [...owned].sort(),
+      '推导不出调度器的表——是建表扫描或归属规则坏了。此时下面的写入方检查会因为「没有表可查」而空过',
+    ).toEqual(expect.arrayContaining(['scheduler_dispatch_outbox', 'scheduler_task_attempts', 'scheduler_tasks']))
+    expect(owned.size, '调度器至少有任务、attempt、派发、控制命令、节点、租约等表').toBeGreaterThanOrEqual(8)
+  })
+
+  it('扫描器自证：调度器自己对这些表的写入看得见', async () => {
+    const own = await schedulerTableWrites((file) => file.startsWith(SCHEDULER_ROOT))
+    const store = own['control-plane/scheduler/internal/store/store.go'] ?? {}
+    expect(
+      store['UPDATE scheduler_tasks'] ?? 0,
+      'store.go 里一条 UPDATE scheduler_tasks 都没扫到——是写语句的识别规则失效了，不是调度器不写自己的表',
+    ).toBeGreaterThanOrEqual(5)
+    expect(
+      (own['control-plane/scheduler/internal/dispatch/dispatch.go'] ?? {})['INSERT INTO scheduler_dispatch_outbox'] ?? 0,
+      '关键字与表名之间隔着换行缩进的写法（dispatch.go 的派发入库）必须认得出来',
+    ).toBeGreaterThanOrEqual(1)
+  })
+
+  it('调度器之外直接写调度器表的语句，必须与认领清单逐条一致', async () => {
+    const claimed: WriteCounts = Object.fromEntries(
+      Object.entries(EXTERNAL_SCHEDULER_WRITES).map(([file, entry]) => [file, entry.writes]),
+    )
+    expect(
+      await schedulerTableWrites(outsideScheduler),
+      '调度器之外写调度器表的地方变了。新增一处：先看能不能走调度器的接口（它的状态机——' +
+        '终态要同时确认派发与控制命令、状态写入要刷新 updated_at——不会替你在这里生效）；' +
+        '确实要直写，就在 EXTERNAL_SCHEDULER_WRITES 里认领并写明理由。删掉一处：把对应条目一并删掉。',
+    ).toEqual(claimed)
+  })
+
+  it('不得用插值出来的表名绕开上面的扫描', async () => {
+    expect(
+      await dynamicWritersMentioningSchedulerTables(outsideScheduler),
+      '这些文件既提到了调度器的表名，又有目标表不是字面量的写语句（${…} / %s / 字符串拼接）。' +
+        '扫描器看不见那条语句写的是哪张表——把表名写成字面量，让它进得了认领清单。',
+    ).toEqual([])
+  })
+})
+
 function migrationFiles(): string[] {
   return readdirSync(join(platformRoot, MIGRATION_DIR))
     .filter((f) => f.endsWith('.sql'))

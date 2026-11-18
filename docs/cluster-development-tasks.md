@@ -1229,6 +1229,11 @@ Three gates, none sufficient alone:
 3. the attempt must have been silent for `max_stall` (default 8h) — a *grace*
    period, not the primary predicate.
 
+> Update 2026-11-14: the 8h clock now measures how long the node has been absent
+> from the directory, and a fast path (`LUMO_NODE_LOST_MS`, default 10min) reaps
+> sooner when the node is absent that long **and** two direct `/healthz` probes
+> fail. See the 2026-11-14 entry in `implementation-status.md`.
+
 The third one is the subtle one. `scheduler_tasks.updated_at` only advances on a
 state **transition** (`reconcile` writes it only when `stateRank` advances), so
 a healthy 9-hour `RUNNING` task and a 9-hour-stuck one look identical. Using it

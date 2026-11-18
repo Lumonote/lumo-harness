@@ -8,18 +8,21 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/scheduler/internal/domain"
 	"github.com/lumo-harness/platform/scheduler/internal/planner"
+	"github.com/lumo-harness/platform/scheduler/internal/store"
 )
 
 // PreparePlacement 给一批任务批量填上项目亲和输入（会话亲和，§7.4.1）。
 //
-// 一次查一批项目而不是逐任务查：drain 循环一轮最多取 32 个 PENDING 任务，逐任务
-// 查会把一轮变成 32 次往返，而它们之间本来只需要一条 `= ANY($2)`。
+// 一次查一批项目而不是逐任务查：drain 循环一轮取一批 PENDING 任务（LUMO_DRAIN_BATCH，默认 64），逐任务
+// 查会把一轮变成几十次往返，而它们之间本来只需要一条 `= ANY($2)`。
 //
 // 失败时**不填**（亲和分恒为 0）而不是让放置失败：亲和是**软偏好**，它读不到
 // 只会让排序退回纯负载最小——那是完全合法的放置。把一次统计查询的抖动升级成
@@ -176,4 +179,211 @@ func LogPlacementWeights(log *slog.Logger, w domain.PlacementWeights) {
 		"load_weight", w.Load, "affinity_weight", w.Affinity,
 		"affinity_bound", w.AffinityBound(),
 		"meaning", "亲和分最多能翻转这么多负载比差；设为 0 即退回纯负载最小")
+}
+
+const (
+	// slotReservationHold 抢占腾出的槽为发起者保留多久（自受害者终态落库起算）。
+	//
+	// 取默认最大退避（30s）的两倍：即使唤醒没轮到它，等待者也至少自然到期一次。
+	// 更长只会让「等待者不来取」时槽位空置更久——那种情况（该节点对它已不再合格）
+	// 这里分辨不出来，只能靠期限兜底。
+	slotReservationHold = 60 * time.Second
+	// preemptionStopGrace 一次已送达的停止请求被视为「在途」多久。期间不为同一个
+	// 等待者再挑受害者。
+	//
+	// 要盖得住节点的收尾上限（部署里 stop_grace_period 是 180s），否则正常的慢停止
+	// 会被当成「没停下来」而多杀一个；也不能无限长，否则一个永远不回报终态的受害者
+	// 会把等待者永久挡住。
+	preemptionStopGrace = 5 * time.Minute
+)
+
+// reservedView 给出某个任务做放置决策时应当看到的各节点占用数：真实活跃数，
+// 加上它无权动用的预留槽位。
+//
+// 一条预留对两类任务不生效：发起者本人，以及优先级**严格高于**发起者的任务——
+// 后者本来就有权拿这个槽（它自己来也会发起抢占），挡住它只会多杀一个。同优先级
+// 不放行：槽是为那个具体的等待者腾的，放行等于受害者白死。
+//
+// 没有任何预留对它生效时直接返回原 map，不复制——这是绝大多数轮次的情况。
+func reservedView(task domain.Task, active map[string]int, reservations []store.SlotReservation, served map[string]struct{}) map[string]int {
+	var view map[string]int
+	for _, r := range reservations {
+		if r.WaiterTaskID == task.TaskID || task.Priority > r.WaiterPriority {
+			continue
+		}
+		if _, done := served[r.WaiterTaskID]; done {
+			continue
+		}
+		if view == nil {
+			view = make(map[string]int, len(active)+1)
+			for node, n := range active {
+				view[node] = n
+			}
+		}
+		view[r.NodeID]++
+	}
+	if view == nil {
+		return active
+	}
+	return view
+}
+
+// DrainOptions 一轮接续放置的参数。
+type DrainOptions struct {
+	Batch      int
+	Backoff    time.Duration
+	MaxBackoff time.Duration
+}
+
+// slotsReleased 相对上一轮是否有节点腾出了槽位。第一轮（没有上一轮）按「有」
+// 处理：领导权刚转移时，新 leader 不知道上一任错过了什么。
+func slotsReleased(prev, cur map[string]int) bool {
+	if prev == nil {
+		return true
+	}
+	for node, n := range prev {
+		if cur[node] < n {
+			return true
+		}
+	}
+	return false
+}
+
+// Drain 一轮接续：取 PENDING → 规划 → 放置。任何一处失败仅记录并等下一轮。
+//
+// 放置决策走 PreparePlacement + PickPrepared（与 HTTP 放置路径同一份实现）。
+//
+// 三件事只在这里发生，HTTP 路径给不了：
+//   - **槽位释放即重查**：等容量的任务在退避里，而释放是它唯一在等的事件。终态
+//     有多个写入方（任意副本的回报端点、治理服务、承载插件），所以不靠通知，
+//     而是比较相邻两轮的活跃数；
+//   - **抢占重试**：提交时只试一次，之后出现的低优先级占用者与投递失败的停止
+//     命令都靠这里再试；
+//   - **抢占腾出的槽留给发起者**：取队列的顺序里公平序先于优先级，不预留的话
+//     排在前面的低优先级任务会先拿走这个槽（见 reservedView）；
+//   - **治理目录按 worker 记忆**：同一轮里同一 worker 只问一次。
+func (s *Server) Drain(ctx context.Context, lease *domain.Lease, opts DrainOptions) {
+	active, err := s.store.ActiveCounts(ctx)
+	if err != nil {
+		s.log.Error("活跃计数失败", "err", err)
+		return
+	}
+	s.drainMu.Lock()
+	released := slotsReleased(s.drainActive, active)
+	s.drainActive = make(map[string]int, len(active))
+	for node, n := range active {
+		s.drainActive[node] = n
+	}
+	s.drainMu.Unlock()
+	if released {
+		if err := s.store.WakeCapacityWaiters(ctx, opts.Batch); err != nil {
+			s.log.Warn("唤醒等容量任务失败", "err", err)
+		}
+	}
+	// 预留读不到时按「没有预留」继续，而不是停掉这一轮：预留防的是白杀一个任务，
+	// 为它让整个队列停摆是用更大的代价换更小的。必须留日志——这一轮里腾出的槽
+	// 可能被别人拿走。
+	reservations, err := s.store.SlotReservations(ctx, slotReservationHold)
+	if err != nil {
+		s.log.Warn("读取槽位预留失败，本轮不做预留", "err", err)
+	}
+	if len(reservations) > 0 {
+		waiters := make([]string, 0, len(reservations))
+		for _, r := range reservations {
+			waiters = append(waiters, r.WaiterTaskID)
+		}
+		if err := s.store.WakePending(ctx, waiters); err != nil {
+			s.log.Warn("唤醒预留的等待者失败", "err", err)
+		}
+	}
+	served := make(map[string]struct{})
+	pending, err := s.store.TakePending(ctx, lease, opts.Batch, opts.Backoff)
+	if err != nil {
+		s.log.Error("取排队任务失败", "err", err)
+		return
+	}
+	if len(pending) == 0 {
+		return
+	}
+	deferTask := func(taskID, reason string) {
+		_ = s.store.DeferPending(ctx, taskID, reason, opts.Backoff, opts.MaxBackoff)
+	}
+	nodes, err := s.catalog.List(ctx)
+	if err != nil {
+		s.log.Error("列节点失败", "err", err)
+		for _, task := range pending {
+			deferTask(task.TaskID, "catalog-unavailable")
+		}
+		return
+	}
+	prepared := make([]*domain.Task, 0, len(pending))
+	for i := range pending {
+		prepared = append(prepared, &pending[i])
+	}
+	s.PreparePlacement(ctx, prepared)
+	type scope struct {
+		nodes []domain.Node
+		err   error
+	}
+	scopes := make(map[[3]string]scope)
+	for _, task := range pending {
+		eligible := nodes
+		if task.WorkerID != "" {
+			key := [3]string{task.Realm, task.WorkerID, task.ProjectID}
+			sc, ok := scopes[key]
+			if !ok {
+				sc.nodes, sc.err = s.workers.Filter(ctx, task, nodes)
+				scopes[key] = sc
+			}
+			if sc.err != nil {
+				s.log.Warn("Worker 设备目录不可用，保留排队任务", "task_id", task.TaskID, "err", sc.err)
+				deferTask(task.TaskID, "worker-directory-unavailable")
+				continue
+			}
+			eligible = sc.nodes
+		}
+		n := s.PickPrepared(ctx, task, eligible, reservedView(task, active, reservations, served))
+		if n == nil {
+			reason := "no-capacity"
+			if len(planner.EligibleNodes(task, eligible)) == 0 {
+				reason = "no-compatible-node"
+			}
+			if planner.VersionBlockedCandidates(task, eligible) > 0 {
+				reason = "version-blocked"
+			}
+			if reason == "no-capacity" {
+				if victim, err := s.requestPreemption(ctx, task, eligible); err != nil {
+					s.log.Warn("抢占停止请求未送达", "task_id", task.TaskID, "err", err)
+				} else if victim != "" {
+					s.log.Info("已请求抢占", "task_id", task.TaskID, "victim", victim)
+				}
+			}
+			deferTask(task.TaskID, reason)
+			continue // Other employees/Agents can still have eligible idle devices.
+		}
+		if err := s.store.SyncNodeSnapshot(ctx, *n); err != nil {
+			s.log.Error("同步节点快照失败", "node_id", n.NodeID, "err", err)
+			deferTask(task.TaskID, "store-unavailable")
+			continue
+		}
+		placed, err := s.store.PlaceTask(ctx, lease, task, n.NodeID)
+		if err != nil {
+			var ncap *domain.NoCapacityError
+			if errors.As(err, &ncap) {
+				deferTask(task.TaskID, "no-capacity")
+				continue
+			}
+			s.log.Error("drain 放置失败", "task_id", task.TaskID, "err", err)
+			continue
+		}
+		if placed.State.Active() {
+			active[n.NodeID]++
+			s.drainMu.Lock()
+			s.drainActive[n.NodeID]++
+			s.drainMu.Unlock()
+			// 等待者已经落位（不论落在哪个节点），它名下的预留在本轮剩余时间里
+			// 不再占数；下一轮查询时它已不在排队，预留自然消失。
+			served[task.TaskID] = struct{}{}
+		}
+	}
 }

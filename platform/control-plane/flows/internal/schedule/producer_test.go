@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"testing"
 	"time"
@@ -630,9 +631,14 @@ func TestCycleReportsFireFailure(t *testing.T) {
 	}
 }
 
-func TestCycleHonoursLimit(t *testing.T) {
+// limit 是每次取到期游标的**批大小**，不是一轮的上限。
+//
+// 整点类表达式会让大量游标同时到期。一轮只处理一批的话，排在后面的自动化要等
+// 若干个 poll 周期才被触发（默认 100 条 / 30s：一千个整点自动化，最后一个晚 5 分钟），
+// 而触发本身只是一次入队。
+func TestCycleDrainsBacklogLargerThanOneBatch(t *testing.T) {
 	fake := newFakeCursors()
-	for _, id := range []string{"auto-1", "auto-2", "auto-3"} {
+	for _, id := range []string{"auto-1", "auto-2", "auto-3", "auto-4", "auto-5"} {
 		seedCursor(fake, hourlyCursor(id, "2026-09-14T08:00:00Z", "2026-09-14T09:00:00Z"))
 	}
 	producer, _ := newTestProducer(t, fake, "2026-09-14T09:00:30Z")
@@ -640,11 +646,52 @@ func TestCycleHonoursLimit(t *testing.T) {
 
 	report := producer.Cycle(context.Background())
 
-	if report.Fired != 2 {
-		t.Fatalf("Fired = %d，期望受 limit=2 限制", report.Fired)
+	if report.Fired != 5 {
+		t.Fatalf("Fired = %d，一轮应把 5 个到期游标全部触发（批大小 2）", report.Fired)
 	}
 }
 
+// 触发失败的游标仍然是到期的，下一批会原样再取到它。一轮里同一个游标只处理一次：
+// 否则一个持续失败的游标会在一轮里被重试到批次上限，错误也被上报同样多次。
+func TestCycleDoesNotRetryFailedCursorWithinOneCycle(t *testing.T) {
+	fake := newFakeCursors()
+	for _, id := range []string{"auto-1", "auto-2", "auto-3"} {
+		seedCursor(fake, hourlyCursor(id, "2026-09-14T08:00:00Z", "2026-09-14T09:00:00Z"))
+	}
+	fake.fireErr = errors.New("fire boom")
+	producer, reported := newTestProducer(t, fake, "2026-09-14T09:00:30Z")
+	producer.SetTiming(time.Second, 2)
+
+	report := producer.Cycle(context.Background())
+
+	if report.Fired != 0 {
+		t.Fatalf("Fired = %d，期望 0", report.Fired)
+	}
+	if len(*reported) != 2 {
+		t.Fatalf("每个失败的游标一轮只应上报一次，实际上报 %d 次: %v", len(*reported), *reported)
+	}
+}
+
+// 一轮的工作量有上限：积压再深，也要把控制权还给调用方（退出信号、下一轮对齐）。
+// 剩下的由下一轮接着处理。
+func TestCycleBoundsWorkPerCycle(t *testing.T) {
+	fake := newFakeCursors()
+	total := maxBatchesPerCycle + 2
+	for i := 0; i < total; i++ {
+		seedCursor(fake, hourlyCursor(fmt.Sprintf("auto-%02d", i), "2026-09-14T08:00:00Z", "2026-09-14T09:00:00Z"))
+	}
+	producer, _ := newTestProducer(t, fake, "2026-09-14T09:00:30Z")
+	producer.SetTiming(time.Second, 1)
+
+	report := producer.Cycle(context.Background())
+
+	if report.Fired != maxBatchesPerCycle {
+		t.Fatalf("Fired = %d，一轮至多 %d 批（批大小 1）", report.Fired, maxBatchesPerCycle)
+	}
+	if again := producer.Cycle(context.Background()); again.Fired != 2 {
+		t.Fatalf("剩余的应由下一轮处理，Fired = %d，期望 2", again.Fired)
+	}
+}
 func TestCycleHandlesMultipleDueCursors(t *testing.T) {
 	fake := newFakeCursors()
 	seedCursor(fake, hourlyCursor("auto-1", "2026-09-14T08:00:00Z", "2026-09-14T09:00:00Z"))

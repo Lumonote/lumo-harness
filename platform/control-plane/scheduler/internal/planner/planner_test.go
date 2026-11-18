@@ -2,7 +2,6 @@ package planner
 
 import (
 	"testing"
-	"time"
 
 	"github.com/lumo-harness/platform/scheduler/internal/domain"
 )
@@ -120,23 +119,6 @@ func TestPickEnforcesAntiAffinityAndRequirementValue(t *testing.T) {
 	task.AvoidNodes = nil
 	if got := Pick(task, nodes, nil); got == nil || got.NodeID != "b" {
 		t.Fatalf("应匹配 capability value, got %+v", got)
-	}
-}
-
-func TestOrderPendingEDFAndWeightedFairQueue(t *testing.T) {
-	now := time.UnixMilli(1000)
-	tasks := []domain.Task{
-		{TaskID: "slow-a", Queue: "a", Weight: 2, EnqueuedAt: now},
-		{TaskID: "slow-b", Queue: "b", Weight: 1, EnqueuedAt: now},
-		{TaskID: "urgent", Queue: "a", DeadlineMS: 900, EnqueuedAt: now},
-		{TaskID: "slow-a2", Queue: "a", Weight: 2, EnqueuedAt: now.Add(time.Millisecond)},
-	}
-	got := OrderPending(tasks, now)
-	if got[0].TaskID != "urgent" {
-		t.Fatalf("过期任务应优先, got %+v", got)
-	}
-	if got[1].TaskID != "slow-a" || got[2].TaskID != "slow-b" || got[3].TaskID != "slow-a2" {
-		t.Fatalf("权重队列顺序错误, got %+v", got)
 	}
 }
 

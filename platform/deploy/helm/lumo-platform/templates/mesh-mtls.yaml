@@ -34,6 +34,42 @@ spec:
 ---
 {{- end }}
 {{- end }}
+{{- with .Values.services.scheduler }}
+{{- if .enabled }}
+# Scheduler replicas reach each other by pod IP: a follower forwards
+# leader-only requests to the address the leader stored next to its lease
+# (LUMO_ADVERTISE_URL). Under STRICT mTLS a bare pod IP is only routable when
+# a headless Service covers it on a port that declares no protocol: the
+# sidecar then builds an outbound listener per pod and sniffs the HTTP inside
+# it. A port named http would be matched by Host header on the shared
+# listener, where a pod IP matches nothing and leaves as plaintext. Unready
+# pods stay addressable because holding the lease does not follow readiness.
+# helm-verify.sh ("scheduler follower -> leader forwarding") pins each part.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lumo-platform.name" $ }}-scheduler-peers
+  labels: { lumo.dev/mesh: istio }
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { lumo.dev/service: scheduler, app.kubernetes.io/instance: {{ $.Release.Name | quote }} }
+  ports:
+    - { name: peers, port: {{ .port }}, targetPort: http }
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ include "lumo-platform.name" $ }}-scheduler-peers-mtls
+  labels: { lumo.dev/mesh: istio }
+spec:
+  host: {{ printf "%s-scheduler-peers.%s.svc.cluster.local" (include "lumo-platform.name" $) $namespace | quote }}
+  exportTo: ["."]
+  trafficPolicy:
+    tls: { mode: ISTIO_MUTUAL }
+---
+{{- end }}
+{{- end }}
 {{- if .Values.deviceGateway.enabled }}
 # This Service carries the application's device mTLS session unchanged. Its
 # only target port is excluded from the Governance sidecar's inbound capture.

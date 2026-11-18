@@ -161,6 +161,44 @@ func TestGlobalPlacementsRetainActualClusterForEveryFailover(t *testing.T) {
 	}
 }
 
+// Migration clears the placement constraint so the next attempt can land elsewhere.
+// The original request and each attempt's actual cluster must survive that transition.
+func TestPlacementPreservesRequestedClusterAndClearsBackoff(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	nodeN1(t, st)
+	if err := (&catalog.Pg{Pool: st.Pool()}).Upsert(ctx, domain.Node{NodeID: "N2", Realm: "r1", ClusterID: "c2", Capacity: 1}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := st.Acquire(ctx, "leader", 60000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{TaskID: "pinned", Realm: "r1", ClusterID: "c1"}
+	if _, err := st.PlaceTask(ctx, lease, task, "N1"); err != nil {
+		t.Fatal(err)
+	}
+	m, err := st.MigrateTask(ctx, store.MigrationRecord{TaskID: task.TaskID, Realm: task.Realm, Attempt: 1, FromClusterID: "c1", FromNodeID: "N1"})
+	if err != nil || !m.Applied {
+		t.Fatalf("migration: %+v %v", m, err)
+	}
+	if err := st.DeferPending(ctx, task.TaskID, "no-capacity", time.Minute, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	task.ClusterID = ""
+	if _, err := st.PlaceTask(ctx, lease, task, "N2"); err != nil {
+		t.Fatal(err)
+	}
+	if n := rowCount(t, st, `SELECT count(*) FROM scheduler_tasks WHERE task_id='pinned' AND state='PLACED'
+		AND attempt=2 AND requested_cluster_id='c1' AND assigned_cluster_id='c2' AND next_check_at=0 AND pending_reason=''`); n != 1 {
+		t.Fatal("re-placement must retain the original request, set the new assignment and clear pending backoff")
+	}
+	if n := rowCount(t, st, `SELECT count(*) FROM scheduler_task_attempts WHERE task_id='pinned'
+		AND (attempt, assigned_cluster_id) IN ((1,'c1'), (2,'c2'))`); n != 2 {
+		t.Fatal("each attempt must retain its own assigned cluster")
+	}
+}
+
 func TestPendingCancelCannotBeResurrectedByStaleDrain(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()

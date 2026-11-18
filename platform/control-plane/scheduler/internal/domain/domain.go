@@ -51,8 +51,11 @@ type Task struct {
 	// Residency is an optional hard data-residency domain (for example cn-east).
 	// Empty means the realm policy has not constrained this task.
 	Residency string `json:"residency,omitempty"`
-	// DeadlineMS is an optional absolute deadline. Pending work is ordered by
-	// earliest deadline first (EDF); zero means no deadline.
+	// DeadlineMS is an optional absolute deadline; zero means no deadline. It
+	// orders work earliest-deadline-first **within its own (realm, queue)** only.
+	// Across queues the weighted fair share decides: the value comes from the
+	// request body, so letting it outrank fairness would let any caller jump
+	// every other tenant's queue by attaching a small deadline.
 	DeadlineMS int64 `json:"deadline_ms,omitempty"`
 	// Queue and Weight provide weighted fair queuing for pending work. Empty
 	// queue uses the default queue and non-positive weights normalize to 1.

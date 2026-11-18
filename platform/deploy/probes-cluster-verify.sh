@@ -439,7 +439,6 @@ llm-gateway	18088	8088
 projects	18086	8086
 registry	18084	8084
 scheduler-0	18083	8083
-scheduler-1	18093	8184
 scheduler-cluster-a	18094	8083
 scheduler-cluster-b	18095	8083
 session-control	18092	8092
@@ -468,8 +467,8 @@ SHARED_FILES=("$HERE/compose.shared.yml" "$HERE/compose.control-plane.bundle.yml
 # `compose.cluster.yml` 里 `scheduler-0`(18096) / `collaborator-0`(18097) 是
 # cluster-full 的独立容器，与 compact 的 api-bundle 属于同一逻辑实例的两套
 # 宿主端口。合并拓扑而不限定 profile 时两者都会出现（这正是派生的正确行为 ——
-# 它按文本采集，不该猜哪套端口在该形态下生效），于是派生 17 条 ≠ 写死的 15 条。
-expect_derivation "Cluster compact bundle 的探针目标 == 写死的 15 条" "$CLUSTER_PINNED" \
+# 它按文本采集，不该猜哪套端口在该形态下生效），于是派生 16 条 ≠ 写死的 14 条。
+expect_derivation "Cluster compact bundle 的探针目标 == 写死的 14 条" "$CLUSTER_PINNED" \
   "${SHARED_FILES[@]}" "$HERE/compose.cluster.yml" "$HERE/compose.cluster.compact.yml" cluster-compact
 expect_derivation "Standalone 共用 bundle 的探针目标 == 写死的 12 条" "$STANDALONE_PINNED" \
   "${SHARED_FILES[@]}" "$HERE/compose.standalone.yml"
@@ -477,7 +476,7 @@ expect_derivation "Standalone 共用 bundle 的探针目标 == 写死的 12 条"
 # 反向 1：把 edge-gateway 的容器端口挪出控制面段（8080 → 9080）→ 派生必须跟着变。
 sed 's/"18080:8080"/"18080:9080"/' "$HERE/compose.cluster.yml" >"$WORK/port-moved.yml"
 if grep -q '"18080:9080"' "$WORK/port-moved.yml"; then
-  # 同上：这条反向用例比对的基线是 compact 形态的 15 条，因此也要限定 profile，
+  # 同上：这条反向用例比对的基线是 compact 形态的 14 条，因此也要限定 profile，
   # 否则它只是因为「多了 cluster-full 那两条」而不等于基线 —— 那样这条用例
   # 会在被测服务根本没变的情况下变绿，等于什么都没验。
   expect_derivation_differs "容器端口挪出控制面段 → 派生跟着变（不是恒返回全部）" \

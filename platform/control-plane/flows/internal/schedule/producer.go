@@ -86,11 +86,18 @@ type Report struct {
 	Stalled int
 }
 
+// maxBatchesPerCycle 一轮至多取多少批到期游标。
+//
+// 有上限是为了让一轮的工作量有界：积压再深也要把控制权还回去（退出信号、下一轮
+// 的游标对齐），剩下的由下一轮接着处理。默认批大小 100 时一轮至多 2000 条。
+const maxBatchesPerCycle = 20
+
 // Producer 周期性地把到期的 cron 自动化变成持久触发。
 type Producer struct {
 	cursors Cursors
-	limit   int
-	poll    time.Duration
+	// limit 每次取到期游标的批大小（一轮至多 maxBatchesPerCycle 批）。
+	limit int
+	poll  time.Duration
 	// location 是表达式没有 TZ= / CRON_TZ= 前缀时的默认时区。
 	location *time.Location
 	now      func() time.Time
@@ -166,23 +173,42 @@ func (p *Producer) Cycle(ctx context.Context) Report {
 		return report
 	}
 
-	due, err := p.cursors.DueCronCursors(ctx, now, p.limit)
-	if err != nil {
-		p.report(err)
-		return report
-	}
-
-	for _, cursor := range due {
-		if ctx.Err() != nil {
+	// limit 是批大小，不是一轮的上限：整点类表达式会让大量游标同时到期，一轮只
+	// 处理一批的话，排在后面的自动化要多等若干个 poll 周期，而触发只是一次入队。
+	//
+	// 同一个游标一轮里只处理一次。触发失败的游标仍然是到期的，下一批会原样再取到
+	// 它（查询按 next_fire_at 排序，它还排在最前）；不去重的话一个持续失败的游标
+	// 会在一轮里被重试到批次上限。一批里没有任何新游标时停下——剩下的都是本轮
+	// 已经试过的。
+	seen := make(map[string]struct{})
+	for batch := 0; batch < maxBatchesPerCycle; batch++ {
+		due, err := p.cursors.DueCronCursors(ctx, now, p.limit)
+		if err != nil {
+			p.report(err)
 			return report
 		}
-		switch outcome := p.fire(ctx, cursor, now); outcome {
-		case outcomeFired:
-			report.Fired++
-		case outcomeAdvanced:
-			report.Advanced++
-		case outcomeStalled:
-			report.Stalled++
+		fresh := 0
+		for _, cursor := range due {
+			if ctx.Err() != nil {
+				return report
+			}
+			if _, done := seen[cursor.AutomationID]; done {
+				continue
+			}
+			seen[cursor.AutomationID] = struct{}{}
+			fresh++
+			switch outcome := p.fire(ctx, cursor, now); outcome {
+			case outcomeFired:
+				report.Fired++
+			case outcomeAdvanced:
+				report.Advanced++
+			case outcomeStalled:
+				report.Stalled++
+			}
+		}
+		// 不满一批说明到期集合已经取完；没有新游标说明剩下的本轮都试过了。
+		if len(due) < p.limit || fresh == 0 {
+			break
 		}
 	}
 	return report

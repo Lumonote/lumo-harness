@@ -21,7 +21,6 @@ import (
 	"github.com/lumo-harness/platform/scheduler/internal/catalog"
 	"github.com/lumo-harness/platform/scheduler/internal/domain"
 	"github.com/lumo-harness/platform/scheduler/internal/election"
-	"github.com/lumo-harness/platform/scheduler/internal/planner"
 	"github.com/lumo-harness/platform/scheduler/internal/server"
 	"github.com/lumo-harness/platform/scheduler/internal/store"
 )
@@ -39,6 +38,11 @@ func main() {
 		metricsMs         = flag.Int64("metrics-ms", envOrInt("LUMO_METRICS_MS", 30000), "节点快照刷新周期（毫秒，供集群维度指标使用）")
 		reapMs            = flag.Int64("stall-reap-ms", envOrInt("LUMO_STALL_REAP_MS", 300000), "停滞任务收割周期（毫秒）")
 		maxStallMs        = flag.Int64("max-stall-ms", envOrInt("LUMO_MAX_STALL_MS", 28800000), "停滞判定宽限期（毫秒，默认 8h；负值=关闭停滞收割）")
+		nodeLostMs        = flag.Int64("node-lost-ms", envOrInt("LUMO_NODE_LOST_MS", 600000), "节点失联快速收割：节点从目录消失超过该时长且直连探测不通时，其上任务转死信（毫秒，默认 10min；负值=关闭，只剩 max-stall 兜底）")
+		advertise         = flag.String("advertise-url", envOr("LUMO_ADVERTISE_URL", ""), "本实例对其他调度副本可达的地址（如 http://10.0.0.3:8083）；当上 leader 时随租约落库，follower 据此转发。留空=follower 不转发，照旧 503")
+		advertiseHost     = flag.String("advertise-host", envOr("LUMO_ADVERTISE_HOST", ""), "广播地址的另一种给法：只给主机（K8s 里是 Pod IP），由本进程拼成 URL，IPv6 自动加方括号。与 -advertise-url 互斥")
+		advertisePort     = flag.String("advertise-port", envOr("LUMO_ADVERTISE_PORT", ""), "与 -advertise-host 配套的端口；留空=监听端口")
+		retentionMs       = flag.Int64("task-retention-ms", envOrInt("LUMO_TASK_RETENTION_MS", 0), "终态任务保留期（毫秒）；超过即连同 attempt/派发/控制命令一并清理。0=不清理。必须远大于任何提交重试窗口：清理后同一 task_id 会被当作新任务")
 		clusterID         = flag.String("cluster-id", envOr("LUMO_SCHEDULER_CLUSTER_ID", ""), "本实例代表哪个集群自报存活；留空=本实例不自报（判定仍可由 -cluster-enforce 单独打开）")
 		clusterEnf        = flag.String("cluster-enforce", envOr("LUMO_CLUSTER_ENFORCE", ""), "本实例是否参与集群失联判定（闸门+指标）；留空=由 -cluster-id 派生（设了身份即判定）")
 		clusterSelfReport = flag.String("cluster-self-report", envOr("LUMO_CLUSTER_SELF_REPORT", ""), "本实例是否替 -cluster-id 的集群自报存活；留空=由身份派生（有身份即自报）。认领身份但不自报的组合见 domain.ResolveClusterSelfReport")
@@ -88,6 +92,21 @@ func main() {
 		os.Exit(2)
 	}
 
+	// 节点失联快速收割的阈值：这条路径把任务不可逆地判死，配错必须在这里拦下
+	// （判据见 domain.ValidateNodeLostAfter）。漂移时间线只在漂移真的会发生时才是
+	// 约束——漂移关着或本实例不判定集群时，没有「被抢先」这回事。max-stall 为负
+	// （收割整体关闭）时快速通道也不跑，不必校验。
+	if *maxStallMs >= 0 {
+		migrateAfter := int64(0)
+		if *migrateMs >= 0 && enforcement.Enabled {
+			migrateAfter = thresholds.DownMS + *graceMs + *migrateMs
+		}
+		if err := domain.ValidateNodeLostAfter(*nodeLostMs, *metricsMs, migrateAfter); err != nil {
+			log.Error("节点失联收割阈值非法，拒绝启动", "err", err)
+			os.Exit(2)
+		}
+	}
+
 	// 版本闸门同样是三态，同样在连库之前校验：打错字会让闸门悄悄关掉，而
 	// 「闸门关着」与「版本本来就一致」在面板上长得一模一样（同上面的理由）。
 	versionGateOn, err := domain.ResolveVersionGate(*versionGate)
@@ -114,6 +133,16 @@ func main() {
 	}
 	server.LogPlacementWeights(log, weights)
 
+	// 广播地址的消费者是**别的副本**（follower 按它转发），写错时本进程一切如常、
+	// 坏在 follower 上，且表现为 503 no-leader——与正在换主无法区分。所以同样在连库
+	// 之前校验、非法即拒绝启动（判据见 domain.ValidateAdvertiseURL；两种入口见
+	// domain.ResolveAdvertiseURL）。
+	advertiseURL, err := domain.ResolveAdvertiseURL(*advertise, *advertiseHost, *advertisePort, *listen)
+	if err != nil {
+		log.Error("广播地址非法，拒绝启动", "err", err)
+		os.Exit(2)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	shutdownOTel, telemetryErr := observability.ConfigureOTelFromEnv(ctx, "lumo-scheduler")
@@ -122,12 +151,18 @@ func main() {
 		os.Exit(2)
 	}
 
-	st, err := store.New(ctx, *pgDSN)
+	st, err := store.NewWithLeaseTTL(ctx, *pgDSN, *ttlMs)
 	if err != nil {
 		log.Error("连接存储失败", "err", err)
 		os.Exit(1)
 	}
 	defer st.Close()
+	st.SetAdvertiseURL(advertiseURL)
+	if advertiseURL == "" {
+		log.Warn("未设 LUMO_ADVERTISE_URL / LUMO_ADVERTISE_HOST：本实例当上 leader 时 follower 无法向它转发，落到 follower 的新放置将 503")
+	} else {
+		log.Info("广播地址（当上 leader 时随租约落库，follower 据此转发）", "advertise_url", advertiseURL)
+	}
 	if err := st.Init(ctx); err != nil {
 		log.Error("初始化表结构失败", "err", err)
 		os.Exit(1)
@@ -205,10 +240,43 @@ func main() {
 				if _, err := st.RequeueStaleDispatch(ctx, *ttlMs*2); err != nil {
 					log.Warn("回收过期派发失败", "err", err)
 				}
-				drainWithOptions(ctx, st, cat, elec.Current(), log, api, workers, int(*drainBatch), time.Duration(*pendingBackoff)*time.Millisecond, time.Duration(*pendingBackoffMax)*time.Millisecond)
+				api.Drain(ctx, elec.Current(), server.DrainOptions{Batch: int(*drainBatch),
+					Backoff: time.Duration(*pendingBackoff) * time.Millisecond, MaxBackoff: time.Duration(*pendingBackoffMax) * time.Millisecond})
 			}
 		}
 	}()
+
+	// 终态任务清理：默认关闭——终态行同时是幂等身份（见 store.PurgeTerminal），
+	// 保留多久是部署决策。关闭状态必须说出来，否则「表一直在长」无从解释。
+	switch {
+	case *retentionMs < 0 || (*retentionMs > 0 && *retentionMs < 3600_000):
+		log.Error("LUMO_TASK_RETENTION_MS 非法：0=关闭，否则不得小于 1 小时")
+		os.Exit(2)
+	case *retentionMs == 0:
+		log.Warn("终态任务清理未启用（LUMO_TASK_RETENTION_MS=0）：scheduler_tasks 及其附属表只增不减")
+	default:
+		log.Info("终态任务清理已启用", "retention_ms", *retentionMs)
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					lease := elec.Current()
+					if lease == nil {
+						continue
+					}
+					if n, err := st.PurgeTerminal(ctx, lease, *retentionMs, 1000); err != nil {
+						log.Warn("清理终态任务失败", "err", err)
+					} else if n > 0 {
+						log.Info("已清理终态任务", "tasks", n)
+					}
+				}
+			}
+		}()
+	}
 
 	// 联邦注册表：上报/查询端点始终装配（它们是**别的集群**上报的入口），
 	// 而「判定（闸门 + 集群维度指标）」与「本实例自报」是两个**独立**的开关：
@@ -279,6 +347,12 @@ func main() {
 	// 时它整轮不动手，而不是拿旧数据做不可逆操作。
 	reapCtx, cancelReap := context.WithCancel(ctx)
 	defer cancelReap()
+	if *maxStallMs >= 0 && *nodeLostMs > 0 {
+		api.SetNodeLostAfter(time.Duration(*nodeLostMs) * time.Millisecond)
+		log.Info("节点失联快速收割已启用（目录缺席 + 直连探测不通）", "node_lost_ms", *nodeLostMs, "max_stall_ms", *maxStallMs)
+	} else if *maxStallMs >= 0 {
+		log.Warn("节点失联快速收割已关闭（LUMO_NODE_LOST_MS 为负）：节点永久消失时其上任务要等满 max-stall 才转死信")
+	}
 	go api.RunStallReaper(reapCtx, time.Duration(*reapMs)*time.Millisecond, time.Duration(*maxStallMs)*time.Millisecond)
 
 	// 跨集群任务漂移（§7.4.1：集群进入 down 之后把它的任务「漂回全局 Task Bus
@@ -333,90 +407,13 @@ func main() {
 	if err := st.Release(context.Background(), *instance); err != nil {
 		log.Warn("释放租约失败", "err", err)
 	}
+	// 集群本地租约同理：不释放的话，降级路径要等一个 TTL 才有新的本地决策者。
+	if *clusterID != "" {
+		if err := st.ReleaseCluster(context.Background(), *clusterID, *instance); err != nil {
+			log.Warn("释放集群本地租约失败", "err", err)
+		}
+	}
 	log.Info("调度服务已停止")
-}
-
-// drainOnce 一轮接续：取 PENDING → 规划 → 放置。任何一处失败仅记录并等下一轮。
-//
-// 放置决策走 api.PreparePlacement + api.PickPrepared（与 HTTP 放置路径同一份实现）：
-// 各拼一遍的漂移方向恰好是「drain 里漏掉了亲和输入」，而那个症状（同一批任务走
-// HTTP 有偏好、被 drain 接续时没有）几乎不可能从外部观察出来。
-//
-// 亲和输入**一次查完一轮的全部项目**而不是逐任务查：一轮最多 32 个任务，
-// 逐任务查会把一轮变成 32 次往返，而它们本来只需要一条 `= ANY($2)`。
-func drainOnce(ctx context.Context, st *store.Store, cat catalog.Catalog, lease *domain.Lease, log *slog.Logger, api *server.Server, directories ...catalog.WorkerDirectory) {
-	var workers catalog.WorkerDirectory
-	if len(directories) > 0 {
-		workers = directories[0]
-	}
-	drainWithOptions(ctx, st, cat, lease, log, api, workers, 64, time.Second, 30*time.Second)
-}
-
-func drainWithOptions(ctx context.Context, st *store.Store, cat catalog.Catalog, lease *domain.Lease, log *slog.Logger, api *server.Server, workers catalog.WorkerDirectory, batch int, backoff, maxBackoff time.Duration) {
-	pending, err := st.TakePending(ctx, lease, batch, backoff)
-	if err != nil {
-		log.Error("取排队任务失败", "err", err)
-		return
-	}
-	if len(pending) == 0 {
-		return
-	}
-	nodes, err := cat.List(ctx)
-	if err != nil {
-		log.Error("列节点失败", "err", err)
-		for _, task := range pending {
-			_ = st.DeferPending(ctx, task.TaskID, "catalog-unavailable", backoff, maxBackoff)
-		}
-		return
-	}
-	active, err := st.ActiveCounts(ctx)
-	if err != nil {
-		log.Error("活跃计数失败", "err", err)
-		return
-	}
-	prepared := make([]*domain.Task, 0, len(pending))
-	for i := range pending {
-		prepared = append(prepared, &pending[i])
-	}
-	api.PreparePlacement(ctx, prepared)
-	for _, task := range pending {
-		eligible, err := workers.Filter(ctx, task, nodes)
-		if err != nil {
-			log.Warn("Worker 设备目录不可用，保留排队任务", "task_id", task.TaskID, "err", err)
-			_ = st.DeferPending(ctx, task.TaskID, "worker-directory-unavailable", backoff, maxBackoff)
-			continue
-		}
-		n := api.PickPrepared(ctx, task, eligible, active)
-		if n == nil {
-			reason := "no-capacity"
-			if len(planner.EligibleNodes(task, eligible)) == 0 {
-				reason = "no-compatible-node"
-			}
-			if planner.VersionBlockedCandidates(task, eligible) > 0 {
-				reason = "version-blocked"
-			}
-			_ = st.DeferPending(ctx, task.TaskID, reason, backoff, maxBackoff)
-			continue // Other employees/Agents can still have eligible idle devices.
-		}
-		if err := st.SyncNodeSnapshot(ctx, *n); err != nil {
-			log.Error("同步节点快照失败", "node_id", n.NodeID, "err", err)
-			_ = st.DeferPending(ctx, task.TaskID, "store-unavailable", backoff, maxBackoff)
-			continue
-		}
-		placed, err := st.PlaceTask(ctx, lease, task, n.NodeID)
-		if err != nil {
-			var ncap *domain.NoCapacityError
-			if errors.As(err, &ncap) {
-				_ = st.DeferPending(ctx, task.TaskID, "no-capacity", backoff, maxBackoff)
-				continue
-			}
-			log.Error("drain 放置失败", "task_id", task.TaskID, "err", err)
-			continue
-		}
-		if placed.State.Active() {
-			active[n.NodeID]++
-		}
-	}
 }
 
 func envOr(key, fallback string) string {

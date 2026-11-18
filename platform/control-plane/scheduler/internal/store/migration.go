@@ -154,7 +154,7 @@ type MigrationResult struct {
 // 台账与状态在同一事务内落库：分开写会出现「任务已经被搬走但没人知道为什么」的
 // 窗口，而台账的全部价值就在于解释那次搬家。
 func (s *Store) MigrateTask(ctx context.Context, rec MigrationRecord) (MigrationResult, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginWork(ctx)
 	if err != nil {
 		return MigrationResult{}, fmt.Errorf("scheduler: 开启事务失败: %w", err)
 	}

@@ -5,12 +5,36 @@
 // 「看起来卡住了」硬得多——误判的代价是丢掉一个还在跑的任务，而且状态机不允许
 // 终态回退（CompleteTaskAttempt 只在活跃态上生效），节点事后回报的真实结果会被
 // 直接丢掉。下面三道闸门都是为此存在，缺一不可。
+//
+// # 两条路径
+//
+// 时钟量的是「节点从目录里消失多久」（见 store.StalledActiveTasks）。在它之上有
+// 两条判死路径，差别在于证据：
+//
+//   - **max_stall（默认 8h，§7.4.2 的规定值）**：只凭目录这一个证据，所以等得久。
+//     它是无条件兜底。
+//   - **节点失联快速通道（LUMO_NODE_LOST_MS，默认 10min）**：目录里消失够久，**并且**
+//     直连节点的控制地址也探不通。两个独立证据都说节点没了，才提前判死。
+//
+// 为什么需要第二条：节点永久消失（宿主机没了、Pod 被删且不再回来）是常见故障，
+// 只有第一条时它上面的任务要挂满 8 小时，期间提交方既得不到结果也无法重试
+// （重新提交会因为「已有活跃 attempt」被幂等地拒掉）。
+//
+// 为什么第二条不能只看目录：目录缺席有一种不代表节点死了的原因——节点与 Nacos
+// 之间断连，但它还在执行、与调度器之间是通的。直连探测正是用来分辨这种情况的：
+// 探得通就不动它，交还给 max_stall。探测是**只读**的，探错的方向只有一个——
+// 把死节点当成活的（比如它的地址被别的 Pod 复用了），后果是退回 8 小时兜底，
+// 不会误杀。
 package server
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
 	"time"
 
+	"github.com/lumo-harness/platform/observability"
 	"github.com/lumo-harness/platform/scheduler/internal/store"
 )
 
@@ -27,6 +51,16 @@ const (
 	maxStallSnapshotAge = 3 * defaultMetricsRefreshInterval
 	// stallReasonOrphaned 落进台账的原因文本。可读即可，不要在代码里按它做判断。
 	stallReasonOrphaned = "max_stall: 所属节点已不在目录中，任务无法再被推进"
+	// stallReasonNodeLost 快速通道的台账原因。与上一条分开，事后才分得清一个任务
+	// 是「等满了兜底期限」还是「节点被两个证据确认失联」。
+	stallReasonNodeLost = "node_lost: 所属节点已从目录消失且直连探测不可达"
+	// nodeProbeTimeout / nodeProbeAttempts 直连探测的单次超时与次数。
+	//
+	// 探两次是为了不让一次瞬时丢包决定一个不可逆动作；不探更多，是因为目录那一侧
+	// 已经连续缺席了分钟级的时间，这里只需要排除「探测本身运气不好」。
+	nodeProbeTimeout  = 3 * time.Second
+	nodeProbeAttempts = 2
+	nodeProbeInterval = time.Second
 )
 
 // stallCandidate 一个通过全部闸门、应当转死信的任务。
@@ -64,10 +98,10 @@ func snapshotFresh(snap nodeSnapshot, now time.Time, maxAge time.Duration) bool 
 //	   目录里」，**不是**「不在 scheduler_nodes 表里」——那张表只增不减（全仓没有
 //	   任何 DELETE），用它做判据会得到一条永远不成立的规则。
 //
-//	③ **该 attempt 静默超过 maxStall。** 这是**宽限**而不是主判据：它给「节点刚
-//	   掉线、目录还没更新」留出时间。仅凭时长判断会误杀长任务——控制面的
-//	   updated_at 只在状态跃迁时前进，正常跑 9 小时和卡死 9 小时长得一样（见
-//	   store.StalledActiveTasks）。
+//	③ **节点消失超过 maxStall。** 时长从「节点最后一次出现在目录里」与 attempt
+//	   最近一次写入的较晚者起算（见 store.StalledActiveTasks）：任务行只在状态
+//	   跃迁时前进，正常跑 9 小时和卡死 9 小时长得一样，所以时钟跟着节点走。
+//	   节点重新出现会把时钟归零——一次排空或目录抖动不足以判死。
 //
 // node_id 为空的任务不在此列：不占槽位、也不是孤儿，未放置的积压由队列时长那条
 // 告警负责，不该被「节点不在目录里」这条判据误伤。
@@ -91,6 +125,114 @@ func stalledBy(rows []store.StalledActive, snap nodeSnapshot, now time.Time, max
 		out = append(out, stallCandidate{row: row, stalled: stalled, snapAge: snapAge})
 	}
 	return out
+}
+
+// nodeLostBy 选出进入节点失联快速通道的任务：节点不在新鲜快照里，消失时长落在
+// [nodeLost, maxStall) 之间。到了 maxStall 的归 stalledBy，两条路径不重叠。
+//
+// 比 stalledBy 多两道闸门，都是因为这条路径激进得多：
+//
+//   - **必须有目击记录**（NodeSeen）。没有时 StalledMS 退回的是 attempt 时钟，
+//     量的是「任务多久没跃迁」而不是「节点消失多久」，一个跑了 20 分钟的正常任务
+//     就会越线；
+//   - **必须有控制地址**。没有就拿不到第二个证据，交还给 max_stall。
+//
+// 选出来的只是**候选**：还要过直连探测（reapStalled）。
+func nodeLostBy(rows []store.StalledActive, snap nodeSnapshot, now time.Time, nodeLost, maxStall, maxSnapshotAge time.Duration) []stallCandidate {
+	if nodeLost <= 0 || !snapshotFresh(snap, now, maxSnapshotAge) {
+		return nil
+	}
+	snapAge := now.Sub(snap.at)
+	var out []stallCandidate
+	for _, row := range rows {
+		if row.NodeID == "" || !row.NodeSeen || strings.TrimSpace(row.ControlURL) == "" {
+			continue
+		}
+		if _, known := snap.ids[row.NodeID]; known {
+			continue
+		}
+		stalled := time.Duration(row.StalledMS) * time.Millisecond
+		if stalled < nodeLost || stalled >= maxStall {
+			continue
+		}
+		out = append(out, stallCandidate{row: row, stalled: stalled, snapAge: snapAge})
+	}
+	return out
+}
+
+// probeNodeAlive 直连节点控制地址的 /healthz，判断它是否还活着。
+//
+// 只有 2xx 算生命迹象。连不上、超时、非 2xx 都不算——网格里 sidecar 会替一个
+// 已经死掉的上游返回 503，把「有东西应答了」当成活着会让这条探测在网格部署里
+// 永远为真。
+//
+// /healthz 是承载端不带鉴权的存活端点（subagent-host/src/server.ts），所以这里
+// 不带令牌：探测不该因为令牌轮换而把活节点判死。
+func probeNodeAlive(ctx context.Context, controlURL string) bool {
+	base := strings.TrimRight(strings.TrimSpace(controlURL), "/")
+	if base == "" {
+		return false
+	}
+	client := observability.ConfiguredHTTPClient(nodeProbeTimeout)
+	for attempt := 0; attempt < nodeProbeAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(nodeProbeInterval):
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/healthz", nil)
+		if err != nil {
+			return false
+		}
+		res, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+		res.Body.Close()
+		if res.StatusCode >= 200 && res.StatusCode < 300 {
+			return true
+		}
+	}
+	return false
+}
+
+// confirmLost 对快速通道的候选逐节点做直连探测，返回确认失联的那些任务。
+// 同一个节点一轮只探一次：它上面可能有很多任务。
+func (s *Server) confirmLost(ctx context.Context, candidates []stallCandidate) []stallCandidate {
+	probe := s.probeNode
+	if probe == nil {
+		probe = probeNodeAlive
+	}
+	alive := make(map[string]bool)
+	var out []stallCandidate
+	for _, c := range candidates {
+		isAlive, probed := alive[c.row.NodeID]
+		if !probed {
+			isAlive = probe(ctx, c.row.ControlURL)
+			alive[c.row.NodeID] = isAlive
+			if isAlive {
+				// 必须留日志：目录说它没了、它自己说还在，这是一个需要人看的矛盾
+				// （节点与 Nacos 之间断连），而且它解释了「为什么这些任务没被收割」。
+				s.log.Warn("节点不在目录中但直连可达，不按失联收割（留给 max_stall 兜底）",
+					"node_id", c.row.NodeID, "absent", c.stalled.String(), "control_url", c.row.ControlURL)
+			}
+		}
+		if !isAlive {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// ReapStalledOnce 立即跑一轮收割（与循环里的一轮相同）。供测试与运维排障用。
+func (s *Server) ReapStalledOnce(ctx context.Context, maxStall time.Duration) {
+	if maxStall <= 0 {
+		maxStall = defaultMaxStall
+	}
+	s.reapStalled(ctx, maxStall)
 }
 
 // RunStallReaper 周期性收割停滞任务，直到 ctx 结束。
@@ -153,7 +295,18 @@ func (s *Server) reapStalled(ctx context.Context, maxStall time.Duration) {
 		s.log.Warn("查询活跃任务失败，本轮不做停滞收割", "err", err)
 		return
 	}
-	candidates := stalledBy(rows, snap, now, maxStall, maxStallSnapshotAge)
+	type verdict struct {
+		stallCandidate
+		reason string
+	}
+	var candidates []verdict
+	for _, c := range stalledBy(rows, snap, now, maxStall, maxStallSnapshotAge) {
+		candidates = append(candidates, verdict{c, stallReasonOrphaned})
+	}
+	// 快速通道：目录缺席够久的先选出来，再逐节点直连确认（见文件头「两条路径」）。
+	for _, c := range s.confirmLost(ctx, nodeLostBy(rows, snap, now, s.nodeLostAfter, maxStall, maxStallSnapshotAge)) {
+		candidates = append(candidates, verdict{c, stallReasonNodeLost})
+	}
 	if len(candidates) == 0 {
 		return
 	}
@@ -163,7 +316,7 @@ func (s *Server) reapStalled(ctx context.Context, maxStall time.Duration) {
 		ok, err := s.store.DeadLetter(ctx, store.DeadLetterRecord{
 			TaskID: c.row.TaskID, Attempt: c.row.Attempt, Realm: c.row.Realm,
 			ClusterID: c.row.ClusterID, NodeID: c.row.NodeID,
-			Reason: stallReasonOrphaned, StalledMS: c.stalled.Milliseconds(),
+			Reason: c.reason, StalledMS: c.stalled.Milliseconds(),
 			SnapshotMS: c.snapAge.Milliseconds(),
 		})
 		if err != nil {
@@ -180,10 +333,10 @@ func (s *Server) reapStalled(ctx context.Context, maxStall time.Duration) {
 			"task_id", c.row.TaskID, "attempt", c.row.Attempt,
 			"node_id", c.row.NodeID, "cluster_id", c.row.ClusterID,
 			"state", c.row.State, "stalled", c.stalled.String(),
-			"snapshot_age", c.snapAge.String(), "reason", stallReasonOrphaned)
+			"snapshot_age", c.snapAge.String(), "reason", c.reason)
 	}
 	s.log.Info("停滞收割完成", "candidates", len(candidates), "dead_lettered", dead,
-		"max_stall", maxStall.String())
+		"max_stall", maxStall.String(), "node_lost_after", s.nodeLostAfter.String())
 }
 
 // snapshotAge 快照年龄；从未成功读过目录时返回 0（调用方已先判 ok/at）。

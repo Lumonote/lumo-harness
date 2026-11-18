@@ -163,10 +163,9 @@ RUN set -eu; apt-get -o Acquire::Retries=5 update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=dsh-build /workspace /workspace
 COPY --from=dsh-build /opt/lumo-ppt /opt/lumo-ppt
-# The outer DSH CLI uses its upstream packageManager pin; profile operations
-# use the platform default outside either workspace. Warm both before boot.
-RUN corepack install --global pnpm@11.7.0 \
-    && cd /workspace/deepseek-harness && corepack install
+# Both workspace pins were installed in dsh-build. Preserve its profile default
+# and Corepack's verified packages so this layer needs no registry access.
+COPY --from=dsh-build /root/.cache/node/corepack /root/.cache/node/corepack
 WORKDIR /workspace/platform
 ENV NODE_ENV=production
 ENV LUMO_BUNDLED_SKILLS_ROOT=/workspace/platform/upstream/skills

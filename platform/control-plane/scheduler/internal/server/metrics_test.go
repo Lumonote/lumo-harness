@@ -312,3 +312,63 @@ func TestDeriveClusterStatesEmptyRegistryHasNoSeries(t *testing.T) {
 		t.Fatalf("空注册表不应产生序列: %+v", points)
 	}
 }
+
+// aliveStubCatalog 区分「可放置」与「还活着」的目录（catalog.AliveLister）。
+type aliveStubCatalog struct {
+	stubCatalog
+	alive    []string
+	aliveErr error
+}
+
+func (c *aliveStubCatalog) ListAlive(context.Context) ([]string, error) { return c.alive, c.aliveErr }
+
+// TestRefreshNodeSnapshotKnowsDrainingNodes 钉住快照的两个集合各自回答哪个问题。
+//
+// `ids` 的三个消费方——停滞收割、任务漂移、孤儿指标——问的都是「原节点是否已经
+// 不可能再推进这个任务」。健康但 enabled=false 的节点（就绪检查未过，或排空刚开始；
+// 不在放置候选里）还在跑已有任务，对这个问题的回答是「不，它还在」。把它算作缺席的
+// 后果分别是：任务被不可逆判死、任务被搬到别的节点上双跑、LumoTaskLost 误响。
+//
+// `counts` 问的是「每个集群有多少节点可放置」，排空节点不计入。
+func TestRefreshNodeSnapshotKnowsDrainingNodes(t *testing.T) {
+	cat := &aliveStubCatalog{
+		stubCatalog: stubCatalog{nodes: []domain.Node{{NodeID: "active", ClusterID: "cn-north"}}},
+		alive:       []string{"active", "draining"},
+	}
+	srv := metricsServer(cat)
+	srv.RefreshNodeSnapshot(context.Background())
+	snap := srv.snapshot()
+
+	if _, ok := snap.ids["draining"]; !ok {
+		t.Fatalf("排空中的节点仍然存活，必须在节点 id 集合里: %v", snap.ids)
+	}
+	if _, ok := snap.ids["active"]; !ok {
+		t.Fatalf("放置候选必须在节点 id 集合里: %v", snap.ids)
+	}
+	if snap.counts["cn-north"] != 1 {
+		t.Fatalf("按集群计数只数放置候选，排空节点不计入: %v", snap.counts)
+	}
+	if got := orphanedActive(map[string]int{"draining": 3, "gone": 2}, snap.ids); got != 2 {
+		t.Fatalf("排空节点上的任务不是孤儿，孤儿数应为 2，got %d", got)
+	}
+}
+
+// 存活集合读不到时，快照退回「只认放置候选」并照常发布：候选集合是已经成功读到的
+// 事实。此时排空节点会被当作缺席（与引入存活集合之前一致），这是偏向误报的方向，
+// 而下游的不可逆动作各自还有时长闸门挡着。
+func TestRefreshNodeSnapshotFallsBackWhenAliveUnavailable(t *testing.T) {
+	cat := &aliveStubCatalog{
+		stubCatalog: stubCatalog{nodes: []domain.Node{{NodeID: "active", ClusterID: "cn-north"}}},
+		aliveErr:    errors.New("nacos unreachable"),
+	}
+	srv := metricsServer(cat)
+	srv.RefreshNodeSnapshot(context.Background())
+	snap := srv.snapshot()
+
+	if !snap.ok || len(snap.ids) != 1 {
+		t.Fatalf("存活集合失败不应让整份快照作废: ok=%v ids=%v", snap.ok, snap.ids)
+	}
+	if _, ok := snap.ids["active"]; !ok {
+		t.Fatalf("放置候选必须保留: %v", snap.ids)
+	}
+}

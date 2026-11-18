@@ -65,9 +65,10 @@ groups:
             {{ $labels.instance }} 报告 {{ $value }} 个活跃任务挂在目录中已不存在的节点上。
             这些任务既不在跑也不在排队，只能靠人工或对账收敛。**迁移前必须先确认 fencing
             （原节点不可能仍在执行）**，否则违反 R2 的幂等要求（§7.4.1）。
-            持续超过 max_stall（默认 8h）后，调度器的停滞收割会自动把它们转死信
-            （scheduler_dead_letters 台账，见 internal/server/stall.go）；本条告警比它早
-            得多，是给人留的介入窗口——两条路径不是重复：一条催人，一条兜底。
+            调度器的停滞收割会自动把它们转死信（scheduler_dead_letters 台账，见
+            internal/server/stall.go）：节点从目录消失超过 LUMO_NODE_LOST_MS（默认 10min）
+            且直连探测不通时走快速通道，否则等满 max_stall（默认 8h）。本条告警比两者都早，
+            是给人留的介入窗口——不是重复：一条催人，一条兜底。
 
       - alert: LumoControlPlaneInstanceDown
         # 控制面实例抓不到了。这是原来的 LumoServiceDown 的正确写法——那条用的是

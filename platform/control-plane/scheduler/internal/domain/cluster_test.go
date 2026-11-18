@@ -398,3 +398,40 @@ func TestValidateMigrationGrace(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateNodeLostAfter 节点失联快速收割阈值的启动期校验。
+func TestValidateNodeLostAfter(t *testing.T) {
+	const refresh, migrateAfter = 30_000, 420_000
+	ok := []struct {
+		name                string
+		lost, ref, migrated int64
+	}{
+		{"默认值", 600_000, refresh, migrateAfter},
+		{"负值=关闭，不再校验其余条件", -1, refresh, migrateAfter},
+		{"漂移未启用时只受刷新周期约束", 90_000, refresh, 0},
+	}
+	for _, tc := range ok {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateNodeLostAfter(tc.lost, tc.ref, tc.migrated); err != nil {
+				t.Fatalf("不应报错: %v", err)
+			}
+		})
+	}
+	bad := []struct {
+		name                string
+		lost, ref, migrated int64
+		want                string
+	}{
+		{"0 不是「关闭」也不是「默认」", 0, refresh, migrateAfter, "负值"},
+		{"短于三个快照刷新周期：缺席时长量不出来", 89_999, refresh, 0, "LUMO_METRICS_MS"},
+		{"不晚于集群漂移：整集群失联时会抢在漂移之前把任务判死", 420_000, refresh, migrateAfter, "漂移"},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateNodeLostAfter(tc.lost, tc.ref, tc.migrated)
+			if err == nil || !strings.Contains(err.Error(), "LUMO_NODE_LOST_MS") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("应报错并说明原因（含 %q），got %v", tc.want, err)
+			}
+		})
+	}
+}

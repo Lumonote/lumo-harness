@@ -63,3 +63,15 @@ func (c clusterAnnotated) List(ctx context.Context) ([]domain.Node, error) {
 func (c clusterAnnotated) Upsert(ctx context.Context, n domain.Node) error {
 	return c.inner.Upsert(ctx, n)
 }
+
+// ListAlive 透传内层目录的存活集合（见 AliveLister）。
+//
+// 必须在装饰器上实现：判定开着的部署里目录总是被包这一层，装饰器吞掉这个能力，
+// 功能就只在「判定关着」的部署里生效。内层不支持时返回空集——调用方取并集，
+// 空集等价于「没有额外信息」。
+func (c clusterAnnotated) ListAlive(ctx context.Context) ([]string, error) {
+	if lister, ok := c.inner.(AliveLister); ok {
+		return lister.ListAlive(ctx)
+	}
+	return nil, nil
+}

@@ -25,6 +25,9 @@ services:
       LUMO_IDENTITY_ASSERTION_SECRET: "${LUMO_IDENTITY_ASSERTION_SECRET:-}"
       LUMO_BUNDLE_COLLABORATOR_0_LUMO_NODE_ADVERTISE_HOST: collaborator
       LUMO_BUNDLE_COLLABORATOR_0_LUMO_NACOS_PORT: "8081"
+      # 单机档只有一个调度器，没有 follower 会转发；配上是为了与其他档位一致，
+      # 并让「未设 LUMO_ADVERTISE_URL」告警只在真的漏配时出现。
+      LUMO_BUNDLE_SCHEDULER_0_LUMO_ADVERTISE_URL: http://scheduler-0:8083
     ports:
       - "18080:8080"
       - "18081:8081"

@@ -25,6 +25,9 @@ import (
 	"github.com/lumo-harness/platform/scheduler/internal/store"
 )
 
+// ForwardedHeader 标记一个请求已经被某个副本转发过一次（防环）。
+const ForwardedHeader = "X-Lumo-Scheduler-Forwarded"
+
 // leaderState 本进程的领导权状态。
 //
 // 抽成接口只有一个目的：让测试能构造出「我是 leader」这一态。election.State 的
@@ -50,6 +53,11 @@ type Server struct {
 	nodeMu   sync.RWMutex
 	nodeSnap nodeSnapshot
 
+	// nodeLostAfter 节点失联快速收割的阈值（<= 0 关闭）；probeNode 是它的第二个
+	// 证据来源，nil 时用 probeNodeAlive（测试可替换）。
+	nodeLostAfter time.Duration
+	probeNode     func(ctx context.Context, controlURL string) bool
+
 	// clusters / clusterThresholds / clusterEnforced 是联邦注册表的装配结果
 	// （见 cluster.go）。enforced 表示**本实例参与判定**：闸门、自报与集群维度
 	// 指标随之启停；上报与查询端点不受它影响。
@@ -69,10 +77,19 @@ type Server struct {
 	localClusterID string
 	clusterElec    leaderState
 	degraded       atomic.Int64
+
+	// drainMu / drainActive 上一轮 drain 看到的每节点活跃数，用来发现槽位释放。
+	drainMu     sync.Mutex
+	drainActive map[string]int
 }
 
 // SetPlacementWeights 装配偏好打分权重。
 func (s *Server) SetPlacementWeights(w domain.PlacementWeights) { s.placementWeights = w }
+
+// SetNodeLostAfter 打开节点失联快速收割：节点从目录里消失超过 d、且直连探测不通时，
+// 它上面的任务转死信（见 stall.go）。d <= 0 关闭，只剩 max_stall 那条兜底。
+// 必须在 RunStallReaper 启动之前调用。
+func (s *Server) SetNodeLostAfter(d time.Duration) { s.nodeLostAfter = d }
 
 func (s *Server) SetWorkerDirectory(directory catalog.WorkerDirectory) { s.workers = directory }
 
@@ -204,8 +221,13 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxForwardBody+1))
+	if err != nil || len(raw) > maxForwardBody {
+		writeError(w, http.StatusBadRequest, "bad-request", "请求体非法或过大")
+		return
+	}
 	var req placeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TaskID == "" {
+	if err := json.Unmarshal(raw, &req); err != nil || req.TaskID == "" {
 		writeError(w, http.StatusBadRequest, "bad-request", "请求体非法或缺少 task_id")
 		return
 	}
@@ -230,17 +252,27 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 	// 的降级曲线）。但它不是「没 leader 就放行」：degradedPlacement 要求本实例有集群身份、
 	// 目标集群就是它、且它持有该集群的本地租约——**换一把更小的锁，而不是把锁拿掉**。
 	lease := s.elec.Current()
-	degraded := false
-	if lease == nil {
-		lease = s.degradedPlacement(req.ClusterID)
-		degraded = lease != nil
-		if degraded {
-			s.log.Warn("全局调度不可用，使用集群本地租约放置", "cluster_id", s.localClusterID, "task_id", req.TaskID)
+	degraded := lease == nil
+	if degraded {
+		if r.Header.Get(ForwardedHeader) != "" {
+			noLeader(w)
+			return
 		}
-	}
-	if lease == nil {
-		writeError(w, http.StatusServiceUnavailable, "no-leader", "当前无 leader，请稍后重试")
-		return
+		endpoint, active, err := s.store.LeaderEndpoint(r.Context())
+		if err != nil {
+			s.log.Warn("读取 leader 地址失败", "err", err)
+			noLeader(w)
+			return
+		}
+		if active {
+			s.relayToLeader(w, r, raw, endpoint)
+			return
+		}
+		lease = s.degradedPlacement(req.ClusterID)
+		if lease == nil {
+			noLeader(w)
+			return
+		}
 	}
 
 	nodes, err := s.catalog.List(r.Context())
@@ -262,10 +294,17 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "worker-directory-unavailable", "无法确认执行者设备范围")
 		return
 	}
+	// 已有不低于它优先级的任务在等容量时，新提交也去排队：否则刚释放的槽位总被
+	// 「正好这时到达」的请求拿走，而等得最久的任务还在退避里。查询失败按「没有」
+	// 处理——公平是软目标，不该让它否决放置。
+	if ahead, err := s.store.CapacityWaiterAhead(r.Context(), task); err == nil && ahead {
+		s.queueAndMaybePreempt(w, r, raw, lease, task, nodes)
+		return
+	}
 	s.PreparePlacement(r.Context(), []*domain.Task{&task})
 	n := s.PickPrepared(r.Context(), task, nodes, active)
 	if n == nil {
-		s.queueAndMaybePreempt(w, r, lease, task, nodes)
+		s.queueAndMaybePreempt(w, r, raw, lease, task, nodes)
 		return
 	}
 
@@ -278,17 +317,18 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 	var ncap *domain.NoCapacityError
 	if errors.As(err, &ncap) {
 		// 规划后槽位被并发占用：转排队（罕见路径，drain 会接续）
-		s.queueAndMaybePreempt(w, r, lease, task, nodes)
+		s.queueAndMaybePreempt(w, r, raw, lease, task, nodes)
 		return
 	}
 	if err != nil {
-		s.respondStoreError(w, err)
+		s.respondPlacementError(w, r, raw, err)
 		return
 	}
 	// 放置成功说明版本闸门这一刻没有拦住东西，清掉跃迁标记让下一次被拦重新打一条
 	// 日志——否则「被拦 → 恢复 → 又被拦」只有第一条会被说出来。
 	clearVersionBlock()
 	if degraded {
+		s.log.Warn("使用集群本地租约放置", "cluster_id", s.localClusterID, "task_id", req.TaskID)
 		s.degraded.Add(1)
 		// 调用方要能区分「正常放置」与「降级放置」：两者的可用性含义不同，而响应体
 		// 长得一样时，只有指标在动，读响应的人看不出这一次是降级——而「这次放置是在
@@ -308,10 +348,10 @@ func (s *Server) handlePlace(w http.ResponseWriter, r *http.Request) {
 // successful stop request only changes the victim to CANCELLING; the new task
 // remains PENDING until the execution node reports a terminal result and the
 // leader drain loop obtains the released slot.
-func (s *Server) queueAndMaybePreempt(w http.ResponseWriter, r *http.Request, lease *domain.Lease, task domain.Task, nodes []domain.Node) {
+func (s *Server) queueAndMaybePreempt(w http.ResponseWriter, r *http.Request, body []byte, lease *domain.Lease, task domain.Task, nodes []domain.Node) {
 	state, err := s.store.QueueTask(r.Context(), lease, task)
 	if err != nil {
-		s.respondStoreError(w, err)
+		s.respondPlacementError(w, r, body, err)
 		return
 	}
 	if state != domain.StatePending {
@@ -325,7 +365,7 @@ func (s *Server) queueAndMaybePreempt(w http.ResponseWriter, r *http.Request, le
 	}
 	response := map[string]any{"task_id": task.TaskID, "state": state}
 	if state == domain.StatePending {
-		if victim, err := s.requestPreemption(r, task, nodes); err != nil {
+		if victim, err := s.requestPreemption(r.Context(), task, nodes); err != nil {
 			// Queuing succeeded, so a transient control-plane failure must not be
 			// presented as a failed submission. The durable pending state remains
 			// eligible for a later normal drain or future preemption request.
@@ -341,8 +381,16 @@ func (s *Server) queueAndMaybePreempt(w http.ResponseWriter, r *http.Request, le
 // and only on a hard-constraint-compatible node that is still full. It shares
 // the exact node stop protocol used for an explicit cancellation and never
 // returns a false ABORTED state.
-func (s *Server) requestPreemption(r *http.Request, waiting domain.Task, nodes []domain.Node) (string, error) {
-	active, err := s.store.ActiveCounts(r.Context())
+func (s *Server) requestPreemption(ctx context.Context, waiting domain.Task, nodes []domain.Node) (string, error) {
+	// 一个等待者同一时间只有一次未兑现的抢占：受害者还在停止中、或腾出的槽还为它
+	// 留着时，不再挑新的受害者（判据见 store.PreemptionOutstanding）。否则它每被
+	// 重查一次就多杀一个。
+	if outstanding, err := s.store.PreemptionOutstanding(ctx, waiting.TaskID, preemptionStopGrace, slotReservationHold); err != nil {
+		return "", err
+	} else if outstanding {
+		return "", nil
+	}
+	active, err := s.store.ActiveCounts(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -355,31 +403,31 @@ func (s *Server) requestPreemption(r *http.Request, waiting domain.Task, nodes [
 		// The final victim query uses the transactional node snapshot for its
 		// capacity recheck. Refresh each candidate from the authoritative
 		// catalog before asking it to free a slot.
-		if err := s.store.SyncNodeSnapshot(r.Context(), node); err != nil {
+		if err := s.store.SyncNodeSnapshot(ctx, node); err != nil {
 			return "", err
 		}
 		nodeIDs = append(nodeIDs, node.NodeID)
 	}
-	victim, err := s.store.FindPreemptionVictim(r.Context(), waiting, nodeIDs)
+	victim, err := s.store.FindPreemptionVictim(ctx, waiting, nodeIDs)
 	if err != nil || victim == nil {
 		return "", err
 	}
-	started, err := s.store.RecordPreemptionIntent(r.Context(), victim.TaskID, victim.Attempt, waiting.TaskID)
+	started, err := s.store.RecordPreemptionIntent(ctx, victim.TaskID, victim.Attempt, waiting.TaskID)
 	if err != nil || !started {
 		return "", err
 	}
-	node, err := s.controlNode(r.Context(), waiting.Realm, victim.NodeID)
+	node, err := s.controlNode(ctx, waiting.Realm, victim.NodeID)
 	if err != nil {
-		_ = s.store.MarkPreemptionDeliveryFailed(r.Context(), victim.TaskID, err.Error())
+		_ = s.store.MarkPreemptionDeliveryFailed(ctx, victim.TaskID, err.Error())
 		return "", err
 	}
-	neverStarted, err := s.requestStop(r, node, waiting.Realm, victim.TaskID, victim.Attempt)
+	neverStarted, err := s.requestStop(ctx, node, waiting.Realm, victim.TaskID, victim.Attempt)
 	if err != nil {
-		_ = s.store.MarkPreemptionDeliveryFailed(r.Context(), victim.TaskID, err.Error())
+		_ = s.store.MarkPreemptionDeliveryFailed(ctx, victim.TaskID, err.Error())
 		return "", err
 	}
 	if neverStarted {
-		p, err := s.store.CompleteAssignedTask(r.Context(), victim.TaskID, waiting.Realm, victim.NodeID, victim.Attempt, domain.StateAborted)
+		p, err := s.store.CompleteAssignedTask(ctx, victim.TaskID, waiting.Realm, victim.NodeID, victim.Attempt, domain.StateAborted)
 		if err != nil {
 			return "", err
 		}
@@ -388,7 +436,7 @@ func (s *Server) requestPreemption(r *http.Request, waiting domain.Task, nodes [
 		}
 		return "", nil
 	}
-	p, err := s.store.ConfirmPreemption(r.Context(), victim.TaskID, victim.Attempt)
+	p, err := s.store.ConfirmPreemption(ctx, victim.TaskID, victim.Attempt)
 	if err != nil {
 		return "", err
 	}
@@ -511,7 +559,7 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "cancel-unavailable", "执行节点不可用，未记录取消状态")
 			return
 		}
-		neverStarted, err := s.requestStop(r, node, realm, taskID, current.Attempt)
+		neverStarted, err := s.requestStop(r.Context(), node, realm, taskID, current.Attempt)
 		if err != nil {
 			if markErr := s.store.MarkCancelDeliveryFailed(r.Context(), taskID, err.Error()); markErr != nil {
 				s.log.Warn("记录取消命令失败状态失败", "task_id", taskID, "err", markErr)
@@ -556,7 +604,7 @@ func (s *Server) controlNode(ctx context.Context, realm, nodeID string) (domain.
 	return domain.Node{}, errors.New("node is absent from the control catalog")
 }
 
-func (s *Server) requestStop(r *http.Request, node domain.Node, realm, taskID string, attempts ...int) (bool, error) {
+func (s *Server) requestStop(parent context.Context, node domain.Node, realm, taskID string, attempts ...int) (bool, error) {
 	var attempt int
 	if len(attempts) > 0 {
 		attempt = attempts[0]
@@ -566,7 +614,7 @@ func (s *Server) requestStop(r *http.Request, node domain.Node, realm, taskID st
 		return false, err
 	}
 	endpoint := strings.TrimRight(node.ControlURL, "/") + "/subagent/stop"
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
@@ -679,13 +727,18 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxForwardBody+1))
+	if err != nil || len(raw) > maxForwardBody {
+		writeError(w, http.StatusBadRequest, "bad-request", "请求体非法或过大")
+		return
+	}
 	lease := s.elec.Current()
 	if lease == nil {
-		writeError(w, http.StatusServiceUnavailable, "no-leader", "当前无 leader，快速失败")
+		s.forwardToLeader(w, r, raw)
 		return
 	}
 	var req reconcileRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(raw, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad-request", "请求体非法")
 		return
 	}
@@ -697,6 +750,75 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"recorded": recorded})
 }
 
+// maxForwardBody 需要决策者的请求体上限（放置与对账都是小 JSON）。
+const maxForwardBody = 4 << 20
+
+// noLeader 统一的「此刻没有可用决策者」应答。Retry-After 让调用方知道这是
+// 可重试的瞬态（选主切换最长一个 TTL），而不是请求本身有错。
+func noLeader(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "no-leader", "当前无 leader，请稍后重试")
+}
+
+// forwardToLeader 本副本不是决策者时，把请求原样交给当前 leader 并回传它的应答。
+//
+// 为什么在服务端转发而不是让客户端自己找 leader：副本前面是负载均衡（K8s Service），
+// 调用方无从选择落到哪个副本；而「谁是 leader」的权威在租约行里，只有副本读得到。
+//
+// 三条边界：
+//   - 只转发一次（ForwardedHeader）：两个都自认不是 leader 的副本互转会成环；
+//   - leader 地址取自**未过期**的租约行，没有地址（旧版本进程 / 未配置）即不转发；
+//   - 连不上 leader（刚崩溃、TTL 未到）快速失败，不把连接错误伪装成放置结果。
+//
+// 转发不改变正确性模型：leader 仍在自己的事务里做 fencing 校验，本副本只是搬运。
+func (s *Server) forwardToLeader(w http.ResponseWriter, r *http.Request, body []byte) {
+	if r.Header.Get(ForwardedHeader) != "" {
+		noLeader(w)
+		return
+	}
+	endpoint, _, err := s.store.LeaderEndpoint(r.Context())
+	if err != nil {
+		s.log.Warn("读取 leader 地址失败", "err", err)
+		noLeader(w)
+		return
+	}
+	s.relayToLeader(w, r, body, endpoint)
+}
+
+func (s *Server) relayToLeader(w http.ResponseWriter, r *http.Request, body []byte, endpoint string) {
+	if endpoint == "" {
+		noLeader(w)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, r.Method, strings.TrimRight(endpoint, "/")+r.URL.RequestURI(), bytes.NewReader(body))
+	if err != nil {
+		noLeader(w)
+		return
+	}
+	for _, h := range []string{"Content-Type", "Authorization", "X-Lumo-Realm"} {
+		if v := r.Header.Get(h); v != "" {
+			req.Header.Set(h, v)
+		}
+	}
+	req.Header.Set(ForwardedHeader, "1")
+	res, err := observability.ConfiguredHTTPClient(20 * time.Second).Do(req)
+	if err != nil {
+		s.log.Warn("转发到 leader 失败", "leader", endpoint, "err", err)
+		noLeader(w)
+		return
+	}
+	defer res.Body.Close()
+	for _, h := range []string{"Content-Type", "Retry-After"} {
+		if v := res.Header.Get(h); v != "" {
+			w.Header().Set(h, v)
+		}
+	}
+	w.WriteHeader(res.StatusCode)
+	_, _ = io.Copy(w, io.LimitReader(res.Body, 16<<20))
+}
+
 func requestRealm(w http.ResponseWriter, r *http.Request) (string, bool) {
 	realm := r.Header.Get("X-Lumo-Realm")
 	if realm == "" {
@@ -704,6 +826,17 @@ func requestRealm(w http.ResponseWriter, r *http.Request) (string, bool) {
 		return "", false
 	}
 	return realm, true
+}
+
+// A global leader may acquire the lease after the routing read. The fenced
+// local transaction has rejected the write in that case, so relay the original
+// request to the new decision maker.
+func (s *Server) respondPlacementError(w http.ResponseWriter, r *http.Request, body []byte, err error) {
+	if errors.Is(err, domain.ErrGlobalLeaderActive) {
+		s.forwardToLeader(w, r, body)
+		return
+	}
+	s.respondStoreError(w, err)
 }
 
 // respondStoreError 领域错误 → HTTP 状态映射（spec §6 表）。

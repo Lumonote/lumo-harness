@@ -9,14 +9,19 @@ import (
 )
 
 // CancelUnseen persists cancellation even if a timed-out submission has not
-// committed yet. Sharing the admission mutex closes the not-found/late-insert
-// window; if placement won first its assignment is returned for executor stop.
+// committed yet. Taking the admission lock exclusively (placements hold it
+// shared) closes the not-found/late-insert window; if placement won first its
+// assignment is returned for executor stop.
 func (s *Store) CancelUnseen(ctx context.Context, taskID, realm string) (domain.Placement, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginWork(ctx)
 	if err != nil {
 		return domain.Placement{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err = lockAdmission(ctx, tx); err != nil {
+		return domain.Placement{}, err
+	}
+	// 行锁只为与旧版本互斥（见 admissionMode.legacyRowLock）。
 	if _, err = tx.Exec(ctx, `SELECT id FROM scheduler_leader_lease WHERE id=1 FOR UPDATE`); err != nil {
 		return domain.Placement{}, err
 	}
@@ -42,7 +47,7 @@ func (s *Store) CancelUnseen(ctx context.Context, taskID, realm string) (domain.
 // durable cancellation intent share the task row lock. If placement won first,
 // return its current assignment so the caller can stop that execution instead.
 func (s *Store) CancelPending(ctx context.Context, taskID, realm string, attempt int) (domain.Placement, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginWork(ctx)
 	if err != nil {
 		return domain.Placement{}, err
 	}
