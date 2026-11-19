@@ -29,6 +29,8 @@
     "@deepseek-ai/dsh-skill-filesystem": "link:../../../deepseek-harness/packages/skill/skill-filesystem",
     "@deepseek-ai/cordis": "link:../../../deepseek-harness/vendor/cordis",
     "@deepseek-ai/dsh-atomic-write": "link:../../../deepseek-harness/packages/util/atomic-write",
+    "@deepseek-ai/dsh-client-connection": "link:../../../deepseek-harness/packages/client/connection",
+    "@deepseek-ai/dsh-credentials": "link:../../../deepseek-harness/packages/credentials/credentials",
     "@deepseek-ai/dsh-client-ui-renderer": "link:../../../deepseek-harness/packages/client/ui-renderer",
     "@deepseek-ai/dsh-client-ui-sidebar-documentpreview": "link:../../../deepseek-harness/packages/client/ui-sidebar-documentpreview",
     "@deepseek-ai/dsh-client-ui-layout": "link:../../../deepseek-harness/packages/client/ui-layout",

@@ -310,6 +310,12 @@ importers:
       '@deepseek-ai/dsh-atomic-write':
         specifier: link:../../../deepseek-harness/packages/util/atomic-write
         version: link:../../../deepseek-harness/packages/util/atomic-write
+      '@deepseek-ai/dsh-client-connection':
+        specifier: link:../../../deepseek-harness/packages/client/connection
+        version: link:../../../deepseek-harness/packages/client/connection
+      '@deepseek-ai/dsh-credentials':
+        specifier: link:../../../deepseek-harness/packages/credentials/credentials
+        version: link:../../../deepseek-harness/packages/credentials/credentials
       '@deepseek-ai/dsh-client-ui-conversation':
         specifier: link:../../../deepseek-harness/packages/client/ui-conversation
         version: link:../../../deepseek-harness/packages/client/ui-conversation
