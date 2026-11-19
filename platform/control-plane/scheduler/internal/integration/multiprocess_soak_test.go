@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build scheduler_stress && !windows
 
 package integration_test
 
@@ -25,7 +25,7 @@ import (
 )
 
 // 多进程换主浸泡：三个**真实的调度器进程**共用一个库，并发放置的同时反复强杀 / 冻结
-// leader。默认不跑（`LUMO_MULTIPROC_SOAK=1` 才跑）——它依赖墙钟与信号，放进常跑套件
+// leader。默认不跑（`-tags scheduler_stress` 才跑）——它依赖墙钟与信号，放进常跑套件
 // 只会在慢机器上制造偶发红。
 //
 // 进程内的并发语义测试（admission_lock_test.go）逐条钉住了锁的次序，但它们共用一个
@@ -233,8 +233,8 @@ type termStart struct {
 }
 
 func TestMultiProcessFailoverSoak(t *testing.T) {
-	if os.Getenv("LUMO_MULTIPROC_SOAK") != "1" {
-		t.Skip("多进程换主浸泡默认不跑：设 LUMO_MULTIPROC_SOAK=1（可选 LUMO_MULTIPROC_SOAK_SECONDS，默认 30）")
+	if os.Getenv("LUMO_TEST_PG_DSN") == "" {
+		t.Fatal("多进程换主浸泡需 LUMO_TEST_PG_DSN 指向独立测试库")
 	}
 	duration := 30 * time.Second
 	if v := os.Getenv("LUMO_MULTIPROC_SOAK_SECONDS"); v != "" {

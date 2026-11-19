@@ -885,11 +885,13 @@ Pod 复用），后果是退回 8 小时兜底，不会误杀。
   就是没调的结果）。调大前先核对 PG 的 `max_connections` 与副本数。
 - **同一节点上的放置仍然串行**（节点行锁保容量），这是有意的。
 
-复跑：
+复跑时将 `LUMO_TEST_PG_DSN` 指向**可清空的独立测试库**。这两项依赖负载或墙钟的专项测试通过
+`scheduler_stress` 构建标签启用，不属于常规 `go test ./...` 的零跳过套件。多进程换主需 Unix 信号支持。
 
 ```sh
 cd platform/control-plane/scheduler
-LUMO_ADMISSION_BENCH=1 LUMO_TEST_PG_DSN=... go test ./internal/store -run TestAdmissionLockBench -v -count=1
+go test -tags scheduler_stress ./internal/store -run '^TestAdmissionLockBench$' -v -count=1
+go test -tags scheduler_stress ./internal/integration -run '^TestMultiProcessFailoverSoak$' -v -count=1
 ```
 
 ### Compose 与 PgBouncer 实测（2026-11-18）

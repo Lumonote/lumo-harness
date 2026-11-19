@@ -169,12 +169,12 @@ export function applyLumoDshOverrides(root) {
     [
       "      {hero && heroWorkspaceRow}\n",
       "      {hero && heroWorkspaceRow}\n"
-        + "      {hero && renderSlot('conversation.hero.input.left', { input: inputState, inputActions })} {/* LUMO_DSH_OVERLAY: pre-session project scope control */}\n",
+        + "      {hero && renderSlot('conversation.hero.input.left', { input: inputState, inputActions: props.inputActions })} {/* LUMO_DSH_OVERLAY: pre-session project scope control */}\n",
     ],
     [
       "      {inputBar}\n    </div>\n",
       "      {inputBar}\n"
-        + "      {hero && renderSlot('conversation.hero.composer.dock', { input: inputState, inputActions })} {/* LUMO_DSH_OVERLAY */}\n"
+        + "      {hero && renderSlot('conversation.hero.composer.dock', { input: inputState, inputActions: props.inputActions })} {/* LUMO_DSH_OVERLAY */}\n"
         + "    </div>\n",
     ],
   ])
@@ -290,15 +290,6 @@ export function applyLumoDshOverrides(root) {
       + "  readonly input?: InputState | undefined\n"
       + "  readonly inputActions?: InputActions | undefined\n"
       + "}\n",
-  ]], 'LUMO_HERO_INPUT_BRIDGE')
-
-  // `inputState` 由组件内的 `useInput` hook 提供，`inputActions` 则来自标准 props
-  // （apply.ts 的 `ctx.uiSession.provide({ props: ['inputActions'] })`）——只把后者补进
-  // 解构，上面的 hero 座位才能拿到原生输入面。载荷升级已并入第一段补丁，这里不再重复。
-  // 锚点随上游 2026-09 对这行解构的重排一起更新。
-  patchFile(root, 'packages/client/ui-conversation/src/client/skeleton/ConversationContent.tsx', [[
-    "    selectWorkspace, t, useFactorySlot,\n",
-    "    selectWorkspace, t, useFactorySlot, inputActions, // LUMO_HERO_INPUT_BRIDGE\n",
   ]], 'LUMO_HERO_INPUT_BRIDGE')
 
   // ── LUMO_STREAM_RESILIENCE ─────────────────────────────────────────────────
@@ -508,6 +499,10 @@ export function applyLumoDshOverrides(root) {
     // fcc0ad46 upstream now owns optional-entry isolation and the required-entry
     // boot gate. Keep those sources intact; these no-op anchors still reject
     // unknown layouts instead of silently bypassing compatibility diagnostics.
+    const bootFile = 'packages/client/web/src/boot.ts'
+    const bootSource = readFileSync(resolve(root, bootFile), 'utf8')
+    // 2e39e704 also requires session-status and passes the local module loader.
+    const sessionStatusEntry = "  '@deepseek-ai/dsh-client-ui-session-status',\n"
     const nativeBootAnchors = [
       [bootAuditFile, [
         "const requiredClientEntryNames = new Set<string>([\n"
@@ -516,6 +511,7 @@ export function applyLumoDshOverrides(root) {
           + "  '@deepseek-ai/dsh-client-ui-renderer',\n"
           + "  '@deepseek-ai/dsh-client-ui-layout',\n"
           + "  '@deepseek-ai/dsh-client-ui-session',\n"
+          + (bootAuditSource.includes(sessionStatusEntry) ? sessionStatusEntry : '')
           + "  '@deepseek-ai/dsh-client-ui-chat',\n"
           + "  '@deepseek-ai/dsh-client-ui-sidebar',\n"
           + "])\n",
@@ -531,11 +527,11 @@ export function applyLumoDshOverrides(root) {
           + "      }))\n"
           + "      await loader.await()\n",
       ]],
-      ['packages/client/web/src/boot.ts', [
+      [bootFile, [
         "import { bootClient } from './boot-client.ts'\n",
         "      await bootClient({\n"
           + "        ctx,\n"
-          + "        modules: this.modules,\n"
+          + (bootSource.includes('        modules: this.modules,\n') ? '        modules: this.modules,\n' : '        modules,\n')
           + "        manifest: this.manifest,\n"
           + "        // A failed entry may be optional; only the audit decides whether the boot page reports a failure.\n"
           + "        onEntryState: (name, state) => {\n"

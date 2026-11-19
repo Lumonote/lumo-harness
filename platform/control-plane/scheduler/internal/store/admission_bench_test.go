@@ -1,3 +1,5 @@
+//go:build scheduler_stress
+
 package store
 
 import (
@@ -19,9 +21,9 @@ import (
 	"github.com/lumo-harness/platform/scheduler/internal/domain"
 )
 
-// 放置准入锁的压测台。只在 LUMO_ADMISSION_BENCH=1 且给了 LUMO_TEST_PG_DSN 时运行：
+// 放置准入锁的压测台。显式启用 scheduler_stress 并提供独立测试库：
 //
-//	LUMO_ADMISSION_BENCH=1 LUMO_TEST_PG_DSN=... go test ./internal/store -run TestAdmissionLockBench -v -count=1
+//	LUMO_TEST_PG_DSN=... go test -tags scheduler_stress ./internal/store -run TestAdmissionLockBench -v -count=1
 //
 // 量三件事，因为「放置吞吐」单看没有意义——租约行上还挂着另外两个排他写入方：
 //   - 放置（PlaceTask）吞吐与延迟；
@@ -153,8 +155,8 @@ func benchEnvInt(name string, def int) int {
 
 func TestAdmissionLockBench(t *testing.T) {
 	dsn := os.Getenv("LUMO_TEST_PG_DSN")
-	if os.Getenv("LUMO_ADMISSION_BENCH") != "1" || dsn == "" {
-		t.Skip("压测台：需 LUMO_ADMISSION_BENCH=1 与 LUMO_TEST_PG_DSN")
+	if dsn == "" {
+		t.Fatal("压测台需 LUMO_TEST_PG_DSN 指向独立测试库")
 	}
 	u, err := url.Parse(dsn)
 	if err != nil {

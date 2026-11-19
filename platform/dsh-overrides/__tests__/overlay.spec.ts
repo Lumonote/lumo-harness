@@ -252,10 +252,8 @@ describe('applyLumoDshOverrides', () => {
     expect(slots).toContain("'conversation.hero.composer.dock': { kind: 'list'; scope: 'root' }")
 
     const conversationContent = read(root, PATCHED[2]!)
-    expect(conversationContent).toContain("renderSlot('conversation.hero.input.left', { input: inputState, inputActions })")
-    expect(conversationContent).toContain("renderSlot('conversation.hero.composer.dock', { input: inputState, inputActions })")
-    // `inputActions` 必须真的解构进来，否则座位收到的是 undefined。
-    expect(conversationContent).toContain('useFactorySlot, inputActions, // LUMO_HERO_INPUT_BRIDGE')
+    expect(conversationContent).toContain("renderSlot('conversation.hero.input.left', { input: inputState, inputActions: props.inputActions })")
+    expect(conversationContent).toContain("renderSlot('conversation.hero.composer.dock', { input: inputState, inputActions: props.inputActions })")
 
     const sidebarApply = read(root, PATCHED[3]!)
     expect(sidebarApply).toContain("'sidebar.navigation': { kind: 'list', scope: 'root' }")
@@ -297,13 +295,20 @@ describe('applyLumoDshOverrides', () => {
 
   })
 
-  it('原生启动隔离保留上游源码,optional失败可降级且required失败继续阻断', () => {
+  it.each([false, true])('原生启动隔离保留上游源码 (session-status: %s)', (sessionStatus) => {
     const root = stagePristineUpstream('native-boot')
     const files = [
       'packages/client/web/src/boot-client.ts',
       'packages/client/modules/src/client/entries.ts',
       'packages/client/web/src/boot.ts',
     ]
+    const statusLine = "  '@deepseek-ai/dsh-client-ui-session-status',\n"
+    const sessionLine = "  '@deepseek-ai/dsh-client-ui-session',\n"
+    const audit = read(root, files[0]!).replace(statusLine, '')
+    writeFileSync(resolve(root, files[0]!), audit.replace(sessionLine, sessionLine + (sessionStatus ? statusLine : '')))
+    const boot = read(root, files[2]!).replace(/(await bootClient\(\{\n        ctx,\n        )modules(?:: this\.modules)?,/u,
+      sessionStatus ? '$1modules,' : '$1modules: this.modules,')
+    writeFileSync(resolve(root, files[2]!), boot)
     const originals = files.map(file => read(root, file))
     applyLumoDshOverrides(root)
     expect(files.map(file => read(root, file))).toEqual(originals)
@@ -381,7 +386,7 @@ describe('applyLumoDshOverrides', () => {
     // 上游已把 composer 重构为 input.dock + composer.bar,不再有 leftItems/三元。
     // 关键:会话输入走上游的 input.dock;hero 座位用 hero 守卫,绝不无条件替换会话槽。
     expect(source).toContain("renderSlot('conversation.input.dock', zone)")
-    expect(source).toContain("{hero && renderSlot('conversation.hero.input.left', { input: inputState, inputActions })}")
+    expect(source).toContain("{hero && renderSlot('conversation.hero.input.left', { input: inputState, inputActions: props.inputActions })}")
     expect(source).not.toMatch(/zone === undefined\s*\?\s*renderSlot\('conversation\.hero\.input\.left'/u)
   })
 
