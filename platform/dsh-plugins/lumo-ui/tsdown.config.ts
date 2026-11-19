@@ -36,7 +36,11 @@ const node = {
   name: id,
   entry: { index: 'src/index.ts' },
   outDir: 'lib', format: 'esm', platform: 'node', dts: false, sourcemap: true, clean: false,
-  external: [/^@deepseek-ai\//u, /^node:/u],
+  // This public source subpath uses TypeScript parameter properties. Bundle it
+  // so the packaged Node process never has to execute uncompiled dependency TS.
+  external: (source: string) => source !== '@deepseek-ai/dsh-host-authentication-token/src/browser-auth.ts'
+    && (/^@deepseek-ai\//u.test(source) || /^node:/u.test(source)),
+  noExternal: ['@deepseek-ai/dsh-host-authentication-token/src/browser-auth.ts'],
   outputOptions: { entryFileNames: 'index.js' },
 }
 

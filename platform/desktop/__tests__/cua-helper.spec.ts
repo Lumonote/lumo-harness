@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cuaBundleDigest, cuaProviderPackage, cuaProviderPackages, stageCuaHelper, verifyCuaHelper } from '../cua-helper.mjs'
 import { copyRuntimePackage } from '../runtime-dependencies.mjs'
+import { stageOptionalComputerUse } from '../optional-computer-use.mjs'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -59,6 +60,25 @@ describe('desktop Computer Use helper', () => {
 
 // Windows cannot represent macOS executable bits or validate a signed .app.
 describe.skipIf(process.platform === 'win32')('macOS Computer Use helper payload', () => {
+  it('omits the optional plugin and partial payload after a compiler failure, leaving core packages intact', () => {
+    const f = fixture()
+    const modulesRoot = join(f.root, 'runtime/node_modules')
+    const names = [cuaProviderPackage, '@lumo/computer-use', '@deepseek-ai/dsh-cua-bundle', '@deepseek-ai/dsh-cua-mcp', '@deepseek-ai/dsh-base']
+    const runtimePackages = names.map(name => ({ manifest: { name }, destination: join(modulesRoot, name) }))
+    for (const { manifest, destination } of runtimePackages) write(destination, 'package.json', JSON.stringify(manifest))
+    f.run.mockImplementation(() => { publish(f.packageRoot, 'arm64'); return { status: 1, stdout: '', stderr: 'AXWorker.swift:418 compiler error' } })
+    const warn = vi.fn()
+    const result = stageOptionalComputerUse({ ...f.spec, runtimePackages, modulesRoot, warn })
+    expect(result).toMatchObject({ available: false, reason: 'packaging-failed', diagnostic: expect.stringContaining('AXWorker.swift:418') })
+    for (const { manifest, destination } of runtimePackages) expect(existsSync(destination)).toBe(manifest.name === '@deepseek-ai/dsh-base')
+    expect(warn).toHaveBeenCalledOnce()
+  })
+  it('retains a successfully built optional plugin and its verified receipt', () => {
+    const f = fixture()
+    const result = stageOptionalComputerUse({ ...f.spec, runtimePackages: [{ manifest: { name: cuaProviderPackage }, destination: f.packageRoot }] })
+    expect(result).toMatchObject({ available: true, provider: cuaProviderPackage })
+    expect(verifyCuaHelper(f.spec).digest).toBe(result.digest)
+  })
   it.each(cuaProviderPackages)('records the installed provider identity for %s', (provider) => {
     const f = fixture('arm64', provider)
     expect(f.stage()).toMatchObject({ available: true, provider })

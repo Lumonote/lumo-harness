@@ -84,7 +84,7 @@ async function fixture(enabled = true) {
   ctx.tools.register({ name: 'knowledge_query', description: 'deployment admin tool', parameters: { type: 'object', properties: {} }, output: {
     schema: { type: 'object', properties: {} }, render: () => [{ type: 'text', text: 'DEPLOYMENT-SECRET' }],
   }, async execute() { hostCalls++; return {} } })
-  new QueryEngine(ctx)
+  await ctx.plugin(QueryEngine).await()
   class TestController extends Controller { initialize() { return this[Service.init]() } }
   await new TestController(ctx, { nativeOpen: false }).initialize()
   const schema = z.object({ sessionId: z.string(), requestId: z.string(), content: z.array(z.object({ type: z.literal('text'), text: z.string() })), mode: z.literal('queue') })

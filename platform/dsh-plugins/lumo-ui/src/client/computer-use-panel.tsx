@@ -19,6 +19,7 @@ function failure(code: string): string {
   if (code === 'session_required') return '当前对话尚未就绪，请返回对话后重试。'
   if (code === 'same_origin_required') return '页面来源校验失败，请从桌面端重新打开此页面。'
   if (code === 'computer_use_unavailable') return '电脑操作服务尚未就绪，请稍后重试。'
+  if (code === 'computer_use_not_installed') return '此版本未安装电脑操作插件，其他功能可正常使用。'
   if (code === 'computer_use_provider_unavailable') return '本机电脑操作驱动尚未就绪，请检查插件状态后重试。'
   if (code === 'computer_use_control_conflict') return '电脑操作授权已更新，请刷新状态后重新授权。'
   if (code === 'computer_use_invalid_status') return '电脑操作状态响应无效，请重新读取后再授权。'

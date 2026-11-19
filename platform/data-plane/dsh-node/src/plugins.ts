@@ -3,6 +3,7 @@ import { BASELINE_PLUGIN_PINS, PACKAGED_PROFILE_MODULES } from './generated/plug
 import { homedir } from 'node:os'
 import { delimiter, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { omittedPackagedPlugins } from './runtime-capabilities.ts'
 
 export const PLATFORM_PLUGIN_MODULES = {
   agentTeams: '@lumo/agent-teams',
@@ -298,7 +299,9 @@ function ensurePackagedProfileModules(profile: string, env: NodeJS.ProcessEnv): 
   }
   const dshHome = env['DSH_HOME'] ?? resolve(homedir(), '.dsh')
   const linked: Array<[string, string]> = []
+  const omitted = omittedPackagedPlugins(env)
   for (const name of PACKAGED_PROFILE_MODULES) {
+    if (omitted.has(name)) continue
     const target = resolve(runtimeModules, ...name.split('/'))
     if (!existsSync(resolve(target, 'package.json'))) {
       if (isOptionalProfilePlugin(name)) {
@@ -311,6 +314,13 @@ function ensurePackagedProfileModules(profile: string, env: NodeJS.ProcessEnv): 
   }
   for (const modulesDir of [resolve(dshHome, 'profiles', 'node_modules'), resolve(dshHome, 'node_modules')]) {
     mkdirSync(modulesDir, { recursive: true })
+    for (const name of omitted) {
+      const link = resolve(modulesDir, ...name.split('/'))
+      // These shared links are owned by the launcher, including dangling links
+      // left by an older installation that shipped the optional capability.
+      try { if (lstatSync(link).isSymbolicLink()) unlinkSync(link) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    }
     for (const [name, target] of linked) linkPackagedModule(modulesDir, name, target, true)
   }
 }
@@ -559,6 +569,7 @@ export function ensurePackagedBaselineBundles(options: {
   const current = Array.isArray(manifest.dsh?.profile?.bundles)
     ? manifest.dsh.profile.bundles.filter((name): name is string => typeof name === 'string')
     : []
+  const omitted = omittedPackagedPlugins(env)
   const quarantinePath = profileQuarantinePath(options.profile, env)
   const quarantined = readPluginQuarantine(quarantinePath)
   // Seeing a quarantined bundle in the manifest means the user explicitly
@@ -573,7 +584,8 @@ export function ensurePackagedBaselineBundles(options: {
     .filter(name => resolvesPackage(name, moduleRoots))
   const recordPath = resolve(profileDir, BASELINE_RECORD_FILENAME)
   const owned = readBaselineRecord(recordPath)
-  const { bundles, added, removed, owned: nextOwned } = reconcileBaselineBundles({ bundles: current, available, owned })
+  const { bundles, added, removed, owned: nextOwned } = reconcileBaselineBundles({ bundles: current.filter(name => !omitted.has(name)), available, owned })
+  removed.push(...current.filter(name => omitted.has(name)))
   if (removed.length > 0) {
     console.warn(`dsh-node: 退役 ${removed.length} 个基线插件 bundle(s)：${removed.join(', ')}`)
   }
@@ -590,6 +602,11 @@ export function ensurePackagedBaselineBundles(options: {
   const baselineNames = new Set(baselineBundlePackages())
   const dependencies = { ...(manifest.dependencies ?? {}) }
   let dependenciesChanged = false
+  for (const name of omitted) {
+    if (dependencies[name] === undefined) continue
+    delete dependencies[name]
+    dependenciesChanged = true
+  }
   const profileModulesDir = resolve(profileDir, 'node_modules')
   for (const name of bundles) {
     if (!baselineNames.has(name)) continue

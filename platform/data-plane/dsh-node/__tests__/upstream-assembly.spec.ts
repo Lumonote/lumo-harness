@@ -1,23 +1,20 @@
 import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
-import { applyEntryPatches, entryListSchema, type PatchOptions } from '@deepseek-ai/cordis-plugin-include'
+import { applyEntryPatches, parseEntryYaml, type PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import { describe, expect, it } from 'vitest'
 import { localStorageRows, profileLifetimeOverlay, profileStorageRows, workflowEngineOverlay } from '../src/workflow.ts'
 
 const upstream = new URL('../../../../deepseek-harness/', import.meta.url)
-const require = createRequire(new URL('vendor/include/package.json', upstream))
-const yaml = require('js-yaml') as { load(text: string, options: object): PatchOptions[] }
-const parse = (text: string) => yaml.load(text, { schema: entryListSchema })
+const parse = (text: string) => parseEntryYaml(text) as PatchOptions[]
 const bundle = (name: string) => parse(readFileSync(new URL(`packages/bundle/${name}/cordis.patch.yml`, upstream), 'utf8'))
 
 describe('composition against the actual upstream bundle contracts', () => {
   it('keeps the headless sandbox independent of the disabled one-shot startup and routes parent workflows remotely', () => {
     const warnings: unknown[] = []
     const warn = (...args: unknown[]) => { warnings.push(args) }
-    let rows = applyEntryPatches([], bundle('base'), warn)
-    rows = applyEntryPatches(rows, bundle('headless'), warn)
-    rows = applyEntryPatches(rows, parse(profileLifetimeOverlay('headless', false)), warn)
-    rows = applyEntryPatches(rows, parse(workflowEngineOverlay('agent')), warn)
+    let rows = applyEntryPatches([], bundle('base'), warn).data
+    rows = applyEntryPatches(rows, bundle('headless'), warn).data
+    rows = applyEntryPatches(rows, parse(profileLifetimeOverlay('headless', false)), warn).data
+    rows = applyEntryPatches(rows, parse(workflowEngineOverlay('agent')), warn).data
     expect(warnings).toEqual([])
     expect(rows.find(row => row.id === 'headless-startup')?.disabled).toBe(true)
     const sandbox = rows.find(row => row.id === 'sandbox-policy')!

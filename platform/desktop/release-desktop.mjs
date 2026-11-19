@@ -132,19 +132,28 @@ export function signMacApplication(application, config, { run = spawnSync } = {}
   const runtime = join(app, 'Contents/Resources/runtime')
   const manifestPath = join(runtime, 'runtime-manifest.json')
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-  if (!['darwin-arm64', 'darwin-x64'].includes(manifest.target) || manifest.computerUse?.signing !== 'certificate') throw Error('正式包必须包含由证书签名的目标 CUA helper')
-  const provider = manifest.computerUse.provider
-  if (!cuaProviderPackages.includes(provider)) throw Error('正式包包含未知的 macOS CUA provider')
-  const helperRoot = join(runtime, 'node_modules', provider)
-  const helper = verifyCuaHelper({ packageRoot: helperRoot, targetArch: manifest.target.slice(7), run })
-  const signature = checked(run, '/usr/bin/codesign', ['-d', '--verbose=4', helper.application])
-  const signatureText = signature.stderr ?? ''
-  if (!signatureText.split(/\r?\n/u).includes(`TeamIdentifier=${config.team}`)
-    || !signatureText.split(/\r?\n/u).includes(`Authority=${config.identity}`)
-    || !/flags=.*\bruntime\b/u.test(signatureText) || !/^Timestamp=(?!none\s*$)\S.+$/mu.test(signatureText)) throw Error('CUA helper 缺少匹配的 Developer ID、hardened runtime 或可信时间戳')
+  const omitted = manifest.computerUse?.available === false && manifest.computerUse.reason === 'packaging-failed'
+  if (!['darwin-arm64', 'darwin-x64'].includes(manifest.target)
+    || (!omitted && manifest.computerUse?.signing !== 'certificate')) throw Error('正式包必须包含由证书签名的目标 CUA helper，或明确记录可选插件打包失败')
+  let helperRoot, helper
+  if (omitted) {
+    for (const provider of cuaProviderPackages) {
+      if (existsSync(join(runtime, 'node_modules', provider))) throw Error('已跳过的 CUA helper 仍残留在正式包中')
+    }
+  } else {
+    const provider = manifest.computerUse.provider
+    if (!cuaProviderPackages.includes(provider)) throw Error('正式包包含未知的 macOS CUA provider')
+    helperRoot = join(runtime, 'node_modules', provider)
+    helper = verifyCuaHelper({ packageRoot: helperRoot, targetArch: manifest.target.slice(7), run })
+    const signature = checked(run, '/usr/bin/codesign', ['-d', '--verbose=4', helper.application])
+    const signatureText = signature.stderr ?? ''
+    if (!signatureText.split(/\r?\n/u).includes(`TeamIdentifier=${config.team}`)
+      || !signatureText.split(/\r?\n/u).includes(`Authority=${config.identity}`)
+      || !/flags=.*\bruntime\b/u.test(signatureText) || !/^Timestamp=(?!none\s*$)\S.+$/mu.test(signatureText)) throw Error('CUA helper 缺少匹配的 Developer ID、hardened runtime 或可信时间戳')
+  }
   const files = []; const bundles = []
   const visit = path => {
-    if (path === helper.application) return
+    if (path === helper?.application) return
     const stat = lstatSync(path)
     if (stat.isSymbolicLink()) {
       const rel = relative(app, realpathSync(path))
@@ -163,9 +172,11 @@ export function signMacApplication(application, config, { run = spawnSync } = {}
   for (const path of bundles) sign(path)
   sign(app)
   checked(run, '/usr/bin/codesign', ['--verify', '--deep', '--strict', app])
-  const stillValid = verifyCuaHelper({ packageRoot: helperRoot, targetArch: manifest.target.slice(7), run })
-  if (stillValid.digest !== helper.digest) throw Error('正式签名改变了 CUA helper 的不可变内容')
-  return { runtime, manifest, helperDigest: helper.digest, signedMachOCount: files.length }
+  if (helper) {
+    const stillValid = verifyCuaHelper({ packageRoot: helperRoot, targetArch: manifest.target.slice(7), run })
+    if (stillValid.digest !== helper.digest) throw Error('正式签名改变了 CUA helper 的不可变内容')
+  }
+  return { runtime, manifest, helperDigest: helper?.digest, signedMachOCount: files.length }
 }
 
 export function notarizeArtifact(artifact, config, { run = spawnSync, stapleTarget = artifact } = {}) {

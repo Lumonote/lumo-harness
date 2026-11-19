@@ -350,6 +350,33 @@ describe('baseline bundle reconciliation', () => {
     }
   })
 
+  it('omits a failed Computer Use package and removes its stale profile links without accepting missing core packages', () => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo-omitted-cua-'))
+    try {
+      const runtime = join(root, 'runtime'), runtimeModules = join(runtime, 'node_modules'), dshHome = join(root, 'dsh')
+      for (const name of PACKAGED_PROFILE_MODULES) {
+        mkdirSync(join(runtimeModules, name), { recursive: true })
+        writeFileSync(join(runtimeModules, name, 'package.json'), '{"name":"fixture","version":"1.0.0"}')
+      }
+      const profile = join(dshHome, 'profiles/web/package.json')
+      mkdirSync(join(profile, '..'), { recursive: true })
+      writeFileSync(profile, JSON.stringify({ dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-cua-bundle'] } } }))
+      const env = { DSH_HOME: dshHome, LUMO_PACKAGED_RUNTIME: '1', LUMO_RUNTIME_ROOT: runtime, LUMO_RUNTIME_NODE_MODULES: runtimeModules }
+      const options = { profile: 'web', platformRoot: root, dshRoot: root, env }
+      ensureProfilePlugins(options)
+      rmSync(join(runtimeModules, '@lumo/computer-use'), { recursive: true })
+      writeFileSync(join(runtime, 'runtime-manifest.json'), JSON.stringify({ computerUse: { available: false, reason: 'packaging-failed', omittedPackages: ['@lumo/computer-use', '@deepseek-ai/dsh-cua-bundle', '@lumo/dsh-platform-ui'] } }))
+      expect(() => ensureProfilePlugins(options)).not.toThrow()
+      for (const anchor of ['node_modules', 'profiles/node_modules']) {
+        expect(() => lstatSync(join(dshHome, anchor, '@lumo/computer-use'))).toThrow()
+        expect(existsSync(join(dshHome, anchor, '@lumo/dsh-platform-ui/package.json'))).toBe(true)
+      }
+      expect(JSON.parse(readFileSync(profile, 'utf8')).dsh.profile.bundles).not.toContain('@deepseek-ai/dsh-cua-bundle')
+      rmSync(join(runtimeModules, '@lumo/dsh-platform-ui'), { recursive: true })
+      expect(() => ensureProfilePlugins(options)).toThrow(/missing @lumo\/dsh-platform-ui/)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
   it('does not re-add a quarantined baseline bundle until it is explicitly reintroduced', () => {
     const root = mkdtempSync(join(tmpdir(), 'lumo-baseline-quarantine-'))
     const runtimeModules = join(root, 'runtime', 'node_modules')

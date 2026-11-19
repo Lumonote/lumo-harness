@@ -29,8 +29,9 @@ import { prepareSourcePlugins } from '../tools/prepare-source-plugins.mjs'
 import { assertRuntimePackageTargets, assertWindowsRuntimePaths, copyRuntimePackage, isOptionalRuntimeDependency, planRuntimePackages, resolveInstalledPackage, shouldStageRuntimeDependency } from './runtime-dependencies.mjs'
 import { compilePackagedTypeScriptPlugin, packagedTypeScriptPluginDirectories } from './packaged-typescript.mjs'
 import { stageDshNode } from './stage-dsh-node.mjs'
-import { cuaProviderPackages, stageCuaHelper, verifyCuaHelper } from './cua-helper.mjs'
-import { stageWindowsCua, verifyWindowsCua } from './windows-cua.mjs'
+import { cuaProviderPackages, verifyCuaHelper } from './cua-helper.mjs'
+import { verifyWindowsCua } from './windows-cua.mjs'
+import { stageOptionalComputerUse } from './optional-computer-use.mjs'
 import { copyPortablePythonTree } from './portable-python.mjs'
 import { writeRuntimeSizeReport } from './runtime-size.mjs'
 
@@ -525,7 +526,7 @@ for (let index = 0; index < packageQueue.length; index += 1) {
 }
 
 assertDshPackagesCameFromSnapshot()
-const runtimePackages = planRuntimePackages(modulesRoot, packageSources)
+let runtimePackages = planRuntimePackages(modulesRoot, packageSources)
 assertRuntimePackageTargets(runtimePackages, { platform: targetPlatform, arch: targetArch })
 for (const { root, destination, manifest } of runtimePackages) {
   copyRuntimePackage(root, destination, {
@@ -537,12 +538,14 @@ assertOverridesCameFromSnapshot()
 compilePackagedTypeScriptPlugins()
 const cuaPackageRoot = runtimePackages.find(({ manifest }) => cuaProviderPackages.includes(manifest.name))?.destination
 const windowsCuaPackageRoot = runtimePackages.find(({ manifest }) => manifest.name === '@lumo/computer-use')?.destination
-const computerUse = targetPlatform === 'win32' ? stageWindowsCua({ packageRoot: windowsCuaPackageRoot, targetArch, modulesRoot }) : stageCuaHelper({
-  packageRoot: cuaPackageRoot,
+const computerUse = stageOptionalComputerUse({
+  runtimePackages,
   targetPlatform,
   targetArch,
+  modulesRoot,
   scratchPath: resolve(repoRoot, 'platform', '.build', 'cua-helper', buildTarget),
 })
+runtimePackages = runtimePackages.filter(({ destination }) => existsSync(join(destination, 'package.json')))
 
 if (!existsSync(bundledSkillSources)) throw new Error(`无法构建桌面 runtime：找不到 ${bundledSkillSources}`)
 cpSync(bundledSkillsRoot, resolve(stagingRoot, 'skills'), {

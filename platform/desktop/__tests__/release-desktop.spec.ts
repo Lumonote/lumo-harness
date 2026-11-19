@@ -13,6 +13,24 @@ const identity = 'Developer ID Application: Lumo (&) (ABCDE12345)'
 const env = { LUMO_MACOS_SIGNING_IDENTITY: identity, LUMO_CUA_SIGNING_IDENTITY: identity, LUMO_MACOS_NOTARY_PROFILE: 'release (&) profile' }
 const unsignedReport = (target = 'darwin-arm64') => ({ target, version: '1.2.1', total: { contentBytes: 123, fileCount: 4 }, sourceRevision: 'a'.repeat(40), upstreamRevision: 'b'.repeat(40) })
 describe('formal desktop release boundary', () => {
+  it('signs the application when Computer Use was explicitly omitted, rejecting unexplained absence', () => {
+    const root = mkdtempSync(join(tmpdir(), 'lumo optional cua ')); roots.push(root)
+    const application = join(realpathSync(root), 'Lumo.app'), runtime = join(application, 'Contents/Resources/runtime')
+    mkdirSync(runtime, { recursive: true })
+    writeFileSync(join(runtime, 'node'), Buffer.from('cffaedfe00000000000000000000000000000000000000000000000000000000', 'hex'))
+    const manifestPath = join(runtime, 'runtime-manifest.json')
+    writeFileSync(manifestPath, JSON.stringify({ target: 'darwin-arm64', computerUse: { available: false, reason: 'packaging-failed' } }))
+    const run = vi.fn(() => ({ status: 0, stdout: '', stderr: '' }))
+    const result = signMacApplication(application, releaseConfiguration(env, 'darwin'), { run })
+    expect(result.helperDigest).toBeUndefined()
+    expect(run.mock.calls.map((call: unknown[]) => call[1]).filter((args: string[]) => args.includes('--sign')).map((args: string[]) => args.at(-1))).toEqual([join(runtime, 'node'), application])
+    for (const computerUse of [undefined, { available: false }, { available: true, signing: 'ad-hoc' }]) {
+      writeFileSync(manifestPath, JSON.stringify({ target: 'darwin-arm64', computerUse }))
+      run.mockClear()
+      expect(() => signMacApplication(application, releaseConfiguration(env, 'darwin'), { run })).toThrow(/CUA helper/)
+      expect(run).not.toHaveBeenCalled()
+    }
+  })
   it.skipIf(process.platform === 'win32').each(cuaProviderPackages)('signs native payloads with %s without mutating the content-addressed helper or Java resources', (provider) => {
     const root = mkdtempSync(join(tmpdir(), 'lumo signed app ')); roots.push(root)
     const application = join(realpathSync(root), 'Lumo.app'), runtime = join(application, 'Contents/Resources/runtime')

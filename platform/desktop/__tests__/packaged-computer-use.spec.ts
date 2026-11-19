@@ -60,9 +60,9 @@ try {
   assert.equal(initial.phase, 'disabled')
   assert.equal(enabled.phase, 'ready')
   assert.equal(stopped.phase, 'disabled')
-  assert.equal(disabled, 'COMPUTER_USE_DISABLED')
+  assert.deepEqual(disabled, { reason: 'COMPUTER_USE_DISABLED' })
   assert.equal(allowed, undefined)
-  assert.equal(unrelated, 'COMPUTER_USE_SESSION_NOT_AUTHORIZED')
+  assert.deepEqual(unrelated, { reason: 'COMPUTER_USE_SESSION_NOT_AUTHORIZED' })
   console.log(JSON.stringify({ entry: import.meta.resolve('@lumo/computer-use'),
     windowsEntry: import.meta.resolve('@lumo/computer-use/windows'),
     registryEntry: import.meta.resolve('@lumo/computer-use/windows-registry'),
@@ -79,5 +79,5 @@ try {
   expect(fileURLToPath(result.windowsEntry)).toBe(join(destination, 'lib/windows.js'))
   expect(fileURLToPath(result.registryEntry)).toBe(join(destination, 'lib/windows-registry.js'))
   expect(result).toMatchObject({ phases: ['disabled', 'ready', 'disabled'],
-    disabled: 'COMPUTER_USE_DISABLED', unrelated: 'COMPUTER_USE_SESSION_NOT_AUTHORIZED', owner: null })
+    disabled: { reason: 'COMPUTER_USE_DISABLED' }, unrelated: { reason: 'COMPUTER_USE_SESSION_NOT_AUTHORIZED' }, owner: null })
 })

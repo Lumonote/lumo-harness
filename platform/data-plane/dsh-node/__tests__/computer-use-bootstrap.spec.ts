@@ -12,10 +12,11 @@ const loader = join(root, 'platform/data-plane/dsh-node/node_modules/tsx/dist/lo
 const require = createRequire(join(root, 'deepseek-harness/vendor/include/package.json'))
 const yaml = require('js-yaml') as { load(text: string): Array<{ id?: string; insert?: Array<{ id?: string; name?: string; config?: Record<string, unknown> }> }> }
 
-function bootstrap(mode: 'local' | 'standalone') {
+function bootstrap(mode: 'local' | 'standalone', computerUse?: { available: boolean; reason?: string }) {
   const directory = mkdtempSync(join(tmpdir(), 'computer-use-bootstrap-'))
   const rendered = join(directory, 'rendered.yml')
   const cli = join(directory, 'fixture.mjs')
+  if (computerUse) writeFileSync(join(directory, 'runtime-manifest.json'), JSON.stringify({ computerUse }))
   writeFileSync(cli, "import {copyFileSync} from 'node:fs';const index=process.argv.indexOf('--patch');copyFileSync(process.argv[index+1],process.env.LUMO_FIXTURE_PATCH);")
   try {
     const result = spawnSync(process.execPath, ['--import', loader, entry], {
@@ -25,7 +26,8 @@ function bootstrap(mode: 'local' | 'standalone') {
         DSH_HOME: join(directory, 'dsh'), LUMO_RUNTIME_STATE_DIR: join(directory, 'runtime'),
         LUMO_SQLITE_PATH: join(directory, 'local.sqlite'),
         LUMO_DEPLOYMENT_MODE: mode, LUMO_DSH_PROFILE: 'web', LUMO_ROLE: 'agent',
-        LUMO_AUTO_INSTALL_PLUGINS: '0', LUMO_DSH_CLI: cli,
+        LUMO_AUTO_INSTALL_PLUGINS: '0', LUMO_DSH_CLI: cli, LUMO_DSH_ROOT: join(root, 'deepseek-harness'),
+        ...(computerUse ? { LUMO_RUNTIME_ROOT: directory } : {}),
         LUMO_PATCH_PATH: join(directory, 'patch.yml'), LUMO_FIXTURE_PATCH: rendered,
       },
       encoding: 'utf8', timeout: 15_000,
@@ -47,5 +49,12 @@ describe('desktop Computer Use composition', () => {
 
   it('does not expose a server host desktop through the standalone deployment', () => {
     expect(bootstrap('standalone').rows.some(row => row.id === 'lumo-computer-use')).toBe(false)
+  })
+
+  it('starts without Computer Use rows when its optional package was omitted', () => {
+    const local = bootstrap('local', { available: false, reason: 'packaging-failed' })
+    expect(local.rows.some(row => row.name?.startsWith('@lumo/computer-use'))).toBe(false)
+    expect(local.rows.some(row => row.name === '@lumo/dsh-platform-ui')).toBe(true)
+    expect(bootstrap('local', { available: true }).rows.some(row => row.id === 'lumo-computer-use')).toBe(true)
   })
 })

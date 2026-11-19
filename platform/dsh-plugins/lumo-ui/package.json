@@ -37,6 +37,7 @@
     "@deepseek-ai/dsh-client-ui-slots": "link:../../../deepseek-harness/packages/client/ui-slots",
     "@deepseek-ai/dsh-client-ui-theme": "link:../../../deepseek-harness/packages/client/ui-theme",
     "@deepseek-ai/dsh-host-webserver": "link:../../../deepseek-harness/packages/host/webserver",
+    "@deepseek-ai/dsh-host-authentication-token": "link:../../../deepseek-harness/packages/host/authentication-token",
     "@deepseek-ai/schemastery": "link:../../../deepseek-harness/vendor/schemastery",
     "react": "link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react"
   },

@@ -3,6 +3,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
 import { expect, it, vi } from 'vitest'
 import * as Connection from '../../../../deepseek-harness/packages/client/connection/src/index.ts'
+import * as Token from '../../../../deepseek-harness/packages/host/authentication-token/src/index.ts'
+import { BrowserAuth } from '../../../../deepseek-harness/packages/host/authentication-token/src/browser-auth.ts'
+import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { provideBrowserCredentials } from '../../../../deepseek-harness/packages/client/connection/tests/browser-credentials.ts'
 import { computerUseHandler, type ComputerUseSnapshot } from '../src/computer-use-api.ts'
 
@@ -21,10 +24,13 @@ function response() {
 it('accepts a real signed upstream browser cookie and rejects launch tokens, tampering, and API operator cookies', async () => {
   const ctx = new Context()
   provideBrowserCredentials(ctx)
-  ctx.provide('webServer', { protocol: 'http:', host: '127.0.0.1', port: 3080, register: () => () => {}, tapIndex: () => () => {} } as never)
+  const routes: WebRoute[] = []
+  ctx.provide('webServer', { protocol: 'http:', host: '127.0.0.1', port: 3080, register: (route: WebRoute) => { routes.push(route); return () => {} }, tapIndex: () => () => {} } as never)
   const fiber = ctx.plugin({ inject: [...Connection.inject], apply: Connection.apply })
   try {
     await fiber.await()
+    await ctx.plugin(Token, { cookieMaxAgeDays: 30 }).await()
+    const auth = await BrowserAuth.create(ctx[Context.root], ctx.credentials, 30)
     const connection = ctx.get('connection')!
     const snapshot: ComputerUseSnapshot = { enabled: false, phase: 'disabled', authorizedSessionId: null, ownerSessionId: null, startedAt: null, lastActivityAt: null, inFlight: 0, events: [] }
     const enable = vi.fn(() => ({ ...snapshot, phase: 'ready' as const, enabled: true, authorizedSessionId: 'session-1' }))
@@ -37,17 +43,17 @@ it('accepts a real signed upstream browser cookie and rejects launch tokens, tam
       expect(reply.result.status).toBe(status)
     }
     await check(req('/lumo/api/computer-use/enable', undefined, 'POST'), 401)
-    const launch = new URL(connection.authenticatedUrl(`http://${authority}`))
+    const launch = new URL(auth.authenticatedUrl(`http://${authority}`))
     await check(req(`/lumo/api/computer-use/enable${launch.search}`, undefined, 'POST'), 401)
     const exchange = response()
-    connection.authorizeIndex(req(`${launch.pathname}${launch.search}`), exchange.res)
+    await ctx.waterfall('webserver/request', req(`${launch.pathname}${launch.search}`), exchange.res, async () => {})
     const cookie = exchange.result.headers['set-cookie']?.split(';')[0]
     expect(cookie).toBeTruthy()
     await check(req('/lumo/api/computer-use/enable', `${cookie!}!`, 'POST'), 401)
     await check(req('/lumo/api/computer-use/enable', cookie, 'POST', 'https://attacker.test'), 403)
-    const apiLaunch = new URL(connection.authenticatedUrl(`http://${authority}/connect`))
+    const apiLaunch = new URL(auth.authenticatedUrl(`http://${authority}/connect`))
     const apiExchange = response()
-    connection.authorizeConnect(req(`${apiLaunch.pathname}${apiLaunch.search}`), apiExchange.res)
+    await routes.find(route => route.path === '/connect')!.handler(req(`${apiLaunch.pathname}${apiLaunch.search}`), apiExchange.res)
     const apiCookie = apiExchange.result.headers['set-cookie']?.split(';')[0]
     expect(apiCookie).toBeTruthy()
     expect(connection.admit(req('/lumo/api/computer-use', apiCookie))).toHaveProperty('peer')
@@ -55,5 +61,9 @@ it('accepts a real signed upstream browser cookie and rejects launch tokens, tam
     expect(enable).not.toHaveBeenCalled()
     await check(req('/lumo/api/computer-use/enable', cookie, 'POST'), 200)
     expect(enable).toHaveBeenCalledExactlyOnceWith('session-1')
+    // The in-process owner Peer is no longer proof of a browser login either.
+    connection.authentication.register({ authenticate: () => connection.browserPeer })
+    await check(req('/lumo/api/computer-use/enable', undefined, 'POST'), 403)
+    expect(enable).toHaveBeenCalledOnce()
   } finally { await fiber.dispose(); await ctx.fiber.dispose() }
 })

@@ -45,7 +45,7 @@ it.each(modes)('real Gateway + access + AgentLoop preserves history and refuses 
     ctx.provide('attachments', { imageLimits: { maxImageBytes: 1000, maxImagesPerMessage: 1, maxMessageImageBytes: 1000, maxImagePixels: 1000, maxImageDimension: 1000, mediaTypes: [] }, admitPromptContent: async content => content } as never)
     ctx.provide('fileUploads', { registerAgentResolver: () => () => {}, resolve: () => undefined, bindPrompt: () => ({ commit() {}, [Symbol.dispose]() {} }), retirePrompt() {} } as never)
     ctx.provide('workspaceRegistry', { archivedSessionIds: [], get: () => undefined } as never)
-    new QueryEngine(ctx)
+    await ctx.plugin(QueryEngine).await()
     class TestController extends Controller { initialize() { return this[Service.init]() } }
     await new TestController(ctx, { nativeOpen: false }).initialize()
     const schema = z.object({ sessionId: z.string(), requestId: z.string(), content: z.array(z.object({ type: z.literal('text'), text: z.string() })), mode: z.literal('queue') })

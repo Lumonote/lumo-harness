@@ -4,14 +4,14 @@ import { describe, expect, it, vi } from 'vitest'
 import { computerUseHandler, registerComputerUseRoutes, type ComputerUseSnapshot } from '../src/computer-use-api.ts'
 
 const initial: ComputerUseSnapshot = { enabled: false, phase: 'disabled', authorizedSessionId: null, ownerSessionId: null, startedAt: null, lastActivityAt: null, inFlight: 0, events: [] }
-function fixture(platform: NodeJS.Platform = 'darwin', release = '23.0.0') {
+function fixture(platform: NodeJS.Platform = 'darwin', release = '23.0.0', installed = true) {
   const browserPeer = {}
   const admit = vi.fn((): { peer: object } | { rejection: number } => ({ peer: browserPeer }))
   const service = { snapshot: vi.fn(() => initial), enable: vi.fn((sessionId: string) => ({ ...initial, enabled: true, authorizedSessionId: sessionId, phase: 'ready' as const })), stop: vi.fn(() => initial) }
   const cuaStatus = vi.fn()
   const services: Record<string, unknown> = { connection: { browserPeer, admit }, lumoComputerUse: service, webServer: { protocol: 'http:' }, computerUse: { providerName: 'dsh-cua' }, cuaAccess: { status: cuaStatus } }
   const ctx = { get: (name: string) => services[name] }
-  const handler = computerUseHandler(ctx, true, platform, release)
+  const handler = computerUseHandler(ctx, true, platform, release, installed)
   async function call(path = '', method = 'GET', value?: unknown, headers: Record<string, string | undefined> = {}) {
     const raw = typeof value === 'string' ? value : value === undefined ? '' : JSON.stringify(value)
     const req = Object.assign(Readable.from(raw ? [Buffer.from(raw)] : []), { method, url: `/lumo/api/computer-use${path}`, headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080', 'content-type': 'application/json', ...headers } }) as IncomingMessage
@@ -27,6 +27,13 @@ function fixture(platform: NodeJS.Platform = 'darwin', release = '23.0.0') {
 }
 
 describe('local computer controls', () => {
+  it('reports an omitted package as unavailable and refuses control even if a stale service is present', async () => {
+    const test = fixture('darwin', '23.0.0', false)
+    expect(await test.call()).toMatchObject({ status: 503, body: { error: 'computer_use_not_installed' } })
+    expect(await test.call('/enable', 'POST', { sessionId: 'session-1', controlRevision: 0 })).toMatchObject({ status: 503, body: { error: 'computer_use_not_installed' } })
+    expect(test.service.snapshot).not.toHaveBeenCalled()
+    expect(test.service.enable).not.toHaveBeenCalled()
+  })
   it('reads passive metadata and does not initialize native access', async () => {
     const test = fixture()
     expect(await test.call()).toMatchObject({ status: 200, headers: { 'cache-control': 'no-store' }, body: { ...initial, provider: 'dsh-cua', platform: 'darwin', nativeSupport: true } })

@@ -331,6 +331,9 @@ importers:
       '@deepseek-ai/dsh-client-ui-theme':
         specifier: link:../../../deepseek-harness/packages/client/ui-theme
         version: link:../../../deepseek-harness/packages/client/ui-theme
+      '@deepseek-ai/dsh-host-authentication-token':
+        specifier: link:../../../deepseek-harness/packages/host/authentication-token
+        version: link:../../../deepseek-harness/packages/host/authentication-token
       '@deepseek-ai/dsh-host-webserver':
         specifier: link:../../../deepseek-harness/packages/host/webserver
         version: link:../../../deepseek-harness/packages/host/webserver

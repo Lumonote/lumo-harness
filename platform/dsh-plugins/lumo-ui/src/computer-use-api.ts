@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { release as osRelease } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import { BrowserAuth } from '@deepseek-ai/dsh-host-authentication-token/src/browser-auth.ts'
 
 export interface ComputerUseSnapshot {
   enabled: boolean
@@ -22,6 +23,7 @@ interface ComputerUseService {
 }
 interface BrowserConnection {
   readonly browserPeer: object
+  readonly authentication?: object
   admit(request: IncomingMessage): { peer: object } | { rejection: number }
 }
 interface ServiceContext { get(name: string): unknown }
@@ -52,10 +54,11 @@ async function body(req: IncomingMessage): Promise<Record<string, unknown>> {
 }
 
 /** Separate, more-specific prefix so the general platform API cannot bypass these checks. */
-export function computerUseHandler(ctx: ServiceContext, local: boolean, platform = process.platform, systemRelease = osRelease()) {
+export function computerUseHandler(ctx: ServiceContext, local: boolean, platform = process.platform, systemRelease = osRelease(), installed = process.env['LUMO_PACKAGED_COMPUTER_USE'] !== '0') {
   // Compare after body transfer: a stop must invalidate an earlier enable even
   // when that enable's request body arrives after the stop has completed.
   let controlRevision = 0
+  let browserAuth: { credentials: object; ready: Promise<BrowserAuth> } | undefined
   const macNativeSupport = platform === 'darwin' && Number.parseInt(systemRelease.split('.')[0] ?? '', 10) >= 23
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if (!local) { json(res, 404, { error: 'computer_use_local_only' }); return }
@@ -63,7 +66,25 @@ export function computerUseHandler(ctx: ServiceContext, local: boolean, platform
     if (connection === undefined) { json(res, 503, { error: 'browser_auth_unavailable' }); return }
     const admission = connection.admit(req)
     if ('rejection' in admission) { json(res, admission.rejection, { error: 'browser_auth_required' }); return }
-    if (admission.peer !== connection.browserPeer) { json(res, 403, { error: 'browser_auth_required' }); return }
+    if (connection.authentication === undefined) {
+      if (admission.peer !== connection.browserPeer) { json(res, 403, { error: 'browser_auth_required' }); return }
+    } else {
+      // Token authentication now owns a separate browser Peer. Both browser
+      // and API cookies carry an owner principal, so Peer kind is insufficient.
+      // Reuse the provider's signed browser-cookie verifier after admission has
+      // already enforced Host/Origin, expiry and configured authentication.
+      const credentials = ctx.get('credentials') as Parameters<typeof BrowserAuth.create>[1] | undefined
+      if (credentials === undefined) { json(res, 503, { error: 'browser_auth_unavailable' }); return }
+      try {
+        if (browserAuth?.credentials !== credentials) browserAuth = { credentials, ready: BrowserAuth.create(ctx, credentials, 30) }
+        const auth = await browserAuth.ready
+        const secure = (ctx.get('webServer') as { protocol?: string } | undefined)?.protocol === 'https:'
+        if (!auth.isAuthenticated(req, secure)) { json(res, 403, { error: 'browser_auth_required' }); return }
+      } catch {
+        browserAuth = undefined
+        json(res, 503, { error: 'browser_auth_unavailable' }); return
+      }
+    }
 
     const pathname = new URL(req.url ?? '/', 'http://local.invalid').pathname
     const action = pathname === PREFIX ? 'status' : pathname === `${PREFIX}/enable` ? 'enable' : pathname === `${PREFIX}/stop` ? 'stop' : undefined
@@ -73,6 +94,7 @@ export function computerUseHandler(ctx: ServiceContext, local: boolean, platform
       json(res, 405, { error: 'method_not_allowed' }); return
     }
     const service = ctx.get('lumoComputerUse') as ComputerUseService | undefined
+    if (!installed) { json(res, 503, { error: 'computer_use_not_installed' }); return }
     if (service === undefined) { json(res, 503, { error: 'computer_use_unavailable' }); return }
     let sessionId: string | undefined
     if (action !== 'status') {

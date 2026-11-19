@@ -37,8 +37,11 @@ import { validateSessionConnectors } from '../../../dsh-plugins/user-auth/src/se
 import { validateSessionKnowledge } from '../../../dsh-plugins/user-auth/src/session-knowledge.ts'
 import { SessionModelPolicy, type SessionModelConfiguration } from '../../../dsh-plugins/user-auth/src/session-model-policy.ts'
 import { managedContentSettings } from './managed-content-config.ts'
+import { packagedComputerUse } from './runtime-capabilities.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
+const computerUseAvailable = packagedComputerUse()?.available !== false
+process.env['LUMO_PACKAGED_COMPUTER_USE'] = computerUseAvailable ? '1' : '0'
 const packagedRuntimeRoot = process.env['LUMO_RUNTIME_ROOT']
   ? resolve(process.env['LUMO_RUNTIME_ROOT']!)
   : undefined
@@ -451,7 +454,7 @@ ${webFetchFakeIpPatchRow}` : ''}${localMode ? '' : `- id: attachment-local
   disabled: true
 `}
 - insert:
-${localMode ? localStorageRows(dshProfile, sqlitePath) + localVaultRows(sqlitePath, platformRealm) + webFetchFakeIpRows + agentTeamsRows + `    - id: lumo-computer-use
+${localMode ? localStorageRows(dshProfile, sqlitePath) + localVaultRows(sqlitePath, platformRealm) + webFetchFakeIpRows + agentTeamsRows + (computerUseAvailable ? `    - id: lumo-computer-use
       name: ${JSON.stringify(computerUseEntry)}
       inject: [tools]
       config:
@@ -475,7 +478,7 @@ ${process.platform === 'win32' && dshProfile === 'web' ? `    - id: lumo-windows
       inject: [computerUse, tools, systemPrompt, lumoComputerUse]
       disabled: ${process.env['LUMO_WINDOWS_CUA'] !== '1'}
 ` : ''}
-` : `    - id: lumo-object-store
+` : '') : `    - id: lumo-object-store
       name: ${JSON.stringify(objectStoreEntry)}
       inject: []
       config:
