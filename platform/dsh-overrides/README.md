@@ -14,6 +14,11 @@
 | `apply.mjs` | 给副本加两个首页 composer 扩展位。**只允许作用于隔离副本，永不作用于上游工作区** | `prepare-runtime.mjs` |
 | `brand-web.mjs` | 在 `apps/web/dist/` 构建产物上覆盖 Lumo 品牌（图标、标题、PWA manifest） | 同上 |
 
+隔离副本会为 workspace 包明确导出的 `./src/*` 补齐 TypeScript 路径映射，并保留上游已有
+映射。这样源码子路径与公开入口都解析到同一份副本，避免共享 `node_modules` 软链把
+部分源码带回原树，导致 `ISessions` 重复声明或 `SessionRetainFacetMap` 扩展失效。
+此调整只写副本的 `tsconfig.base.json`；准备脚本与映射逻辑共同参与缓存指纹。
+
 构建**前后**各查一次洁净度：暂存副本的 `node_modules` 是软链回源树的，pnpm 有可能顺着
 workspace 链接把编译产物写回 `deepseek-harness/packages`——仓库里那批 345 个
 `.js`/`.d.ts`/`.map` 正是这么来的。只查前不查后，等于把这条路留着。

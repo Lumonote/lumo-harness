@@ -18,6 +18,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { applyLumoDshOverrides, overriddenPackageDirectories } from './apply.mjs'
 import { assertPristineProductSource, git } from './assert-pristine.mjs'
+import { isolateWorkspaceSourcePaths } from './workspace-source-paths.mjs'
 
 const scriptRoot = dirname(fileURLToPath(import.meta.url))
 
@@ -109,7 +110,9 @@ function projectedNativeBinDirectories(sourceRoot) {
 function fingerprint(root) {
   const commit = git(root, ['rev-parse', 'HEAD']).trim()
   const hash = createHash('sha256')
-  hash.update(readFileSync(resolve(scriptRoot, 'apply.mjs')))
+  for (const script of ['apply.mjs', 'prepare-runtime.mjs', 'workspace-source-paths.mjs']) {
+    hash.update(readFileSync(resolve(scriptRoot, script)))
+  }
   for (const libDirectory of projectedLibDirectories(root)) {
     hashTree(libDirectory, libDirectory, hash)
   }
@@ -402,6 +405,7 @@ export function prepareRuntime(sourceRoot, targetRoot) {
     // Keep the content cache, but refresh package-level node_modules links so
     // TypeScript can resolve dependencies such as packages/api/gateway -> ws.
     linkWorkspaceModules(sourceRoot, targetRoot)
+    isolateWorkspaceSourcePaths(sourceRoot, targetRoot)
     return targetRoot
   }
 
@@ -411,6 +415,7 @@ export function prepareRuntime(sourceRoot, targetRoot) {
   linkWorkspaceModules(sourceRoot, targetRoot)
   copyBuildOutputs(sourceRoot, targetRoot)
   applyLumoDshOverrides(targetRoot)
+  isolateWorkspaceSourcePaths(sourceRoot, targetRoot)
   writeFileSync(marker, `${expected}\n`)
   return targetRoot
 }
