@@ -1,5 +1,19 @@
 # Implementation status (2026-09-15)
 
+## 2026-11-20 计量 SDK 配置同步竞态
+
+正式发行运行 `44543416666` 的集群验收在 usage-ledger 的三个 RocketMQ 用例中被 `-race`
+阻断：SDK v5.1.4 的 telemetry 接收协程原地修改 producer retry policy，发送协程同时对同一
+protobuf 对象编码。独立 PostgreSQL 16 + RocketMQ 5.3.1 环境复现了相同调用栈。
+
+usage-ledger 依赖固定到上游 PR #1377 的提交 `2513a7b1660b08a47acfac617eb9f2d74405d66b`
+（Go 伪版本 `v5.1.5-0.20260916060455-2513a7b1660b`），由 SDK 在锁内替换配置快照，
+并克隆发送配置。该修复尚无正式 Go SDK 版本标签，因此显式固定提交及模块校验和。
+
+同一隔离环境下 `go test -race -json ./... -count=1` 的 7 个包、42 个用例通过，
+0 失败、0 跳过；`go vet`、模块校验和校验及 usage-ledger 二进制构建通过。
+发布工作流的竞态检测和完整集群门禁保持启用；整套远端发行结果仍以新的 Actions 运行为准。
+
 ## 2026-11-19 终端实时订阅、重连与在线续期（待集中测试）
 
 终端网关按每页 256 条读取 PostgreSQL 会话日志。WebSocket 回放和实时订阅共用订阅建立时已落盘的最大序号，

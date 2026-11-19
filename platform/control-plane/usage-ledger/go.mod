@@ -11,8 +11,10 @@ require github.com/lumo-harness/platform/heartbeat v0.0.0
 replace github.com/lumo-harness/platform/heartbeat => ../heartbeat
 
 require (
-	github.com/apache/rocketmq-clients/golang/v5 v5.1.4
+	// Pin upstream #1377: v5.1.4 mutates producer retry settings during telemetry sends.
+	github.com/apache/rocketmq-clients/golang/v5 v5.1.5-0.20260916060455-2513a7b1660b
 	github.com/jackc/pgx/v5 v5.7.2
+	google.golang.org/grpc v1.72.0
 )
 
 require (
@@ -49,6 +51,5 @@ require (
 	google.golang.org/api v0.230.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250422160041-2d3770c4ea7f // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250422160041-2d3770c4ea7f // indirect
-	google.golang.org/grpc v1.72.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 )
