@@ -3,6 +3,47 @@
 本文件记录本项目所有值得注意的变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.3] - 2026-11-19
+
+改进调度器并发放置与故障接管、终端事件续传，并修复新版 DSH 兼容和桌面打包问题。
+电脑操作作为可选插件处理：原生组件打包失败时跳过该插件，桌面主程序仍可完成构建。
+
+### 新功能与改进
+
+- **scheduler**: 不同节点的任务支持并发放置，同一任务保留去重、节点容量与任期围栏；
+  合并任务和 attempt 的集群信息写入，减少放置路径的数据库往返。
+- **scheduler**: follower 根据广播地址转发到有效的全局 leader；运行期事务按租约期限设置
+  数据库超时，使主进程冻结后其他副本仍可接管，并改进跨集群重新派发。
+- **scheduler**: deadline 排序限定在同一队列内，抢占释放的槽位为发起者预留；
+  节点丢失判定改用目录缺席时间，新增默认 10 分钟、需两次直连健康探测失败的快速收割通道。
+- **terminal-gateway**: 会话事件按页回放，支持用十进制字符串游标精确保存和恢复 64 位序号，
+  可续传超过 50,000 条的历史；回放与实时订阅共享边界，避免交接丢事件。
+- **terminal-gateway**: 心跳和业务帧可续期在线状态，慢消费者或投递失败时关闭连接以便重连；
+  收到 `SIGTERM` 后停止接受新的 WebSocket 连接，并在统一期限内排空请求和订阅。
+
+### 修复
+
+- **desktop**: Computer Use 原生组件缺失或编译失败时，清理该插件及其配套包并记录不可用原因，
+  运行时跳过加载、移除残留配置，界面提示「此版本未安装电脑操作插件，其他功能可正常使用」。
+  有 helper 的签名与完整性校验继续生效，核心依赖缺失仍会阻止打包。
+- **build**: 对齐新版 DSH 启动、电脑操作 provider 命名、Windows 品牌类型与子代理错误接口；
+  隔离打包快照中的工作区源码引用，并修复桌面客户端打包入口。
+- **ui**: 适配上游拆分后的浏览器认证模块，恢复有效签名浏览器 Cookie 的校验，
+  补齐打包后认证代码的直接运行时依赖。
+- **deploy**: Compact 与 Full 执行节点正确继承身份断言密钥，修正调度器广播地址、探针与监控配置；
+  Compact node 和 agent 共享 10 分钟冷启动期限，并复用构建阶段的 Corepack 缓存。
+- **ci**: 稳定项目打开与终端实时事件交接用例，适配新版查询、配置及工具接口；
+  调度器负载和多进程压力测试通过 `scheduler_stress` 构建标签单独启用。
+
+### 升级须知
+
+- 数据库按部署流程应用 `047_scheduler_leader_forwarding.sql`，补齐 leader 广播地址、
+  节点目击时间、抢占预留字段及查询索引。
+- 调度器新旧版本混跑存在任期交接窗口。要避免该窗口，先将调度器缩至 0，再启动所有新版副本；
+  此期间新任务放置不可用，已放置任务继续运行。详见
+  [`platform/deploy/README.md`](platform/deploy/README.md)「调度器放置并发与升级」。
+- 若发行包跳过了电脑操作插件，该包不提供电脑操作能力；其他功能可正常使用。
+
 ## [1.2.2] - 2026-11-10
 
 桌面发行同时支持有证书和无证书打包，并修复 v1.2.1 发布验收中发现的测试竞态与诊断缺失。
@@ -483,6 +524,7 @@ README 补充 AI 定制服务与联系方式。
 - **lumo-ui**: 放大 SkillHub 市场字号与控件尺寸 (`c6d963d0`)
 - Initial commit (`41dbf440`)
 
+[1.2.3]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.2.3
 [1.2.2]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.2.2
 [1.2.1]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.2.1
 [1.1.1]: https://github.com/Lumonote/lumo-harness/releases/tag/v1.1.1
