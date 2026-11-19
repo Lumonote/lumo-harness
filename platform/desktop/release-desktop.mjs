@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { verifyCuaHelper, cuaProviderPackage } from './cua-helper.mjs'
+import { verifyCuaHelper, cuaProviderPackages } from './cua-helper.mjs'
 import { measureRuntime, enforceRuntimeBudget } from './runtime-size.mjs'
 
 const desktop = dirname(fileURLToPath(import.meta.url))
@@ -133,7 +133,9 @@ export function signMacApplication(application, config, { run = spawnSync } = {}
   const manifestPath = join(runtime, 'runtime-manifest.json')
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   if (!['darwin-arm64', 'darwin-x64'].includes(manifest.target) || manifest.computerUse?.signing !== 'certificate') throw Error('正式包必须包含由证书签名的目标 CUA helper')
-  const helperRoot = join(runtime, 'node_modules', cuaProviderPackage)
+  const provider = manifest.computerUse.provider
+  if (!cuaProviderPackages.includes(provider)) throw Error('正式包包含未知的 macOS CUA provider')
+  const helperRoot = join(runtime, 'node_modules', provider)
   const helper = verifyCuaHelper({ packageRoot: helperRoot, targetArch: manifest.target.slice(7), run })
   const signature = checked(run, '/usr/bin/codesign', ['-d', '--verbose=4', helper.application])
   const signatureText = signature.stderr ?? ''

@@ -42,7 +42,7 @@
 发送输入、申请系统授权或打开权限设置。
 
 ```sh
-node tools/macos-cua-acceptance.mjs --catalog /absolute/runtime/node_modules/@deepseek-ai/dsh-experimental-cua-macos /tmp/lumo-macos-catalog
+node tools/macos-cua-acceptance.mjs --catalog /absolute/runtime/node_modules/@deepseek-ai/dsh-cua-macos /tmp/lumo-macos-catalog
 ```
 
 输出目录必须尚不存在。命令保存真实 `catalog.json` 与 `acceptance.json`，后者包括 helper 摘要、
@@ -55,7 +55,7 @@ node tools/macos-cua-acceptance.mjs --catalog /absolute/runtime/node_modules/@de
 随后校验独立状态、最新 AX 树和前后真实 PNG。
 
 ```sh
-LUMO_MACOS_CUA_E2E=1 node tools/macos-cua-acceptance.mjs --desktop /absolute/runtime/node_modules/@deepseek-ai/dsh-experimental-cua-macos /tmp/lumo-macos-desktop
+LUMO_MACOS_CUA_E2E=1 node tools/macos-cua-acceptance.mjs --desktop /absolute/runtime/node_modules/@deepseek-ai/dsh-cua-macos /tmp/lumo-macos-desktop
 ```
 
 权限不足或桌面锁定返回 `status: "blocked"`、退出码 2，不启动测试窗口、不发送输入、不弹授权框。

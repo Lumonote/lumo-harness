@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cuaBundleDigest, cuaProviderPackage, stageCuaHelper, verifyCuaHelper } from '../cua-helper.mjs'
+import { cuaBundleDigest, cuaProviderPackage, cuaProviderPackages, stageCuaHelper, verifyCuaHelper } from '../cua-helper.mjs'
 import { copyRuntimePackage } from '../runtime-dependencies.mjs'
 
 const roots: string[] = []
@@ -30,12 +30,12 @@ function publish(packageRoot: string, arch: string) {
   return { application, directory, digest }
 }
 
-function fixture(arch = 'arm64') {
+function fixture(arch = 'arm64', provider = cuaProviderPackage) {
   const root = mkdtempSync(join(tmpdir(), 'lumo CUA (&) '))
   roots.push(root)
-  const packageRoot = join(root, 'runtime/node_modules', cuaProviderPackage)
+  const packageRoot = join(root, 'runtime/node_modules', provider)
   const scratchPath = join(root, 'Swift 缓存')
-  write(packageRoot, 'package.json', JSON.stringify({ name: cuaProviderPackage, type: 'module' }))
+  write(packageRoot, 'package.json', JSON.stringify({ name: provider, type: 'module' }))
   write(packageRoot, 'native/build_app.py', '# official builder fixture\n')
   const run = vi.fn((command: string, args: string[], _options: unknown) => {
     if (command === '/usr/bin/xcrun') publish(packageRoot, arch)
@@ -59,6 +59,15 @@ describe('desktop Computer Use helper', () => {
 
 // Windows cannot represent macOS executable bits or validate a signed .app.
 describe.skipIf(process.platform === 'win32')('macOS Computer Use helper payload', () => {
+  it.each(cuaProviderPackages)('records the installed provider identity for %s', (provider) => {
+    const f = fixture('arm64', provider)
+    expect(f.stage()).toMatchObject({ available: true, provider })
+    write(f.packageRoot, 'package.json', JSON.stringify({ name: '@unrelated/provider' }))
+    f.run.mockClear()
+    expect(f.stage).toThrow(/不是受支持/u)
+    expect(f.run).not.toHaveBeenCalled()
+  })
+
   it.each(['arm64', 'x64'])('stages an official %s release helper with structured arguments', (arch) => {
     const f = fixture(arch)
     write(f.packageRoot, 'native/.build/old-cache', 'old')

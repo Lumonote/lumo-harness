@@ -20,7 +20,7 @@ import type { RemoteConfig } from './provider.ts'
 import { PgSubagentReceipts } from '../../../shared/subagent-receipts.ts'
 import { PgPlacementRecovery } from './placement-recovery.ts'
 import type { SubagentRun } from '@deepseek-ai/dsh-subagent'
-import { SubagentError } from '@deepseek-ai/dsh-subagent'
+import { RemoteSubagentError } from './error.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 
 declare module '@deepseek-ai/cordis' {
@@ -108,7 +108,7 @@ export async function registerSubagentRemote(ctx: Context, config: RemoteConfig)
   ctx.subagents.registerProvider(assembly.provider)
   ctx.provide('remoteSubagentRuns', {
     recover: (childId, parent) => {
-      if (ctx.agents.get(parent.session.header.id) !== parent) throw new SubagentError('Recovery requires this runtime’s live parent Agent', 'REMOTE_PARENT_NOT_OWNED')
+      if (ctx.agents.get(parent.session.header.id) !== parent) throw new RemoteSubagentError('Recovery requires this runtime’s live parent Agent', 'REMOTE_PARENT_NOT_OWNED')
       return assembly.provider.recover(childId, parent)
     },
   })

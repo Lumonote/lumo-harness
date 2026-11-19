@@ -1,10 +1,33 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { HarnessError } from '@deepseek-ai/dsh-llm'
 
-import { postPlacement, postTerminalState } from '../src/client.ts'
+import { cancelPlacement, getPlacement, postPlacement, postTerminalState } from '../src/client.ts'
+import { RemoteSubagentError } from '../src/error.ts'
 
 afterEach(() => vi.unstubAllGlobals())
 
 describe('subagent-remote scheduler client', () => {
+  it.each(['placement', 'terminal'] as const)('preserves Scheduler wire errors through %s', async operation => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(
+      { error: 'PLACEMENT_ATTEMPT_STALE', message: 'use the original execution identity' }, { status: 409 },
+    )))
+    const opts = { base: 'http://scheduler', realm: 'realm-a', childId: 'child-1' }
+    const result = operation === 'placement' ? postPlacement(opts)
+      : postTerminalState({ ...opts, state: 'FAILED', attempt: 2, nodeId: 'node-1' })
+    await expect(result).rejects.toBeInstanceOf(RemoteSubagentError)
+    await expect(result).rejects.toBeInstanceOf(HarnessError)
+    await expect(result).rejects.toMatchObject({ code: 'PLACEMENT_ATTEMPT_STALE' })
+    await expect(result).rejects.toThrow('use the original execution identity')
+  })
+
+  it('retains distinct transport operation codes without using the upstream service vocabulary', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 503 })))
+    const opts = { base: 'http://scheduler', realm: 'realm-a', childId: 'child-1' }
+    await expect(getPlacement(opts)).rejects.toMatchObject({ name: 'RemoteSubagentError', code: 'PLACEMENT_QUERY_FAILED' })
+    await expect(cancelPlacement(opts)).rejects.toMatchObject({ name: 'RemoteSubagentError', code: 'PLACEMENT_CANCEL_FAILED' })
+    await expect(postTerminalState({ ...opts, state: 'FAILED' })).rejects.toMatchObject({ name: 'RemoteSubagentError', code: 'RESULT_IDENTITY_MISSING' })
+  })
+
   it('sends the control-plane bearer token for placement and terminal state', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(new Response(JSON.stringify({ node_id: 'node-1', attempt: 2 }), { status: 201 }))

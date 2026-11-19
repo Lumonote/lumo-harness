@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import SubagentRuntime, { SubagentError, SUBAGENT_DESCRIPTOR_VERSION } from '@deepseek-ai/dsh-subagent'
+import SubagentRuntime, { SUBAGENT_DESCRIPTOR_VERSION } from '@deepseek-ai/dsh-subagent'
 import { provideWorkingDirectoryFixture } from '@deepseek-ai/dsh-agent-loop-testkit'
 import type { ResolvedSubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import PtcWorkflowEngine from '../../../../deepseek-harness/packages/workflow/workflow-ptc/src/index.ts'
@@ -17,6 +17,7 @@ import type { JobControlSeam } from '../../../shared/seam-contracts/job-virtuali
 import { registerSubagentRemote } from '../src/index.ts'
 import { assembleRemote } from '../src/provider.ts'
 import type { RemoteSubagentProvider } from '../src/provider.ts'
+import { RemoteSubagentError } from '../src/error.ts'
 
 /**
  * 三 mock server 全真 HTTP(不 mock fetch):
@@ -327,6 +328,7 @@ describe('subagent-remote —— 父侧跨节点 provider', () => {
     const run = await h.provider.start(startRequest())
     startPublished = true
     expect(callbackStatus).toBe(200)
+    await expect(run.result).rejects.toBeInstanceOf(RemoteSubagentError)
     await expect(run.result).rejects.toMatchObject({ code: 'HOST_PROCESS_LOST' })
     expect(h.schedCalls.results[0]?.body).toEqual({ state: 'FAILED', attempt: 1, node_id: 'N1' })
   })

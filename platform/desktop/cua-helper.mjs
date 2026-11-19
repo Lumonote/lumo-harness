@@ -3,7 +3,9 @@ import { createHash } from 'node:crypto'
 import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
-export const cuaProviderPackage = '@deepseek-ai/dsh-experimental-cua-macos'
+export const cuaProviderPackage = '@deepseek-ai/dsh-cua-macos'
+// Upstream promoted the provider without moving its sources or native builder.
+export const cuaProviderPackages = Object.freeze([cuaProviderPackage, '@deepseek-ai/dsh-experimental-cua-macos'])
 const applicationName = 'DSH Computer Use.app'
 const digestPattern = /^[a-f0-9]{64}$/u
 const requiredFiles = [
@@ -105,8 +107,9 @@ export function stageCuaHelper({
   if (hostPlatform !== 'darwin') throw fail('macOS helper 必须在 macOS 构建机上编译')
   if (typeof packageRoot !== 'string') throw fail(`runtime 缺少 ${cuaProviderPackage}`)
   regularFile(join(packageRoot, 'package.json'))
-  if (JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')).name !== cuaProviderPackage) {
-    throw fail(`不是 ${cuaProviderPackage} 包：${packageRoot}`)
+  const provider = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')).name
+  if (!cuaProviderPackages.includes(provider)) {
+    throw fail(`不是受支持的 macOS CUA provider 包：${packageRoot}`)
   }
   const nativeRoot = join(packageRoot, 'native')
   const builder = join(nativeRoot, 'build_app.py')
@@ -135,7 +138,7 @@ export function stageCuaHelper({
   // Receipts and manifest paths remain valid when the enclosing .app moves.
   return {
     available: true,
-    provider: cuaProviderPackage,
+    provider,
     target: `darwin-${targetArch}`,
     variant: 'release',
     signing: signingIdentity === '-' ? 'ad-hoc' : 'certificate',

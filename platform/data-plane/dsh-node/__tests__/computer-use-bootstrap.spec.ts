@@ -40,7 +40,7 @@ describe('desktop Computer Use composition', () => {
   it('mounts local coordination while preserving the official opt-in provider and preset', () => {
     const local = bootstrap('local')
     expect(local.rows.find(row => row.id === 'lumo-computer-use')).toMatchObject({ name: '@lumo/computer-use', config: { idleLeaseMs: 120000 } })
-    expect(local.rows.some(row => row.name === '@deepseek-ai/dsh-experimental-cua-macos' || row.name === '@deepseek-ai/dsh-cua-bundle')).toBe(false)
+    expect(local.rows.some(row => ['@deepseek-ai/dsh-cua-macos', '@deepseek-ai/dsh-experimental-cua-macos', '@deepseek-ai/dsh-cua-bundle'].includes(row.name))).toBe(false)
     expect(local.text).not.toContain('allowedApps:')
     expect(local.text).not.toContain('selectedDefault: ptc')
   })

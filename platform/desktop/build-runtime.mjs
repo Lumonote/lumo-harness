@@ -22,13 +22,14 @@ import { overriddenPackageDirectories } from '../dsh-overrides/apply.mjs'
 import { generateTypertArtifacts, hasTypertRemoteProjection } from '../dsh-overrides/prepare-runtime.mjs'
 import { resolveWorkspaceNodeTool } from './node-tools.mjs'
 import { dshClientTypeConfigs, hasUsableDshClientTypes } from './dsh-client-types.mjs'
+import { dshClientBundleArgs } from './dsh-client-bundle.mjs'
 import { prepareSkillHubArchive, stageSkillHub } from './skillhub-tooling.mjs'
 import { acquireBuildLock } from './build-lock.mjs'
 import { prepareSourcePlugins } from '../tools/prepare-source-plugins.mjs'
 import { assertRuntimePackageTargets, assertWindowsRuntimePaths, copyRuntimePackage, isOptionalRuntimeDependency, planRuntimePackages, resolveInstalledPackage, shouldStageRuntimeDependency } from './runtime-dependencies.mjs'
 import { compilePackagedTypeScriptPlugin, packagedTypeScriptPluginDirectories } from './packaged-typescript.mjs'
 import { stageDshNode } from './stage-dsh-node.mjs'
-import { cuaProviderPackage, stageCuaHelper, verifyCuaHelper } from './cua-helper.mjs'
+import { cuaProviderPackages, stageCuaHelper, verifyCuaHelper } from './cua-helper.mjs'
 import { stageWindowsCua, verifyWindowsCua } from './windows-cua.mjs'
 import { copyPortablePythonTree } from './portable-python.mjs'
 import { writeRuntimeSizeReport } from './runtime-size.mjs'
@@ -528,13 +529,13 @@ const runtimePackages = planRuntimePackages(modulesRoot, packageSources)
 assertRuntimePackageTargets(runtimePackages, { platform: targetPlatform, arch: targetArch })
 for (const { root, destination, manifest } of runtimePackages) {
   copyRuntimePackage(root, destination, {
-    exclude: manifest.name === cuaProviderPackage ? [join('native', '.build'), join('native', 'bin')]
+    exclude: cuaProviderPackages.includes(manifest.name) ? [join('native', '.build'), join('native', 'bin')]
       : manifest.name === '@lumo/computer-use' ? [join('native', 'target'), join('native', 'bin')] : [],
   })
 }
 assertOverridesCameFromSnapshot()
 compilePackagedTypeScriptPlugins()
-const cuaPackageRoot = runtimePackages.find(({ manifest }) => manifest.name === cuaProviderPackage)?.destination
+const cuaPackageRoot = runtimePackages.find(({ manifest }) => cuaProviderPackages.includes(manifest.name))?.destination
 const windowsCuaPackageRoot = runtimePackages.find(({ manifest }) => manifest.name === '@lumo/computer-use')?.destination
 const computerUse = targetPlatform === 'win32' ? stageWindowsCua({ packageRoot: windowsCuaPackageRoot, targetArch, modulesRoot }) : stageCuaHelper({
   packageRoot: cuaPackageRoot,
@@ -1148,7 +1149,7 @@ function buildDshHostPackages() {
 // 修复后的 tsdown.config.ts 下可完整跑通（UNRESOLVED_ENTRY 幻影发生在补丁落地前）。
 function rebuildDshClientArtifacts() {
   console.log('重建 DSH client 面产物（整 workspace：clientBundle 包 node 半 + 浏览器 bundle）...')
-  runWorkspaceBinary('.', 'tsdown', ['--env.DSH_BUILD_FACE', 'client'], 'DSH client 面产物重建失败')
+  runWorkspaceBinary('.', 'tsdown', dshClientBundleArgs(dshRoot), 'DSH client 面产物重建失败')
   mirrorSnapshotLibsBackToSource()
 }
 
@@ -1190,7 +1191,7 @@ function buildDshClientPackages() {
 
   for (const config of clientConfigs) {
     const packageDirectory = dirname(config)
-    runWorkspaceBinary(packageDirectory, 'tsdown', ['--env.DSH_BUILD_FACE', 'client'], `${packageDirectory} 客户端包构建失败`)
+    runWorkspaceBinary(packageDirectory, 'tsdown', dshClientBundleArgs(dshRoot), `${packageDirectory} 客户端包构建失败`)
   }
 }
 

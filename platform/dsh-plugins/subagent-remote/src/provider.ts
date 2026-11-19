@@ -19,7 +19,6 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   NO_START_CAPABILITIES,
-  SubagentError,
   SUBAGENT_DESCRIPTOR_VERSION,
   captureDelegatedPolicyOverrides,
   delegationDepthOf,
@@ -49,6 +48,7 @@ import type { JobControlSeam } from '../../../shared/seam-contracts/job-virtuali
 import type { CallbackInbox } from '../../../shared/subagent-receipts.ts'
 import type { PlacementRecovery } from './placement-recovery.ts'
 import type { PlacementResult } from './client.ts'
+import { RemoteSubagentError } from './error.ts'
 
 export interface RemoteConfig {
   readonly connectionString?: string
@@ -174,11 +174,11 @@ export class RemoteSubagentProvider implements SubagentProvider {
 		const nodeId = placement.nodeId
 	  const nodeUrl = await this.resolveNodeUrl(nodeId)
       if (nodeUrl === undefined) {
-	        throw new SubagentError(`未找到节点 ${nodeId} 的登记地址`, 'NODE_URL_UNKNOWN')
+	        throw new RemoteSubagentError(`未找到节点 ${nodeId} 的登记地址`, 'NODE_URL_UNKNOWN')
       }
       const token = this.hostTokens[nodeId] ?? this.defaultHostToken
       if (token === undefined || token === '') {
-        throw new SubagentError(`节点 ${nodeId} 未配置承载令牌`, 'HOST_TOKEN_UNKNOWN')
+        throw new RemoteSubagentError(`节点 ${nodeId} 未配置承载令牌`, 'HOST_TOKEN_UNKNOWN')
       }
       await this.receipts?.register(this.realm, childId, {
         secretHash: createHash('sha256').update(secret).digest('hex'), attempt: placement.attempt, nodeId: placement.nodeId,
@@ -199,7 +199,7 @@ export class RemoteSubagentProvider implements SubagentProvider {
             correlationId: randomUUID(),
           })
           if (!decision.allowed) {
-            throw new SubagentError(`远端子代理取消被控制通道拒绝: ${decision.reason}`, 'CONTROL_DENIED')
+            throw new RemoteSubagentError(`远端子代理取消被控制通道拒绝: ${decision.reason}`, 'CONTROL_DENIED')
           }
         }
       return remoteRunHandle(childId, result, stop)
@@ -221,9 +221,9 @@ export class RemoteSubagentProvider implements SubagentProvider {
     const receipt = await this.receipts?.get(this.realm, childId)
     if (!receipt?.attempt || !receipt.nodeId || !this.config.ownerUserId || receipt.ownerUserId !== this.config.ownerUserId
       || !receipt.parentSessionId || receipt.parentSessionId !== String(parent.session.header.id)) {
-      throw new SubagentError('No recoverable child belongs to this parent identity', 'REMOTE_RUN_NOT_RECOVERABLE')
+      throw new RemoteSubagentError('No recoverable child belongs to this parent identity', 'REMOTE_RUN_NOT_RECOVERABLE')
     }
-    if (this.pending.has(childId)) throw new SubagentError('This child already has an attached result consumer', 'REMOTE_RUN_ALREADY_ATTACHED')
+    if (this.pending.has(childId)) throw new RemoteSubagentError('This child already has an attached result consumer', 'REMOTE_RUN_ALREADY_ATTACHED')
     let resolve!: (result: SubagentResult) => void
     let reject!: (error: unknown) => void
     const result = new Promise<SubagentResult>((yes, no) => { resolve = yes; reject = no })
@@ -257,7 +257,7 @@ export class RemoteSubagentProvider implements SubagentProvider {
 	    }, nodeId)
 	    return endpoint?.baseUrl
 	  } catch (error: unknown) {
-	    throw new SubagentError(
+	    throw new RemoteSubagentError(
 	      `Nacos 节点查询失败(${nodeId}): ${error instanceof Error ? error.message : String(error)}`,
 	      'NODE_DISCOVERY_FAILED',
 	    )
@@ -284,7 +284,7 @@ function describeParent(parent: Agent): ChildParentDescriptor {
 
 /**
  * 一枚回执的终态接驳:ok:true = child 结局(resolve,契约闭集内);
- * ok:false = 基础设施故障(reject,code/message 透传为 SubagentError)。
+ * ok:false = 基础设施故障(reject,code/message 透传为 RemoteSubagentError)。
  */
 function settleOf(
   childId: string,
@@ -304,7 +304,7 @@ function settleOf(
       })
       return
     }
-    reject(new SubagentError(body.message ?? `子代理基础设施故障(runId=${childId})`, body.code ?? 'internal'))
+    reject(new RemoteSubagentError(body.message ?? `子代理基础设施故障(runId=${childId})`, body.code ?? 'internal'))
   }
 }
 

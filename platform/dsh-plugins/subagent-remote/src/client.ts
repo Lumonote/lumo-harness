@@ -1,10 +1,10 @@
 /**
  * subagent-remote 的 HTTP 客户端:父节点对 Scheduler 放置/终态、承载节点 start/stop
  * 的出站调用(fetch 风格照 connector/src/client.ts:超时合并、结构化错误优先、
- * 非结构化按状态映射;错误归因分两族 —— Scheduler 域外语义与基础设施走 dsh
- * `SubagentError`,承载节点 wire 失败走平台 `SeamError`,code 透传由调用方定夺重试)。
+ * 非结构化按状态映射;错误归因分两族 —— Scheduler 域外语义与基础设施走平台
+ * `RemoteSubagentError`,承载节点 wire 失败走平台 `SeamError`,code 透传由调用方定夺重试)。
  */
-import { SubagentError } from '@deepseek-ai/dsh-subagent'
+import { RemoteSubagentError } from './error.ts'
 import { SeamError } from '../../../shared/seam-contracts/errors.ts'
 import { codeForStatus, type SeamErrorCode } from '../../../shared/seam-contracts/remote.ts'
 import type { ChildResultBody, StartChildRequest, StartChildFail } from '../../../shared/seam-contracts/subagent-host.ts'
@@ -16,7 +16,7 @@ const TIMEOUT_MS = 30_000
 /**
  * Scheduler 放置:`POST {schedulerUrl}/v1/placements`(X-Lumo-Realm 头)。
  * 201 → node_id; 202 → poll the durable placement until assigned or cancelled.
- * 其它 → 基础设施 `SubagentError`(服务端错误码透传)。
+ * 其它 → 基础设施 `RemoteSubagentError`(服务端错误码透传)。
  */
 export interface PlacementResult {
   nodeId: string
@@ -44,13 +44,13 @@ export async function postPlacement(opts: {
     for (;;) {
       const placement = await getPlacement({ ...opts, signal })
       if (placement.state === 'PLACED' || placement.state === 'RUNNING') return parseAssignment(placement)
-      if (placement.state !== 'PENDING') throw new SubagentError(`Queued child ended before dispatch: ${placement.state}`, 'REMOTE_PLACEMENT_CANCELLED')
+      if (placement.state !== 'PENDING') throw new RemoteSubagentError(`Queued child ended before dispatch: ${placement.state}`, 'REMOTE_PLACEMENT_CANCELLED')
       await delay(opts.pollIntervalMs ?? 250, undefined, { signal })
     }
   }
   if (res.status !== 201) {
     const detail = await schedulerErrorOf(res)
-    throw new SubagentError(
+    throw new RemoteSubagentError(
       `Scheduler 放置失败(HTTP ${res.status})${detail.message !== undefined ? `: ${detail.message}` : ''}`,
       detail.error ?? 'internal',
     )
@@ -58,7 +58,7 @@ export async function postPlacement(opts: {
   const placement = await res.json() as Record<string, unknown>
   // Scheduler replays durable terminal placements as 201, too.
   if (placement['state'] !== undefined && !['PLACED', 'RUNNING'].includes(String(placement['state']))) {
-    throw new SubagentError(`Child ended before dispatch: ${placement['state']}`, 'REMOTE_PLACEMENT_CANCELLED')
+    throw new RemoteSubagentError(`Child ended before dispatch: ${placement['state']}`, 'REMOTE_PLACEMENT_CANCELLED')
   }
   return parseAssignment(placement)
 }
@@ -71,7 +71,7 @@ function parseAssignment(body: Record<string, unknown>): PlacementResult {
   if (nodeIdBad || attemptBad) {
     // 逐字段列名:两个字段共用一条「缺 node_id」的文案时,缺的是 attempt 也会把排查引向 node_id。
     const missing = [nodeIdBad ? 'node_id' : '', attemptBad ? 'attempt(正整数)' : ''].filter((f) => f !== '')
-    throw new SubagentError(`Scheduler 201 应答缺 ${missing.join('、')}(收到 ${JSON.stringify(body)})`, 'internal')
+    throw new RemoteSubagentError(`Scheduler 201 应答缺 ${missing.join('、')}(收到 ${JSON.stringify(body)})`, 'internal')
   }
   return { nodeId, attempt }
 }
@@ -81,7 +81,7 @@ export async function getPlacement(opts: PlacementIdentity): Promise<Record<stri
   const res = await rawFetch(`${opts.base}/v1/placements/${encodeURIComponent(opts.childId)}`, {
     headers: schedulerHeaders(opts), signal: opts.signal,
   })
-  if (!res.ok) throw new SubagentError(`Scheduler placement query failed (HTTP ${res.status})`, 'PLACEMENT_QUERY_FAILED')
+  if (!res.ok) throw new RemoteSubagentError(`Scheduler placement query failed (HTTP ${res.status})`, 'PLACEMENT_QUERY_FAILED')
   return await res.json() as Record<string, unknown>
 }
 
@@ -92,7 +92,7 @@ export async function cancelPlacement(opts: PlacementIdentity & { attempt?: numb
     body: JSON.stringify({ ...(opts.attempt ? { attempt: opts.attempt, node_id: opts.nodeId } : {}) }),
   })
   if (res.status === 404) return true
-  if (!res.ok) throw new SubagentError(`Scheduler cancellation failed (HTTP ${res.status})`, 'PLACEMENT_CANCEL_FAILED')
+  if (!res.ok) throw new RemoteSubagentError(`Scheduler cancellation failed (HTTP ${res.status})`, 'PLACEMENT_CANCEL_FAILED')
   const body = await res.json() as Record<string, unknown>
   return ['ABORTED', 'COMPLETED', 'FAILED', 'LOST'].includes(String(body.state))
 }
@@ -171,7 +171,7 @@ export async function postTerminalState(opts: {
   controlPlaneToken?: string
 }): Promise<void> {
   if (!Number.isSafeInteger(opts.attempt) || !opts.attempt || !opts.nodeId) {
-    throw new SubagentError('Scheduler result requires the original attempt and execution node', 'RESULT_IDENTITY_MISSING')
+    throw new RemoteSubagentError('Scheduler result requires the original attempt and execution node', 'RESULT_IDENTITY_MISSING')
   }
   const res = await rawFetch(`${opts.base}/v1/tasks/${encodeURIComponent(opts.childId)}/result`, {
     method: 'POST',
@@ -180,7 +180,7 @@ export async function postTerminalState(opts: {
   })
   if (res.ok) return
   const detail = await schedulerErrorOf(res)
-  throw new SubagentError(
+  throw new RemoteSubagentError(
     `Scheduler 终态上报失败(HTTP ${res.status})${detail.message !== undefined ? `: ${detail.message}` : ''}`,
     detail.error ?? 'internal',
   )

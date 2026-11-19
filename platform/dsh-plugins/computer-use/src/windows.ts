@@ -1,6 +1,7 @@
 /** Optional Windows provider using the public SDK inside an owned process tree. */
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { ComputerUseProviderName } from '@deepseek-ai/dsh-computer-use/brand'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { ComputerUseProviderName } from '@deepseek-ai/dsh-computer-use/types'
 import { createMcpToolDefinition } from '@deepseek-ai/dsh-mcp-client'
 import type {} from '@deepseek-ai/dsh-computer-use'
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -28,7 +29,7 @@ export async function mountWindowsProvider(ctx: Context, runtime: WindowsCuaRunt
   const pending = new Set<Promise<unknown>>()
   ctx.on('internal/plugin', fiber => { if (fiber === ctx.fiber && fiber.uid === null) lifetime.abort() }, { global: true })
   const dispose = ctx.effect(function* () {
-    yield ctx.computerUse.register(ComputerUseProviderName('lumo-cua-windows'))
+    yield ctx.computerUse.register(brandString<ComputerUseProviderName>('lumo-cua-windows'))
     yield ctx.lumoComputerUse.bindWindowsCleanup(() => runtime.drain())
     yield async () => { lifetime.abort(); await runtime.dispose(); await Promise.allSettled(pending) }
   }, 'lumo-computer-use-windows: isolated native runtime')

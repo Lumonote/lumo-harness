@@ -6,17 +6,17 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { finalizeBuiltInstaller, finalizeInstaller, installerSigningMode, loadInstallerRuntimeReport, notarizeArtifact, preflightRelease, recordUnsignedInstaller, releaseConfiguration, signMacApplication } from '../release-desktop.mjs'
-import { cuaBundleDigest, cuaProviderPackage } from '../cua-helper.mjs'
+import { cuaBundleDigest, cuaProviderPackages } from '../cua-helper.mjs'
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 const identity = 'Developer ID Application: Lumo (&) (ABCDE12345)'
 const env = { LUMO_MACOS_SIGNING_IDENTITY: identity, LUMO_CUA_SIGNING_IDENTITY: identity, LUMO_MACOS_NOTARY_PROFILE: 'release (&) profile' }
 const unsignedReport = (target = 'darwin-arm64') => ({ target, version: '1.2.1', total: { contentBytes: 123, fileCount: 4 }, sourceRevision: 'a'.repeat(40), upstreamRevision: 'b'.repeat(40) })
 describe('formal desktop release boundary', () => {
-  it.skipIf(process.platform === 'win32')('signs native payloads from inside out without mutating the content-addressed helper or Java resources', () => {
+  it.skipIf(process.platform === 'win32').each(cuaProviderPackages)('signs native payloads with %s without mutating the content-addressed helper or Java resources', (provider) => {
     const root = mkdtempSync(join(tmpdir(), 'lumo signed app ')); roots.push(root)
     const application = join(realpathSync(root), 'Lumo.app'), runtime = join(application, 'Contents/Resources/runtime')
-    const helperBase = join(runtime, 'node_modules', cuaProviderPackage, 'native/bin/darwin-arm64')
+    const helperBase = join(runtime, 'node_modules', provider, 'native/bin/darwin-arm64')
     const staged = join(helperBase, 'staged/DSH Computer Use.app')
     const write = (path: string, body: string | Buffer) => { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, body) }
     write(join(staged, 'Contents/Info.plist'), '<plist/>')
@@ -25,7 +25,7 @@ describe('formal desktop release boundary', () => {
     const digest = cuaBundleDigest(staged), helper = join(helperBase, digest, 'DSH Computer Use.app')
     mkdirSync(join(helper, '..'), { recursive: true }); renameSync(staged, helper)
     writeFileSync(join(helperBase, 'current.json'), JSON.stringify({ bundle: digest }))
-    write(join(runtime, 'runtime-manifest.json'), JSON.stringify({ target: 'darwin-arm64', version: '1', computerUse: { signing: 'certificate' } }))
+    write(join(runtime, 'runtime-manifest.json'), JSON.stringify({ target: 'darwin-arm64', version: '1', computerUse: { signing: 'certificate', provider } }))
     write(join(runtime, 'node'), Buffer.from('cffaedfe00000000000000000000000000000000000000000000000000000000', 'hex'))
     write(join(runtime, 'java.class'), Buffer.from('cafebabe00000037000100000000000000000000000000000000000000000000', 'hex'))
     const validSignature = `Authority=${identity}\nTeamIdentifier=ABCDE12345\nflags=0x10000(runtime)\nTimestamp=Nov 9, 2026\n`

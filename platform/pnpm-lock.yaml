@@ -152,6 +152,9 @@ importers:
       '@deepseek-ai/dsh-atomic-write':
         specifier: link:../../../deepseek-harness/packages/util/atomic-write
         version: link:../../../deepseek-harness/packages/util/atomic-write
+      '@deepseek-ai/dsh-brand':
+        specifier: link:../../../deepseek-harness/packages/util/brand
+        version: link:../../../deepseek-harness/packages/util/brand
       '@deepseek-ai/dsh-computer-use':
         specifier: link:../../../deepseek-harness/packages/computer-use/computer-use
         version: link:../../../deepseek-harness/packages/computer-use/computer-use

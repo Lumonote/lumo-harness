@@ -11,6 +11,7 @@
     "@deepseek-ai/cordis": "link:../../../deepseek-harness/vendor/cordis",
     "@deepseek-ai/dsh-agent": "link:../../../deepseek-harness/packages/core/agent",
     "@deepseek-ai/dsh-atomic-write": "link:../../../deepseek-harness/packages/util/atomic-write",
+    "@deepseek-ai/dsh-brand": "link:../../../deepseek-harness/packages/util/brand",
     "@deepseek-ai/dsh-computer-use": "link:../../../deepseek-harness/packages/computer-use/computer-use",
     "@deepseek-ai/dsh-mcp-client": "link:../../../deepseek-harness/packages/mcp/mcp-client",
     "@deepseek-ai/dsh-llm": "link:../../../deepseek-harness/packages/llm/llm",
