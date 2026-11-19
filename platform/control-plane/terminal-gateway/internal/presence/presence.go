@@ -33,8 +33,8 @@ type Store struct {
 	mu    sync.Mutex
 	ttl   time.Duration
 	clock Clock
-	// sessions[sessionRef][terminalID] = entry
-	sessions map[string]map[string]Entry
+	// 每个终端只由最近一次注册的连接更新。
+	sessions map[string]map[string]*Registration
 }
 
 // NewStore 创建存储。ttl<=0 回落 30s；clock==nil 回落 time.Now。
@@ -45,30 +45,52 @@ func NewStore(ttl time.Duration, clock Clock) *Store {
 	if ttl <= 0 {
 		ttl = 30 * time.Second
 	}
-	return &Store{ttl: ttl, clock: clock, sessions: make(map[string]map[string]Entry)}
+	return &Store{ttl: ttl, clock: clock, sessions: make(map[string]map[string]*Registration)}
 }
 
-// Touch 写入/刷新一条 presence（用当前时钟）。同一 terminalID 覆盖而非新增——一个终端只应
-// 在会话里占一条。注意：这里**不**注册任何「断开清理」回调，过期完全靠 TTL。
-func (s *Store) Touch(e Entry) {
+// Registration 绑定一次连接。旧连接晚到的心跳和退出只对自己的注册生效。
+type Registration struct {
+	store *Store
+	entry Entry
+}
+
+// Register 在握手时登记能力，返回本连接专用的续期和退出句柄。
+func (s *Store) Register(e Entry) *Registration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sessions[e.SessionRef] == nil {
-		s.sessions[e.SessionRef] = make(map[string]Entry)
+		s.sessions[e.SessionRef] = make(map[string]*Registration)
 	}
 	e.LastSeen = s.clock()
-	s.sessions[e.SessionRef][e.TerminalID] = e
+	r := &Registration{store: s, entry: e}
+	s.sessions[e.SessionRef][e.TerminalID] = r
+	return r
 }
 
-// Leave 显式移除一条 presence（尽力而为：连接正常关闭时调用，仅作优化）。
-// 即使永远不被调用，Snapショット 也会因 TTL 把过期条目收敛掉——这正是「不依赖回调」的体现。
-func (s *Store) Leave(sessionRef, terminalID string) {
+// HeartbeatInterval 是发给客户端的建议心跳间隔。
+func (s *Store) HeartbeatInterval() time.Duration { return s.ttl / 3 }
+
+// Refresh 返回 false 表示另一条连接已取代当前连接。
+func (r *Registration) Refresh() bool {
+	s := r.store
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if m := s.sessions[sessionRef]; m != nil {
-		delete(m, terminalID)
+	if s.sessions[r.entry.SessionRef][r.entry.TerminalID] != r {
+		return false
+	}
+	r.entry.LastSeen = s.clock()
+	return true
+}
+
+func (r *Registration) Leave() {
+	s := r.store
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ref, id := r.entry.SessionRef, r.entry.TerminalID
+	if m := s.sessions[ref]; m[id] == r {
+		delete(m, id)
 		if len(m) == 0 {
-			delete(s.sessions, sessionRef)
+			delete(s.sessions, ref)
 		}
 	}
 }
@@ -81,7 +103,8 @@ func (s *Store) Snapshot(sessionRef string) []Entry {
 	defer s.mu.Unlock()
 	src := s.sessions[sessionRef]
 	out := make([]Entry, 0, len(src))
-	for _, e := range src {
+	for _, r := range src {
+		e := r.entry
 		if now.Sub(e.LastSeen) <= s.ttl {
 			out = append(out, e)
 		}
@@ -102,8 +125,8 @@ func (s *Store) PublishMetrics() {
 	s.mu.Lock()
 	for sess, m := range s.sessions {
 		n := 0
-		for _, e := range m {
-			if now.Sub(e.LastSeen) <= s.ttl {
+		for _, r := range m {
+			if now.Sub(r.entry.LastSeen) <= s.ttl {
 				n++
 			}
 		}

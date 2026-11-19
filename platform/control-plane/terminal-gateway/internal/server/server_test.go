@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,7 +36,7 @@ func newTestServer(t *testing.T, opts Options) *httptest.Server {
 
 func TestPresenceQuery(t *testing.T) {
 	store := presence.NewStore(30*time.Second, nil)
-	store.Touch(presence.Entry{
+	store.Register(presence.Entry{
 		SessionRef: "s1", TerminalID: "t1", Kind: capability.KindWeb,
 		Renderers: []capability.RendererKey{capability.RendererChart},
 	})
@@ -102,6 +103,50 @@ func TestWS_BadHandshake_NoKey(t *testing.T) {
 	status, _ := br.ReadString('\n')
 	if !strings.Contains(status, "400") {
 		t.Fatalf("缺 key 应返回 400，得到 %q", status)
+	}
+}
+
+func TestWS_RejectsInvalidResumeCursorBeforeUpgrade(t *testing.T) {
+	srv := New(Options{Source: events.NewMemory()})
+	for _, query := range []string{"cursor", "cursor=", "cursor=1&cursor=2", "cursor=-1", "cursor=%zz", "cursor=9223372036854775808"} {
+		t.Run(query, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/v1/terminals/s1", nil)
+			r.URL.RawQuery = query
+			w := httptest.NewRecorder()
+			srv.handleWS(w, r, "s1")
+			if w.Code != http.StatusBadRequest || !(strings.Contains(w.Body.String(), "cursor") || strings.Contains(w.Body.String(), "查询参数")) {
+				t.Fatalf("invalid cursor: status %d, body %q", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestWS_ResumeWithExact64BitCursor(t *testing.T) {
+	mem := events.NewMemory()
+	// 该奇数不能由浏览器的 JSON number 精确表示。
+	const seq int64 = 9_007_199_254_740_993
+	for _, n := range []int64{seq, seq + 1} {
+		if _, err := mem.Append("s1", events.Event{Seq: n, Type: "step"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := newTestServer(t, Options{Source: mem})
+	connect := func(query string) *wsClient {
+		cli := dialWS(t, ts, "/v1/terminals/s1"+query)
+		t.Cleanup(func() { cli.Close() })
+		cli.write(`{"terminal_id":"t1","capabilities":{"kind":"web"}}`)
+		cli.read(t)
+		return cli
+	}
+	first := connect("")
+	cursor, ok := first.read(t)["cursor"].(string)
+	if !ok || cursor != "9007199254740993" {
+		t.Fatalf("unexpected cursor %q", cursor)
+	}
+	first.Close()
+	resumed := connect("?cursor=" + cursor)
+	if got := resumed.read(t)["cursor"]; got != "9007199254740994" {
+		t.Fatalf("unexpected first event after resume: %v", got)
 	}
 }
 
@@ -212,6 +257,30 @@ func TestWS_Happy_ReplayAndNegotiation(t *testing.T) {
 	}
 }
 
+func TestWS_HeartbeatAfterReconnect(t *testing.T) {
+	ts := newTestServer(t, Options{Source: events.NewMemory(), Presence: presence.NewStore(12*time.Second, nil)})
+	connect := func() *wsClient {
+		cli := dialWS(t, ts, "/v1/terminals/s1")
+		t.Cleanup(func() { cli.Close() })
+		cli.write(`{"terminal_id":"t1","capabilities":{"kind":"web"}}`)
+		if frame := cli.read(t); frame["presence_heartbeat_ms"] != float64(4000) {
+			t.Fatalf("missing negotiated heartbeat interval: %v", frame)
+		}
+		return cli
+	}
+	old := connect()
+	current := connect()
+	for _, tc := range []struct {
+		cli    *wsClient
+		active bool
+	}{{old, false}, {current, true}} {
+		tc.cli.write(`{"action":"heartbeat"}`)
+		if ack := tc.cli.read(t); ack["type"] != "heartbeat_ack" || ack["presence_active"] != tc.active {
+			t.Fatalf("unexpected heartbeat reply: %v", ack)
+		}
+	}
+}
+
 // live push：连接后新追加的事件应通过订阅实时推给客户端。
 func TestWS_LivePush(t *testing.T) {
 	mem := events.NewMemory() // 不预置事件，先只收协商帧
@@ -237,8 +306,7 @@ func TestWS_LivePush(t *testing.T) {
 	}
 }
 
-// handoffSource pauses after taking the replay snapshot. Its subscription also
-// appends an event, so the same event appears in both replay and the live buffer.
+// handoffSource pauses replay after the subscription has captured its boundary.
 type handoffSource struct {
 	*events.MemoryEventSource
 	snapshotReady chan struct{}
@@ -246,27 +314,23 @@ type handoffSource struct {
 	unsubscribed  chan struct{}
 }
 
-func (s *handoffSource) Subscribe(ctx context.Context, sessionRef string) (<-chan events.Event, error) {
+func (s *handoffSource) Subscribe(ctx context.Context, sessionRef string) (events.Subscription, error) {
 	sub, err := s.MemoryEventSource.Subscribe(ctx, sessionRef)
 	if err != nil {
-		return nil, err
+		return events.Subscription{}, err
 	}
-	s.Append(sessionRef, events.Event{Type: "overlap", Payload: json.RawMessage(`{}`)})
-	go func() {
-		<-ctx.Done()
-		close(s.unsubscribed)
-	}()
+	s.Append(sessionRef, events.Event{Type: "after_subscribe", Payload: json.RawMessage(`{}`)})
+	context.AfterFunc(ctx, func() { close(s.unsubscribed) })
 	return sub, nil
 }
 
-func (s *handoffSource) History(ctx context.Context, sessionRef string, cursor int64) ([]events.Event, error) {
-	history, err := s.MemoryEventSource.History(ctx, sessionRef, cursor)
+func (s *handoffSource) Replay(ctx context.Context, sessionRef string, since, through int64, emit func(events.Event) error) error {
 	close(s.snapshotReady)
 	select {
 	case <-s.resumeHistory:
-		return history, err
+		return s.MemoryEventSource.Replay(ctx, sessionRef, since, through, emit)
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
 }
 
@@ -274,7 +338,7 @@ func (s *handoffSource) History(ctx context.Context, sessionRef string, cursor i
 // events present in both sources must not repeat. The cursor filters replay;
 // even a cursor ahead of the log must continue receiving newly subscribed events.
 func TestWS_ReplayLiveHandoff(t *testing.T) {
-	for _, cursor := range []int64{0, 2, 100} {
+	for _, cursor := range []int64{0, 2, 3, 100} {
 		t.Run(fmt.Sprintf("cursor=%d", cursor), func(t *testing.T) {
 			source := &handoffSource{MemoryEventSource: events.NewMemory(), snapshotReady: make(chan struct{}),
 				resumeHistory: make(chan struct{}), unsubscribed: make(chan struct{})}
@@ -294,6 +358,11 @@ func TestWS_ReplayLiveHandoff(t *testing.T) {
 			case <-source.snapshotReady:
 			case <-time.After(3 * time.Second):
 				t.Fatal("replay snapshot was not taken")
+			}
+			// 即使历史源仍在等待，读循环也应能续期并回应心跳。
+			cli.write(`{"action":"heartbeat"}`)
+			if ack := cli.read(t); ack["type"] != "heartbeat_ack" || ack["presence_active"] != true {
+				t.Fatalf("heartbeat while replay is paused: %v", ack)
 			}
 			source.Append("s1", events.Event{Type: "handoff", Payload: json.RawMessage(`{}`)})
 			release()
@@ -326,20 +395,100 @@ func TestWS_ReplayLiveHandoff(t *testing.T) {
 	}
 }
 
+func TestWS_DisconnectWhileReplayIsBlocked(t *testing.T) {
+	source := &handoffSource{MemoryEventSource: events.NewMemory(), snapshotReady: make(chan struct{}),
+		resumeHistory: make(chan struct{}), unsubscribed: make(chan struct{})}
+	defer close(source.resumeHistory)
+	ts := newTestServer(t, Options{Source: source})
+	cli := dialWS(t, ts, "/v1/terminals/s1")
+	defer cli.Close()
+	cli.write(`{"terminal_id":"t1","capabilities":{"kind":"cli"}}`)
+	cli.read(t)
+	select {
+	case <-source.snapshotReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("replay did not start")
+	}
+	cli.Close()
+	select {
+	case <-source.unsubscribed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("blocked replay kept the subscription after the client left")
+	}
+}
+
+// 服务停机时，已升级的连接即使尚未发送能力声明，也要随请求根上下文关闭。
+func TestWS_ServerCancellationDuringHandshakeAndReplay(t *testing.T) {
+	for _, phase := range []string{"handshake", "replay"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			source := &handoffSource{MemoryEventSource: events.NewMemory(), snapshotReady: make(chan struct{}),
+				resumeHistory: make(chan struct{}), unsubscribed: make(chan struct{})}
+			defer close(source.resumeHistory)
+			mux := http.NewServeMux()
+			gateway := New(Options{Source: source})
+			gateway.Routes(mux)
+			finished := make(chan struct{})
+			ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(finished)
+				mux.ServeHTTP(w, r)
+			}))
+			ts.Config.BaseContext = func(net.Listener) context.Context { return ctx }
+			ts.Start()
+			defer ts.Close()
+			cli := dialWS(t, ts, "/v1/terminals/s1")
+			defer cli.Close()
+			if phase == "replay" {
+				cli.write(`{"terminal_id":"t1","capabilities":{"kind":"cli"}}`)
+				cli.read(t)
+				select {
+				case <-source.snapshotReady:
+				case <-time.After(3 * time.Second):
+					t.Fatal("replay did not start")
+				}
+			}
+			// 旧连接尚在服务，不能报告排空成功；排空后即使监听器还在，也不能再升级。
+			expired, expire := context.WithCancel(context.Background())
+			expire()
+			if err := gateway.DrainWebSockets(expired); err != context.Canceled {
+				t.Fatalf("expected active connection to prevent drain, got %v", err)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/v1/terminals/s2", nil)
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "websocket")
+			req.Header.Set("Sec-WebSocket-Version", "13")
+			req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("upgrade during drain: got status %d", recorder.Code)
+			}
+			cancel()
+			drainCtx, stopDrain := context.WithTimeout(context.Background(), 3*time.Second)
+			defer stopDrain()
+			if err := gateway.DrainWebSockets(drainCtx); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-finished:
+			case <-time.After(3 * time.Second):
+				t.Fatal("server cancellation left a WebSocket handler running")
+			}
+		})
+	}
+}
+
 type zeroSeqLiveSource struct {
 	sub chan events.Event
 }
 
-func (s *zeroSeqLiveSource) Subscribe(context.Context, string) (<-chan events.Event, error) {
-	return s.sub, nil
+func (s *zeroSeqLiveSource) Subscribe(context.Context, string) (events.Subscription, error) {
+	return events.Subscription{Live: s.sub}, nil
 }
 
-func (*zeroSeqLiveSource) History(context.Context, string, int64) ([]events.Event, error) {
-	return nil, nil
-}
-
-func (*zeroSeqLiveSource) LatestSeq(context.Context, string) (int64, error) {
-	return 0, nil
+func (*zeroSeqLiveSource) Replay(context.Context, string, int64, int64, func(events.Event) error) error {
+	return nil
 }
 
 func TestWS_EmptyReplayKeepsZeroSeqLiveEvent(t *testing.T) {
@@ -355,6 +504,32 @@ func TestWS_EmptyReplayKeepsZeroSeqLiveEvent(t *testing.T) {
 	frame := cli.read(t)
 	if ev, ok := frame["event"].(map[string]any); !ok || ev["seq"] != float64(0) {
 		t.Fatalf("empty replay must not filter the first live event: %v", frame)
+	}
+}
+
+func TestWS_LiveFailureClosesIdleConnection(t *testing.T) {
+	for _, cause := range []string{"source closed", "invalid event"} {
+		t.Run(cause, func(t *testing.T) {
+			source := &zeroSeqLiveSource{sub: make(chan events.Event, 1)}
+			ts := newTestServer(t, Options{Source: source})
+			cli := dialWS(t, ts, "/v1/terminals/s1")
+			defer cli.Close()
+			cli.write(`{"terminal_id":"t1","capabilities":{"kind":"cli"}}`)
+			cli.read(t)
+			if cause == "source closed" {
+				close(source.sub)
+			} else {
+				source.sub <- events.Event{Payload: json.RawMessage(`invalid`)}
+			}
+			frame, err := ws.ReadFrameFrom(cli.reader, 1<<20, false)
+			if err != nil || frame.OpCode != ws.OpClose || len(frame.Payload) < 2 || binary.BigEndian.Uint16(frame.Payload) != 1011 {
+				t.Fatalf("want server error close, got %+v, err=%v", frame, err)
+			}
+			// 客户端一直不发帧，服务端也必须主动释放连接。
+			if _, err := cli.reader.ReadByte(); err != io.EOF {
+				t.Fatalf("want closed connection, got %v", err)
+			}
+		})
 	}
 }
 

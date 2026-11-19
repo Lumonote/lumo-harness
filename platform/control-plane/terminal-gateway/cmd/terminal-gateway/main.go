@@ -8,8 +8,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -166,11 +168,33 @@ func main() {
 	log.Info("terminal-gateway 启动", "addr", *listen, "presenceTTL", *presenceTTL, "maxFrame", *maxFrame)
 	httpSrv := &http.Server{
 		Addr:              *listen,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 		Handler:           observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	if err := observability.Serve(httpSrv); err != nil {
-		log.Error("退出", "err", err)
-		os.Exit(1)
+	served := make(chan error, 1)
+	go func() { served <- observability.Serve(httpSrv) }()
+	select {
+	case err := <-served:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("终端网关监听失败", "err", err)
+			os.Exit(1)
+		}
+	case <-ctx.Done():
+		// BaseContext 通知已升级的 WebSocket 取消订阅，Shutdown 负责 HTTP 监听和普通请求。
+		stop()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.DrainWebSockets(shutdownCtx); err != nil {
+			log.Warn("终端网关 WebSocket 排空超时", "err", err)
+		}
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			log.Warn("终端网关 HTTP 排空超时", "err", err)
+			_ = httpSrv.Close()
+		}
+		if err := <-served; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("终端网关退出", "err", err)
+			os.Exit(1)
+		}
 	}
 }

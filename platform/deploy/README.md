@@ -386,6 +386,21 @@ OpenDesign 提供 artifact-first 的设计/原型工作流；Archify 提供可�
 `platform/upstream/skill-sources.json`。这些适配器不会运行 `ruflo init`、修改仓库级指令文件，
 也不会在服务启动时下载上游代码。
 
+### 终端订阅、重连与在线心跳
+
+连接 `GET /v1/terminals/{session}` 并完成 WebSocket 升级后，终端先发送能力声明。
+在 `capability_negotiated` 响应中读取 `presence_heartbeat_ms`。默认在线有效期 30 秒，建议心跳间隔 10 秒。
+空闲的浏览器客户端可定期发送 `{"action":"heartbeat"}`。网关回复 `heartbeat_ack`，其中
+`presence_active` 表示当前连接是否仍持有这条在线记录。使用原生 WebSocket Ping 的客户端也可以续期。
+同一网关上，同一会话中的相同 `terminal_id` 以最后注册的连接为准。在线列表按网关实例维护。
+
+客户端在处理完每条 `session_event` 后，按会话保存外层 `cursor` 字符串，重连时原样传入 `?cursor=`。
+`cursor` 是 `event.seq` 的精确十进制表示，浏览器可用它保存完整的 64 位序号。首次连接省略游标即可。
+生产网关从 PostgreSQL 按每页 256 条补发历史，直至订阅建立时已落盘的最大序号。
+超过 50,000 条的积压也能使用原游标恢复。回放期间可继续发心跳，新追加的事件在回放结束后按序推送。
+滚动重启时，网关停止接受新升级并关闭当前连接；排空期间发起的握手可能收到 HTTP 503。
+客户端应延迟重试，始终使用最后处理成功的游标。网关为 WebSocket 和普通 HTTP 的排空共预留 5 秒。
+
 ## 故障注入（完整 Cluster 拓扑）
 
 ```sh

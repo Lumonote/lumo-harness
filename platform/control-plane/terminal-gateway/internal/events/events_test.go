@@ -109,13 +109,96 @@ func TestSubscribe_DeliversAppended(t *testing.T) {
 		t.Fatalf("订阅失败: %v", err)
 	}
 	// 订阅之后再追加，应被实时投递。
-	ev := m.Append("s2", Event{Type: "live", Payload: json.RawMessage(`{}`)})
+	ev, err := m.Append("s2", Event{Type: "live", Payload: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	select {
-	case got := <-ch:
+	case got := <-ch.Live:
 		if got.Seq != ev.Seq {
 			t.Fatalf("收到的事件 seq=%d，期望 %d", got.Seq, ev.Seq)
 		}
 	default:
 		t.Fatalf("订阅者未收到实时事件")
+	}
+}
+
+func TestSlowMemorySubscriberCanResumeFromLastDeliveredEvent(t *testing.T) {
+	m := NewMemory()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	slow, _ := m.Subscribe(ctx, "s1")
+	fast, _ := m.Subscribe(ctx, "s1")
+	n := cap(slow.Live) + 3
+	for i := 1; i <= n; i++ {
+		m.Append("s1", Event{Type: "step"})
+		if got := <-fast.Live; got.Seq != int64(i) {
+			t.Fatalf("active subscriber got seq %d, want %d", got.Seq, i)
+		}
+	}
+	var last int64
+	for i := 1; i <= cap(slow.Live); i++ {
+		ev := <-slow.Live
+		if ev.Seq != int64(i) {
+			t.Fatalf("buffered seq %d, want %d", ev.Seq, i)
+		}
+		last = ev.Seq
+	}
+	select {
+	case _, ok := <-slow.Live:
+		if ok {
+			t.Fatal("full subscriber received an event beyond its buffered prefix")
+		}
+	default:
+		t.Fatal("subscriber stayed open after missing an event")
+	}
+	replay, err := m.History(ctx, "s1", last)
+	if err != nil || len(replay) != 3 {
+		t.Fatalf("want three events on reconnect, got %v (%v)", replay, err)
+	}
+	for i, ev := range replay {
+		if ev.Seq != last+1+int64(i) {
+			t.Fatalf("gap after reconnect: seq %d at position %d", ev.Seq, i)
+		}
+	}
+}
+
+func TestMemoryReplayWithSparseSequences(t *testing.T) {
+	m := NewMemory()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for _, seq := range []int64{2, 40} {
+		if _, err := m.Append("s", Event{Seq: seq}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sub, err := m.Subscribe(ctx, "s")
+	if err != nil || sub.Through != 40 {
+		t.Fatalf("want watermark 40, got %d (%v)", sub.Through, err)
+	}
+	for _, seq := range []int64{39, 40} {
+		if _, err := m.Append("s", Event{Seq: seq}); err == nil {
+			t.Fatalf("accepted non-increasing seq %d", seq)
+		}
+	}
+	ev, err := m.Append("s", Event{})
+	if err != nil || ev.Seq != 41 {
+		t.Fatalf("auto seq after 40: %d (%v)", ev.Seq, err)
+	}
+	var seqs []int64
+	err = m.Replay(ctx, "s", 2, sub.Through, func(ev Event) error {
+		seqs = append(seqs, ev.Seq)
+		return nil
+	})
+	if err != nil || len(seqs) != 1 || seqs[0] != 40 {
+		t.Fatalf("replay: %v (%v)", seqs, err)
+	}
+	select {
+	case live := <-sub.Live:
+		if live.Seq != 41 {
+			t.Fatalf("first live seq: %d", live.Seq)
+		}
+	default:
+		t.Fatal("new event was not delivered")
 	}
 }

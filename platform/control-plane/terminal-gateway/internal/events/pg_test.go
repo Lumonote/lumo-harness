@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -182,6 +183,58 @@ func TestPgHistoryRefusesToSilentlyTruncate(t *testing.T) {
 	}
 }
 
+// 实时追加不能延长本次回放。测试跨越两页并保留序号空洞，第二次连接从中途接续。
+func TestPgReplayResumesAcrossPagesAtFixedWatermark(t *testing.T) {
+	pool := testPool(t)
+	src, err := NewPg(Options{Pool: pool, MaxReplay: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	ref := "sess-paged-" + time.Now().Format("150405.000000")
+	const count = 2*logPageSize + 3
+	_, err = pool.Exec(ctx, `INSERT INTO session_log
+		(session_ref,seq,fencing_token,event_type,payload,digest,event_time,appended_at)
+		SELECT $1,2*i,1,'step','{}','d',i,i FROM generate_series(1,$2::int) i`, ref, count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	sub, err := src.Subscribe(ctx, ref)
+	if err != nil || sub.Through != 2*count {
+		t.Fatalf("want watermark %d, got %d (%v)", 2*count, sub.Through, err)
+	}
+	var last int64
+	interrupted := errors.New("test disconnect")
+	err = src.Replay(ctx, ref, 0, sub.Through, func(ev Event) error {
+		if ev.Seq != last+2 {
+			t.Fatalf("after %d, got %d", last, ev.Seq)
+		}
+		if last == 2*logPageSize {
+			return interrupted
+		}
+		last = ev.Seq
+		return nil
+	})
+	if !errors.Is(err, interrupted) || last != 2*logPageSize {
+		t.Fatalf("unexpected interruption at %d: %v", last, err)
+	}
+	err = src.Replay(ctx, ref, last, sub.Through, func(ev Event) error {
+		if last == 2*logPageSize {
+			seedLog(t, pool, ref, 2*count+1, 2*count+1)
+		}
+		if ev.Seq != last+2 {
+			t.Fatalf("after %d, got %d", last, ev.Seq)
+		}
+		last = ev.Seq
+		return nil
+	})
+	if err != nil || last != 2*count {
+		t.Fatalf("want original watermark %d, got %d (%v)", 2*count, last, err)
+	}
+}
+
 // Subscribe 只推**增量**：调用方刚 replay 过历史，再推一遍历史不是「实时」。
 func TestPgSubscribePushesOnlyNewEvents(t *testing.T) {
 	pool := testPool(t)
@@ -204,7 +257,7 @@ func TestPgSubscribePushesOnlyNewEvents(t *testing.T) {
 	seedLog(t, pool, ref, 4, 4)
 
 	select {
-	case ev := <-sub:
+	case ev := <-sub.Live:
 		if ev.Seq != 4 {
 			t.Fatalf("只应推送新增的 seq=4，实得 %d（历史被重推了？）", ev.Seq)
 		}
@@ -216,12 +269,48 @@ func TestPgSubscribePushesOnlyNewEvents(t *testing.T) {
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
-		case _, ok := <-sub:
+		case _, ok := <-sub.Live:
 			if !ok {
 				return // ctx 取消后 channel 被关闭，符合契约
 			}
 		case <-deadline:
 			t.Fatal("ctx 取消后 channel 未关闭")
+		}
+	}
+}
+
+// 一次提交积压的事件，保证轮询只能看到整批数据。历史回放的上限不应卡住实时游标。
+func TestPgSubscribeDrainsBacklogBeyondReplayLimit(t *testing.T) {
+	pool := testPool(t)
+	src, err := NewPg(Options{Pool: pool, Interval: 20 * time.Millisecond, MaxReplay: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ref := "sess-burst-" + time.Now().Format("150405.000000")
+	seedLog(t, pool, ref, 1, 1)
+	sub, err := src.Subscribe(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 带空洞的序号和多页积压都必须按实际 seq 推进，随后仍能接到下一批。
+	for _, batch := range [][2]int64{{2, 601}, {602, 603}} {
+		_, err := pool.Exec(ctx, `INSERT INTO session_log
+			(session_ref,seq,fencing_token,event_type,payload,digest,event_time,appended_at)
+			SELECT $1,i*2,1,'step','{}','d',i,i FROM generate_series($2::bigint,$3::bigint) i`, ref, batch[0], batch[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := batch[0]; i <= batch[1]; i++ {
+			select {
+			case ev, ok := <-sub.Live:
+				if !ok || ev.Seq != i*2 {
+					t.Fatalf("want seq %d, got %d (open=%t)", i*2, ev.Seq, ok)
+				}
+			case <-ctx.Done():
+				t.Fatalf("timed out waiting for seq %d", i*2)
+			}
 		}
 	}
 }
@@ -266,7 +355,7 @@ func TestPgReadsDoNotTouchTheWriteSide(t *testing.T) {
 	}
 	time.Sleep(120 * time.Millisecond)
 	cancel()
-	<-sub
+	<-sub.Live
 	cancel()
 
 	if after := countRows(t, pool, `SELECT count(*) FROM session_log WHERE session_ref=$1`, ref); after != before {

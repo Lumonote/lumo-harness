@@ -24,12 +24,16 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 // maxFrameSizeDefault 是单帧 payload 的硬上限（1 MiB）。超出直接拒绝——防止一个超大
 // 帧把连接缓冲撑爆（§8.2「帧大小要有硬上限」）。本实现不跨段重组超大帧，所以这是
 // 内存与「拒绝」之间的安全线。
 const maxFrameSizeDefault = 1 << 20
+
+// 每帧独立计时，给长连接上的慢客户端留下重新连接和回放的机会。
+const frameWriteTimeout = 15 * time.Second
 
 // handshakeMagic 是 RFC 6455 §1.3 规定的握手魔法串，拼在客户端 key 后面做 SHA1。
 const handshakeMagic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -229,6 +233,9 @@ func readFrame(br *bufio.Reader, max int, expectMasked bool) (Frame, error) {
 func (c *Conn) WriteFrame(f Frame) error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	if err := c.conn.SetWriteDeadline(time.Now().Add(frameWriteTimeout)); err != nil {
+		return err
+	}
 	return writeFrame(c.rw.Writer, f, c.max)
 }
 
@@ -325,15 +332,28 @@ func writeFrame(bw *bufio.Writer, f Frame, max int) error {
 	return bw.Flush()
 }
 
-// CloseWith 发送一个 close 帧（code 1002 = protocol error，RFC 6455 §7.4.1）并关闭连接。
-// reason 必须是 UTF-8 且 ≤ 123 字节；用于把「为什么被拒」清楚地告诉对端。
+// CloseWith 以协议错误结束连接。
 func (c *Conn) CloseWith(reason string) error {
-	payload := make([]byte, 2+len(reason))
-	binary.BigEndian.PutUint16(payload[:2], 1002)
-	copy(payload[2:], reason)
+	return c.closeWithCode(1002, reason)
+}
+
+// CloseServerError 通知客户端服务端已中断推送，客户端可带游标重连。
+func (c *Conn) CloseServerError(reason string) error {
+	return c.closeWithCode(1011, reason)
+}
+
+func (c *Conn) closeWithCode(code uint16, reason string) error {
 	c.wmu.Lock()
-	_ = writeFrame(c.rw.Writer, Frame{OpCode: OpClose, Payload: payload}, c.max)
-	c.wmu.Unlock()
+	defer c.wmu.Unlock()
+	// 控制帧最多 125 字节，其中前两个字节是状态码。截断后去掉不完整的字符。
+	if c.max >= 2 && c.conn.SetWriteDeadline(time.Now().Add(time.Second)) == nil {
+		n := min(len(reason), c.max-2, 123)
+		reason = strings.ToValidUTF8(reason[:n], "")
+		payload := make([]byte, 2+len(reason))
+		binary.BigEndian.PutUint16(payload, code)
+		copy(payload[2:], reason)
+		_ = writeFrame(c.rw.Writer, Frame{OpCode: OpClose, Payload: payload}, c.max)
+	}
 	return c.conn.Close()
 }
 

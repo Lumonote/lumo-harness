@@ -11,10 +11,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lumo-harness/platform/observability"
@@ -41,10 +45,15 @@ type Options struct {
 	MaxFrame int
 }
 
-// Server 持有依赖并 expose 路由。无内部状态，可并发处理多连接。
+// Server 装配路由，并跟踪已脱离 net/http 管理的 WebSocket。
 type Server struct {
 	opts Options
 	log  *slog.Logger
+
+	mu       sync.Mutex
+	active   int
+	idle     chan struct{} // 仅在有连接时创建，最后一条连接退出时关闭。
+	draining bool
 }
 
 // New 构造 Server，补默认值。
@@ -109,16 +118,23 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request, sessionRef str
 		})
 		return
 	}
-	// 游标：出现且非法 → 400，不让坏游标被静默当成 0。
-	cursor := int64(0)
-	if raw := r.URL.Query().Get("cursor"); raw != "" {
-		n, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil || n < 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte("cursor 必须是非负整数"))
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		http.Error(w, "查询参数编码无效", http.StatusBadRequest)
+		return
+	}
+	var cursor int64
+	if values, supplied := query["cursor"]; supplied {
+		if len(values) != 1 {
+			http.Error(w, "cursor 只能指定一次", http.StatusBadRequest)
 			return
 		}
-		cursor = n
+		value, err := strconv.ParseUint(values[0], 10, 63)
+		if err != nil {
+			http.Error(w, "cursor 必须是非负的 64 位整数", http.StatusBadRequest)
+			return
+		}
+		cursor = int64(value)
 	}
 	// 先校验握手（失败在劫持之前以 HTTP 错误返回），再劫持。
 	if err := ws.ValidateUpgrade(r); err != nil {
@@ -126,6 +142,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request, sessionRef str
 		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
+	if !s.beginUpgrade() {
+		http.Error(w, "终端网关正在停止，请重连", http.StatusServiceUnavailable)
+		return
+	}
+	defer s.endUpgrade()
 	hj, err := ws.Hijack(w, r, s.opts.MaxFrame)
 	if err != nil {
 		s.log.Error("WebSocket 劫持失败", "session", sessionRef, "err", err)
@@ -134,13 +155,60 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request, sessionRef str
 	s.serveConn(r.Context(), hj, sessionRef, cursor)
 }
 
+func (s *Server) beginUpgrade() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.draining {
+		return false
+	}
+	if s.active == 0 {
+		s.idle = make(chan struct{})
+	}
+	s.active++
+	return true
+}
+
+func (s *Server) endUpgrade() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.active--
+	if s.active == 0 {
+		close(s.idle)
+		s.idle = nil
+	}
+}
+
+// DrainWebSockets 在请求根上下文取消后调用。拒绝新升级，等待已接入的处理器完成清理。
+func (s *Server) DrainWebSockets(ctx context.Context) error {
+	s.mu.Lock()
+	s.draining = true
+	idle := s.idle
+	s.mu.Unlock()
+	if idle == nil {
+		return nil
+	}
+	select {
+	case <-idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // serveConn 驱动一条已建立的 WebSocket 连接：读能力声明 → 注册 presence → 回协商结果 →
 // replay 历史 → 转 live，并负责读客户端帧（ping/pong、业务消息）。
 func (s *Server) serveConn(parent context.Context, hj *ws.Conn, sessionRef string, cursor int64) {
 	ctx, cancel := context.WithCancel(parent)
-	// defer 顺序（LIFO）：先取消订阅，再关连接。
-	defer hj.Close()
-	defer cancel()
+	var senderDone chan struct{}
+	stopClose := context.AfterFunc(parent, func() { _ = hj.Close() })
+	defer func() {
+		stopClose()
+		cancel()
+		hj.Close() // 唤醒正在写入慢客户端的发送者。
+		if senderDone != nil {
+			<-senderDone
+		}
+	}()
 
 	decl, err := s.readCapabilities(hj)
 	if err != nil {
@@ -148,89 +216,97 @@ func (s *Server) serveConn(parent context.Context, hj *ws.Conn, sessionRef strin
 		return
 	}
 	terminalID := decl.TerminalID
-	// 显式 Leave 只是尽力而为（连接正常关闭时）；即使永远不调用，TTL 也会把过期条目收敛掉。
-	defer s.opts.Presence.Leave(sessionRef, terminalID)
-
-	// 注册 presence（带时刻；过期靠 TTL，不靠断开回调）。
-	s.opts.Presence.Touch(presence.Entry{
+	reg := s.opts.Presence.Register(presence.Entry{
 		SessionRef: sessionRef,
 		TerminalID: terminalID,
 		Kind:       decl.Cap.Kind,
 		Renderers:  decl.Cap.Renderers,
 	})
+	defer reg.Leave()
 
-	// 先建立订阅，再取历史快照；两者重叠的事件在回放后按实际发送的序号去重。
+	// 在订阅时确定回放终点，后续的新事件进入实时流。
 	// 协商帧发出之前订阅已就绪，因此客户端随即触发的新事件不会落入交接窗口。
 	sub, err := s.opts.Source.Subscribe(ctx, sessionRef)
 	if err != nil {
-		hj.CloseWith("订阅实时事件失败: " + err.Error())
+		s.log.Warn("订阅实时事件失败", "session", sessionRef, "err", err)
+		hj.CloseServerError("订阅实时事件失败，请重连")
 		return
 	}
 
 	// 回协商结果，让终端知道它会被如何渲染。
 	neg, _ := json.Marshal(map[string]any{
-		"type":        "capability_negotiated",
-		"terminal_id": terminalID,
-		"kind":        string(decl.Cap.Kind),
-		"renderers":   decl.Cap.Renderers,
+		"type":                  "capability_negotiated",
+		"terminal_id":           terminalID,
+		"kind":                  string(decl.Cap.Kind),
+		"renderers":             decl.Cap.Renderers,
+		"presence_heartbeat_ms": max(int64(1), s.opts.Presence.HeartbeatInterval().Milliseconds()),
 	})
 	if err := hj.WriteFrame(ws.Frame{OpCode: ws.OpText, Payload: neg}); err != nil {
 		return
 	}
 
-	// 游标只筛选历史。即使请求游标领先于现有日志，订阅后的新事件仍按原语义推送，
-	// 因此去重水位从实际已回放的事件计算，不直接使用请求游标。
-	hist, err := s.opts.Source.History(ctx, sessionRef, cursor)
-	if err != nil {
-		hj.CloseWith("历史回放失败: " + err.Error())
-		return
-	}
-	var replayedThrough int64
-	for _, ev := range hist {
-		if err := s.pushEvent(hj, decl.Cap, ev); err != nil {
-			return
-		}
-		replayedThrough = ev.Seq
-	}
-	hasReplayed := len(hist) > 0
-
-	// 实时推送 goroutine：忽略已回放的重叠部分，其余增量推给客户端。
+	// 单个发送者按顺序推进历史和实时事件；读循环同时接收心跳与断线通知。
+	senderDone = make(chan struct{})
 	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case ev, ok := <-sub:
-				if !ok {
-					return
-				}
-				if hasReplayed && ev.Seq <= replayedThrough {
-					continue
-				}
-				if err := s.pushEvent(hj, decl.Cap, ev); err != nil {
-					cancel()
-					return
-				}
-			}
-		}
+		defer close(senderDone)
+		s.streamEvents(ctx, hj, sessionRef, cursor, decl.Cap, sub)
 	}()
 
 	// 主循环：处理客户端帧。
 	for {
 		f, err := hj.ReadFrame()
 		if err != nil {
-			hj.CloseWith(ws.CloseReason(err))
+			if ctx.Err() == nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+				hj.CloseWith(ws.CloseReason(err))
+			}
 			return
 		}
 		switch f.OpCode {
+		case ws.OpClose:
+			return
 		case ws.OpPing:
+			reg.Refresh()
 			if err := hj.WriteFrame(ws.Frame{OpCode: ws.OpPong, Payload: f.Payload}); err != nil {
 				return
 			}
-		case ws.OpClose:
-			return
+		case ws.OpPong:
+			reg.Refresh()
 		case ws.OpText, ws.OpBinary:
-			s.handleClientMessage(ctx, hj, f.Payload)
+			s.handleClientMessage(ctx, hj, f.Payload, reg.Refresh())
+		}
+	}
+}
+
+func (s *Server) streamEvents(ctx context.Context, hj *ws.Conn, sessionRef string, cursor int64, cap capability.Capabilities, sub events.Subscription) {
+	// 客户端游标只筛选历史，即便游标领先也从本次订阅的水位转入实时流。
+	err := s.opts.Source.Replay(ctx, sessionRef, cursor, sub.Through, func(ev events.Event) error {
+		return s.pushEvent(hj, cap, ev)
+	})
+	if err != nil {
+		if ctx.Err() == nil {
+			s.log.Warn("历史回放中断", "session", sessionRef, "err", err)
+			hj.CloseServerError("历史回放已中断，请带游标重连")
+		}
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-sub.Live:
+			if !ok {
+				if ctx.Err() == nil {
+					hj.CloseServerError("实时订阅已中断，请带游标重连")
+				}
+				return
+			}
+			if err := s.pushEvent(hj, cap, ev); err != nil {
+				if ctx.Err() == nil {
+					s.log.Warn("实时事件投递失败", "session", sessionRef, "seq", ev.Seq, "err", err)
+					hj.CloseServerError("实时事件投递失败，请带游标重连")
+				}
+				return
+			}
 		}
 	}
 }
@@ -251,6 +327,7 @@ func (s *Server) pushEvent(hj *ws.Conn, cap capability.Capabilities, ev events.E
 	payload, err := json.Marshal(map[string]any{
 		"type":     "session_event",
 		"event":    ev,
+		"cursor":   strconv.FormatInt(ev.Seq, 10),
 		"renderer": renderStr,
 	})
 	if err != nil {
@@ -297,15 +374,18 @@ type clientMessage struct {
 }
 
 // handleClientMessage 处理客户端发来的业务消息。
+//   - action="heartbeat"：回应本连接是否仍持有终端的在线登记。
 //   - action="claim_control"：presence 相关敏感动作，走签名+OPA 校验（§8.2），结果回写。
 //   - 其它/未知 action：本网关只渲染视图、不实现控制状态机（§8.4.3），明确回绝而非静默落地。
-func (s *Server) handleClientMessage(ctx context.Context, hj *ws.Conn, body []byte) {
+func (s *Server) handleClientMessage(ctx context.Context, hj *ws.Conn, body []byte, presenceActive bool) {
 	var msg clientMessage
 	if err := json.Unmarshal(body, &msg); err != nil {
 		hj.CloseWith("消息 JSON 非法")
 		return
 	}
 	switch msg.Action {
+	case "heartbeat":
+		s.writeJSON(hj, map[string]any{"type": "heartbeat_ack", "presence_active": presenceActive})
 	case "claim_control":
 		if s.opts.Auth == nil {
 			s.writeJSON(hj, map[string]any{"type": "control_claim_result", "allowed": false, "reason": "鉴权未配置（fail-closed）"})

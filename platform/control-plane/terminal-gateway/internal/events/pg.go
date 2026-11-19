@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,8 +33,7 @@ import (
 //
 // 没有为它引入消息总线：轮询的代价是延迟（一个周期），而引入一条总线的代价是**多一个
 // 必须与日志保持一致的真相源**。会话日志本来就是权威，轮询它不需要任何一致性论证。
-// 轮询按游标推进且**阻塞发送**，所以不丢事件（内存实现丢弃慢订阅者，是因为那里的事件源
-// 由写入方直接驱动、不能反过来阻塞写入方；这里没有那个耦合，可以选更结实的语义）。
+// 实时轮询按页推进。发送受阻时只保留当前页，数据库连接已归还连接池。
 type PgEventSource struct {
 	pool     *pgxpool.Pool
 	interval time.Duration
@@ -51,6 +51,9 @@ type PgEventSource struct {
 // 前 N 条」显示成「这个会话就这么多」，与 §8.2 禁止的「伪造空历史」是同一类谎。
 // 所以超限时**报错并说出上限**，让它在界面上可见。
 const maxReplayEvents = 50_000
+
+// 每条连接在回放或追赶实时事件时按页释放查询结果。
+const logPageSize = 256
 
 // Options 装配 PgEventSource。
 type Options struct {
@@ -89,11 +92,52 @@ func (p *PgEventSource) History(ctx context.Context, sessionRef string, since in
 	if since < 0 {
 		return nil, errors.New("replay 游标不能为负")
 	}
+	out, err := p.readPage(ctx, sessionRef, since, math.MaxInt64, p.maxReplay+1)
+	if err != nil {
+		return nil, err
+	}
+	// 多取一条：命中上限说明后面还有，此时报错而不是把读到的部分当成全部。
+	if len(out) > p.maxReplay {
+		return nil, fmt.Errorf(
+			"会话 %s 在游标 %d 之后超过 %d 条事件，超出单次回放上限；这是上限而不是终点，请从更近的游标重连",
+			sessionRef, since, p.maxReplay)
+	}
+	return out, nil
+}
+
+// Replay 的终点取自 Subscribe，回放和实时读取共用这一次查询的水位。
+func (p *PgEventSource) Replay(ctx context.Context, sessionRef string, since, through int64, emit func(Event) error) error {
+	if since < 0 {
+		return errors.New("replay 游标不能为负")
+	}
+	for since < through {
+		page, err := p.readPage(ctx, sessionRef, since, through, logPageSize)
+		if err != nil {
+			return err
+		}
+		if len(page) == 0 {
+			return fmt.Errorf("会话日志水位 %d 在回放期间已不可读", through)
+		}
+		for _, ev := range page {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := emit(ev); err != nil {
+				return err
+			}
+			since = ev.Seq
+		}
+	}
+	return nil
+}
+
+// readPage 返回一页已提交的事件，且在向订阅者投递前归还数据库连接。
+func (p *PgEventSource) readPage(ctx context.Context, sessionRef string, since, through int64, limit int) ([]Event, error) {
 	rows, err := p.pool.Query(ctx,
 		`SELECT seq, event_type, payload FROM session_log
-		  WHERE session_ref = $1 AND seq > $2
+		  WHERE session_ref = $1 AND seq > $2 AND seq <= $3
 		  ORDER BY seq
-		  LIMIT $3`, sessionRef, since, p.maxReplay+1)
+		  LIMIT $4`, sessionRef, since, through, limit)
 	if err != nil {
 		return nil, fmt.Errorf("读取会话日志失败: %w", err)
 	}
@@ -122,12 +166,6 @@ func (p *PgEventSource) History(ctx context.Context, sessionRef string, since in
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("遍历会话日志失败: %w", err)
 	}
-	// 多取一条：命中上限说明后面还有，此时报错而不是把读到的部分当成全部。
-	if len(out) > p.maxReplay {
-		return nil, fmt.Errorf(
-			"会话 %s 在游标 %d 之后超过 %d 条事件，超出单次回放上限；这是上限而不是终点，请从更近的游标重连",
-			sessionRef, since, p.maxReplay)
-	}
 	return out, nil
 }
 
@@ -142,12 +180,11 @@ func (p *PgEventSource) LatestSeq(ctx context.Context, sessionRef string) (int64
 }
 
 // Subscribe 按游标轮询并推送增量；返回的 channel 在 ctx 取消时关闭。
-func (p *PgEventSource) Subscribe(ctx context.Context, sessionRef string) (<-chan Event, error) {
-	// 起点取当前水位，只推订阅之后的增量。网关先 Subscribe 再读取 History，
-	// 并按实际回放的序号过滤重叠部分，以免回放转实时之间漏掉新事件。
+func (p *PgEventSource) Subscribe(ctx context.Context, sessionRef string) (Subscription, error) {
+	// 先确定已落盘的最大序号。查询之后提交的新事件都可从这个序号向后读取。
 	start, err := p.LatestSeq(ctx, sessionRef)
 	if err != nil {
-		return nil, err
+		return Subscription{}, err
 	}
 	ch := make(chan Event, 64)
 	go func() {
@@ -160,12 +197,15 @@ func (p *PgEventSource) Subscribe(ctx context.Context, sessionRef string) (<-cha
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				batch, err := p.History(ctx, sessionRef, cursor)
+			}
+			for ctx.Err() == nil {
+				batch, err := p.readPage(ctx, sessionRef, cursor, math.MaxInt64, logPageSize)
 				if err != nil {
-					// 读失败不关连接：这是视图层，一次抖动不该让终端掉线。
-					// 游标不推进，所以恢复后同一批事件仍会被送达。
+					if ctx.Err() != nil {
+						return
+					}
 					p.log.Warn("轮询会话事件失败", "session", sessionRef, "cursor", cursor, "err", err)
-					continue
+					break // 从最后送达的序号开始，在下个周期重试。
 				}
 				for _, ev := range batch {
 					select {
@@ -175,8 +215,11 @@ func (p *PgEventSource) Subscribe(ctx context.Context, sessionRef string) (<-cha
 						cursor = ev.Seq
 					}
 				}
+				if len(batch) < logPageSize {
+					break
+				}
 			}
 		}
 	}()
-	return ch, nil
+	return Subscription{Through: start, Live: ch}, nil
 }

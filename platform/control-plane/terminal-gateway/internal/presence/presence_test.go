@@ -26,11 +26,11 @@ func newStore(ttl time.Duration) (*Store, *fakeClock) {
 
 func TestSnapshot_ActiveAndExpired(t *testing.T) {
 	s, clk := newStore(30 * time.Second)
-	s.Touch(Entry{SessionRef: "s1", TerminalID: "a", Kind: capability.KindWeb})
+	s.Register(Entry{SessionRef: "s1", TerminalID: "a", Kind: capability.KindWeb})
 
 	// a 先上线，然后把时钟推进到超过 TTL，再让 b 上线：a 应过期、b 仍在线。
 	clk.advance(31 * time.Second)
-	s.Touch(Entry{SessionRef: "s1", TerminalID: "b", Kind: capability.KindCLI})
+	s.Register(Entry{SessionRef: "s1", TerminalID: "b", Kind: capability.KindCLI})
 
 	if got := s.Snapshot("s1"); len(got) != 1 || got[0].TerminalID != "b" {
 		t.Fatalf("过期收敛错误，得到 %+v", got)
@@ -41,7 +41,7 @@ func TestSnapshot_ActiveAndExpired(t *testing.T) {
 // 条目必须被自然收敛掉——不能依赖任何清理回调。这里不调用 Leave，纯靠时间。
 func TestExpiry_ConvergesAfterKill(t *testing.T) {
 	s, clk := newStore(10 * time.Second)
-	s.Touch(Entry{SessionRef: "s1", TerminalID: "ghost", Kind: capability.KindMobile})
+	s.Register(Entry{SessionRef: "s1", TerminalID: "ghost", Kind: capability.KindMobile})
 
 	// 模拟进程被杀：既不停心跳、也不调用 Leave。时间照常流逝。
 	clk.advance(11 * time.Second)
@@ -50,13 +50,38 @@ func TestExpiry_ConvergesAfterKill(t *testing.T) {
 	}
 }
 
-func TestTouch_OverwritesSameTerminal(t *testing.T) {
+func TestRegister_OverwritesSameTerminal(t *testing.T) {
 	s, _ := newStore(30 * time.Second)
-	s.Touch(Entry{SessionRef: "s1", TerminalID: "a", Kind: capability.KindWeb})
-	s.Touch(Entry{SessionRef: "s1", TerminalID: "a", Kind: capability.KindMobile})
+	s.Register(Entry{SessionRef: "s1", TerminalID: "a", Kind: capability.KindWeb})
+	s.Register(Entry{SessionRef: "s1", TerminalID: "a", Kind: capability.KindMobile})
 	got := s.Snapshot("s1")
 	if len(got) != 1 || got[0].Kind != capability.KindMobile {
 		t.Fatalf("同一终端应被覆盖为最新能力，得到 %+v", got)
+	}
+}
+
+func TestReconnectedTerminalOwnsItsPresence(t *testing.T) {
+	s, clk := newStore(30 * time.Second)
+	entry := Entry{SessionRef: "s1", TerminalID: "same", Kind: capability.KindWeb}
+	old := s.Register(entry)
+	entry.Kind = capability.KindMobile
+	current := s.Register(entry)
+	clk.advance(20 * time.Second)
+	if !current.Refresh() || old.Refresh() {
+		t.Fatal("only the new connection should refresh the terminal")
+	}
+	old.Leave()
+	clk.advance(20 * time.Second)
+	if got := s.Snapshot("s1"); len(got) != 1 || got[0].Kind != capability.KindMobile {
+		t.Fatalf("new connection lost its presence: %+v", got)
+	}
+	clk.advance(11 * time.Second)
+	if got := s.Snapshot("s1"); len(got) != 0 {
+		t.Fatalf("idle terminal should expire: %+v", got)
+	}
+	current.Leave()
+	if current.Refresh() || old.Refresh() {
+		t.Fatal("departed connections revived an offline terminal")
 	}
 }
 
@@ -64,8 +89,8 @@ func TestTouch_OverwritesSameTerminal(t *testing.T) {
 // 必须让该 session_ref 的序列**消失**（维度消失可被表达）。
 func TestPublishMetrics_DimensionDisappears(t *testing.T) {
 	s, clk := newStore(30 * time.Second)
-	s.Touch(Entry{SessionRef: "s1", TerminalID: "a", Kind: capability.KindWeb})
-	s.Touch(Entry{SessionRef: "s1", TerminalID: "b", Kind: capability.KindCLI})
+	s.Register(Entry{SessionRef: "s1", TerminalID: "a", Kind: capability.KindWeb})
+	s.Register(Entry{SessionRef: "s1", TerminalID: "b", Kind: capability.KindCLI})
 	s.PublishMetrics()
 
 	if !metricsHasPresence("s1", 2) {
