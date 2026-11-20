@@ -294,8 +294,8 @@ ALTER TABLE scheduler_control_commands ADD COLUMN IF NOT EXISTS waiter_task_id T
 // 索引，稳态下匹配 0 行但照样要扫），放在同一个事务里就等于每次启动都把放置路径
 // 堵住一次全表扫描那么久——表越大、滚动重启越频繁，越疼。
 //
-// 挪出来之后它们只拿行锁（稳态下一行都不锁），与放置并发执行。每条都是幂等的，
-// 多个副本同时启动时重复执行无害。
+// 每条回填在独立事务里执行，与放置并发，不继承 DDL 的 ACCESS EXCLUSIVE 锁。
+// 回填仍须持初始化咨询锁：否则其他副本的 DDL 可与跨表 UPDATE 交错取得表锁并死锁。
 var backfills = []string{
 	`UPDATE scheduler_tasks SET requested_cluster_id=cluster_id WHERE requested_cluster_id='' AND cluster_id<>''`,
 	// n.cluster_id<>'' ：节点没有集群时没有可回填的值，不加这个条件会让这些行
@@ -337,31 +337,35 @@ func NewWithSink(ctx context.Context, dsn string, sink dispatch.Sink) (*Store, e
 	return s, nil
 }
 
-// Init 幂等建表（含预插空租约行）。
+// Init 幂等建表（含预插空租约行），然后逐条回填旧数据。
 func (s *Store) Init(ctx context.Context) error {
-	// Multiple scheduler replicas may initialize the same database concurrently.
-	// PostgreSQL's IF NOT EXISTS does not serialize creation of the backing
-	// relation/type, so guard the whole schema transaction with a cluster-wide
-	// advisory lock before executing the DDL.
+	if err := s.initTransaction(ctx, DDL, "建表"); err != nil {
+		return err
+	}
+	// 提交建表事务后释放 DDL 表锁；每条回填重新取初始化锁，避免与其他副本建表重叠。
+	for _, stmt := range backfills {
+		if err := s.initTransaction(ctx, stmt, "回填"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// initTransaction 串行化各副本的建表与回填阶段，且每个阶段独立提交、释放表锁。
+func (s *Store) initTransaction(ctx context.Context, stmt, phase string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("scheduler: 开启建表事务失败: %w", err)
+		return fmt.Errorf("scheduler: 开启%s事务失败: %w", phase, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(781234567)`); err != nil {
-		return fmt.Errorf("scheduler: 获取建表锁失败: %w", err)
+		return fmt.Errorf("scheduler: 获取%s锁失败: %w", phase, err)
 	}
-	if _, err := tx.Exec(ctx, DDL); err != nil {
-		return fmt.Errorf("scheduler: 建表失败: %w", err)
+	if _, err := tx.Exec(ctx, stmt); err != nil {
+		return fmt.Errorf("scheduler: %s失败: %w", phase, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("scheduler: 提交建表事务失败: %w", err)
-	}
-	// 回填在建表事务提交之后做，不持有任何表级锁（理由见 backfills）。
-	for _, stmt := range backfills {
-		if _, err := s.pool.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("scheduler: 回填失败: %w", err)
-		}
+		return fmt.Errorf("scheduler: 提交%s事务失败: %w", phase, err)
 	}
 	return nil
 }

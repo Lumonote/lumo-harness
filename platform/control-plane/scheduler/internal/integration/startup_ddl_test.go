@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"context"
+	"net/url"
 	"regexp"
 	"testing"
 	"time"
@@ -52,6 +53,120 @@ func TestInitStillBackfillsLegacyRows(t *testing.T) {
 	}
 	if n := rowCount(t, st, `SELECT count(*) FROM scheduler_task_attempts WHERE task_id='legacy' AND assigned_cluster_id='cn-north'`); n != 1 {
 		t.Fatal("启动后 attempt 行应被回填 assigned 集群")
+	}
+}
+
+// 暂停一个真实 Init 的回填，再启动另一个 Init。第二个实例必须在建表前等待，
+// 同时第一个实例已经提交了建表事务，普通租约读取仍应畅通。
+func TestConcurrentInitDoesNotOverlapDDLWithBackfill(t *testing.T) {
+	st := newStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := st.Pool().Exec(ctx, `
+		INSERT INTO scheduler_tasks (task_id, realm, cluster_id, requires, priority, state, created_at, updated_at)
+		VALUES ('paused-backfill', 'r1', 'cn-north', '[]', 0, 'PENDING', 1, 1);
+		CREATE FUNCTION scheduler_test_pause_backfill() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			PERFORM pg_advisory_xact_lock(781234568);
+			RETURN NEW;
+		END $$;
+		CREATE TRIGGER scheduler_test_pause_backfill BEFORE UPDATE OF requested_cluster_id
+			ON scheduler_tasks FOR EACH ROW EXECUTE FUNCTION scheduler_test_pause_backfill()`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		if _, err := st.Pool().Exec(cleanupCtx, `
+			DROP TRIGGER scheduler_test_pause_backfill ON scheduler_tasks;
+			DROP FUNCTION scheduler_test_pause_backfill()`); err != nil {
+			t.Errorf("清理回填闸门失败: %v", err)
+		}
+	})
+
+	// 单连接池保证在 DDL 和回填事务之间也能用同一个后端 PID 精确观察。
+	newInitStore := func() (*store.Store, uint32) {
+		t.Helper()
+		u, err := url.Parse(testDSN(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := u.Query()
+		q.Set("pool_max_conns", "1")
+		u.RawQuery = q.Encode()
+		initStore, err := store.New(ctx, u.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(initStore.Close)
+		var pid uint32
+		if err := initStore.Pool().QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+			t.Fatal(err)
+		}
+		return initStore, pid
+	}
+	first, firstPID := newInitStore()
+	second, secondPID := newInitStore()
+	gateConn := sideConn(t)
+	gate, err := gateConn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pending []<-chan error
+	defer func() {
+		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer releaseCancel()
+		if err := gate.Rollback(releaseCtx); err != nil {
+			t.Errorf("释放回填闸门失败: %v", err)
+		}
+		// Init 使用有期限的 ctx；在清理触发器和测试 schema 前收回所有 goroutine。
+		for i, done := range pending {
+			if err := <-done; err != nil {
+				t.Errorf("Init %d: %v", i+1, err)
+			}
+		}
+	}()
+	if _, err := gate.Exec(ctx, `SELECT pg_advisory_xact_lock(781234568)`); err != nil {
+		t.Fatal(err)
+	}
+	startInit := func(initStore *store.Store) {
+		done := make(chan error, 1)
+		pending = append(pending, done)
+		go func() { done <- initStore.Init(ctx) }()
+	}
+	waitBlockedBy := func(pid, blocker uint32) {
+		t.Helper()
+		waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer waitCancel()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			var blocked bool
+			if err := st.Pool().QueryRow(waitCtx, `SELECT EXISTS (
+				SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'
+				AND $2::integer=ANY(pg_blocking_pids(pid)))`, pid, blocker).Scan(&blocked); err != nil {
+				t.Fatalf("观察 Init 锁等待失败: %v", err)
+			}
+			if blocked {
+				return
+			}
+			select {
+			case <-waitCtx.Done():
+				t.Fatalf("后端 %d 未等待后端 %d: %v", pid, blocker, waitCtx.Err())
+			case <-ticker.C:
+			}
+		}
+	}
+	startInit(first)
+	waitBlockedBy(firstPID, gateConn.PgConn().PID())
+	startInit(second)
+	waitBlockedBy(secondPID, firstPID)
+
+	readCtx, readCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer readCancel()
+	var id int
+	if err := st.Pool().QueryRow(readCtx, `SELECT id FROM scheduler_leader_lease WHERE id=1`).Scan(&id); err != nil {
+		t.Fatalf("回填期间并发 Init 不应持有建表锁并阻塞租约读取: %v", err)
 	}
 }
 
