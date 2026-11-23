@@ -316,6 +316,10 @@ func (s *Store) AddMember(ctx context.Context, projectID, userID, role string) e
 
 // UpdateMemberRole 改角色。最后一个 owner 降级 = 无主孤儿，拒绝。
 func (s *Store) UpdateMemberRole(ctx context.Context, projectID, userID, role string) error {
+	return s.UpdateMemberRoleIf(ctx, projectID, userID, role, "")
+}
+
+func (s *Store) UpdateMemberRoleIf(ctx context.Context, projectID, userID, role, expectedRole string) error {
 	// 同一事务内先数 owner：降级的是最后 owner 时 0 行更新
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -335,6 +339,9 @@ func (s *Store) UpdateMemberRole(ctx context.Context, projectID, userID, role st
 	}
 	if err != nil {
 		return err
+	}
+	if expectedRole != "" && cur != expectedRole {
+		return ErrResourceStale
 	}
 	if cur == domain.RoleOwner && role != domain.RoleOwner {
 		var owners int
@@ -357,6 +364,10 @@ func (s *Store) UpdateMemberRole(ctx context.Context, projectID, userID, role st
 
 // RemoveMember 移除成员。最后一个 owner 不可移除。
 func (s *Store) RemoveMember(ctx context.Context, projectID, userID string) error {
+	return s.RemoveMemberIf(ctx, projectID, userID, "")
+}
+
+func (s *Store) RemoveMemberIf(ctx context.Context, projectID, userID, expectedRole string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -375,6 +386,9 @@ func (s *Store) RemoveMember(ctx context.Context, projectID, userID string) erro
 	}
 	if err != nil {
 		return err
+	}
+	if expectedRole != "" && role != expectedRole {
+		return ErrResourceStale
 	}
 	if role == domain.RoleOwner {
 		var owners int

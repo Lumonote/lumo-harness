@@ -24,7 +24,9 @@ function mount() {
     fallback: { displayTitle: '仅保留的子会话', running: true, updatedAt: 100 },
   }
   const sessions = store({ phase: 'ready', ids: ['stopped', 'running', 'archived', 'blank', 'subagent'], byId })
-  const workspaces = store({ phase: 'ready', items: [], archivedSessionIds: ['archived'] })
+  const workspaces = store<ReturnType<DesktopPetServices['workspaces']['list']['getSnapshot']>>({
+    phase: 'ready', items: [], archivedSessionIds: ['archived'],
+  })
   const openSession = vi.fn()
   const services = { sessions: { list: sessions }, workspaces: { list: workspaces }, uiWorkspace: { openSession } } as unknown as DesktopPetServices
   disposers.push(installDesktopPetBridge(window, services))
@@ -67,6 +69,56 @@ describe('本机对话任务', () => {
     fireEvent.click(screen.getByRole('button', { name: /构建桌宠.*打开对话/u }))
     expect(openSession).toHaveBeenCalledWith('running')
     expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('同名对话依宿主记录区分工作区，未归属的历史对话可按目录搜索并打开', () => {
+    const { sessions, workspaces, openSession, byId } = mount()
+    const cwd = '/shared'
+    const history = { ...byId['stopped']!, displayTitle: '历史', cwd }
+    act(() => {
+      sessions.set({ phase: 'ready', ids: ['running', 'stopped', 'history'], byId: {
+        running: { ...byId['running']!, displayTitle: '同名', cwd },
+        stopped: { ...byId['stopped']!, displayTitle: '同名', cwd }, history,
+      } })
+      workspaces.set({ phase: 'ready', items: [
+        { workspaceId: 'one', title: '工作资料', path: '/projects/a', createdAt: '', sessionIds: ['running'] },
+        { workspaceId: 'two', title: '日记', path: '/shared', createdAt: '', sessionIds: ['stopped'] },
+      ] })
+    })
+    const filter = screen.getByRole('combobox', { name: '筛选工作区' })
+    const search = screen.getByRole('textbox', { name: '搜索对话' })
+    fireEvent.change(search, { target: { value: '工作资料' } })
+    expect(screen.getAllByRole('listitem')).toHaveLength(1)
+    expect(screen.getByRole('button', { name: /同名.*工作资料/ })).toBeTruthy()
+    fireEvent.change(search, { target: { value: '/shared' } })
+    fireEvent.change(filter, { target: { value: 'ws:two' } })
+    expect(screen.getAllByRole('listitem')).toHaveLength(1)
+    expect(screen.getByRole('button', { name: /同名.*日记/ })).toBeTruthy()
+    fireEvent.click(screen.getByRole('checkbox', { name: '只看进行中' }))
+    expect(screen.getByRole('status').textContent).toContain('没有符合条件')
+    fireEvent.click(screen.getByRole('checkbox', { name: '只看进行中' }))
+    fireEvent.change(filter, { target: { value: 'unassigned' } })
+    fireEvent.click(screen.getByRole('button', { name: /历史.*未归属工作区/ }))
+    expect(openSession).toHaveBeenCalledWith('history')
+  })
+
+  it('更换工作区重置分页，选中的工作区被移除时恢复全部对话', () => {
+    const { sessions, workspaces } = mount()
+    const ids = Array.from({ length: 32 }, (_, i) => `task-${i}`)
+    act(() => {
+      sessions.set({ phase: 'ready', ids, byId: Object.fromEntries(ids.map((id, i) => [id, { updatedAt: i }])) })
+      workspaces.set({ phase: 'ready', items: [
+        { workspaceId: 'all', path: '/projects', sessionIds: ids, createdAt: '' },
+      ] })
+    })
+    fireEvent.click(screen.getByRole('button', { name: /显示更多/ }))
+    expect(screen.getAllByRole('listitem')).toHaveLength(32)
+    const filter = screen.getByRole('combobox', { name: '筛选工作区' }) as HTMLSelectElement
+    fireEvent.change(filter, { target: { value: 'ws:all' } })
+    expect(screen.getAllByRole('listitem')).toHaveLength(30)
+    act(() => workspaces.set({ phase: 'ready', items: [] }))
+    expect(filter.value).toBe('')
+    expect(screen.getByRole('button', { name: /task-31.*未归属工作区/ })).toBeTruthy()
   })
 
   it('加载态与真实空列表区分，空检索有明确反馈', () => {

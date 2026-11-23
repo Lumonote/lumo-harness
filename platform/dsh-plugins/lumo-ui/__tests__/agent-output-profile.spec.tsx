@@ -65,4 +65,30 @@ describe('controlled file preset configuration', () => {
     expect(within(files).getByText(/审核结论请在独立审核任务中查看/u)).toBeTruthy()
     await waitFor(() => expect(request).toHaveBeenCalled())
   })
+
+  it('copies the selected run file verbatim and recovers from denied clipboard access', async () => {
+    const writeText = vi.fn().mockRejectedValueOnce(new Error('denied')).mockResolvedValue(undefined)
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const request = vi.fn().mockResolvedValue({ artifacts: [] })
+    const panel = (runID: string, text: string) => <TaskEvidencePanel taskID="task" runID={runID} request={request}
+      result={{ run_id: runID, state: 'COMPLETED', files: [{ name: 'report.md', media_type: 'text/markdown', text }] }}
+      error="" busy={false} label={value => value} close={vi.fn()} />
+    try {
+      const view = render(panel('old-run', '旧记录'))
+      fireEvent.click(screen.getByText('report.md · text/markdown', { selector: 'summary' }))
+      fireEvent.click(screen.getByRole('button', { name: '复制 report.md 正文' }))
+      expect((await screen.findByRole('alert')).textContent).toContain('无法写入剪贴板')
+      const body = '  本次交付\r\n\r\n结尾空格  \n'
+      view.rerender(panel('new-run', body))
+      expect(screen.queryByRole('alert')).toBeNull()
+      fireEvent.click(screen.getByText('report.md · text/markdown', { selector: 'summary' }))
+      fireEvent.click(screen.getByRole('button', { name: '复制 report.md 正文' }))
+      expect(await screen.findByText('已复制正文。')).toBeTruthy()
+      expect(writeText.mock.calls).toEqual([['旧记录'], [body]])
+    } finally {
+      if (original) Object.defineProperty(navigator, 'clipboard', original)
+      else Reflect.deleteProperty(navigator, 'clipboard')
+    }
+  })
 })

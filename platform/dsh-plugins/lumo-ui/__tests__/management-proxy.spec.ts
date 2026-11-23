@@ -5,6 +5,10 @@ import { encodeIdentityAssertion, signIdentityAssertion } from '../src/identity.
 import { KnowledgeSourceConflictError } from '../../knowledge/src/pg-provider.ts'
 import { forbidden } from '../../../shared/seam-contracts/errors.ts'
 
+// These HTTP proxy tests exercise management routes; the separately tested
+// desktop computer-use route requires its packaged DSH browser-auth provider.
+vi.mock('../src/computer-use-api.ts', () => ({ registerComputerUseRoutes: vi.fn() }))
+
 const config: Config = {
   schedulerUrl: '', projectsUrl: 'http://projects.test', flowsUrl: '', connectorUrl: '', governanceUrl: 'http://governance.test', registryUrl: '',
   realm: 'realm-a', userId: 'member-a', roles: ['viewer'], projectId: 'project-a', deptId: 'dept-a',
@@ -14,6 +18,28 @@ const config: Config = {
   skillhubCommand: '', skillhubApiBase: '', skillhubSnapshotFile: '',
 }
 const digest = 'a'.repeat(64)
+
+it('binds directory snapshots to the server-resolved viewer and ignores forged query identity', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ projects: [], viewer: { realm: 'forged', userId: 'other' } })))
+  vi.stubGlobal('fetch', fetchMock)
+  const result = await invoke('GET', '/lumo/api/projects/directory?realm=forged&userId=other&limit=20')
+  expect(result.body).toMatchObject({ viewer: { realm: 'realm-a', userId: 'member-a' } })
+  expect(fetchMock.mock.calls[0][0]).toBe('http://projects.test/v1/projects/directory?limit=20')
+})
+
+it('only forwards the observed role for member changes', async () => {
+  const ready = { ...config, deploymentMode: 'cluster', clusterStatus: 'ready' } as Config
+  const fetchMock = vi.fn().mockImplementation(async () => new Response('{"error":"changed"}', {status:409}))
+  vi.stubGlobal('fetch', fetchMock)
+  const member = '/lumo/api/projects/p-1/members/bob'
+  for (const method of ['PATCH','DELETE']) {
+    const result = await invoke(method, member + '?expectedRole=viewer&realm=forged', {config:ready, body: method === 'PATCH' ? {role:'editor'} : undefined})
+    expect(result.status).toBe(409)
+    expect(fetchMock.mock.lastCall?.[0]).toBe('http://projects.test/v1/projects/p-1/members/bob?expectedRole=viewer')
+  }
+  expect((await invoke('DELETE',member+'?expectedRole=&expectedRole=viewer',{config:ready})).status).toBe(400)
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+})
 
 it('Space 授权代理使用受信身份与指定项目，保留 CAS 冲突且不转发伪造 query', async () => {
   const ready: Config = { ...config, collaboratorUrl: 'http://collaborator.test', deploymentMode: 'cluster', clusterStatus: 'ready' }

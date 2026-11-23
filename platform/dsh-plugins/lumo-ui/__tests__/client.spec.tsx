@@ -78,7 +78,8 @@ function createLumoContext(preloadedThemes: string[] = []): { context: unknown; 
   }
   // inputTriggers 是上游 ui-input-trigger 的公开服务；替身只记录登记的 `/` 源。
   const inputTriggers = { registerSource: (source: SlashSource) => { sources.push(source); return () => { sources.splice(sources.indexOf(source), 1) } } }
-  const context: Record<string, unknown> = { root: {}, slots, theme, effect: (body: () => unknown) => { body() }, on: () => () => {} }
+  const context: Record<string, unknown> = { [Symbol.for('cordis.root')]: {}, slots, theme, effect: (body: () => unknown) => { body() }, on: () => () => {} }
+  Object.defineProperty(context, 'root', { get() { throw Error('cannot get property "root" without inject') } })
   context['get'] = (name: string) => name === 'inputTriggers' ? inputTriggers : undefined
   context['inject'] = (_deps: string[], body: (ctx: unknown) => void) => { body(context) }
   return { context, registered, sources }
@@ -1213,8 +1214,10 @@ describe('Lumo native Harness integration', () => {
     apply(context as never)
     const first = registered.map(item => `${item.name}:${item.id}`)
 
-    apply(context as never)
+    apply(Object.create(context as object) as never)
 
+    expect(first).toContain('sidebar.navigation:lumo-navigation')
+    expect(first).toContain('shell.overlay:lumo-platform')
     expect(registered.map(item => `${item.name}:${item.id}`)).toEqual(first)
   })
 

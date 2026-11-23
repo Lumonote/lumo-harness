@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -45,6 +45,7 @@ struct Preferences {
     always_on_top: bool,
     launch_on_start: bool,
     anchor: Option<(i32, i32)>,
+    workbenches: Vec<CloudWorkbench>,
 }
 
 impl Default for Preferences {
@@ -53,6 +54,7 @@ impl Default for Preferences {
             always_on_top: true,
             launch_on_start: true,
             anchor: None,
+            workbenches: Vec::new(),
         }
     }
 }
@@ -76,6 +78,69 @@ pub struct Snapshot {
     always_on_top: bool,
     launch_on_start: bool,
     compact: bool,
+    workbenches: Vec<CloudWorkbench>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct CloudWorkbench {
+    label: String,
+    origin: String,
+}
+
+fn cloud_origin(raw: &str) -> Result<tauri::Url, String> {
+    let err = "请输入 HTTPS 服务器地址，仅含域名或 IP 和可选端口";
+    if raw.len() > 512
+        || raw.contains(['?', '#', '@', '\\'])
+        || raw.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(err.into());
+    }
+    let rest = raw.strip_prefix("https://").ok_or(err)?;
+    let authority = rest.strip_suffix('/').unwrap_or(rest);
+    if authority.is_empty() || authority.contains('/') || authority.chars().any(char::is_control) {
+        return Err(err.into());
+    }
+    let url: tauri::Url = raw.parse().map_err(|_| err)?;
+    if !is_external_web_link(&url) || url.path() != "/" {
+        return Err(err.into());
+    }
+    Ok(url)
+}
+
+fn change_workbenches(
+    current: &[CloudWorkbench],
+    change: &str,
+    origin: &str,
+    label: &str,
+) -> Result<Vec<CloudWorkbench>, String> {
+    let origin = cloud_origin(origin)?.to_string();
+    let mut items = current.to_vec();
+    let index = items.iter().position(|item| item.origin == origin);
+    match change {
+        "save" => {
+            let label = label.trim();
+            if label.is_empty() || label.chars().count() > 60 || label.chars().any(char::is_control)
+            {
+                return Err("请填写 60 字以内的服务器名称".into());
+            }
+            let item = CloudWorkbench {
+                label: label.to_owned(),
+                origin,
+            };
+            if let Some(i) = index {
+                items[i] = item;
+            } else if items.len() < 12 {
+                items.push(item);
+            } else {
+                return Err("最多保存 12 个云工作台".into());
+            }
+        }
+        "remove" => {
+            items.remove(index.ok_or("此云工作台已被移除")?);
+        }
+        _ => return Err("未知的云工作台操作".into()),
+    }
+    Ok(items)
 }
 
 /// Assets use a dedicated native protocol in both dev and release. The runtime's
@@ -97,6 +162,10 @@ pub fn asset(request: tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Ve
         "/pet-motion.mjs" => (
             "text/javascript; charset=utf-8",
             include_bytes!("../../desktop-assets/pet-motion.mjs"),
+        ),
+        "/dev-tools.mjs" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../desktop-assets/dev-tools.mjs"),
         ),
         "/pet-whale.svg" => (
             "image/svg+xml",
@@ -519,7 +588,40 @@ pub fn pet_snapshot(window: WebviewWindow, app: AppHandle) -> Result<Snapshot, S
         always_on_top: data.preferences.always_on_top,
         launch_on_start: data.preferences.launch_on_start,
         compact: !data.expanded,
+        workbenches: data.preferences.workbenches.clone(),
     })
+}
+
+#[tauri::command]
+pub fn pet_cloud_workbench(
+    window: WebviewWindow,
+    action: String,
+    origin: String,
+    label: String,
+) -> Result<Vec<CloudWorkbench>, String> {
+    authorize(&window)?;
+    let state = window.app_handle().state::<PetState>();
+    let mut data = state.data.lock().map_err(|_| "桌宠设置暂不可用")?;
+    if action == "open" {
+        let saved = data
+            .preferences
+            .workbenches
+            .iter()
+            .find(|item| item.origin == origin)
+            .ok_or("请先保存云工作台地址")?;
+        let url = cloud_origin(&saved.origin)?;
+        let items = data.preferences.workbenches.clone();
+        drop(data);
+        open_external_link(&url)?;
+        return Ok(items);
+    }
+    let next = change_workbenches(&data.preferences.workbenches, &action, &origin, &label)?;
+    let previous = std::mem::replace(&mut data.preferences.workbenches, next);
+    if let Err(err) = save(&state, &data) {
+        data.preferences.workbenches = previous;
+        return Err(err);
+    }
+    Ok(data.preferences.workbenches.clone())
 }
 
 #[tauri::command]
@@ -757,13 +859,448 @@ pub async fn pet_workspaces(
 ) -> Result<serde_json::Value, String> {
     authorize(&window)?;
     let main = connected_main(&app)?;
+    tauri::async_runtime::spawn_blocking(move || workspace_snapshot(&main))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn workspace_snapshot(main: &WebviewWindow) -> Result<serde_json::Value, String> {
+    let result = evaluate(main, "(() => { try { return window.__lumoDesktopPet?.workspaces() ?? {error:'工作空间正在加载'} } catch { return {error:'工作空间暂不可用'} } })()".into())?;
+    if let Some(error) = result["error"].as_str() {
+        return Err(error.to_string());
+    }
+    let items = result["workspaces"].as_array().ok_or("工作空间响应无效")?;
+    if items.len() > 1000
+        || items
+            .iter()
+            .any(|item| !item["id"].is_string() || !item["label"].is_string())
+    {
+        return Err("工作空间响应无效".into());
+    }
+    Ok(result)
+}
+
+enum DevAction {
+    Read,
+    Note(String),
+    Goal(String),
+    Session {
+        provider: String,
+        action: String,
+        session_id: String,
+    },
+    Transcript {
+        provider: String,
+        session_id: String,
+        text: String,
+    },
+    Open {
+        tool: String,
+        goal: String,
+    },
+    Locate {
+        tool: String,
+        relative: String,
+        line: u32,
+    },
+}
+
+fn workspace_item<'a>(
+    snapshot: &'a serde_json::Value,
+    workspace_id: &str,
+) -> Result<&'a serde_json::Value, String> {
+    if workspace_id.is_empty() || workspace_id.len() > 4096 {
+        return Err("工作区标识无效".into());
+    }
+    let mut matches = snapshot["workspaces"]
+        .as_array()
+        .ok_or("工作区列表无效")?
+        .iter()
+        .filter(|item| item["id"].as_str() == Some(workspace_id));
+    let item = matches.next().ok_or("该工作区已移除，请重新选择")?;
+    if matches.next().is_some() {
+        return Err("工作区标识不唯一".into());
+    }
+    Ok(item)
+}
+
+fn project_directory(item: &serde_json::Value) -> Result<PathBuf, String> {
+    let path = PathBuf::from(item["path"].as_str().ok_or("此工作区没有本地目录")?);
+    if !path.is_absolute() || !path.is_dir() {
+        return Err("工作区目录不在本机或已移除".into());
+    }
+    Ok(path)
+}
+
+static DEV_CONTROL: Mutex<()> = Mutex::new(());
+
+async fn with_dev_workspace<T: Send + 'static>(
+    window: WebviewWindow,
+    app: AppHandle,
+    workspace_id: String,
+    operation: impl FnOnce(&Path, &str, &serde_json::Value) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    authorize(&window)?;
+    let main = connected_main(&app)?;
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("development-memory");
     tauri::async_runtime::spawn_blocking(move || {
-        let result = evaluate(&main, "(() => { try { return window.__lumoDesktopPet?.workspaces() ?? {error:'工作空间正在加载'} } catch { return {error:'工作空间暂不可用'} } })()".into())?;
-        if let Some(error) = result["error"].as_str() { return Err(error.to_string()); }
-        let items = result["workspaces"].as_array().ok_or("工作空间响应无效")?;
-        if items.len() > 1000 || items.iter().any(|item| !item["id"].is_string() || !item["label"].is_string()) { return Err("工作空间响应无效".into()); }
-        Ok(result)
-    }).await.map_err(|error| error.to_string())?
+        let snapshot = workspace_snapshot(&main)?;
+        let workspace = workspace_item(&snapshot, &workspace_id)?;
+        let _control = DEV_CONTROL.lock().map_err(|_| "开发工具状态不可用")?;
+        operation(&root, &workspace_id, workspace)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn session_action(
+    root: &Path,
+    id: &str,
+    workspace: &serde_json::Value,
+    provider: &str,
+    action: &str,
+    input: &str,
+    launch: impl FnOnce(&str, &Path, Option<&str>, bool) -> Result<(), String>,
+) -> Result<super::dev_memory::Memory, String> {
+    use super::dev_memory::{append, read};
+    if !super::dev_catalog::is_agent(provider) {
+        return Err("请选择支持的编码助手".into());
+    }
+    let session = match action {
+        "new" if input.is_empty() => {
+            (provider == "claude-code").then(|| uuid::Uuid::new_v4().to_string())
+        }
+        "link" | "resume" => {
+            let uuid = uuid::Uuid::try_parse(input).map_err(|_| "请输入完整的原生会话 UUID")?;
+            let canonical = uuid.to_string();
+            if !canonical.eq_ignore_ascii_case(input) {
+                return Err("请输入带连字符的完整 UUID".into());
+            }
+            Some(canonical)
+        }
+        _ => return Err("会话操作参数无效".into()),
+    };
+    if action == "link" {
+        return append(
+            root,
+            id,
+            "session_link",
+            provider,
+            session.as_deref().unwrap(),
+        );
+    }
+    let memory = read(root, id)?;
+    if action == "resume"
+        && !memory.entries.iter().any(|e| {
+            e.kind == "session_link"
+                && e.tool == provider
+                && session
+                    .as_ref()
+                    .is_some_and(|s| e.text.eq_ignore_ascii_case(s))
+        })
+    {
+        return Err("此会话尚未关联到当前项目和工具".into());
+    }
+    if action == "resume"
+        && session
+            .as_deref()
+            .is_some_and(|s| super::dev_memory::session_state(&memory, provider, s).archived)
+    {
+        return Err("请先从已归档列表恢复此会话，再继续会话".into());
+    }
+    let result = project_directory(workspace)
+        .and_then(|path| launch(provider, &path, session.as_deref(), action == "resume"));
+    if let Err(error) = result {
+        let target = session.as_deref().unwrap_or("新会话");
+        return append(
+            root,
+            id,
+            "session_failed",
+            provider,
+            &format!("{target}：{error}"),
+        );
+    }
+    let detail = match session {
+        Some(ref session) if action == "new" => {
+            append(root, id, "session_link", provider, session)
+                .map_err(|e| format!("已请求打开终端，未能保存关联；可手动关联 {session}。{e}"))?;
+            format!("已请求在终端中新建会话：{session}")
+        }
+        Some(session) => format!("已请求在终端中恢复会话：{session}"),
+        None if provider == "codex" => {
+            "已请求新建 Codex 会话。可在终端用 /status 查看 ID 并关联到此项目。".to_owned()
+        }
+        None => "已请求新建 Gemini CLI 会话。可用 /stats 查看完整 UUID 并关联到此项目。".to_owned(),
+    };
+    append(root, id, "session_open", provider, &detail)
+        .map_err(|e| format!("{detail}。操作记录未保存：{e}"))
+}
+
+async fn dev_action(
+    window: WebviewWindow,
+    app: AppHandle,
+    workspace_id: String,
+    action: DevAction,
+) -> Result<super::dev_memory::Memory, String> {
+    with_dev_workspace(window, app, workspace_id, move |root, id, workspace| {
+        use super::dev_memory::{append, handoff, read};
+        let (tool, outcome) = match action {
+            DevAction::Read => return read(root, id),
+            DevAction::Note(note) => return append(root, id, "note", "", &note),
+            DevAction::Goal(goal) => return append(root, id, "goal", "", &goal),
+            DevAction::Session {
+                provider,
+                action,
+                session_id,
+            } => {
+                return session_action(
+                    root,
+                    id,
+                    workspace,
+                    &provider,
+                    &action,
+                    &session_id,
+                    super::dev_agents::launch,
+                )
+            }
+            DevAction::Transcript {
+                provider,
+                session_id,
+                text,
+            } => return super::dev_memory::transcript(root, id, &provider, &session_id, &text),
+            DevAction::Open { tool, goal } => {
+                validate_dev_tool(&tool)?;
+                let memory = read(root, id)?;
+                let previous = memory.entries.iter().rev().find(|e| e.kind == "goal");
+                if !goal.trim().is_empty() {
+                    if !previous.is_some_and(|e| e.text == goal) {
+                        append(root, id, "goal", &tool, &goal)?;
+                    }
+                } else if previous.is_none() {
+                    return Err("请先填写本次开发目标".into());
+                }
+                let outcome = project_directory(workspace)
+                    .and_then(|dir| {
+                        super::dev_tools::open_workspace(&tool, &dir, &handoff(root, id)?)
+                    })
+                    .map(|_| ("opened", "已向编辑器请求打开项目和交接文档。".to_owned()));
+                (tool, outcome)
+            }
+            DevAction::Locate {
+                tool,
+                relative,
+                line,
+            } => {
+                validate_dev_tool(&tool)?;
+                if relative.len() > 2048
+                    || relative.trim().is_empty()
+                    || relative.chars().any(char::is_control)
+                    || !(1..=10_000_000).contains(&line)
+                {
+                    return Err("请填写项目内相对路径和有效行号".into());
+                }
+                let outcome = project_directory(workspace)
+                    .and_then(|dir| {
+                        super::dev_tools::open_project_file(&tool, &dir, &relative, line)
+                    })
+                    .map(|_| ("located", format!("{relative}:{line}")))
+                    .map_err(|e| format!("{relative}:{line} · {e}"));
+                (tool, outcome)
+            }
+        };
+        let (kind, text) = outcome.unwrap_or_else(|e| ("failed", e));
+        append(root, id, kind, &tool, &text)
+            .map_err(|e| format!("工具操作已尝试，记录保存失败；请先核对编辑器状态。{e}"))
+    })
+    .await
+}
+
+fn validate_dev_tool(tool: &str) -> Result<(), String> {
+    if super::dev_catalog::is_editor(tool) {
+        Ok(())
+    } else {
+        Err("未知的开发工具".into())
+    }
+}
+
+#[tauri::command]
+pub async fn pet_dev_tools(
+    window: WebviewWindow,
+) -> Result<Vec<super::dev_catalog::ToolStatus>, String> {
+    authorize(&window)?;
+    tauri::async_runtime::spawn_blocking(super::dev_catalog::detect)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn pet_dev_memory(
+    window: WebviewWindow,
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<super::dev_memory::Memory, String> {
+    dev_action(window, app, workspace_id, DevAction::Read).await
+}
+
+#[tauri::command]
+pub async fn pet_dev_session(
+    window: WebviewWindow,
+    app: AppHandle,
+    workspace_id: String,
+    provider: String,
+    action: String,
+    session_id: String,
+) -> Result<super::dev_memory::Memory, String> {
+    dev_action(
+        window,
+        app,
+        workspace_id,
+        DevAction::Session {
+            provider,
+            action,
+            session_id,
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn pet_dev_transcript(
+    window: WebviewWindow,
+    app: AppHandle,
+    workspace_id: String,
+    provider: String,
+    session_id: String,
+    text: String,
+) -> Result<super::dev_memory::Memory, String> {
+    dev_action(
+        window,
+        app,
+        workspace_id,
+        DevAction::Transcript {
+            provider,
+            session_id,
+            text,
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn pet_dev_copy_context(
+    window: WebviewWindow,
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<(), String> {
+    with_dev_workspace(window, app, workspace_id, |root, id, _| {
+        let text = super::dev_memory::context(root, id)?;
+        copy_dev_text(text)
+    })
+    .await
+}
+
+fn copy_dev_text(text: String) -> Result<(), String> {
+    // Some window systems keep clipboard contents only while the owner is alive.
+    static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
+    let mut clipboard = CLIPBOARD.lock().map_err(|_| "剪贴板不可用")?;
+    if clipboard.is_none() {
+        *clipboard =
+            Some(arboard::Clipboard::new().map_err(|e| format!("无法打开系统剪贴板：{e}"))?);
+    }
+    clipboard
+        .as_mut()
+        .unwrap()
+        .set_text(text)
+        .map_err(|e| format!("无法复制项目上下文：{e}"))
+}
+
+#[tauri::command]
+pub async fn pet_dev_handoff(
+    window: WebviewWindow,
+    app: AppHandle,
+    workspace_id: String,
+    selection: super::dev_memory::HandoffSelection,
+    expected_digest: Option<String>,
+) -> Result<super::dev_memory::MemoryHandoff, String> {
+    with_dev_workspace(window, app, workspace_id, move |root, id, _| {
+        let packet =
+            super::dev_memory::selected_handoff(root, id, selection, expected_digest.as_deref())?;
+        if expected_digest.is_some() {
+            copy_dev_text(packet.text.clone())?;
+        }
+        Ok(packet)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn pet_dev_library(
+    window: WebviewWindow,
+    app: AppHandle,
+    workspace_id: String,
+    edit: super::dev_memory::LibraryEdit,
+) -> Result<super::dev_memory::Memory, String> {
+    with_dev_workspace(window, app, workspace_id, move |root, id, _| {
+        super::dev_memory::edit_library(root, id, edit)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn pet_dev_goal(
+    window: WebviewWindow,
+    app: AppHandle,
+    workspace_id: String,
+    text: String,
+) -> Result<super::dev_memory::Memory, String> {
+    dev_action(window, app, workspace_id, DevAction::Goal(text)).await
+}
+
+#[tauri::command]
+pub async fn pet_dev_note(
+    window: WebviewWindow,
+    app: AppHandle,
+    workspace_id: String,
+    text: String,
+) -> Result<super::dev_memory::Memory, String> {
+    dev_action(window, app, workspace_id, DevAction::Note(text)).await
+}
+
+#[tauri::command]
+pub async fn pet_dev_open(
+    window: WebviewWindow,
+    app: AppHandle,
+    workspace_id: String,
+    tool: String,
+    goal: String,
+) -> Result<super::dev_memory::Memory, String> {
+    dev_action(window, app, workspace_id, DevAction::Open { tool, goal }).await
+}
+
+#[tauri::command]
+pub async fn pet_dev_locate(
+    window: WebviewWindow,
+    app: AppHandle,
+    workspace_id: String,
+    tool: String,
+    relative: String,
+    line: u32,
+) -> Result<super::dev_memory::Memory, String> {
+    dev_action(
+        window,
+        app,
+        workspace_id,
+        DevAction::Locate {
+            tool,
+            relative,
+            line,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -817,6 +1354,209 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cloud_servers_persist_as_origins_without_login_secrets() {
+        for bad in [
+            "https://example.org/?token=secret",
+            "https://user:pwd@example.org",
+            "http://example.org",
+            "file:///tmp",
+            "https://example.org/path",
+            "https://example.org/a/..",
+            "https://example.org/#token",
+            "https://good.test\\@other.test",
+        ] {
+            assert!(cloud_origin(bad).is_err(), "{bad}");
+        }
+        let old: Preferences = serde_json::from_str(r#"{"launch_on_start":false}"#).unwrap();
+        assert!(old.workbenches.is_empty());
+        let list = change_workbenches(&[], "save", "https://Team.Example.org:443", "研发").unwrap();
+        let list = change_workbenches(&list, "save", "https://team.example.org/", "团队").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].label, "团队");
+        let mut prefs = old;
+        prefs.workbenches =
+            change_workbenches(&list, "save", "https://[::1]:9443", "实验室").unwrap();
+        let stored: Preferences =
+            serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
+        assert_eq!(stored.workbenches, prefs.workbenches);
+        assert_eq!(
+            change_workbenches(&stored.workbenches, "remove", "https://[::1]:9443", "").unwrap(),
+            list
+        );
+    }
+
+    #[test]
+    fn dev_workspace_requires_one_registered_id_and_uses_its_path() {
+        let dir = std::env::temp_dir();
+        let list = serde_json::json!({"workspaces":[{"id":"a","label":"A","path":dir},{"id":"b","label":"B"}]});
+        assert_eq!(
+            project_directory(workspace_item(&list, "a").unwrap()).unwrap(),
+            dir
+        );
+        assert!(project_directory(workspace_item(&list, "b").unwrap()).is_err());
+        assert!(workspace_item(&list, "gone").is_err());
+        assert!(workspace_item(
+            &serde_json::json!({"workspaces":[{"id":"a"},{"id":"a"}]}),
+            "a"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn archived_gemini_link_preserves_handoff_and_requires_restore_before_launch() {
+        use crate::dev_memory::{
+            append, context, edit_library, session_state, transcript, LibraryEdit,
+        };
+        let root = std::env::temp_dir().join(format!("lumo-archive-{}", uuid::Uuid::new_v4()));
+        let id = uuid::Uuid::new_v4().to_string();
+        let edit = |revision, archived| LibraryEdit::SessionState {
+            provider: "gemini".into(),
+            session: id.to_uppercase(),
+            revision,
+            pinned: true,
+            archived,
+        };
+        append(&root, "work", "session_link", "gemini", &id).unwrap();
+        append(&root, "work", "session_link", "codex", &id).unwrap();
+        transcript(&root, "work", "gemini", &id, "保留的交接记录").unwrap();
+        assert!(edit_library(&root, "other", edit(0, true)).is_err());
+        let memory = edit_library(&root, "work", edit(0, true)).unwrap();
+        assert!(session_state(&memory, "gemini", &id).archived);
+        assert!(!session_state(&memory, "codex", &id).archived);
+        assert!(edit_library(&root, "work", edit(0, false)).is_err());
+        let workspace = serde_json::json!({"path":root});
+        let rejected = session_action(
+            &root,
+            "work",
+            &workspace,
+            "gemini",
+            "resume",
+            &id,
+            |_, _, _, _| panic!("archived session must not launch"),
+        );
+        assert!(rejected.unwrap_err().contains("归档"));
+        assert!(context(&root, "work").unwrap().contains("保留的交接记录"));
+        let restored = edit_library(&root, "work", edit(1, false)).unwrap();
+        assert_eq!(restored.entries.len(), memory.entries.len());
+        assert!(session_state(&restored, "gemini", &id).pinned);
+        session_action(
+            &root,
+            "work",
+            &workspace,
+            "gemini",
+            "resume",
+            &id,
+            |provider, _, target, resume| {
+                assert_eq!(
+                    (provider, target, resume),
+                    ("gemini", Some(id.as_str()), true)
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_session_history_recovers_an_exact_link_and_only_after_accepted_launch() {
+        use super::super::dev_memory::read;
+        let dir = std::env::temp_dir().join(format!("lumo-pet-session-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let workspace = serde_json::json!({"path":dir});
+        let memory = session_action(
+            &dir,
+            "a",
+            &workspace,
+            "claude-code",
+            "new",
+            "",
+            |p, path, id, resume| {
+                assert_eq!((p, path, resume), ("claude-code", dir.as_path(), false));
+                assert!(uuid::Uuid::try_parse(id.unwrap()).is_ok());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            memory
+                .entries
+                .iter()
+                .map(|e| e.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["session_link", "session_open"]
+        );
+        let id = &memory.entries[0].text;
+        for (project, provider, target) in [
+            ("b", "claude-code", id.as_str()),
+            ("a", "codex", id.as_str()),
+            ("a", "claude-code", "--last"),
+        ] {
+            assert!(session_action(
+                &dir,
+                project,
+                &workspace,
+                provider,
+                "resume",
+                target,
+                |_, _, _, _| panic!("unlinked launch")
+            )
+            .is_err());
+        }
+        session_action(
+            &dir,
+            "a",
+            &workspace,
+            "claude-code",
+            "resume",
+            id,
+            |_, _, target, resume| {
+                assert!(resume);
+                assert_eq!(target, Some(id.as_str()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        session_action(
+            &dir,
+            "a",
+            &workspace,
+            "codex",
+            "new",
+            "",
+            |_, _, target, resume| {
+                assert!(!resume && target.is_none());
+                Ok(())
+            },
+        )
+        .unwrap();
+        session_action(
+            &dir,
+            "b",
+            &workspace,
+            "claude-code",
+            "new",
+            "",
+            |_, _, _, _| Err("终端不可用".into()),
+        )
+        .unwrap();
+        let failure = read(&dir, "b").unwrap();
+        assert_eq!(failure.entries.len(), 1);
+        assert_eq!(failure.entries[0].kind, "session_failed");
+        assert!(failure.entries[0].text.contains("终端不可用"));
+        assert_eq!(
+            read(&dir, "a")
+                .unwrap()
+                .entries
+                .iter()
+                .filter(|e| e.kind == "session_link")
+                .count(),
+            1
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn popup_policy_preserves_login_preopen_and_plain_web_links() {
         assert_eq!(
             popup_policy(&"about:blank".parse().unwrap()),
@@ -857,6 +1597,7 @@ mod tests {
             ("/pet.css", "text/css; charset=utf-8"),
             ("/pet.mjs", "text/javascript; charset=utf-8"),
             ("/pet-motion.mjs", "text/javascript; charset=utf-8"),
+            ("/dev-tools.mjs", "text/javascript; charset=utf-8"),
             ("/pet-whale.svg", "image/svg+xml"),
             ("/pet-breach-atlas.webp", "image/webp"),
             ("/pet-artwork.NOTICE", "text/plain; charset=utf-8"),

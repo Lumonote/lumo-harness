@@ -1,4 +1,5 @@
 import { BREACH_DURATION, mountWhaleMotion } from './pet-motion.mjs'
+import { mountDevTools } from './dev-tools.mjs'
 
 export const PET_ATTACHMENT_LIMITS = Object.freeze({ count: 4, fileBytes: 8 * 1024 * 1024, totalBytes: 16 * 1024 * 1024 })
 
@@ -32,12 +33,62 @@ export function mountPet(view) {
   let loadingWorkspaces = false
   let files = []
   let sendRequestId
+  let cloudListVersion = '', cloudBusy = false
   const fileReaders = new Set()
 
   const invoke = (command, args) => native
     ? Promise.resolve().then(() => bridge(command, args))
     : Promise.reject(Error('desktop_unavailable'))
   const listen = (target, event, handler) => target.addEventListener(event, handler, { signal: events.signal })
+  const devTools = mountDevTools({ doc, invoke, listen, getWorkspace: () => workspaceId })
+  const cloudFields = () => {
+    const item = snapshot.workbenches?.find(i => i.origin === $('cloud-list').value)
+    $('cloud-name').value = item?.label ?? ''
+    $('cloud-origin').value = item?.origin ?? ''
+    $('cloud-status').textContent = ''
+  }
+  const cloudControls = () => {
+    const unavailable = !native || !connected || busy || cloudBusy
+    const menu = $('cloud-list')
+    const items = snapshot.workbenches ?? []
+    const version = JSON.stringify(items)
+    if (version !== cloudListVersion) {
+      const selected = menu.value
+      menu.replaceChildren(new view.Option('新增服务器', ''))
+      for (const item of items) menu.add(new view.Option(item.label + ' · ' + item.origin, item.origin))
+      menu.value = items.some(i => i.origin === selected) ? selected : ''
+      if (selected && !menu.value) cloudFields()
+      cloudListVersion = version
+    }
+    $('cloud-open').disabled = $('cloud-remove').disabled = unavailable || !menu.value
+    $('cloud-origin').readOnly = !!menu.value
+    $('cloud-save').disabled = unavailable || !$('cloud-name').value.trim() || !$('cloud-origin').value.trim()
+    $('cloud-manage').disabled = unavailable
+    for (const id of ['cloud-name','cloud-origin','cloud-list','cloud-back']) $(id).disabled = cloudBusy
+  }
+  const closeCloud = () => {
+    $('cloud-manager').hidden = true
+    delete $('assistant').dataset.cloud
+  }
+  async function cloudAction(op) {
+    if (busy || cloudBusy || !native || !connected) return
+    const origin = op === 'save' ? $('cloud-origin').value.trim() : $('cloud-list').value
+    const label = op === 'save' ? $('cloud-name').value.trim() : ''
+    ++requestVersion
+    cloudBusy = true; cloudControls()
+    try {
+      const items = await invoke('pet_cloud_workbench', { action: op, origin, label })
+      if (disposed) return
+      if (op !== 'open') {
+        snapshot = { ...snapshot, workbenches: items }
+        cloudControls()
+        $('cloud-list').value = op === 'save' ? new URL(origin).href : ''
+        cloudFields()
+      }
+      $('cloud-status').textContent = op === 'open' ? '已请求系统浏览器打开服务器。' : op === 'save' ? '服务器已保存。' : '服务器已从本机列表移除。'
+    } catch (e) { if (!disposed) $('cloud-status').textContent = String(e?.message ?? e) }
+    finally { cloudBusy = false; if (!disposed) cloudControls() }
+  }
   const feedback = (message = '', error = false, source = 'action') => {
     $('feedback').textContent = message
     $('feedback').dataset.error = String(error)
@@ -53,10 +104,11 @@ export function mountPet(view) {
     root.dataset.expanded = String(next)
     $('assistant').hidden = !next
     $('whale').setAttribute('aria-expanded', String(next))
-    if (!next) closeSettings()
+    if (!next) { closeSettings(); devTools.close(false); closeCloud() }
     if (restoreFocus) $('whale').focus()
   }
   const controls = () => {
+    cloudControls()
     const ready = connected && snapshot.runtime === 'ready'
     for (const id of ['send-draft', 'new-chat', 'view-tasks', 'open-home', 'always-on-top', 'launch-on-start', 'hide', 'open-log']) {
       $(id).disabled = busy || !native
@@ -73,6 +125,7 @@ export function mountPet(view) {
     $('workspace').disabled = busy || loadingWorkspaces || !workspaces.length
     $('refresh-workspaces').disabled = busy || loadingWorkspaces || !ready || !native
     $('attach-files').disabled = busy || !ready || !native
+    devTools.update(ready && native && !busy && !loadingWorkspaces && workspacesLoaded && workspaces.some(item => item.id === workspaceId))
     $('attachment-input').disabled = busy || !ready || !native
     for (const button of $('attachments').querySelectorAll('button')) button.disabled = busy
     $('jump').disabled = busy || playing || dragging
@@ -177,7 +230,7 @@ export function mountPet(view) {
     }
   }
   async function refresh() {
-    if (!native || disposed || busy || refreshing) return
+    if (!native || disposed || busy || cloudBusy || refreshing) return
     const version = ++requestVersion
     refreshing = true
     try {
@@ -332,7 +385,9 @@ export function mountPet(view) {
     if (!$('preferences').hidden) {
       closeSettings()
       $('settings').focus()
-    } else void expand(false)
+    } else if (!$('cloud-manager').hidden) { closeCloud(); $('settings').focus() }
+    else if (devTools.isOpen()) devTools.close()
+    else void expand(false)
   })
   listen(doc, 'pointerdown', event => {
     if (!$('preferences').hidden && !$('preferences').contains(event.target) && !$('settings').contains(event.target)) closeSettings()
@@ -406,6 +461,15 @@ export function mountPet(view) {
     $('preferences').hidden = !next
     $('settings').setAttribute('aria-expanded', String(next))
   })
+  listen($('cloud-manage'), 'click', () => {
+    closeSettings(); devTools.close(false)
+    $('assistant').dataset.cloud = 'true'; $('cloud-manager').hidden = false
+    $('cloud-list').focus()
+  })
+  listen($('cloud-back'), 'click', () => { closeCloud(); $('settings').focus() })
+  listen($('cloud-list'), 'change', () => { cloudFields(); cloudControls() })
+  listen($('cloud-manager'), 'input', cloudControls)
+  for (const op of ['open', 'remove', 'save']) listen($('cloud-' + op), 'click', () => void cloudAction(op))
   const savePreferences = () => {
     const args = { alwaysOnTop: $('always-on-top').checked, launchOnStart: $('launch-on-start').checked }
     void action('pet_set_preferences', args, () => {
@@ -427,6 +491,7 @@ export function mountPet(view) {
   const dispose = () => {
     if (disposed) return
     disposed = true
+    devTools.close(false)
     requestVersion++
     events.abort()
     for (const reader of fileReaders) reader.abort()

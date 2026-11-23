@@ -2285,7 +2285,11 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     const params = new URLSearchParams()
     const incoming = new URL(req.url ?? '/', 'http://lumo.local').searchParams
     for (const key of ['q', 'status', 'role', 'sort', 'limit', 'offset']) for (const value of incoming.getAll(key)) params.append(key, value)
-    writeUpstream(res, await upstream(config, identity, 'projects', `/v1/projects/directory?${params}`, req)); return
+    const result = await upstream(config, identity, 'projects', `/v1/projects/directory?${params}`, req)
+    writeUpstream(res, result.ok && result.data && typeof result.data === 'object'
+      ? { ...result, data: { ...result.data, viewer: { realm: identity.realm, userId: identity.userId } } }
+      : result)
+    return
   }
 
   const projectDetail = pathname.match(/^\/lumo\/api\/projects\/([^/]+)$/u)
@@ -2387,7 +2391,9 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     if (!requireClusterReady(config, res)) return
     const projectID = safeID(projectMember[1]); const userID = projectMember[2] === undefined ? undefined : safeID(projectMember[2])
     if (projectID === undefined || (projectMember[2] !== undefined && userID === undefined)) { writeJson(res, 400, { error: 'invalid project member id' }); return }
-    const path = `/v1/projects/${encodeURIComponent(projectID)}/members${userID ? `/${encodeURIComponent(userID)}` : ''}`
+    const roles = new URL(req.url ?? '/', 'http://lumo.local').searchParams.getAll('expectedRole')
+    if (roles.length && (!userID || roles.length !== 1 || !['owner', 'editor', 'viewer'].includes(roles[0]!))) { writeJson(res, 400, { error: 'invalid expected role' }); return }
+    const path = `/v1/projects/${encodeURIComponent(projectID)}/members${userID ? `/${encodeURIComponent(userID)}` : ''}${roles.length ? `?expectedRole=${roles[0]}` : ''}`
     if (req.method === 'DELETE' && userID) { writeUpstream(res, await upstream(config, identity, 'projects', path, req, 'DELETE')); return }
     if ((req.method === 'POST' && !userID) || (req.method === 'PATCH' && userID)) {
       try { writeUpstream(res, await upstream(config, identity, 'projects', path, req, req.method, await readBody(req))) } catch (error) { writeJson(res, 413, { error: error instanceof Error ? error.message : 'invalid request body' }) }

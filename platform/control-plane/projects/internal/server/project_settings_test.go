@@ -2,9 +2,62 @@ package server_test
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 )
+
+func TestMemberRolePrecondition(t *testing.T) {
+	ts := newTestServer(t)
+	parent := ts.URL + "/v1/projects/" + createProject(t, ts, "owner", "realm", "Member scope") + "/members"
+	resp, out := do(t, "POST", parent, `{"userId":"person","role":"viewer"}`, auth("owner", "realm"))
+	if resp.StatusCode != 201 {
+		t.Fatalf("add member: %d %s", resp.StatusCode, out)
+	}
+
+	// Both administrators saw viewer. At most one transition may commit.
+	start := make(chan struct{})
+	type result struct {
+		status int
+		role   string
+	}
+	results := make(chan result, 2)
+	for _, role := range []string{"owner", "editor"} {
+		go func(role string) {
+			<-start
+			req, _ := http.NewRequest("PATCH", parent+"/person?expectedRole=viewer", strings.NewReader(fmt.Sprintf(`{"role":%q}`, role)))
+			for k, v := range auth("owner", "realm") {
+				req.Header.Set(k, v)
+			}
+			r, err := ts.Client().Do(req)
+			if err != nil {
+				results <- result{0, role}
+				return
+			}
+			r.Body.Close()
+			results <- result{r.StatusCode, role}
+		}(role)
+	}
+	close(start)
+	first, second := <-results, <-results
+	if first.status == 409 {
+		first, second = second, first
+	}
+	if first.status != 200 || second.status != 409 {
+		t.Fatalf("unexpected concurrent results: %+v %+v", first, second)
+	}
+	for _, tc := range []struct {
+		suffix string
+		want   int
+	}{
+		{"?expectedRole=", 400}, {"?expectedRole=owner&expectedRole=viewer", 400}, {"?expectedRole=viewer", 409}, {"?expectedRole=" + first.role, 200},
+	} {
+		resp, out := do(t, "DELETE", parent+"/person"+tc.suffix, "", auth("owner", "realm"))
+		if resp.StatusCode != tc.want {
+			t.Fatalf("delete %s: got %d %s", tc.suffix, resp.StatusCode, out)
+		}
+	}
+}
 
 func TestRenameProjectPermissionsAndPrecondition(t *testing.T) {
 	ts := newTestServer(t)

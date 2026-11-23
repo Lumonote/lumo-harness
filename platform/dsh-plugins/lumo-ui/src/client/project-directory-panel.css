@@ -1,4 +1,6 @@
 .lumo-project-directory { display: grid; gap: 18px; }
+.lumo-project-directory-cache { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--lumo-muted); }
+.lumo-project-directory-cache small { flex: 1; min-width: 180px; }
 .lumo-project-directory-summary { display: flex; flex-wrap: wrap; gap: 12px 24px; color: var(--lumo-muted); font-size: 13px; }
 .lumo-project-directory-summary strong { margin-left: 6px; color: var(--lumo-ink); font-variant-numeric: tabular-nums; }
 .lumo-project-directory-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }

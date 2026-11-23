@@ -38,6 +38,7 @@ import { layoutTaskBoard, type BoardTaskInput, type BoardTaskState, type TeamPro
 // 侧边栏登录态的映射规则（纯函数，见该文件头）：三条分支的区别就是它的全部内容。
 import { resolveSidebarIdentity, type SidebarIdentity } from './sidebar-identity.ts'
 import { ClusterNodesPanel, SchedulerClustersPanel, SkillAccessPanel, ProjectMembersPanel, ConnectorManifestPanel, ConnectorAccountPanel, AgentPresetEditor, FlowManagementPanel, TaskIntentContractPanel, TaskCollaboratorsPanel, TaskCollaborationPanel, TaskEvidencePanel, SessionControlPanel, ThreadBoardPanel, type AgentPreset, type ProjectMember, type TaskIntentFacts, type TaskIntentContract, type TaskScoreBreakdown, type TaskResultFacts, type TaskCollaborationFacts } from './cluster-panels.tsx'
+import { downloadFile } from './download-file.ts'
 import { AgentOutputProfileField, TEXT_OUTPUT_PROFILE, agentOutputProfileError, agentOutputProfileLabel, useClusterCapabilities } from './cluster-panels.tsx'
 import { TokenUsagePanel } from './token-usage-panel.tsx'
 import { ProjectDirectoryPanel } from './project-directory-panel.tsx'
@@ -1554,12 +1555,7 @@ function archifyTaskTopology(tasks: DelegatedTask[]) {
 
 function downloadArchifyTopology(tasks: DelegatedTask[]): void {
   const blob = new Blob([`${JSON.stringify(archifyTaskTopology(tasks), null, 2)}\n`], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = `lumo-agent-topology-${new Date().toISOString().replace(/[:.]/gu, '-')}.workflow.json`
-  anchor.click()
-  URL.revokeObjectURL(url)
+  downloadFile(blob, `lumo-agent-topology-${new Date().toISOString().replace(/[:.]/gu, '-')}.workflow.json`)
 }
 
 function OrchestrationTopology({ tasks, busy, cancel, retry, reassign, showRuns }: {
@@ -2545,7 +2541,7 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
     </> : null}
     {area === 'projects' ? <>
     {data.deployment.clusterReady ? <FlowManagementPanel request={api} projects={data.projects} refresh={load} /> : null}
-    <div className="lumo-split"><Section title="项目边界" meta={`${data.projects.length} 个`}><form className="lumo-inline-form" onSubmit={createProject}><label><span>新项目</span><input name="name" placeholder="项目名称" /></label><BusyButton type="submit" busy={busy === 'project'} className="lumo-primary">创建</BusyButton></form><ProjectDirectoryPanel request={api} onOpen={id => void openProject({ id })} openingId={busy} refreshKey={data.generatedAt} /></Section><Section title="流程管理" meta={`${data.flows.length} 条`}><form className="lumo-flow-form" onSubmit={createFlow}><label><span>归属项目</span><select name="project" defaultValue="" aria-label="归属项目"><option value="" disabled>选择项目</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name ?? project.id}</option>)}</select></label><label><span>流程名称</span><input name="name" placeholder="流程名称" /></label><BusyButton type="submit" busy={busy === 'flow'} disabled={data.projects.length === 0} className="lumo-primary">新建</BusyButton></form><div className="lumo-compact-list">{data.flows.length ? data.flows.map(flow => <div key={flow.id}><span><b>{flow.name ?? flow.id}</b><small>{flow.status === 'unknown' || !flow.status ? '未声明状态' : flow.status} · v{flow.version ?? 1}</small></span>{flow.status === 'draft' ? <BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'submit')}>提交审核</BusyButton> : flow.status === 'submitted' ? <BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'review')}>审核通过</BusyButton> : ['published', 'targeted'].includes(flow.status ?? '') ? <span className="lumo-flow-actions"><BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'run')}>试运行</BusyButton><BusyButton busy={busy === `flow-diff-${flow.id}`} disabled={(flow.version ?? 0) < 2} className="lumo-small lumo-secondary" onClick={() => void compareFlowVersions(flow)}>版本差异</BusyButton><BusyButton busy={busy === flow.id} className="lumo-small lumo-danger" onClick={() => void triggerFlow(flow, 'deprecate')}>停用</BusyButton></span> : flow.status === 'deprecated' ? <em>已停用</em> : <em>治理中</em>}</div>) : <Empty>还没有流程。流程从草稿开始，提交后进入治理审核。</Empty>}</div>{flowVersionDiff ? <div className="lumo-flow-version-diff"><header><span><b>流程版本对比</b><small>{flowVersionDiff.flow.name ?? flowVersionDiff.flow.id} · v{flowVersionDiff.previous.version} → v{flowVersionDiff.current.version} · 审核人 {flowVersionDiff.previous.reviewer || '未记录'} / {flowVersionDiff.current.reviewer || '未记录'}</small></span><button type="button" className="lumo-quiet" onClick={() => setFlowVersionDiff(null)} aria-label="关闭版本对比">×</button></header><ul>{flowVersionChanges(flowVersionDiff.previous.definition, flowVersionDiff.current.definition).map(change => <li key={change}>{change}</li>)}</ul><p>对比的是已发布不可变快照；草稿编辑不会改变此结果。</p></div> : null}</Section></div>
+    <div className="lumo-split"><Section title="项目边界" meta={`${data.projects.length} 个`}><form className="lumo-inline-form" onSubmit={createProject}><label><span>新项目</span><input name="name" placeholder="项目名称" /></label><BusyButton type="submit" busy={busy === 'project'} className="lumo-primary">创建</BusyButton></form><ProjectDirectoryPanel request={api} actor={reviewActor} onOpen={id => void openProject({ id })} openingId={busy} refreshKey={data.generatedAt} /></Section><Section title="流程管理" meta={`${data.flows.length} 条`}><form className="lumo-flow-form" onSubmit={createFlow}><label><span>归属项目</span><select name="project" defaultValue="" aria-label="归属项目"><option value="" disabled>选择项目</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name ?? project.id}</option>)}</select></label><label><span>流程名称</span><input name="name" placeholder="流程名称" /></label><BusyButton type="submit" busy={busy === 'flow'} disabled={data.projects.length === 0} className="lumo-primary">新建</BusyButton></form><div className="lumo-compact-list">{data.flows.length ? data.flows.map(flow => <div key={flow.id}><span><b>{flow.name ?? flow.id}</b><small>{flow.status === 'unknown' || !flow.status ? '未声明状态' : flow.status} · v{flow.version ?? 1}</small></span>{flow.status === 'draft' ? <BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'submit')}>提交审核</BusyButton> : flow.status === 'submitted' ? <BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'review')}>审核通过</BusyButton> : ['published', 'targeted'].includes(flow.status ?? '') ? <span className="lumo-flow-actions"><BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'run')}>试运行</BusyButton><BusyButton busy={busy === `flow-diff-${flow.id}`} disabled={(flow.version ?? 0) < 2} className="lumo-small lumo-secondary" onClick={() => void compareFlowVersions(flow)}>版本差异</BusyButton><BusyButton busy={busy === flow.id} className="lumo-small lumo-danger" onClick={() => void triggerFlow(flow, 'deprecate')}>停用</BusyButton></span> : flow.status === 'deprecated' ? <em>已停用</em> : <em>治理中</em>}</div>) : <Empty>还没有流程。流程从草稿开始，提交后进入治理审核。</Empty>}</div>{flowVersionDiff ? <div className="lumo-flow-version-diff"><header><span><b>流程版本对比</b><small>{flowVersionDiff.flow.name ?? flowVersionDiff.flow.id} · v{flowVersionDiff.previous.version} → v{flowVersionDiff.current.version} · 审核人 {flowVersionDiff.previous.reviewer || '未记录'} / {flowVersionDiff.current.reviewer || '未记录'}</small></span><button type="button" className="lumo-quiet" onClick={() => setFlowVersionDiff(null)} aria-label="关闭版本对比">×</button></header><ul>{flowVersionChanges(flowVersionDiff.previous.definition, flowVersionDiff.current.definition).map(change => <li key={change}>{change}</li>)}</ul><p>对比的是已发布不可变快照；草稿编辑不会改变此结果。</p></div> : null}</Section></div>
     </> : null}
     {area === 'delivery' ? <>
     {data.deployment.clusterReady ? <AgentPresetEditor request={api} presets={agentPresets} refresh={load} /> : null}
@@ -3176,12 +3172,14 @@ export const lumoCreativeCommandSource: LumoInputTriggerSource = {
 
 export const inject = ['slots', 'theme']
 export function apply(ctx: ClientContext): void {
-  // Use ctx itself as the root identifier instead of accessing ctx.root property.
-  // Each plugin instance gets a unique context, so ctx serves as the mount ledger key.
+  // Cordis rc.12 exposes Context.root as a global symbol. Looking up the old
+  // string property throws before any menus or themes can be registered.
+  // Older runtimes without this symbol can still deduplicate a replay on ctx.
+  const root = Reflect.get(ctx, Symbol.for('cordis.root')) ?? ctx
   const roots = activeClientRoots()
-  if (roots.has(ctx)) return
-  roots.add(ctx)
-  ctx.effect(() => () => { roots.delete(ctx) }, 'lumo-ui: singleton client mount')
+  if (roots.has(root)) return
+  roots.add(root)
+  ctx.effect(() => () => { roots.delete(root) }, 'lumo-ui: singleton client mount')
   if (typeof window !== 'undefined') ctx.effect(() => installAnchoredOverlayFallback(window), 'lumo-ui: CSS anchor compatibility')
   if (typeof window !== 'undefined' && (window as Window & { __LUMO_DESKTOP__?: boolean }).__LUMO_DESKTOP__ === true) {
     ctx.inject(['sessions', 'workspaces', 'conversation', 'uiWorkspace', 'layout'], (desktopCtx) => {

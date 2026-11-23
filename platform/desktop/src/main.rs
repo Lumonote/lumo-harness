@@ -23,6 +23,10 @@ use tauri::{
     AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 
+mod dev_agents;
+mod dev_catalog;
+mod dev_memory;
+mod dev_tools;
 mod pet;
 
 const MAIN_WINDOW: &str = "main";
@@ -777,6 +781,18 @@ fn main() {
             pet::pet_hide,
             pet::pet_set_preferences,
             pet::pet_workspaces,
+            pet::pet_dev_memory,
+            pet::pet_dev_tools,
+            pet::pet_cloud_workbench,
+            pet::pet_dev_session,
+            pet::pet_dev_transcript,
+            pet::pet_dev_copy_context,
+            pet::pet_dev_handoff,
+            pet::pet_dev_goal,
+            pet::pet_dev_library,
+            pet::pet_dev_note,
+            pet::pet_dev_open,
+            pet::pet_dev_locate,
             pet::pet_open_workbench
         ])
         .build(tauri::generate_context!())

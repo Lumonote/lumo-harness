@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { deriveThreadBoard, type ThreadFacts } from './thread-board.ts'
+import { downloadFile } from './download-file.ts'
+import { DirectoryUserPicker } from './directory-user-picker.tsx'
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 type Capability = { clusterReady: boolean; organization: boolean }
@@ -153,6 +155,29 @@ interface DeviceCommand {
   id: string; action: string; state: string; revision: number; body?: { name?: string; version?: string }; result?: unknown; expires_at: string; created_at: string
 }
 interface Enrollment { code: string; expires_in: number; realm: string; node_id: string; gateway_url: string }
+type VisibleEnrollment = Enrollment & { expiresAt: number; scope: string }
+
+function enrollmentScope(status: DeviceStatusResponse | null) {
+  if (!status?.permissions.enroll || status.connected || status.device.status !== 'PENDING_ACTIVATION' || status.device.revision <= 0) return null
+  const d = status.device
+  return JSON.stringify([d.node_id, d.owner_user_id, d.realm, d.revision, d.certificate_serial, status.gateway_url])
+}
+
+function onboardingStep(status: DeviceStatusResponse, live: boolean, expiredCertificate: boolean, ticket: boolean, eligible: boolean) {
+  const d = status.device
+  if (d.status === 'REVOKED') return ['设备已撤销', '此设备身份已停用。']
+  if (d.status === 'DRAINING') return ['正在排空', '服务器暂停接收新任务。']
+  if (!d.revision) return ['等待签名策略', status.permissions.manage_policy ? '选择制品、版本与客户端版本，验证并保存策略。' : '请联系工作域管理员配置签名制品策略。']
+  if (live) {
+    if (d.report_error === 'install_failed') return ['制品安装失败', '检查服务器上的安装日志、磁盘空间与制品信任文件。']
+    if (d.applied_revision !== d.revision || d.report_error) return ['已连接，等待策略收敛', '核对客户端版本和制品安装报告，再刷新遥测。']
+    return d.status === 'ONLINE' && eligible ? ['已接入，可调度', '客户端已通过认证，当前策略已应用。'] : ['策略已应用，等待调度就绪', '可调度状态以节点目录为准。']
+  }
+  if (ticket) return ['等待服务器使用激活码', '在目标服务器使用本次激活码启动 desktop-agent。']
+  if (expiredCertificate) return ['设备证书已过期', '请联系管理员核对设备身份，并重新激活。']
+  if (!d.certificate_serial) return ['等待激活', status.permissions.enroll ? '签发一次性激活码，并在目标服务器完成身份登记。' : '请联系工作域管理员检查设备激活权限。']
+  return ['已登记身份，当前未连接', '核对服务器上的 desktop-agent 是否运行，并检查它能否访问已批准网关。']
+}
 const deviceCommandStates: Record<string, string> = { queued: '等待领取', delivered: '已下发', completed: '已完成', failed: '执行失败', interrupted: '已中断', expired: '已过期' }
 const deviceCommandActions: Record<string, string> = { reconcile: '立即收敛', start: '启动进程', stop: '停止进程' }
 const deviceShapes = [{ id: 'olap', name: 'OLAP' }, { id: 'graph', name: '图计算' }, { id: 'vector', name: '向量检索' }, { id: 'object', name: '对象存储' }, { id: 'gpu', name: 'GPU' }]
@@ -165,15 +190,23 @@ export function ClusterNodesPanel({ request }: { request: Request }) {
   const [filter, setFilter] = useState('')
   const [status, setStatus] = useState('all')
   const [registering, setRegistering] = useState(false)
+  const [serverPreset, setServerPreset] = useState(false)
   const [confirmation, setConfirmation] = useState('')
   const [selectedNodeID, setSelectedNodeID] = useState('')
+  const listSequence = useRef(0)
   const load = useCallback(async () => {
+    const current = ++listSequence.current
     setLoading(true)
-    try { const result = await request<{ nodes: DesktopNode[] }>('/lumo/api/desktop-nodes'); setNodes(result.nodes ?? []); setError('') }
-    catch (reason) { setError(message(reason)) }
-    finally { setLoading(false) }
+    try {
+      const result = await request<{ nodes: DesktopNode[] }>('/lumo/api/desktop-nodes')
+      if (current !== listSequence.current) return
+      if (!Array.isArray(result.nodes)) throw Error('节点目录响应无效。')
+      setNodes(result.nodes); setError('')
+    } catch (reason) {
+      if (current === listSequence.current) { setNodes([]); setConfirmation(''); setError(message(reason)) }
+    } finally { if (current === listSequence.current) setLoading(false) }
   }, [request])
-  useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 30000); return () => window.clearInterval(timer) }, [load])
+  useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 30000); return () => { listSequence.current++; window.clearInterval(timer) } }, [load])
   const action = useAction(load)
   const visible = nodes.filter(node => (status === 'all' || node.status === status) && `${node.id} ${node.display_name} ${node.cluster_id} ${node.owner_user_id}`.toLowerCase().includes(filter.toLowerCase()))
   const update = async (id: string, state: string) => {
@@ -182,21 +215,25 @@ export function ClusterNodesPanel({ request }: { request: Request }) {
   const register = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const form = event.currentTarget; const fields = new FormData(form)
     const value = (key: string) => String(fields.get(key) ?? '').trim()
-    if (await action.run(() => request('/lumo/api/desktop-nodes', { method: 'POST', body: JSON.stringify({
+    let registeredID = ''
+    if (await action.run(async () => { const result = await request<DesktopNode>('/lumo/api/desktop-nodes', { method: 'POST', body: JSON.stringify({
       id: value('id'), display_name: value('display_name'), cluster_id: value('cluster_id'), os: value('os'), arch: value('arch'), client_version: value('client_version'),
       residency: value('residency'), capacity: Number(fields.get('capacity')), capabilities: value('capabilities').split(',').map(item => item.trim()).filter(Boolean),
-    }) }), '设备已登记，当前状态为待激活。')) { form.reset(); setRegistering(false) }
+    }) })
+      if (!result?.id) throw Error('未收到设备 ID，请刷新节点目录核对登记结果。')
+      registeredID = result.id
+    }, '设备已登记，当前状态为待激活。')) { form.reset(); setRegistering(false); setFilter(''); setStatus('all'); setSelectedNodeID(registeredID) }
   }
   return <section className="lumo-section lumo-cluster-panel">
-    <div className="lumo-section-title"><div><b>受管桌面节点</b><span>{loading ? '正在同步' : `${visible.length} 个节点`}</span></div><div className="lumo-form-actions"><Button disabled={loading} onClick={() => void load()}>刷新</Button><Button disabled={action.busy} onClick={() => setRegistering(value => !value)}>{registering ? '取消登记' : '登记设备'}</Button></div></div>
+    <div className="lumo-section-title"><div><b>受管设备与服务器</b><span>{loading ? '正在同步' : `${visible.length} 个节点`}</span></div><div className="lumo-form-actions"><Button disabled={loading} onClick={() => void load()}>刷新</Button>{!registering ? <Button disabled={action.busy} onClick={() => { setServerPreset(true); setRegistering(true) }}>接入 Linux 服务器</Button> : null}<Button disabled={action.busy} onClick={() => { setServerPreset(false); setRegistering(value => !value) }}>{registering ? '取消登记' : '登记设备'}</Button></div></div>
     <Feedback error={error || action.error} notice={action.notice} />
     <div className="lumo-cluster-toolbar"><label>搜索节点<input value={filter} onChange={event => setFilter(event.target.value)} /></label><label>节点状态<select value={status} onChange={event => setStatus(event.target.value)}><option value="all">全部</option>{Object.entries(nodeStatus).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label></div>
     <div className="lumo-cluster-list">{visible.map(node => <div key={node.id} className={selectedNodeID === node.id ? 'selected' : ''}><span><b>{node.display_name}</b><small>{node.id} · {node.cluster_id} · {node.owner_user_id}</small><small>{node.os}/{node.arch} · {node.client_version} · {node.capacity} 并发 · {node.residency || '未声明驻留'}</small><small>{node.capabilities?.join(' · ') || '无能力声明'} · 最近心跳 {new Date(node.last_seen_at).toLocaleString('zh-CN')}</small></span><span><b>{nodeStatus[node.status] ?? node.status}</b><small>{node.scheduling_eligible ? '可调度' : '不可调度'}</small></span><div className="lumo-form-actions"><Button disabled={action.busy} onClick={() => setSelectedNodeID(current => current === node.id ? '' : node.id)}>{selectedNodeID === node.id ? '收起详情' : '接入详情'}</Button>{capability?.organization && node.status !== 'REVOKED' ? <><Button disabled={action.busy || node.status === 'DRAINING'} onClick={() => void update(node.id, 'DRAINING')}>排空</Button>{node.status === 'DRAINING' ? <Button disabled={action.busy} onClick={() => void update(node.id, 'PENDING_ACTIVATION')}>重新激活</Button> : null}{confirmation === node.id ? <><Button danger disabled={action.busy} onClick={() => void update(node.id, 'REVOKED')}>确认撤销</Button><Button onClick={() => setConfirmation('')}>取消</Button></> : <Button danger disabled={action.busy} onClick={() => setConfirmation(node.id)}>撤销设备</Button>}</> : null}</div></div>)}</div>
     {!visible.length ? <p className="lumo-inline-empty">{loading ? '正在读取节点。' : error ? '节点目录读取失败。' : '没有匹配的设备。'}</p> : null}
-    {selectedNodeID ? <DeviceDetailPanel key={selectedNodeID} request={request} node={nodes.find(node => node.id === selectedNodeID)} refreshNodes={load} close={() => setSelectedNodeID('')} /> : null}
+    {nodes.some(n => n.id === selectedNodeID) ? <DeviceDetailPanel key={selectedNodeID} request={request} node={nodes.find(node => node.id === selectedNodeID)} refreshNodes={load} close={() => setSelectedNodeID('')} /> : null}
     {registering ? <form className="lumo-governance-form lumo-cluster-form" onSubmit={register}>
       <label>设备 ID<input name="id" maxLength={128} /></label><label>设备名称<input name="display_name" required maxLength={160} /></label><label>集群 ID<input name="cluster_id" required maxLength={128} /></label>
-      <label>操作系统<select name="os"><option value="windows">Windows</option><option value="macos">macOS</option><option value="linux">Linux</option></select></label><label>架构<select name="arch"><option value="arm64">ARM64</option><option value="amd64">AMD64</option></select></label><label>客户端版本<input name="client_version" required maxLength={64} /></label>
+      <label>操作系统<select name="os" defaultValue={serverPreset ? 'linux' : 'windows'}><option value="windows">Windows</option><option value="macos">macOS</option><option value="linux">Linux</option></select></label><label>架构<select name="arch" defaultValue={serverPreset ? 'amd64' : 'arm64'}><option value="arm64">ARM64</option><option value="amd64">AMD64</option></select></label><label>客户端版本<input name="client_version" required maxLength={64} /></label>
       <label>并发上限<input name="capacity" type="number" min={1} max={1024} step={1} defaultValue={1} required /></label><label>数据驻留<input name="residency" maxLength={128} /></label><label>能力<input name="capabilities" maxLength={1024} /></label><div className="lumo-user-form-actions"><Button submit disabled={action.busy}>登记设备</Button></div>
     </form> : null}
   </section>
@@ -208,12 +245,14 @@ function DeviceDetailPanel({ request, node, refreshNodes, close }: { request: Re
   const base = `/lumo/api/desktop-nodes/${encodeURIComponent(nodeID)}/device`
   const [status, setStatus] = useState<DeviceStatusResponse | null>(null)
   const [commands, setCommands] = useState<DeviceCommand[]>([])
-  const [enrollment, setEnrollment] = useState<Enrollment | null>(null)
+  const [enrollment, setEnrollment] = useState<VisibleEnrollment | null>(null)
+  const [clock, setClock] = useState(Date.now)
   const [commandAction, setCommandAction] = useState('reconcile')
   const [artifactIndex, setArtifactIndex] = useState('0')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const sequence = useRef(0)
+  const enrollmentContext = useRef({ scope: null as string | null, revision: 0 })
   const load = useCallback(async () => {
     if (!nodeID) return
     const current = ++sequence.current
@@ -221,32 +260,57 @@ function DeviceDetailPanel({ request, node, refreshNodes, close }: { request: Re
     try {
       const [device, history] = await Promise.all([request<DeviceStatusResponse>(base), request<{ commands: DeviceCommand[] }>(`${base}/commands`)])
       if (current !== sequence.current) return
-      setStatus(device); setCommands(history.commands ?? []); setError('')
+      if (device?.device?.node_id !== nodeID || device.device.owner_user_id !== node?.owner_user_id || !device.permissions || !Number.isSafeInteger(device.device.revision) || !device.device.policy || !Array.isArray(history?.commands)) throw Error('设备接入回执无效，请刷新。')
+      const scope = enrollmentScope(device)
+      if (scope !== enrollmentContext.current.scope) enrollmentContext.current = { scope, revision: enrollmentContext.current.revision + 1 }
+      setStatus(device); setCommands(history.commands); setError('')
+      setEnrollment(ticket => ticket && ticket.scope === scope && ticket.expiresAt > Date.now() ? ticket : null)
       setArtifactIndex(index => device.device.policy.artifacts?.[Number(index)] ? index : '0')
-    } catch (reason) { if (current === sequence.current) setError(message(reason)) }
+    } catch (reason) { if (current === sequence.current) {
+      enrollmentContext.current = { scope: null, revision: enrollmentContext.current.revision + 1 }
+      setError(message(reason)); setStatus(null); setCommands([]); setEnrollment(null)
+    } }
     finally { if (current === sequence.current) setLoading(false) }
-  }, [request, nodeID, observedNodeStatus, base])
-  useEffect(() => { void load(); return () => { sequence.current++ } }, [load])
+  }, [request, nodeID, node?.owner_user_id, observedNodeStatus, base])
+  useEffect(() => {
+    void load()
+    const poll = window.setInterval(() => { if (!document.hidden) void load() }, 10000)
+    const visible = () => { if (!document.hidden) void load() }
+    document.addEventListener('visibilitychange', visible)
+    return () => {
+      sequence.current++; enrollmentContext.current = { scope: null, revision: enrollmentContext.current.revision + 1 }
+      window.clearInterval(poll); document.removeEventListener('visibilitychange', visible)
+    }
+  }, [load])
+  useEffect(() => {
+    if (!enrollment && !status?.connected) return
+    const tick = () => {
+      const now = Date.now(); setClock(now)
+      if (enrollment && enrollment.expiresAt <= now) setEnrollment(null)
+    }
+    tick(); const timer = window.setInterval(tick, 1000)
+    return () => window.clearInterval(timer)
+  }, [enrollment, status?.connected])
   const refreshAll = useCallback(async () => { await Promise.all([load(), refreshNodes()]) }, [load, refreshNodes])
   const action = useAction(refreshAll)
   if (!node) return null
   const connection = status?.device
   const policy = connection?.policy
+  const now = Math.max(clock, Date.now())
+  const expiredCertificate = Boolean(connection?.certificate_expires && !(Date.parse(connection.certificate_expires) > now))
+  const live = status?.connected === true && Date.parse(connection?.connection_expires ?? '') > now && Date.parse(connection?.certificate_expires ?? '') > now
+  const readyToStart = live && status?.permissions.start && status.process_runtime && connection?.status === 'ONLINE' && connection.revision > 0 && connection.applied_revision === connection.revision && !connection.report_error
+  const ticket = enrollment && enrollment.expiresAt > now && enrollment.scope === enrollmentScope(status) ? enrollment : null
+  const step = status ? onboardingStep(status, live, expiredCertificate, Boolean(ticket), node.scheduling_eligible) : null
   const artifacts = policy?.artifacts ?? []
   const selectedArtifact = artifacts[Number(artifactIndex)]
   const approvedShape = JSON.stringify(Object.fromEntries(Object.entries(policy?.shape ?? {}).filter(([, enabled]) => enabled)))
-  const agentCommand = policy?.client_version ? [
-    'desktop-agent \\',
-    `  -gateway ${status?.gateway_url ?? '<设备网关>'} \\`,
-    `  -realm ${connection?.realm ?? '<realm>'} \\`,
-    `  -node ${nodeID} \\`,
-    '  -state-dir <身份状态绝对路径> \\',
-    '  -install-dir <制品安装绝对路径> \\',
-    '  -trust-file <发布者信任文件> \\',
-    `  -shape '${approvedShape}' \\`,
-    `  -client-version ${policy.client_version} \\`,
-    '  -enrollment-code-file <激活码文件>',
-  ].join('\n') : ''
+  const agentOptions = policy?.client_version && connection && status ? [
+    ['-gateway', status.gateway_url], ['-realm', connection.realm], ['-node', nodeID],
+    ['-client-version', policy.client_version], ['-shape', approvedShape],
+    ['-state-dir', '设备身份状态目录的绝对路径'], ['-install-dir', '制品安装目录的绝对路径'],
+    ['-trust-file', '发布者信任文件路径'], ['-enrollment-code-file', '仅当前用户可读的激活码文件路径'],
+  ] : []
   const savePolicy = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!connection) return
@@ -256,15 +320,24 @@ function DeviceDetailPanel({ request, node, refreshNodes, close }: { request: Re
     await action.run(() => request(`${base}/policy`, { method: 'PUT', body: JSON.stringify({ revision: connection.revision, name: value('name'), version: value('version'), client_version: value('client_version'), shape }) }), '设备策略已验签并保存；设备需重新激活后收敛。')
   }
   const issueEnrollment = async () => {
-    await action.run(async () => { setEnrollment(await request<Enrollment>(`${base}/enrollment`, { method: 'POST' })) }, '一次性激活码已签发，有效期 5 分钟。')
+    const { scope, revision } = enrollmentContext.current
+    if (!status || !connection || !scope || scope !== enrollmentScope(status)) return
+    await action.run(async () => {
+      setEnrollment(null)
+      const issuedAt = Date.now()
+      const result = await request<Enrollment>(`${base}/enrollment`, { method: 'POST' })
+      if (revision !== enrollmentContext.current.revision) throw Error('设备接入状态已变化，请刷新后重新签发激活码。')
+      if (!result?.code || result.node_id !== nodeID || result.realm !== connection.realm || result.gateway_url !== status.gateway_url || !Number.isInteger(result.expires_in) || result.expires_in <= 0 || result.expires_in > 300) throw Error('激活码回执无效，请重新签发。')
+      setEnrollment({ ...result, expiresAt: issuedAt + result.expires_in * 1000, scope })
+    }, '一次性激活码已签发。')
   }
   const copyEnrollment = async () => {
-    if (!enrollment) return
-    try { await navigator.clipboard.writeText(enrollment.code) } catch (reason) { action.setError(`无法写入剪贴板：${message(reason)}`) }
+    if (!ticket || ticket.expiresAt <= Date.now()) { setEnrollment(null); return }
+    try { await navigator.clipboard.writeText(ticket.code) } catch (reason) { action.setError(`无法写入剪贴板：${message(reason)}`) }
   }
   const queueCommand = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!connection) return
+    if (!connection || !live || !status?.permissions.command || (commandAction === 'start' && !readyToStart)) return
     const artifact = commandAction === 'reconcile' ? undefined : selectedArtifact
     await action.run(() => request(`${base}/commands`, { method: 'POST', body: JSON.stringify({ revision: connection.revision, action: commandAction, name: artifact?.name ?? '', version: artifact?.version ?? '' }) }), `${deviceCommandActions[commandAction]}命令已加入设备队列。`)
   }
@@ -274,9 +347,10 @@ function DeviceDetailPanel({ request, node, refreshNodes, close }: { request: Re
     <header><div><span className="lumo-device-kicker">DEVICE CONTROL / {node.cluster_id}</span><h3>{node.display_name}</h3><p>{node.id} · {node.os}/{node.arch} · 所有者 {node.owner_user_id}</p></div><div className="lumo-form-actions"><Button disabled={loading || action.busy} onClick={() => void load()}>刷新遥测</Button><Button disabled={action.busy} onClick={close}>关闭</Button></div></header>
     <Feedback error={error || action.error} notice={action.notice} />
     {status && connection ? <>
+      {step ? <div className="lumo-cluster-feedback" role="status"><b>{step[0]}</b><p>{step[1]}</p></div> : null}
       <div className="lumo-device-telemetry">
-        <div className={status.connected ? 'live' : ''}><small>连接链路</small><b>{status.connected ? 'LIVE' : 'OFFLINE'}</b><span>{status.gateway_url}</span></div>
-        <div className={connection.applied_revision === connection.revision ? 'live' : 'warn'}><small>策略收敛</small><b>{connection.applied_revision} / {connection.revision}</b><span>{connection.report_error || '无上报错误'}</span></div>
+        <div className={live ? 'live' : ''}><small>连接链路</small><b>{live ? '已连接' : '未连接'}</b><span>{status.gateway_url}</span></div>
+        <div className={connection.revision > 0 && connection.applied_revision === connection.revision && !connection.report_error ? 'live' : 'warn'}><small>策略收敛</small><b>{connection.applied_revision} / {connection.revision}</b><span>{connection.report_error || '无上报错误'}</span></div>
         <div><small>客户端证书</small><b>{connection.certificate_serial ? 'ISSUED' : 'NOT ENROLLED'}</b><span>{factTime(connection.certificate_expires)}</span></div>
         <div><small>最后报告</small><b>{connection.status}</b><span>{factTime(connection.last_report_at)}</span></div>
       </div>
@@ -293,15 +367,15 @@ function DeviceDetailPanel({ request, node, refreshNodes, close }: { request: Re
         <section>
           <div className="lumo-device-lane-title"><span>02</span><div><b>身份激活</b><small>激活码仅展示本次签发结果，5 分钟后失效</small></div></div>
           <div className="lumo-device-facts"><span><small>设备状态</small><b>{nodeStatus[connection.status] ?? connection.status}</b></span><span><small>连接租约</small><b>{factTime(connection.connection_expires)}</b></span><span><small>已批准网关</small><b>{status.gateway_url}</b></span></div>
-          {enrollment ? <div className="lumo-enrollment-ticket"><span>ONE-TIME ACTIVATION</span><code>{enrollment.code}</code><small>{enrollment.realm}/{enrollment.node_id} · {enrollment.expires_in} 秒内有效</small><Button onClick={() => void copyEnrollment()}>复制激活码</Button></div> : null}
-          {agentCommand ? <details className="lumo-device-bootstrap"><summary>查看 desktop-agent 启动参数模板</summary><p>先把激活码写入仅当前用户可读的文件；模板不会把密钥放进 URL 或进程参数。</p><code>{agentCommand}</code></details> : null}
-          <div className="lumo-form-actions"><Button disabled={loading || action.busy || !status.permissions.enroll} onClick={() => void issueEnrollment()}>{enrollment ? '重新签发激活码' : '签发激活码'}</Button>{status.permissions.manage_policy && connection.status !== 'REVOKED' && connection.status !== 'PENDING_ACTIVATION' ? <Button danger disabled={action.busy} onClick={() => void updateState('PENDING_ACTIVATION', '设备已进入待激活状态；旧连接与命令已失效。')}>重置设备身份</Button> : null}</div>
+          {ticket ? <div className="lumo-enrollment-ticket"><span>一次性激活码</span><code>{ticket.code}</code><small>{ticket.realm}/{ticket.node_id} · 剩余 {Math.ceil((ticket.expiresAt - now) / 1000)} 秒</small><Button disabled={loading || action.busy} onClick={() => void copyEnrollment()}>复制激活码</Button></div> : null}
+          {agentOptions.length ? <details className="lumo-device-bootstrap"><summary>查看目标服务器的 desktop-agent 启动参数</summary><dl>{agentOptions.map(([flag, value]) => <div key={flag}><dt>{flag}</dt><dd>{value}</dd></div>)}</dl></details> : null}
+          <div className="lumo-form-actions"><Button disabled={loading || action.busy || !status.permissions.enroll || live} onClick={() => void issueEnrollment()}>{ticket ? '重新签发激活码' : '签发激活码'}</Button>{status.permissions.manage_policy && connection.status !== 'REVOKED' && connection.status !== 'PENDING_ACTIVATION' ? <Button danger disabled={action.busy} onClick={() => void updateState('PENDING_ACTIVATION', '设备已进入待激活状态；旧连接与命令已失效。')}>重置设备身份</Button> : null}</div>
           {!status.permissions.enroll ? <p className="lumo-device-hint">设备需处于待激活状态且已有有效策略，才可签发激活码。</p> : null}
         </section>
         <section>
           <div className="lumo-device-lane-title"><span>03</span><div><b>受控命令</b><small>命令绑定当前连接与策略 revision，不跨重连自动重放</small></div></div>
-          <form className="lumo-device-command" onSubmit={queueCommand}><label>动作<select value={commandAction} onChange={event => setCommandAction(event.target.value)}><option value="reconcile">立即收敛</option><option value="start" disabled={!status.permissions.start || !status.process_runtime}>启动受控进程</option><option value="stop">停止受控进程</option></select></label>{commandAction !== 'reconcile' ? <label>制品<select value={artifactIndex} onChange={event => setArtifactIndex(event.target.value)}>{artifacts.map((artifact, index) => <option key={`${artifact.name}:${artifact.version}`} value={index}>{artifact.name}@{artifact.version}</option>)}</select></label> : null}<Button submit disabled={loading || action.busy || !status.permissions.command || !status.connected || (commandAction !== 'reconcile' && !selectedArtifact)}>下发命令</Button></form>
-          {!status.connected ? <p className="lumo-device-hint">设备当前未建立有效连接，暂不能创建命令。</p> : !status.process_runtime ? <p className="lumo-device-hint">服务端未启用进程运行策略；仍可下发收敛和停止命令。</p> : null}
+          <form className="lumo-device-command" onSubmit={queueCommand}><label>动作<select value={commandAction} onChange={event => setCommandAction(event.target.value)}><option value="reconcile">立即收敛</option><option value="start" disabled={!readyToStart}>启动受控进程</option><option value="stop">停止受控进程</option></select></label>{commandAction !== 'reconcile' ? <label>制品<select value={artifactIndex} onChange={event => setArtifactIndex(event.target.value)}>{artifacts.map((artifact, index) => <option key={`${artifact.name}:${artifact.version}`} value={index}>{artifact.name}@{artifact.version}</option>)}</select></label> : null}<Button submit disabled={loading || action.busy || !status.permissions.command || !live || (commandAction === 'start' && !readyToStart) || (commandAction !== 'reconcile' && !selectedArtifact)}>下发命令</Button></form>
+          {!live ? <p className="lumo-device-hint">设备当前未建立有效连接，暂不能创建命令。</p> : !status.process_runtime ? <p className="lumo-device-hint">服务端未启用进程运行策略；仍可下发收敛和停止命令。</p> : null}
           <div className="lumo-device-command-log">{commands.map(command => <div key={command.id}><time>{new Date(command.created_at).toLocaleString('zh-CN')}</time><span><b>{deviceCommandActions[command.action] ?? command.action}</b><small>{command.body?.name ? `${command.body.name}@${command.body.version}` : `policy v${command.revision}`}</small></span><em className={command.state}>{deviceCommandStates[command.state] ?? command.state}</em>{command.result !== undefined ? <code>{typeof command.result === 'string' ? command.result : JSON.stringify(command.result)}</code> : null}</div>)}</div>
           {!commands.length ? <p className="lumo-inline-empty">尚无设备命令记录。</p> : null}
         </section>
@@ -366,17 +440,44 @@ export function SkillAccessPanel({ request, skillID, version }: { request: Reque
 export interface ProjectMember { userId: string; role: string; addedAt?: string }
 const memberRoles = [{ id: 'viewer', name: '只读成员' }, { id: 'editor', name: '编辑成员' }, { id: 'owner', name: '项目所有者' }]
 
-export function ProjectMembersPanel({ request, projectID, members, editable, refresh }: { request: Request; projectID: string; members: ProjectMember[]; editable: boolean; refresh: () => Promise<void> }) {
+interface MemberPanelProps { request: Request; projectID: string; members: ProjectMember[]; editable: boolean; refresh: () => Promise<void> }
+export function ProjectMembersPanel(props: MemberPanelProps) {
+  return <ProjectMembersEditor key={props.projectID} {...props} />
+}
+function ProjectMembersEditor({ request, projectID, members, editable, refresh }: MemberPanelProps) {
   const action = useAction(refresh)
-  const [confirmation, setConfirmation] = useState('')
+  const [confirmation, setConfirmation] = useState<ProjectMember | null>(null)
+  const [search, setSearch] = useState('')
+  const [roleFilter, setRoleFilter] = useState('')
+  const [directory, setDirectory] = useState(false)
+  const owners = members.filter(member => member.role === 'owner').length
+  const visible = members.filter(member => (!roleFilter || member.role === roleFilter) && member.userId.toLowerCase().includes(search.trim().toLowerCase()))
+  const base = `/lumo/api/projects/${encodeURIComponent(projectID)}/members`
+  const memberPath = (member: ProjectMember) => `${base}/${encodeURIComponent(member.userId)}?expectedRole=${encodeURIComponent(member.role)}`
   const add = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const form = event.currentTarget; const fields = new FormData(form)
-    if (await action.run(() => request(`/lumo/api/projects/${encodeURIComponent(projectID)}/members`, { method: 'POST', body: JSON.stringify({ userId: String(fields.get('userId') ?? '').trim(), role: String(fields.get('role') ?? 'viewer') }) }), '项目成员已添加。')) form.reset()
+    const userId = String(fields.get('userId') ?? '').trim()
+    if (!userId) { action.setError('请选择启用用户或输入用户 ID。'); return }
+    if (members.some(member => member.userId === userId)) { action.setError('该用户已经是项目成员。'); return }
+    if (await action.run(() => request(base, { method: 'POST', body: JSON.stringify({ userId, role: String(fields.get('role') ?? 'viewer') }) }), '项目成员已添加。')) form.reset()
   }
-  const changeRole = (userID: string, role: string) => action.run(() => request(`/lumo/api/projects/${encodeURIComponent(projectID)}/members/${encodeURIComponent(userID)}`, { method: 'PATCH', body: JSON.stringify({ role }) }), '项目角色已更新。')
-  const remove = async (userID: string) => { if (await action.run(() => request(`/lumo/api/projects/${encodeURIComponent(projectID)}/members/${encodeURIComponent(userID)}`, { method: 'DELETE' }), '项目成员已移除。')) setConfirmation('') }
-  return <div className="lumo-cluster-panel"><h4>项目成员</h4><Feedback error={action.error} notice={action.notice} /><div className="lumo-cluster-list">{members.map(member => <div key={member.userId}><span><b>{member.userId}</b><small>{member.addedAt ? new Date(member.addedAt).toLocaleDateString('zh-CN') : ''}</small></span>{editable ? <><select aria-label={`${member.userId} 的项目角色`} disabled={action.busy} value={member.role} onChange={event => void changeRole(member.userId, event.target.value)}>{memberRoles.map(role => <option key={role.id} value={role.id}>{role.name}</option>)}</select><div className="lumo-form-actions">{confirmation === member.userId ? <><Button danger disabled={action.busy} onClick={() => void remove(member.userId)}>确认移除</Button><Button onClick={() => setConfirmation('')}>取消</Button></> : <Button danger disabled={action.busy} onClick={() => setConfirmation(member.userId)}>移除</Button>}</div></> : <span>{memberRoles.find(role => role.id === member.role)?.name ?? member.role}</span>}</div>)}</div>
-    {editable ? <form className="lumo-governance-form lumo-cluster-form" onSubmit={add}><label>用户 ID<input name="userId" required maxLength={128} /></label><label>项目角色<select name="role">{memberRoles.map(role => <option key={role.id} value={role.id}>{role.name}</option>)}</select></label><div className="lumo-user-form-actions"><Button submit disabled={action.busy}>添加成员</Button></div></form> : null}
+  const changeRole = (member: ProjectMember, role: string) => { setConfirmation(null); return action.run(() => request(memberPath(member), { method: 'PATCH', body: JSON.stringify({ role }) }), '项目角色已更新。') }
+  const remove = async (member: ProjectMember) => { if (await action.run(() => request(memberPath(member), { method: 'DELETE' }), '项目成员已移除。')) setConfirmation(null) }
+  return <div className="lumo-cluster-panel"><h4>项目成员</h4><Feedback error={action.error} notice={action.notice} />
+    <div className="lumo-cluster-toolbar"><label>搜索成员<input value={search} onChange={event => setSearch(event.target.value)} placeholder="用户 ID" /></label>
+      <label>筛选项目角色<select value={roleFilter} onChange={event => setRoleFilter(event.target.value)}><option value="">全部角色</option>{memberRoles.map(role => <option key={role.id} value={role.id}>{role.name}</option>)}</select></label></div>
+    <div className="lumo-cluster-list">{visible.map(member => {
+      const lastOwner = member.role === 'owner' && owners === 1
+      return <div key={member.userId}><span><b>{member.userId}</b><small>{lastOwner ? '唯一项目所有者' : member.addedAt ? new Date(member.addedAt).toLocaleDateString('zh-CN') : ''}</small></span>
+        {editable ? <><select aria-label={`${member.userId} 的项目角色`} disabled={action.busy || lastOwner} value={member.role} onChange={event => void changeRole(member, event.target.value)}>{memberRoles.map(role => <option key={role.id} value={role.id}>{role.name}</option>)}</select>
+          <div className="lumo-form-actions">{confirmation?.userId === member.userId && confirmation.role === member.role ? <><Button danger disabled={lastOwner || action.busy} onClick={() => void remove(confirmation)}>确认移除</Button><Button onClick={() => setConfirmation(null)}>取消</Button></> : <Button danger disabled={lastOwner || action.busy} onClick={() => setConfirmation(member)}>移除</Button>}</div></> : <span>{memberRoles.find(role => role.id === member.role)?.name ?? member.role}</span>}</div>
+    })}</div>
+    {!visible.length ? <p className="lumo-muted">{members.length ? '没有匹配的项目成员。' : '暂无项目成员。'}</p> : null}
+    {editable ? <form className="lumo-governance-form lumo-cluster-form" onSubmit={add}>
+      <label>添加方式<select value={directory ? 'directory' : 'id'} disabled={action.busy} onChange={event => { setDirectory(event.target.value === 'directory'); action.setError('') }}><option value="id">输入用户 ID</option><option value="directory">从用户目录选择</option></select></label>
+      {directory ? <DirectoryUserPicker request={request} name="userId" label="待添加成员" disabled={action.busy} /> : <label>用户 ID<input name="userId" required maxLength={128} disabled={action.busy} /></label>}
+      <label>项目角色<select name="role" disabled={action.busy}>{memberRoles.map(role => <option key={role.id} value={role.id}>{role.name}</option>)}</select></label>
+      <div className="lumo-user-form-actions"><Button submit disabled={action.busy}>添加成员</Button></div></form> : null}
   </div>
 }
 
@@ -800,6 +901,43 @@ function TaskArtifactsPanel({ request, taskID, runID }: { request: Request; task
   </div>
 }
 
+function EvidenceFile({ file }: { file: NonNullable<TaskResultFacts['files']>[number] }) {
+  const [notice, setNotice] = useState('')
+  const [error, setError] = useState('')
+  const copy = async () => {
+    setError('')
+    setNotice('')
+    try {
+      await navigator.clipboard.writeText(file.text)
+      setNotice('已复制正文。')
+    } catch {
+      setError('无法写入剪贴板，可选中下方正文复制。')
+    }
+  }
+  const download = () => {
+    setError('')
+    setNotice('')
+    try {
+      downloadFile(new Blob([file.text], { type: file.media_type }), file.name)
+    } catch {
+      setError('下载未能开始，可复制下方正文。')
+    }
+  }
+  return <details className="lumo-governed-source">
+    <summary>{file.name} · {file.media_type}</summary>
+    <div className="lumo-form-actions">
+      <button type="button" className="lumo-button lumo-secondary" aria-label={`复制 ${file.name} 正文`} onClick={() => void copy()}>
+        <svg width="16" height="16" aria-hidden="true"><use href="#dsw-icon-copy-outline-regular" /></svg>复制正文
+      </button>
+      <button type="button" className="lumo-button lumo-secondary" aria-label={`下载 ${file.name}`} onClick={download}>
+        <svg width="16" height="16" aria-hidden="true"><use href="#dsw-icon-download-outline-regular" /></svg>下载
+      </button>
+    </div>
+    <Feedback error={error} notice={notice} />
+    <pre>{file.text}</pre>
+  </details>
+}
+
 export function TaskEvidencePanel({ taskID, request, runID, result, error, busy, label, close }: {
   taskID: string; request: Request; runID: string; result: TaskResultFacts | null; error: string; busy: boolean; label: (state: string) => string; close: () => void
 }) {
@@ -855,7 +993,11 @@ export function TaskEvidencePanel({ taskID, request, runID, result, error, busy,
       <small className="lumo-form-note">上报摘要</small>
       <p className="lumo-cluster-feedback">{result.summary?.trim() || '该结果只带结构化交付物，没有文字摘要。'}</p>
       <details className="lumo-governed-source"><summary>{`交付物全文 · ${hasOutput ? `${output.length} 字符` : '无 output 字段'}`}</summary>{output ? <pre>{output}</pre> : <p>{hasOutput ? '交付物是空字符串。' : '该结果只带摘要，没有结构化交付物。'}</p>}</details>
-      {result.files?.length ? <section aria-label="受控文本文件"><small className="lumo-form-note">受控文本文件 · {result.files.length} 个</small>{result.files.map(file => <details className="lumo-governed-source" key={file.name}><summary>{file.name} · {file.media_type}</summary><pre>{file.text}</pre></details>)}<p className="lumo-form-note">这里显示执行结果中保存的文件正文；审核结论请在独立审核任务中查看。</p></section> : null}
+      {result.files?.length ? <section aria-label="受控文本文件">
+        <small className="lumo-form-note">受控文本文件 · {result.files.length} 个</small>
+        {result.files.map(file => <EvidenceFile key={JSON.stringify([taskID, runID, file.name])} file={file} />)}
+        <p className="lumo-form-note">这里显示执行结果中保存的文件正文；审核结论请在独立审核任务中查看。</p>
+      </section> : null}
       <small className="lumo-form-note">{`上报时间 ${result.created_at ? new Date(result.created_at).toLocaleString('zh-CN') : '未记录'} · 结果行不可变，重放不会覆盖`}</small>
     </> : null}
     <TaskArtifactsPanel request={request} taskID={taskID} runID={runID} />

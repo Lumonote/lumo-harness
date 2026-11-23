@@ -58,11 +58,11 @@ function DirectoryUserPickerContent({ request, name = 'manager_user_id', label =
       setPage({ users: result.users ?? [], total: result.total, offset: resolvedOffset, hasMore: result.has_more, search })
       setSelection(selected => selected ? result.users?.find(user => user.id === selected.id) ?? selected : null)
     } catch (reason) { if (current === sequence.current) {
-      if (authorityDenied(reason)) setPage({ users: [], total: 0, offset: 0, hasMore: false, search })
+      if (authorityDenied(reason)) { setPage({ users: [], total: 0, offset: 0, hasMore: false, search }); if (!initialUserId) setSelection(null) }
       setError(reason instanceof Error ? reason.message : String(reason))
     } }
     finally { if (current === sequence.current) setLoading(false) }
-  }, [request, search])
+  }, [request, search, initialUserId])
   useEffect(() => { void load(); return () => { sequence.current++ } }, [load, resetKey])
   const unavailable = disabled || loading || !currentPage
   return <div ref={root} className="lumo-directory-user-picker" role="group" aria-label={`${label}选择`}>
@@ -75,6 +75,6 @@ function DirectoryUserPickerContent({ request, name = 'manager_user_id', label =
     </div>
     {!page.users.length && !loading && !error ? <p className="lumo-muted">没有匹配的启用用户。</p> : null}
     <UserDirectoryPagination total={page.total} limit={pageSize} offset={page.offset} hasMore={page.hasMore} loading={unavailable} onOffsetChange={offset => void load(offset)} />
-    <p className="lumo-section-note">从当前工作域的启用用户中选择；保留原负责人，直至显式选择或清除。</p>
+    <p className="lumo-section-note">{label === '负责人' ? '从当前工作域的启用用户中选择；保留原负责人，直至显式选择或清除。' : '从当前工作域的启用用户中选择。'}</p>
   </div>
 }

@@ -645,7 +645,11 @@ func (s *Server) updateMember(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"valid role required"}`, http.StatusBadRequest)
 		return
 	}
-	if err := s.store.UpdateMemberRole(r.Context(), id, uid, req.Role); err != nil {
+	expected, ok := memberRolePrecondition(w, r)
+	if !ok {
+		return
+	}
+	if err := s.store.UpdateMemberRoleIf(r.Context(), id, uid, req.Role, expected); err != nil {
 		if s.projectWriteError(w, err) {
 			return
 		}
@@ -663,12 +667,29 @@ func (s *Server) updateMember(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
+// Old clients can omit the precondition. Reject present but ambiguous values.
+func memberRolePrecondition(w http.ResponseWriter, r *http.Request) (string, bool) {
+	values, present := r.URL.Query()["expectedRole"]
+	if !present {
+		return "", true
+	}
+	if len(values) != 1 || (values[0] != domain.RoleOwner && values[0] != domain.RoleEditor && values[0] != domain.RoleViewer) {
+		http.Error(w, `{"error":"invalid expected role"}`, http.StatusBadRequest)
+		return "", false
+	}
+	return values[0], true
+}
+
 func (s *Server) removeMember(w http.ResponseWriter, r *http.Request) {
 	id, uid := r.PathValue("id"), r.PathValue("userId")
 	if _, _, ok := s.require(w, r, id, domain.ActionMembersManage); !ok {
 		return
 	}
-	if err := s.store.RemoveMember(r.Context(), id, uid); err != nil {
+	expected, ok := memberRolePrecondition(w, r)
+	if !ok {
+		return
+	}
+	if err := s.store.RemoveMemberIf(r.Context(), id, uid, expected); err != nil {
 		if s.projectWriteError(w, err) {
 			return
 		}

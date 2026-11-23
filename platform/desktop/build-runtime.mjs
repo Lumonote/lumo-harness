@@ -34,6 +34,7 @@ import { verifyWindowsCua } from './windows-cua.mjs'
 import { stageOptionalComputerUse } from './optional-computer-use.mjs'
 import { copyPortablePythonTree } from './portable-python.mjs'
 import { writeRuntimeSizeReport } from './runtime-size.mjs'
+import { verifyWorkbenchClient } from './verify-workbench-client.mjs'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(desktopRoot, '..', '..')
@@ -592,6 +593,7 @@ cpSync(launcherSource, launcherDestination)
 if (targetPlatform !== 'win32') chmodSync(launcherDestination, 0o755)
 if (targetPlatform === 'win32') assertWindowsRuntimePaths(stagingRoot)
 
+const workbenchClient = verifyWorkbenchClient(resolve(modulesRoot, '@lumo', 'dsh-platform-ui'))
 writeFileSync(resolve(stagingRoot, 'runtime-manifest.json'), `${JSON.stringify({
   version: JSON.parse(readFileSync(resolve(repoRoot, 'platform/package.json'), 'utf8')).version,
   target: buildTarget,
@@ -601,6 +603,7 @@ writeFileSync(resolve(stagingRoot, 'runtime-manifest.json'), `${JSON.stringify({
   python: pptPython,
   skillhub,
   computerUse,
+  workbenchClient,
   prunedBytes,
   entrypoint: launcherName,
   upstreamPlugins: upstreamPluginSpecs,
