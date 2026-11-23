@@ -100,7 +100,12 @@ function parseRequest(value: unknown): DesktopPetRequest | undefined {
 }
 function targetWorkspace(services: DesktopPetServices, requested?: string): string {
   const workspaces = services.workspaces.list.getSnapshot(); const sessions = services.sessions.list.getSnapshot()
-  if (workspaces.phase !== 'ready' || sessions.phase !== 'ready') throw Error('工作区尚未就绪，请稍后重试。')
+  if (workspaces.phase !== 'ready' || sessions.phase !== 'ready') {
+    const notReady: string[] = []
+    if (workspaces.phase !== 'ready') notReady.push(`工作区(${workspaces.phase})`)
+    if (sessions.phase !== 'ready') notReady.push(`会话(${sessions.phase})`)
+    throw Error(`服务未就绪：${notReady.join('、')}。请重启应用或查看控制台错误日志。`)
+  }
   if (requested !== undefined) {
     if (!workspaces.items.some(item => item.workspaceId === requested)) throw Error('所选工作区已移除，请重新选择。')
     return requested
@@ -331,7 +336,7 @@ export function installDesktopPetBridge(view: Window, services: DesktopPetServic
     workspaces() {
       try {
         const snapshot = services.workspaces.list.getSnapshot()
-        if (snapshot.phase !== 'ready') throw Error('工作区尚未就绪，请稍后重试。')
+        if (snapshot.phase !== 'ready') throw Error(`工作区服务状态: ${snapshot.phase}，请重启应用或查看控制台日志。`)
         const workspaces = snapshot.items.map(item => ({ id: item.workspaceId, label: item.title || item.path || item.workspaceId, ...(item.path ? { path: item.path } : {}) }))
         return { workspaces, ...(workspaces.length ? { selectedWorkspaceId: targetWorkspace(services) } : {}) }
       } catch (reason) { return { workspaces: [], error: reason instanceof Error ? reason.message : '工作区尚未就绪。' } }

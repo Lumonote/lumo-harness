@@ -94,6 +94,11 @@ function mountLumoWithSources(): { registered: Registered[]; sources: SlashSourc
   return { registered, sources }
 }
 
+async function workToolsContent() {
+  const dialog = await screen.findByRole('dialog', { name: '工作工具工作台' })
+  return within(within(dialog).getByRole('main'))
+}
+
 describe('Lumo native Harness integration', () => {
   const calls: string[] = []
   // 线程看板的夹具**单独加**，不塞进下面那条共用列表：那条列表里的每一行都在被员工视图
@@ -294,7 +299,7 @@ describe('Lumo native Harness integration', () => {
     }
   })
 
-  it('keeps only the primary server workspaces in product navigation', async () => {
+  it('shows all available server workspaces in product navigation', async () => {
     const registered = mountLumo()
 
     const entries = registered.filter(item => item.name === 'sidebar.navigation')
@@ -308,11 +313,11 @@ describe('Lumo native Harness integration', () => {
     render(<div>{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
     const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
     expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual([
-      '协作空间', '资料库', '技能中心', '工作工具',
+      '协作空间', '项目运营', '技能管理', '资料库', '开放设计', 'PPT 生成', '技能中心', '连接器', '用户中心', '工作工具',
     ])
 
     fireEvent.click(within(navigation).getByRole('button', { name: '工作工具' }))
-    fireEvent.click(await screen.findByRole('button', { name: /^项目运营/ }))
+    fireEvent.click(await (await workToolsContent()).findByRole('button', { name: /^项目运营/ }))
     expect(await screen.findByRole('button', { name: '返回对话' })).toBeTruthy()
     expect(await screen.findByText('让每个项目都有清楚的边界与下一步。')).toBeTruthy()
     expect(screen.getByRole('navigation', { name: '项目与运营分区' })).toBeTruthy()
@@ -382,10 +387,11 @@ describe('Lumo native Harness integration', () => {
     fireEvent.click(within(navigation).getByRole('button', { name: '工作工具' }))
     expect(await screen.findByText('按工作领域找到真正可用的入口。')).toBeTruthy()
     expect(screen.getByRole('navigation', { name: '工具分类' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /开放设计/ })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /技能管理/ })).toBeTruthy()
-    expect(await screen.findByRole('button', { name: /连接器/ })).toBeTruthy()
-    expect(await screen.findByRole('button', { name: /用户中心/ })).toBeTruthy()
+    const tools = await workToolsContent()
+    expect(tools.getByRole('button', { name: /开放设计/ })).toBeTruthy()
+    expect(tools.getByRole('button', { name: /技能管理/ })).toBeTruthy()
+    expect(await tools.findByRole('button', { name: /连接器/ })).toBeTruthy()
+    expect(await tools.findByRole('button', { name: /用户中心/ })).toBeTruthy()
     expect(screen.queryByText('Stable 通道期望状态')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: /制品目录与灰度/ }))
     expect(screen.getByRole('list', { name: '能力生命周期' })).toBeTruthy()
@@ -414,7 +420,7 @@ describe('Lumo native Harness integration', () => {
     expect(calls.some(call => call === 'POST /lumo/api/registry/plan')).toBe(true)
 		fireEvent.click(within(screen.getByRole('navigation', { name: '工作领域' })).getByRole('button', { name: '工作工具' }))
 		fireEvent.click(within(screen.getByRole('navigation', { name: '工具分类' })).getByRole('button', { name: /^工作工具/ }))
-		fireEvent.click(await screen.findByRole('button', { name: /^开放设计/ }))
+		fireEvent.click(await (await workToolsContent()).findByRole('button', { name: /^开放设计/ }))
 		expect(await screen.findByRole('heading', { name: '开放设计' })).toBeTruthy()
 		expect(screen.queryByRole('button', { name: '添加设计上下文' })).toBeNull()
 
@@ -892,7 +898,7 @@ describe('Lumo native Harness integration', () => {
     // 再走一次「协作空间 → 项目」，这次没输入任何东西：意图不该被上一次的目标填上。
     fireEvent.click(within(navigation).getByRole('button', { name: '协作空间' }))
     fireEvent.click(await within(screen.getByRole('navigation', { name: '工作领域' })).findByRole('button', { name: '工作工具' }))
-    fireEvent.click(await screen.findByRole('button', { name: /^项目运营/ }))
+    fireEvent.click(await (await workToolsContent()).findByRole('button', { name: /^项目运营/ }))
     fireEvent.click(screen.getByRole('button', { name: /协作执行/ }))
     expect((await screen.findByLabelText('工作意图') as HTMLTextAreaElement).value).toBe('')
   }, 15000)
@@ -909,13 +915,14 @@ describe('Lumo native Harness integration', () => {
     }), { status: 200, headers: { 'content-type': 'application/json' } })))
     render(<Navigation wide />)
     const navigation = screen.getByRole('navigation', { name: 'Lumo 功能菜单' })
-    await waitFor(() => expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual(['资料库', '电脑操作', '技能中心', '工作工具']))
+    await waitFor(() => expect(within(navigation).getAllByRole('button').map(button => button.textContent)).toEqual([
+      '电脑操作', '项目运营', '技能管理', '资料库', '开放设计', 'PPT 生成', '技能中心', '工作工具',
+    ]))
     expect(within(navigation).queryByRole('button', { name: '更多' })).toBeNull()
     expect(within(navigation).getByRole('button', { name: '工作工具' }).querySelector('small')).toBeNull()
-    expect(within(navigation).queryByRole('button', { name: '项目运营' })).toBeNull()
+    expect(within(navigation).queryByRole('button', { name: '协作空间' })).toBeNull()
     expect(within(navigation).queryByRole('button', { name: '连接器' })).toBeNull()
-    expect(within(navigation).queryByRole('button', { name: '技能管理' })).toBeNull()
-    expect(within(navigation).queryByRole('button', { name: '开放设计' })).toBeNull()
+    expect(within(navigation).queryByRole('button', { name: '用户中心' })).toBeNull()
   })
 
   it('separates experts from skills and supports creating an expert', async () => {
@@ -1118,7 +1125,7 @@ describe('Lumo native Harness integration', () => {
     const opener = screen.getByRole('button', { name: '工作工具' })
     opener.focus()
     fireEvent.click(opener)
-    fireEvent.click(await screen.findByRole('button', { name: /^项目运营/ }))
+    fireEvent.click(await (await workToolsContent()).findByRole('button', { name: /^项目运营/ }))
     const workbench = await screen.findByRole('dialog', { name: '项目运营工作台' })
     await waitFor(() => expect(workbench.contains(document.activeElement)).toBe(true))
 

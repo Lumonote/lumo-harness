@@ -22,9 +22,8 @@ export function availableSurfaces(localMode: boolean): Surface[] {
 }
 
 export function navigationSurfaces(localMode: boolean): Surface[] {
-  const primarySurfaces: Surface[] = ['collaboration', 'knowledge', 'computer', 'skillhub', 'market']
-  const available = availableSurfaces(localMode)
-  return primarySurfaces.filter(surface => available.includes(surface))
+  // Show all available surfaces in sidebar navigation, not just primary subset
+  return availableSurfaces(localMode)
 }
 
 export const OPEN_EVENT = 'lumo:open-workbench'

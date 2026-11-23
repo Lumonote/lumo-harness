@@ -3176,11 +3176,12 @@ export const lumoCreativeCommandSource: LumoInputTriggerSource = {
 
 export const inject = ['slots', 'theme']
 export function apply(ctx: ClientContext): void {
-  const root = ((ctx as ClientContext & { root?: object }).root ?? ctx) as object
+  // Use ctx itself as the root identifier instead of accessing ctx.root property.
+  // Each plugin instance gets a unique context, so ctx serves as the mount ledger key.
   const roots = activeClientRoots()
-  if (roots.has(root)) return
-  roots.add(root)
-  ctx.effect(() => () => { roots.delete(root) }, 'lumo-ui: singleton client mount')
+  if (roots.has(ctx)) return
+  roots.add(ctx)
+  ctx.effect(() => () => { roots.delete(ctx) }, 'lumo-ui: singleton client mount')
   if (typeof window !== 'undefined') ctx.effect(() => installAnchoredOverlayFallback(window), 'lumo-ui: CSS anchor compatibility')
   if (typeof window !== 'undefined' && (window as Window & { __LUMO_DESKTOP__?: boolean }).__LUMO_DESKTOP__ === true) {
     ctx.inject(['sessions', 'workspaces', 'conversation', 'uiWorkspace', 'layout'], (desktopCtx) => {
@@ -3189,7 +3190,46 @@ export function apply(ctx: ClientContext): void {
       // Read the optional public upload service when it appears; text sending
       // remains available while an attachment provider is still loading.
       Object.defineProperty(services, 'fileUpload', { get: () => desktopCtx.get('fileUpload') })
-      desktopCtx.effect(() => installDesktopPetBridge(window, services as unknown as DesktopPetServices), 'lumo-ui: desktop pet messaging')
+
+      // Wait for workspaces and sessions to reach 'ready' phase before installing the bridge.
+      // Desktop pet operations require these services to be fully initialized to list workspaces
+      // and route messages to sessions.
+      desktopCtx.effect(() => {
+        const checkAndInstall = (): (() => void) => {
+          const ws = services.workspaces.list.getSnapshot()
+          const sess = services.sessions.list.getSnapshot()
+
+          if (ws.phase === 'ready' && sess.phase === 'ready') {
+            return installDesktopPetBridge(window, services as unknown as DesktopPetServices)
+          }
+
+          // Subscribe to both services and install once both are ready
+          const unsubscribers: Array<(() => void) | undefined> = []
+
+          const tryInstall = (): void => {
+            const ws = services.workspaces.list.getSnapshot()
+            const sess = services.sessions.list.getSnapshot()
+            if (ws.phase === 'ready' && sess.phase === 'ready') {
+              unsubscribers.forEach(unsub => unsub?.())
+              const dispose = installDesktopPetBridge(window, services as unknown as DesktopPetServices)
+              // Replace the subscription cleanup with the bridge disposal
+              unsubscribers.length = 0
+              unsubscribers.push(dispose)
+            }
+          }
+
+          if (services.workspaces.list.subscribe) {
+            unsubscribers.push(services.workspaces.list.subscribe(tryInstall))
+          }
+          if (services.sessions.list.subscribe) {
+            unsubscribers.push(services.sessions.list.subscribe(tryInstall))
+          }
+
+          return () => { unsubscribers.forEach(unsub => unsub?.()) }
+        }
+
+        return checkAndInstall()
+      }, 'lumo-ui: desktop pet messaging')
     })
   }
   if (typeof window !== 'undefined') ctx.inject(['sessions', 'layout'], (computerCtx) => {
