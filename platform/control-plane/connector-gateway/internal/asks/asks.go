@@ -72,10 +72,10 @@ func StatusOf(s string) string {
 func FromApproval(r approval.Request) Ask {
 	a := Ask{
 		ID: ConnectorPrefix + r.ID, Kind: "approval", Status: StatusOf(r.Status), Realm: r.Realm,
-		Title:   "连接器高敏感写入：" + r.ConnectorID + " · " + r.Operation,
-		Detail:  "批准仅对完全相同的请求生效一次。",
-		Options: approvalOptions,
-		Source:  Source{Kind: "connector", Ref: r.ID, ConnectorID: r.ConnectorID, Operation: r.Operation},
+		Title:           "连接器高敏感写入：" + r.ConnectorID + " · " + r.Operation,
+		Detail:          "批准仅对完全相同的请求生效一次。",
+		Options:         approvalOptions,
+		Source:          Source{Kind: "connector", Ref: r.ID, ConnectorID: r.ConnectorID, Operation: r.Operation},
 		RequesterUserID: r.RequesterUserID, ProjectID: r.ProjectID,
 		CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt, SourceStatus: r.Status,
 	}

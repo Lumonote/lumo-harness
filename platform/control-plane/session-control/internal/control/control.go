@@ -443,7 +443,7 @@ func (c *Controller) load(ctx context.Context, req Request) (store.Row, bool, er
 }
 
 // askMismatch 校验 approve/reject 回答的是状态行关联的那个 Ask（P0-1）。
-// 兼容旧数据：状态行未关联（''）或指令未携带 AskID 时不校验。
+// 兼容旧数据：状态行关联的 AskID 为空字符串，或指令未携带 AskID 时不校验。
 func askMismatch(row store.Row, req Request) string {
 	if req.Command != state.CmdApprove && req.Command != state.CmdReject {
 		return ""

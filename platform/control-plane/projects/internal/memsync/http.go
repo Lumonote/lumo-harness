@@ -33,7 +33,9 @@ func ident(w http.ResponseWriter, r *http.Request) (string, string, bool) {
 	return realm, u, true
 }
 
-func fail(w http.ResponseWriter, code int, msg string) { write(w, code, map[string]string{"error": msg}) }
+func fail(w http.ResponseWriter, code int, msg string) {
+	write(w, code, map[string]string{"error": msg})
+}
 
 func write(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
