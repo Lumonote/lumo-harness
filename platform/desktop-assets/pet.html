@@ -76,6 +76,14 @@
           <label for="dev-card-body">正文</label><textarea id="dev-card-body" rows="3"></textarea>
           <div class="dev-actions"><button type="button" id="dev-card-save">保存记忆</button><button type="button" id="dev-card-remove" hidden>移除记忆</button></div>
         </details>
+        <details id="dev-sync"><summary>跨设备同步 <span id="dev-sync-summary"></span></summary>
+          <label class="dev-check"><input id="dev-sync-enabled" type="checkbox">同步长期记忆到云工作台</label>
+          <label for="dev-sync-server">同步服务器</label><input id="dev-sync-server" type="url" maxlength="512" spellcheck="false" placeholder="https://lumo.example.com">
+          <label for="dev-sync-token">访问令牌</label><input id="dev-sync-token" type="password" maxlength="4096" autocomplete="off">
+          <div class="dev-actions"><button type="button" id="dev-sync-save">保存设置</button><button type="button" id="dev-sync-now">立即同步</button></div>
+          <p class="feedback" id="dev-sync-status" role="status" aria-live="polite"></p>
+          <ol id="dev-sync-conflicts" aria-label="同步冲突" hidden></ol>
+        </details>
         <details id="dev-handoff">
           <summary>选择内容并交接</summary>
           <p>选择已保存的内容，预览后复制到 Claude Code、Codex 或其他工具。</p>

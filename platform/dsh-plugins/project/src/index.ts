@@ -11,6 +11,7 @@ import z from '@deepseek-ai/schemastery'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 import { ProjectService } from './service.ts'
+import { dualPluginsEnabled, registerDualPlugin, PROJECT_MANIFEST } from '../../dual-plugins/src/index.ts'
 
 export interface ProjectConfig {
   connectionString: string
@@ -108,7 +109,13 @@ export function apply(ctx: Context, config: ProjectConfig): void {
     },
   }
 
-  const unregister = ctx.tools.register(definition)
+  // P1 双受众插件：清单注册（人用页面 + Agent 工具），调用走判定 / Ask / 运行树；LUMO_DUAL_PLUGINS=off 回到直接注册
+  const unregister = dualPluginsEnabled()
+    ? registerDualPlugin(ctx.tools, PROJECT_MANIFEST, { project_context: (args, c) => {
+      if (c.caller.realm !== config.realm || c.caller.projectId !== config.projectId) throw new Error('project_context: 授权范围与节点项目不一致')
+      return definition.execute(args, c as never)
+    } })
+    : ctx.tools.register(definition)
   ctx.effect(() => () => {
     unregister()
   })

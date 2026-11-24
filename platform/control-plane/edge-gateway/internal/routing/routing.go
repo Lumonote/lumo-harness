@@ -38,6 +38,10 @@ type Route struct {
 	RateLimitRPM int `json:"rate_limit_rpm,omitempty"`
 	// Canary 灰度分流配置；为空表示无灰度。
 	Canary *Canary `json:"canary,omitempty"`
+	// Identity 为空表示沿用默认：调用方须持控制面令牌并自带身份头（内部调用者）。
+	// "session" 表示用户直连：网关用 governance 校验用户会话、剥掉客户端的
+	// X-Lumo-* 头并注入已验证身份（见 internal/identity）。
+	Identity string `json:"identity,omitempty"`
 }
 
 // Canary 灰度分流：同一路由在两个上游之间按 header 或权重分流。
@@ -111,6 +115,9 @@ func (rt *RouteTable) Validate() error {
 		} else if host := hostOf(r.Upstream); host == "" || !wl[host] {
 			// 边界隔离：上游主机不在白名单 → 加载时拒绝，而不是请求时才连。
 			errs = append(errs, fmt.Errorf("%s: upstream 主机 %q 不在白名单内", tag, host))
+		}
+		if r.Identity != "" && r.Identity != "session" {
+			errs = append(errs, fmt.Errorf("%s: identity 只能为空或 \"session\", 得到 %q", tag, r.Identity))
 		}
 		if r.Canary != nil {
 			c := r.Canary

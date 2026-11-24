@@ -65,7 +65,7 @@ Two trees, very different rules:
 | Path | In this repo? | Role |
 |---|---|---|
 | `docs/` | yes (the actual work) | Chinese-language architecture spec for the distributed platform |
-| `deepseek-harness/` | **no — gitignored, separate git repo** | Upstream `dsh` checkout tracking branch `master` (not pinned to a tag). Read-only reference. |
+| `deepseek-harness/` | **no — gitignored, separate git repo** | Upstream `dsh` checkout. Release/CI pin the commit in `platform/dsh-pin.json` (see `docs/dsh-compat.md`); only the nightly job follows `master`. Read-only reference. |
 
 `deepseek-harness/` is ignored by the first line of `.gitignore` and carries its own `.git`. Never
 commit into it, never treat edits there as part of this project's work, and don't expect changes

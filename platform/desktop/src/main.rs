@@ -23,11 +23,17 @@ use tauri::{
     AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 
+mod acp_launch;
 mod dev_agents;
 mod dev_catalog;
 mod dev_memory;
 mod dev_tools;
+mod memory_sync;
+mod device_actions;
+mod device_exec;
+mod device_server;
 mod pet;
+mod pet_acp;
 
 const MAIN_WINDOW: &str = "main";
 const TRAY_ID: &str = "lumo-tray";
@@ -367,6 +373,8 @@ fn spawn_runtime(app: &AppHandle) -> Result<String, String> {
     // 上一进程留下的旧 token 对新进程无效，spawn 前先清掉。
     let handoff_file = state_dir.join("web-url");
     let _ = fs::remove_file(&handoff_file);
+    // P1 设备动作：本机 127.0.0.1 + token 调用面；失败只记日志，不影响 runtime 启动。
+    let device_actions_file = device_server::start(&data_dir, &state_dir).unwrap_or_else(|e| { log_stage(app, &e); PathBuf::new() });
 
     // The desktop worker is deliberately a child process rather than a second
     // copy of the control plane. It owns one SQLite file and never receives
@@ -401,6 +409,7 @@ fn spawn_runtime(app: &AppHandle) -> Result<String, String> {
         .env("DSH_HOME", data_dir.join("dsh"))
         .env("LUMO_RUNTIME_STATE_DIR", &state_dir)
         .env("LUMO_DESKTOP_HANDOFF_FILE", &handoff_file)
+        .env("LUMO_DEVICE_ACTIONS_FILE", &device_actions_file)
         .env_remove("LUMO_PG_DSN")
         .env_remove("LUMO_REDIS_URL")
         .env_remove("LUMO_NACOS_ADDR")
@@ -793,7 +802,9 @@ fn main() {
             pet::pet_dev_note,
             pet::pet_dev_open,
             pet::pet_dev_locate,
-            pet::pet_open_workbench
+            pet::pet_open_workbench,
+            memory_sync::pet_memory_sync,
+            memory_sync::pet_memory_sync_run
         ])
         .build(tauri::generate_context!())
         .expect("error while building Lumo desktop");

@@ -1,0 +1,39 @@
+/* 本机设备动作面板（P1）。只使用 lumo.css 已定义的 --lumo-* 变量，随亮/暗主题自动切换。 */
+.lumo-device-actions { display: grid; gap: 12px; }
+.lumo-device-switches { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.lumo-device-switches > span { padding: 2px 10px; border: 1px solid var(--lumo-line); border-radius: var(--lumo-radius-sm); color: var(--lumo-muted); font-size: var(--lumo-fs-xxs-12); }
+.lumo-device-switches > span[data-on="true"] { color: var(--lumo-mint); border-color: var(--lumo-mint); background: var(--lumo-mint-soft); }
+.lumo-device-list, .lumo-device-calls { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.lumo-device-list { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.lumo-device-list > li, .lumo-device-calls > li { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--lumo-line); border-radius: var(--lumo-radius); background: var(--lumo-panel); color: var(--lumo-body); }
+.lumo-device-list > li[aria-selected="true"] { border-color: var(--lumo-line-strong); background: var(--lumo-panel-raised); }
+.lumo-device-list > li > div:first-child { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }
+.lumo-device-list code { font-family: var(--lumo-mono); font-size: var(--lumo-fs-xxxs-11); color: var(--lumo-faint); }
+.lumo-device-list small, .lumo-device-calls small { color: var(--lumo-muted); font-size: var(--lumo-fs-xxs-12); line-height: var(--lumo-lh-snug); }
+.lumo-device-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.lumo-device-tags > span { padding: 0 8px; border-radius: var(--lumo-radius-sm); font-size: var(--lumo-fs-xxxs-11); border: 1px solid var(--lumo-line); color: var(--lumo-muted); }
+.lumo-device-list > li[data-risk="low"] .lumo-device-risk { color: var(--lumo-cyan); border-color: var(--lumo-cyan-line); background: var(--lumo-cyan-soft); }
+.lumo-device-list > li[data-risk="high"] .lumo-device-risk { color: var(--lumo-warn); border-color: var(--lumo-warn); }
+.lumo-device-list > li[data-effect="deny"] { opacity: .78; }
+.lumo-device-list > li[data-effect="deny"] .lumo-device-effect { color: var(--lumo-danger); border-color: var(--lumo-danger); }
+.lumo-device-perm[data-missing="true"] { color: var(--lumo-danger) !important; border-color: var(--lumo-danger) !important; }
+.lumo-device-actions .lumo-surface-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.lumo-device-actions a { color: var(--lumo-mint); font-size: var(--lumo-fs-xxs-12); }
+.lumo-device-trigger { display: grid; gap: 8px; padding: 12px; border: 1px dashed var(--lumo-line-strong); border-radius: var(--lumo-radius); background: var(--lumo-panel-soft); }
+.lumo-device-trigger label { display: grid; gap: 4px; color: var(--lumo-muted); font-size: var(--lumo-fs-xxs-12); }
+.lumo-device-trigger textarea { font-family: var(--lumo-mono); background: var(--lumo-bg); color: var(--lumo-ink); border: 1px solid var(--lumo-line); border-radius: var(--lumo-radius-sm); padding: 6px 8px; }
+.lumo-device-calls > li { grid-template-columns: auto 1fr; align-items: baseline; }
+.lumo-device-calls > li > small, .lumo-device-calls > li > .lumo-surface-actions { grid-column: 1 / -1; }
+.lumo-device-state { font-size: var(--lumo-fs-xxxs-11); padding: 0 8px; border-radius: var(--lumo-radius-sm); border: 1px solid var(--lumo-line); color: var(--lumo-muted); }
+.lumo-device-calls > li[data-state="confirming"] { border-color: var(--lumo-warn); }
+.lumo-device-calls > li[data-state="confirming"] .lumo-device-state { color: var(--lumo-warn); border-color: var(--lumo-warn); animation: lumo-device-pulse 1.6s ease-in-out infinite; }
+.lumo-device-calls > li[data-state="running"] .lumo-device-state { color: var(--lumo-mint); border-color: var(--lumo-mint); }
+.lumo-device-calls > li[data-state="succeeded"] .lumo-device-state { color: var(--lumo-cyan); border-color: var(--lumo-cyan-line); }
+.lumo-device-calls > li[data-state="failed"] .lumo-device-state,
+.lumo-device-calls > li[data-state="denied"] .lumo-device-state,
+.lumo-device-calls > li[data-state="rejected"] .lumo-device-state { color: var(--lumo-danger); border-color: var(--lumo-danger); }
+@keyframes lumo-device-pulse { 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .lumo-device-calls .lumo-device-state { animation: none !important; } }
+/* 统一 Ask 列表里的来源标签与高风险提示（asks-panel.tsx） */
+[data-ask-id] .lumo-ask-source { font-size: var(--lumo-fs-xxxs-11); padding: 0 6px; border-radius: var(--lumo-radius-sm); border: 1px solid var(--lumo-line); color: var(--lumo-muted); justify-self: start; }
+[data-ask-id][data-risk="high"] .lumo-ask-source { color: var(--lumo-warn); border-color: var(--lumo-warn); }

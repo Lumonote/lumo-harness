@@ -1,0 +1,86 @@
+/* P0-3 运行树 + P0-1 待处理 Ask 面板样式。
+   只消费 lumo.css 里 :root 定义的 --lumo-* token（它们来自宿主 --dsw-* 主题契约，
+   亮色/暗色/四套 Lumo 主题切换时自动跟随），本文件不新增任何 --lumo-* 变量。
+   圆形元素按 lumo.css 顶部约定同时声明 corner-shape: round。 */
+
+.lumo-run-tree{
+  --rt-pending:var(--lumo-faint);--rt-running:var(--lumo-mint);--rt-awaiting:var(--lumo-warn);
+  --rt-succeeded:var(--lumo-cyan);--rt-failed:var(--lumo-danger);--rt-cancelled:var(--lumo-muted);
+  display:grid;grid-template-columns:minmax(0,1fr);gap:12px;color:var(--lumo-ink);font-size:var(--lumo-fs-xs-13)}
+.lumo-run-tree:has(>.lumo-run-tree-detail){grid-template-columns:minmax(0,1fr) minmax(240px,320px)}
+.lumo-run-tree>header,.lumo-run-tree>.lumo-alert,.lumo-run-tree>.lumo-empty{grid-column:1/-1}
+.lumo-run-tree>header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.lumo-run-tree>header>div{display:grid;gap:4px;min-width:0}
+.lumo-run-tree>header b{font-size:var(--lumo-fs-s-14)}
+.lumo-run-tree>header small{color:var(--lumo-faint);font-size:var(--lumo-fs-xxs-12);line-height:1.6}
+.lumo-run-tree>.lumo-empty{padding:28px 12px;border:1px dashed var(--lumo-line-strong);border-radius:var(--lumo-radius-sm);text-align:center}
+.lumo-run-tree[aria-busy=true],.lumo-run-tree:has(>header [aria-busy=true]) .lumo-run-tree-list{opacity:.6;transition:opacity .2s}
+
+/* 树 */
+.lumo-run-tree-list,.lumo-run-tree-list ul{list-style:none;margin:0;padding:0}
+.lumo-run-tree-list{min-width:0;max-height:560px;overflow:auto;padding:6px;border:1px solid var(--lumo-line);border-radius:var(--lumo-radius-sm);background:var(--lumo-panel)}
+.lumo-run-tree-list ul[role=group]{position:relative;margin-left:11px;padding-left:12px;border-left:1px solid var(--lumo-line)}
+.lumo-run-tree-list ul[role=group]>li{position:relative}
+.lumo-run-tree-list ul[role=group]>li::before{content:"";position:absolute;left:-12px;top:15px;width:10px;border-top:1px solid var(--lumo-line)}
+.lumo-run-tree-list ul[role=group]>li:last-child::after{content:"";position:absolute;left:-13px;top:16px;bottom:0;width:2px;background:var(--lumo-panel)}
+/* 缩进交给嵌套 ul，覆盖组件里的 paddingLeft 内联值，连接线才能对齐 */
+.lumo-run-tree-row{display:flex;align-items:center;gap:2px;min-height:30px;padding-left:0!important}
+.lumo-run-tree-toggle{flex:none;display:inline-grid;place-items:center;width:20px;height:20px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--lumo-faint);font-size:var(--lumo-fs-xxs-12);line-height:1}
+span.lumo-run-tree-toggle{opacity:.5}
+button.lumo-run-tree-toggle{cursor:pointer;transition:background .15s,color .15s}
+button.lumo-run-tree-toggle:hover{background:var(--lumo-accent-8);color:var(--lumo-ink)}
+.lumo-run-tree-node{flex:1;min-width:0;display:flex;align-items:center;gap:6px;padding:5px 8px;border:1px solid transparent;border-radius:6px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;white-space:nowrap;overflow:hidden;transition:background .15s,border-color .15s}
+.lumo-run-tree-node:hover{background:var(--lumo-accent-4)}
+.lumo-run-tree-toggle:focus-visible,.lumo-run-tree-node:focus-visible{outline:2px solid var(--lumo-cyan);outline-offset:1px}
+.lumo-run-tree-node>b{font-weight:600;overflow:hidden;text-overflow:ellipsis}
+.lumo-run-tree-node>small{color:var(--lumo-faint);font-size:var(--lumo-fs-xxxs-11)}
+.lumo-run-tree-node>small:first-of-type{flex:none;padding:1px 6px;border:1px solid var(--lumo-line);border-radius:4px;font-family:var(--lumo-mono)}
+.lumo-run-tree-node>small:last-of-type{overflow:hidden;text-overflow:ellipsis}
+.lumo-run-tree li[aria-selected=true]>.lumo-run-tree-row>.lumo-run-tree-node{background:var(--lumo-accent-12);border-color:var(--lumo-accent-24)}
+.lumo-run-tree li[data-node-kind=task]>.lumo-run-tree-row>.lumo-run-tree-node>b{font-size:var(--lumo-fs-s-14)}
+
+/* 状态点：覆盖组件内联回退色，改用主题 token */
+.lumo-run-tree-node>i{flex:none;width:8px!important;height:8px!important;margin-right:0!important;border-radius:50%!important;corner-shape:round;background:var(--rt-dot,var(--rt-pending))!important}
+.lumo-run-tree li[data-status=pending]{--rt-dot:var(--rt-pending)}
+.lumo-run-tree li[data-status=running]{--rt-dot:var(--rt-running)}
+.lumo-run-tree li[data-status=awaiting_ask]{--rt-dot:var(--rt-awaiting)}
+.lumo-run-tree li[data-status=succeeded]{--rt-dot:var(--rt-succeeded)}
+.lumo-run-tree li[data-status=failed]{--rt-dot:var(--rt-failed)}
+.lumo-run-tree li[data-status=cancelled]{--rt-dot:var(--rt-cancelled)}
+.lumo-run-tree li[data-status=running]>.lumo-run-tree-row>.lumo-run-tree-node>i{animation:lumo-run-tree-pulse 1.6s ease-in-out infinite}
+.lumo-run-tree li[data-status=awaiting_ask]>.lumo-run-tree-row>.lumo-run-tree-node>i{box-shadow:0 0 0 3px color-mix(in srgb,var(--rt-awaiting) 25%,transparent)}
+.lumo-run-tree li[data-status=awaiting_ask]>.lumo-run-tree-row>.lumo-run-tree-node>small:last-of-type{color:var(--rt-awaiting)}
+.lumo-run-tree li[data-status=failed]>.lumo-run-tree-row>.lumo-run-tree-node>small:last-of-type{color:var(--rt-failed)}
+.lumo-run-tree li[data-status=cancelled]>.lumo-run-tree-row>.lumo-run-tree-node>b{color:var(--lumo-muted);text-decoration:line-through;text-decoration-color:var(--lumo-faint)}
+@keyframes lumo-run-tree-pulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--rt-running) 55%,transparent)}50%{box-shadow:0 0 0 4px color-mix(in srgb,var(--rt-running) 0%,transparent);opacity:.7}}
+
+/* 详情面板 */
+.lumo-run-tree-detail{position:sticky;top:12px;align-self:start;display:grid;gap:10px;min-width:0;padding:14px;border:1px solid var(--lumo-line);border-radius:var(--lumo-radius-sm);background:var(--lumo-panel-raised)}
+.lumo-run-tree-detail>b{font-size:var(--lumo-fs-s-14);overflow-wrap:anywhere}
+.lumo-run-tree-detail>small{color:var(--lumo-faint);font:var(--lumo-fs-xxxs-11)/var(--lumo-lh-tight) var(--lumo-mono);overflow-wrap:anywhere}
+.lumo-run-tree-detail dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 12px;margin:0}
+.lumo-run-tree-detail dt{color:var(--lumo-muted);font-size:var(--lumo-fs-xxs-12)}
+.lumo-run-tree-detail dd{margin:0;font-size:var(--lumo-fs-xxs-12);overflow-wrap:anywhere}
+.lumo-run-tree-detail dd:first-of-type{font-weight:600}
+.lumo-run-tree:has(li[aria-selected=true][data-status=pending]) .lumo-run-tree-detail dd:first-of-type{color:var(--rt-pending)!important}
+.lumo-run-tree:has(li[aria-selected=true][data-status=running]) .lumo-run-tree-detail dd:first-of-type{color:var(--rt-running)!important}
+.lumo-run-tree:has(li[aria-selected=true][data-status=awaiting_ask]) .lumo-run-tree-detail dd:first-of-type{color:var(--rt-awaiting)!important}
+.lumo-run-tree:has(li[aria-selected=true][data-status=succeeded]) .lumo-run-tree-detail dd:first-of-type{color:var(--rt-succeeded)!important}
+.lumo-run-tree:has(li[aria-selected=true][data-status=failed]) .lumo-run-tree-detail dd:first-of-type{color:var(--rt-failed)!important}
+.lumo-run-tree:has(li[aria-selected=true][data-status=cancelled]) .lumo-run-tree-detail dd:first-of-type{color:var(--rt-cancelled)!important}
+/* 详情里的待处理 Ask 列表 */
+.lumo-run-tree-detail>div{display:grid;gap:6px;padding-top:10px;border-top:1px solid var(--lumo-line)}
+.lumo-run-tree-detail [data-ask-id]{display:grid;gap:2px;margin:0;padding:8px 10px;border-left:2px solid var(--lumo-warn);border-radius:4px;background:color-mix(in srgb,var(--lumo-warn) 10%,transparent)}
+.lumo-run-tree-detail [data-ask-id] small{color:var(--lumo-muted);font-size:var(--lumo-fs-xxxs-11)}
+.lumo-run-tree-detail>.lumo-small{justify-self:start}
+
+@media (max-width:860px){.lumo-run-tree:has(>.lumo-run-tree-detail){grid-template-columns:minmax(0,1fr)}.lumo-run-tree-detail{position:static}}
+
+/* P0-1 AsksPanel：卡片网格复用 lumo.css 的 .lumo-market-note-grid；补上缺失的操作区与状态色 */
+.lumo-market-note-grid>[data-ask-id] .lumo-surface-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:4px}
+.lumo-market-note-grid>[data-ask-id] .lumo-surface-actions input{flex:1;min-width:120px;min-height:28px;padding:4px 8px;border:1px solid var(--lumo-line-strong);border-radius:6px;background:var(--lumo-panel);color:var(--lumo-ink);font:inherit;font-size:var(--lumo-fs-xxs-12)}
+.lumo-market-note-grid>[data-ask-id] .lumo-surface-actions input:focus-visible{outline:2px solid var(--lumo-cyan);outline-offset:1px}
+.lumo-market-note-grid>[data-ask-id] .lumo-surface-actions span{color:inherit;font:inherit}
+.lumo-market-note-grid>[data-ask-id]>small{color:var(--lumo-muted);font-size:var(--lumo-fs-xxs-12);overflow-wrap:anywhere}
+.lumo-market-note-grid>[data-ask-id]:has(.lumo-surface-actions){border-color:color-mix(in srgb,var(--lumo-warn) 45%,transparent)}
+.lumo-market-note-grid>[data-ask-id]:has(.lumo-surface-actions)>span:first-child{color:var(--lumo-warn)}

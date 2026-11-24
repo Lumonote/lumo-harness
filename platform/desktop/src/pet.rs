@@ -1,3 +1,6 @@
+mod request;
+use request::{validate_pet_request, PetAttachment};
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -167,6 +170,7 @@ pub fn asset(request: tauri::http::Request<Vec<u8>>) -> tauri::http::Response<Ve
             "text/javascript; charset=utf-8",
             include_bytes!("../../desktop-assets/dev-tools.mjs"),
         ),
+        "/memory-sync.mjs" => ("text/javascript; charset=utf-8", include_bytes!("../../desktop-assets/memory-sync.mjs")),
         "/pet-whale.svg" => (
             "image/svg+xml",
             include_bytes!("../../desktop-assets/pet-whale.svg"),
@@ -671,7 +675,7 @@ pub fn pet_set_preferences(
     Ok(())
 }
 
-fn evaluate(window: &WebviewWindow, script: String) -> Result<serde_json::Value, String> {
+pub(crate) fn evaluate(window: &WebviewWindow, script: String) -> Result<serde_json::Value, String> {
     let (send, receive) = mpsc::sync_channel(1);
     window
         .eval_with_callback(script, move |result| {
@@ -682,95 +686,6 @@ fn evaluate(window: &WebviewWindow, script: String) -> Result<serde_json::Value,
         .recv_timeout(Duration::from_secs(2))
         .map_err(|_| "工作台暂未响应，请稍后重试".to_string())?;
     serde_json::from_str(&result).map_err(|_| "工作台返回了无效状态".to_string())
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PetAttachment {
-    name: String,
-    mime_type: String,
-    base64: String,
-}
-
-const PET_MAX_FILES: usize = 4;
-const PET_FILE_BYTES: usize = 8 * 1024 * 1024;
-const PET_TOTAL_BYTES: usize = 16 * 1024 * 1024;
-
-fn attachment_bytes(file: &PetAttachment) -> Result<usize, String> {
-    let raw = file.base64.as_bytes();
-    if file.name.is_empty()
-        || file.name.chars().count() > 255
-        || file
-            .name
-            .chars()
-            .any(|ch| ch.is_control() || ch == '/' || ch == '\\')
-        || file.mime_type.len() > 255
-        || file.mime_type.chars().any(char::is_control)
-        || raw.is_empty()
-        || raw.len() > (PET_FILE_BYTES + 2) / 3 * 4
-        || raw.len() % 4 != 0
-    {
-        return Err("附件名称、类型或大小无效".into());
-    }
-    let padding = raw.iter().rev().take_while(|&&ch| ch == b'=').count();
-    if padding > 2
-        || raw[..raw.len() - padding]
-            .iter()
-            .any(|ch| !ch.is_ascii_alphanumeric() && *ch != b'+' && *ch != b'/')
-    {
-        return Err("附件编码无效".into());
-    }
-    let bytes = raw.len() / 4 * 3 - padding;
-    if bytes > PET_FILE_BYTES {
-        return Err("单个附件不能超过 8 MB".into());
-    }
-    Ok(bytes)
-}
-
-fn validate_pet_request(
-    target: &str,
-    draft: &str,
-    workspace_id: Option<&str>,
-    request_id: Option<&str>,
-    attachments: &[PetAttachment],
-) -> Result<bool, String> {
-    if !["home", "chat", "tasks"].contains(&target)
-        || draft.encode_utf16().count() > 12000
-        || (target != "chat"
-            && (!draft.is_empty() || !attachments.is_empty() || workspace_id.is_some()))
-    {
-        return Err("无效的桌宠请求".into());
-    }
-    if let Some(id) = workspace_id {
-        if id.trim().is_empty() || id.len() > 1024 || id.chars().any(char::is_control) {
-            return Err("请选择有效的工作空间".into());
-        }
-    }
-    if let Some(id) = request_id {
-        if id.is_empty()
-            || id.len() > 128
-            || !id
-                .bytes()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-')
-        {
-            return Err("发送标识无效".into());
-        }
-    }
-    let submitting = target == "chat" && (!draft.trim().is_empty() || !attachments.is_empty());
-    if submitting && (workspace_id.is_none() || request_id.is_none()) {
-        return Err("发送需要工作空间和请求标识".into());
-    }
-    if attachments.len() > PET_MAX_FILES {
-        return Err("最多添加 4 个附件".into());
-    }
-    let mut total = 0;
-    for file in attachments {
-        total += attachment_bytes(file)?;
-    }
-    if total > PET_TOTAL_BYTES {
-        return Err("附件总大小不能超过 16 MB".into());
-    }
-    Ok(submitting)
 }
 
 fn cancellation_result(
@@ -835,7 +750,7 @@ fn handoff(window: WebviewWindow, request: serde_json::Value) -> Result<serde_js
     }
 }
 
-fn connected_main(app: &AppHandle) -> Result<WebviewWindow, String> {
+pub(crate) fn connected_main(app: &AppHandle) -> Result<WebviewWindow, String> {
     let main = super::main_window(app).ok_or("主窗口未创建")?;
     let expected = app
         .state::<PetState>()
@@ -934,7 +849,7 @@ fn project_directory(item: &serde_json::Value) -> Result<PathBuf, String> {
 
 static DEV_CONTROL: Mutex<()> = Mutex::new(());
 
-async fn with_dev_workspace<T: Send + 'static>(
+pub(crate) async fn with_dev_workspace<T: Send + 'static>(
     window: WebviewWindow,
     app: AppHandle,
     workspace_id: String,
@@ -1046,6 +961,7 @@ async fn dev_action(
     workspace_id: String,
     action: DevAction,
 ) -> Result<super::dev_memory::Memory, String> {
+    let launch = super::pet_acp::launcher(&app);
     with_dev_workspace(window, app, workspace_id, move |root, id, workspace| {
         use super::dev_memory::{append, handoff, read};
         let (tool, outcome) = match action {
@@ -1064,7 +980,7 @@ async fn dev_action(
                     &provider,
                     &action,
                     &session_id,
-                    super::dev_agents::launch,
+                    launch,
                 )
             }
             DevAction::Transcript {
@@ -1598,6 +1514,7 @@ mod tests {
             ("/pet.mjs", "text/javascript; charset=utf-8"),
             ("/pet-motion.mjs", "text/javascript; charset=utf-8"),
             ("/dev-tools.mjs", "text/javascript; charset=utf-8"),
+            ("/memory-sync.mjs", "text/javascript; charset=utf-8"),
             ("/pet-whale.svg", "image/svg+xml"),
             ("/pet-breach-atlas.webp", "image/webp"),
             ("/pet-artwork.NOTICE", "text/plain; charset=utf-8"),
@@ -1667,87 +1584,6 @@ mod tests {
         assert_eq!(fs::read_to_string(sentinel).unwrap(), "untouched");
         assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
         fs::remove_dir_all(&folder).unwrap();
-    }
-
-    #[test]
-    fn message_requests_require_workspace_and_stable_identity() {
-        assert_eq!(
-            validate_pet_request("chat", "hello", Some("workspace-1"), Some("request_1"), &[]),
-            Ok(true)
-        );
-        assert_eq!(
-            validate_pet_request("chat", "", Some("workspace-1"), None, &[]),
-            Ok(false)
-        );
-        assert!(validate_pet_request("chat", "hello", None, Some("request-1"), &[]).is_err());
-        assert!(validate_pet_request("chat", "hello", Some("workspace-1"), None, &[]).is_err());
-        assert!(validate_pet_request(
-            "chat",
-            "hello",
-            Some("workspace-1"),
-            Some("bad/request"),
-            &[]
-        )
-        .is_err());
-        assert!(validate_pet_request("home", "hello", None, None, &[]).is_err());
-        assert!(validate_pet_request("tasks", "", Some("workspace-1"), None, &[]).is_err());
-    }
-
-    #[test]
-    fn attachments_are_bounded_and_encoded_as_plain_base64() {
-        let file = PetAttachment {
-            name: "report.txt".into(),
-            mime_type: "text/plain".into(),
-            base64: "YQ==".into(),
-        };
-        assert_eq!(attachment_bytes(&file), Ok(1));
-        assert_eq!(
-            validate_pet_request(
-                "chat",
-                "",
-                Some("workspace-1"),
-                Some("request-1"),
-                &[file.clone()]
-            ),
-            Ok(true)
-        );
-        for encoded in [
-            "",
-            "=",
-            "data:text/plain;base64,YQ==",
-            "YQ=",
-            "Y===",
-            "YQ==AAAA",
-        ] {
-            assert!(
-                attachment_bytes(&PetAttachment {
-                    base64: encoded.into(),
-                    ..file.clone()
-                })
-                .is_err(),
-                "{encoded}"
-            );
-        }
-        for name in ["../secret", "folder\\report", "bad\nname", ""] {
-            assert!(attachment_bytes(&PetAttachment {
-                name: name.into(),
-                ..file.clone()
-            })
-            .is_err());
-        }
-        assert!(validate_pet_request(
-            "chat",
-            "",
-            Some("workspace-1"),
-            Some("request-1"),
-            &vec![file.clone(); 5]
-        )
-        .is_err());
-        let full = PetAttachment {
-            base64: "AAAA".repeat(PET_FILE_BYTES / 3 + 1),
-            ..file
-        };
-        assert!(attachment_bytes(&full).is_err());
     }
 
     #[test]

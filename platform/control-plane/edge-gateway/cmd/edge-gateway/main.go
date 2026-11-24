@@ -22,6 +22,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/lumo-harness/platform/edge-gateway/internal/gate"
+	"github.com/lumo-harness/platform/edge-gateway/internal/identity"
 	"github.com/lumo-harness/platform/edge-gateway/internal/routing"
 	"github.com/lumo-harness/platform/edge-gateway/internal/server"
 	"github.com/lumo-harness/platform/edge-gateway/internal/waf"
@@ -164,6 +165,8 @@ func main() {
 		CORSMethods:  *corsMethods,
 		WafRules:     waf.DefaultRules(),
 		Logger:       log,
+
+		SessionIdentity: sessionIdentityFromEnv(log),
 	})
 
 	mux := http.NewServeMux()
@@ -187,7 +190,7 @@ func main() {
 
 	httpSrv := &http.Server{
 		Addr:              *listen,
-		Handler:           observability.Middleware(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux)),
+		Handler:           observability.Middleware(srv.Front(observability.RequireControlPlaneToken(os.Getenv("LUMO_CONTROL_PLANE_TOKEN"))(mux))),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	if err := observability.Serve(httpSrv); err != nil {
@@ -225,6 +228,19 @@ func reloadOnSIGHUP(ctx context.Context, log *slog.Logger, path string, srv *ser
 			log.Info("SIGHUP 路由表已热重载")
 		}
 	}
+}
+
+// sessionIdentityFromEnv 装配 identity=session 路由的会话校验。未配置
+// LUMO_EDGE_GOVERNANCE_URL 或控制面令牌时返回 nil：这类路由 fail-closed 返回 503。
+func sessionIdentityFromEnv(log *slog.Logger) func(http.Handler) http.Handler {
+	govURL, svcToken := os.Getenv("LUMO_EDGE_GOVERNANCE_URL"), os.Getenv("LUMO_CONTROL_PLANE_TOKEN")
+	if govURL == "" || svcToken == "" {
+		log.Warn("未配置 LUMO_EDGE_GOVERNANCE_URL：identity=session 的路由将返回 503")
+		return nil
+	}
+	ttl := time.Duration(envOrInt("LUMO_EDGE_SESSION_CACHE_SECONDS", 30)) * time.Second
+	res := &identity.GovernanceResolver{BaseURL: govURL, ServiceToken: svcToken, TTL: ttl, Client: &http.Client{Timeout: 5 * time.Second}}
+	return identity.Middleware(res, svcToken)
 }
 
 func splitCSV(s string) []string {

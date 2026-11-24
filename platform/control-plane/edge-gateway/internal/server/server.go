@@ -31,6 +31,10 @@ type Options struct {
 	CORSMethods  string
 	WafRules     waf.Rules
 	Logger       *slog.Logger
+
+	// SessionIdentity 用于 identity=session 的路由（见 routing.Route.Identity）；
+	// 为 nil 时这类路由一律 503（fail-closed）。
+	SessionIdentity func(http.Handler) http.Handler
 }
 
 // Server 持有当前路由表与代理工厂，支持原子热重载。
@@ -98,13 +102,45 @@ func (s *Server) buildHandler(cr *routing.CompiledRoute) http.Handler {
 		target := cr.SelectUpstream(r)
 		s.factory.For(target).ServeHTTP(w, r)
 	})
+	inner := gate.MaxBodyBytes(s.opts.MaxBodyBytes)(waf.Middleware(s.opts.WafRules)(proxyH))
+	if cr.Raw.Identity == "session" {
+		inner = sessionIdentity(s.opts.SessionIdentity)(inner)
+	}
 	h := gate.NewConnLimit(s.opts.MaxConns).Wrap(
 		gate.CORS(s.opts.CORSOrigins, s.opts.CORSMethods)(
 			gate.RateLimit(s.opts.Limiter, s.globalLimitOpts())(
-				gate.RateLimit(s.opts.Limiter, s.routeLimitOpts(cr))(
-					gate.MaxBodyBytes(s.opts.MaxBodyBytes)(
-						waf.Middleware(s.opts.WafRules)(proxyH))))))
+				gate.RateLimit(s.opts.Limiter, s.routeLimitOpts(cr))(inner))))
 	return h
+}
+
+// sessionIdentity 在未配置身份解析时 fail-closed：绝不把 identity=session 的路由
+// 退化成「不鉴权直通」。
+func sessionIdentity(mw func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	if mw != nil {
+		return mw
+	}
+	return func(http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, `{"error":"edge_identity","message":"edge identity is not configured"}`, http.StatusServiceUnavailable)
+		})
+	}
+}
+
+// Front 返回网关的最外层处理器：命中 identity=session 路由的请求由该路由自己的
+// 会话鉴权链处理（用户不持有控制面令牌），其余请求一律先过 guarded（控制面令牌
+// 校验 + mux）。/healthz、/metrics、/v1/routes 不可能命中 session 路由以外的分支，
+// 因为 session 路由的前缀在加载时已被拒绝与其他前缀重叠。
+func (s *Server) Front(guarded http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.RLock()
+		compiled, byRoute := s.compiled, s.byRoute
+		s.mu.RUnlock()
+		if cr := compiled.Match(r.URL.Path, r.Host); cr != nil && cr.Raw.Identity == "session" {
+			byRoute[cr].ServeHTTP(w, r)
+			return
+		}
+		guarded.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) globalLimitOpts() gate.RateLimitOpts {

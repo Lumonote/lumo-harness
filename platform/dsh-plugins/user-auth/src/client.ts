@@ -79,9 +79,9 @@ export class GovernanceAuthClient {
     this.base = governanceUrl.replace(/\/+$/u, '')
   }
 
-  async captcha(): Promise<CaptchaResponse> {
+  async captcha(puzzle = false): Promise<CaptchaResponse> {
     const body = await this.json<{ id: string; prompt: string; expires_in: number; image: string }>(
-      '/v1/auth/captcha', { method: 'POST' },
+      puzzle ? '/v1/auth/captcha?kind=puzzle' : '/v1/auth/captcha', { method: 'POST' },
     )
     if (body.id === '' || body.image === '') {
       throw new GovernanceApiError(502, 'invalid_captcha_response', '验证码服务返回了无效响应')

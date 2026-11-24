@@ -21,6 +21,7 @@ import (
 
 	"github.com/lumo-harness/platform/heartbeat"
 	"github.com/lumo-harness/platform/observability"
+	"github.com/lumo-harness/platform/projects/internal/memsync"
 	"github.com/lumo-harness/platform/projects/internal/server"
 	"github.com/lumo-harness/platform/projects/internal/store"
 )
@@ -73,6 +74,15 @@ func main() {
 	srv := server.New(st, log)
 	mux := http.NewServeMux()
 	srv.Register(mux)
+	// P1 跨设备记忆同步（默认开启；LUMO_MEMORY_SYNC=off 关闭，路由不注册即 404）。
+	if os.Getenv("LUMO_MEMORY_SYNC") != "off" {
+		ms := memsync.NewPG(pool)
+		if err := ms.Init(ctx); err != nil {
+			log.Error("初始化记忆同步失败", "err", err)
+			os.Exit(1)
+		}
+		(&memsync.Handler{B: ms, Log: log}).Register(mux)
+	}
 
 	// 心跳上报：集群就绪态由心跳新鲜度与自报依赖派生（E4/D6），不再只看
 	// LUMO_CLUSTER_STATUS 这个静态声明。放在初始化之后，避免服务尚不可用就报 ready。

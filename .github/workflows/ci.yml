@@ -58,15 +58,17 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Validate upstream checkout identity
+        id: upstream
         env:
-          LUMO_UPSTREAM_REF: ${{ inputs.upstream_ref || 'master' }}
-        run: node tools/resolve-upstream-ref.mjs --validate "$LUMO_UPSTREAM_REF"
+          # 空 = 使用 platform/dsh-pin.json 钉住的 SHA（见 docs/dsh-compat.md）
+          LUMO_UPSTREAM_REF: ${{ inputs.upstream_ref || '' }}
+        run: node tools/resolve-upstream-ref.mjs --select "$LUMO_UPSTREAM_REF"
 
       - name: Checkout upstream dsh
         uses: actions/checkout@v5
         with:
           repository: deepseek-ai/deepseek-harness
-          ref: ${{ inputs.upstream_ref || 'master' }}
+          ref: ${{ steps.upstream.outputs.ref }}
           fetch-depth: 0
           path: deepseek-harness
 
@@ -81,6 +83,13 @@ jobs:
           node-version: '24'
           cache: 'pnpm'
           cache-dependency-path: platform/pnpm-lock.yaml
+
+      # 自定义工程守卫（tools/guards，纯 Node 静态检查）：体积棘轮、DSH 边界、备份文件、
+      # --lumo-* 变量、迁移只追加、写死颜色（仅警告）。放在装依赖之前，几秒内失败。
+      - name: Engineering guards
+        run: |
+          node --test tools/guards/__tests__/*.test.mjs
+          pnpm run guard
 
       - name: Check all DSH overlay anchors
         run: node dsh-overrides/check-compatibility.mjs ../deepseek-harness

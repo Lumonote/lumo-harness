@@ -314,6 +314,9 @@ spec:
               value: ""
             - name: LUMO_EDGE_ROUTES
               value: /etc/lumo/edge-routes.json
+            {{- /* identity=session 路由（/v1/memory-sync/）用它校验用户会话；缺了则这类路由 503。 */}}
+            - name: LUMO_EDGE_GOVERNANCE_URL
+              value: {{ printf "http://%s-governance:%v" (include "lumo-platform.name" $) $.Values.services.governance.port | quote }}
             - name: LUMO_EDGE_REDIS_URL
               value: {{ default (printf "redis://%s" $.Values.redis.address) $.Values.edgeGateway.redisUrl | quote }}
             - name: LUMO_EDGE_LIMITER_FAIL_OPEN

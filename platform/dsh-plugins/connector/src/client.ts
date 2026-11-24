@@ -86,6 +86,8 @@ export class GatewayError extends Error {
     readonly code: GatewayCode,
     readonly status: number,
     message: string,
+    /** 网关错误体原文（例如 428 附带的 `approval` / `ask`），供 Ask 闸门使用。 */
+    readonly detail?: unknown,
   ) {
     super(message)
     this.name = 'GatewayError'
@@ -138,6 +140,13 @@ export class ConnectorClient {
     const res = await this.fetch('/connectors', { method: 'GET' })
     const json = (await res.json()) as { connectors?: ConnectorSummary[] }
     return json.connectors ?? []
+  }
+
+  /** 统一 Ask 列表（GET /asks，P0-1）。非管理员只返回本人发起的。 */
+  async listAsks(status?: string, signal?: AbortSignal): Promise<Array<import('../../../shared/seam-contracts/asks.ts').Ask>> {
+    const res = await this.fetch(`/asks${status ? `?status=${encodeURIComponent(status)}` : ''}`, { method: 'GET' }, signal)
+    const json = (await res.json()) as { asks?: Array<import('../../../shared/seam-contracts/asks.ts').Ask> }
+    return json.asks ?? []
   }
 
   async invoke(req: InvokeRequest): Promise<InvokeResult> {
@@ -194,14 +203,16 @@ export class ConnectorClient {
       // 网关的拒绝携带结构化 code；解析失败也不能吞掉状态码
       let code: GatewayCode = 'internal_error'
       let message = `连接器网关返回 ${res.status}`
+      let detail: unknown
       try {
         const body = (await res.json()) as { error?: string; code?: GatewayCode }
+        detail = body
         if (body.code) code = body.code
         if (body.error) message = body.error
       } catch {
         /* 非 JSON 响应：保留默认信息 */
       }
-      throw new GatewayError(code, res.status, message)
+      throw new GatewayError(code, res.status, message, detail)
     }
     return res
   }

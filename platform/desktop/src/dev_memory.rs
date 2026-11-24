@@ -517,6 +517,21 @@ fn with_project<T>(
     .map_err(|e| format!("项目开发记忆访问失败：{e}"))
 }
 
+/// 跨设备同步（memory_sync.rs）专用：在项目锁内读写长期记忆卡片；回调返回 true 时落盘。
+pub fn with_cards<T>(
+    root: &Path,
+    workspace_id: &str,
+    action: impl FnOnce(&Path, &mut Vec<Card>) -> io::Result<(T, bool)>,
+) -> Result<T, String> {
+    with_project(root, workspace_id, |dir, mut memory| {
+        let (value, changed) = action(dir, &mut memory.library.cards)?;
+        if changed {
+            replace(&dir.join("library.json"), &serde_json::to_vec(&memory.library)?)?;
+        }
+        Ok(value)
+    })
+}
+
 pub fn read(root: &Path, workspace_id: &str) -> Result<Memory, String> {
     with_project(root, workspace_id, |_, memory| Ok(memory))
 }

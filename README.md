@@ -244,7 +244,7 @@ Windows 安装包同样未做代码签名，SmartScreen 会提示「Windows 已�
 
 ### 2. 从源码运行（本地单机）
 
-环境要求：Node `^22.19 || >=24`、pnpm `11.7.0`、Rust stable 与 Tauri 系统依赖，以及一份可用的上游 dsh checkout。
+环境要求：Node `^22.19 || >=24`、pnpm `11.7.0`、Rust stable 与 Tauri 系统依赖，以及一份可用的上游 dsh checkout（版本请切到 [`platform/dsh-pin.json`](./platform/dsh-pin.json) 钉住的 commit，兼容情况见 [`docs/dsh-compat.md`](./docs/dsh-compat.md)）。
 
 ```sh
 cd platform/upstream && ./install-components.sh   # 安装固定上游技能快照（缺失时按 pin 提交拉取）
@@ -360,6 +360,7 @@ go build ./... && go vet ./... && go test ./...
 | [`docs/roadmap.md`](./docs/roadmap.md) | 实施蓝图与端到端流程（§16–§17） |
 | [`docs/design-review.md`](./docs/design-review.md) | 独立评审：P0 风险与替代落地顺序 |
 | [`docs/implementation-status.md`](./docs/implementation-status.md) | 已落地能力与外部集成边界 |
+| [`docs/dsh-compat.md`](./docs/dsh-compat.md) | dsh 钉版与兼容矩阵、升级流程 |
 | [`docs/configuration.md`](./docs/configuration.md) | 全部环境变量与配置契约 |
 | [`docs/cluster-management.md`](./docs/cluster-management.md) | 集群管理接口与权限边界 |
 | [`platform/deploy/README.md`](./platform/deploy/README.md) | 部署清单、三档形态、设备 TLS 接入 |

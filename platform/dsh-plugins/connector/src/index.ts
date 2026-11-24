@@ -28,6 +28,8 @@ export interface ConnectorConfig {
   agentId?: string
   /** 单次调用超时（默认 30s；网关侧还有连接器级超时，取两者较小） */
   timeoutMs?: number
+  /** 428 后工具内等待人工审批的上限（毫秒，默认 600000；0 = 旧行为立即返回）。 */
+  askWaitMs?: number
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -47,6 +49,7 @@ export const Config: z<ConnectorConfig> = z.object({
   projectId: z.string(),
   agentId: z.string(),
   timeoutMs: z.number(),
+  askWaitMs: z.number(),
 })
 
 export const inject = ['tools']
@@ -67,7 +70,7 @@ export function apply(ctx: Context, config: ConnectorConfig): void {
   ctx.provide('connectors', client)
   ctx.provide('connectorScope', scope)
 
-  const unregister = defineConnectorTools(ctx, client, scope)
+  const unregister = defineConnectorTools(ctx, client, scope, { ...(config.askWaitMs !== undefined ? { askWaitMs: config.askWaitMs } : {}) })
   ctx.effect(() => () => {
     unregister()
   })

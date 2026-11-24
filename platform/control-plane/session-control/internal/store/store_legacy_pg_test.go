@@ -248,7 +248,19 @@ func TestMigrationFileMatchesServiceDDL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读不到迁移文件（相对 internal/store 起算）：%v", err)
 	}
-	if !strings.Contains(string(raw), strings.TrimSpace(DDL)) {
-		t.Error("006 迁移与服务端 const DDL 不同文：两条部署路径会各自收敛出不同的表，而只有一条被测到")
+	extension, err := os.ReadFile("../../../../deploy/migrations/049_session_control_ask_link.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalize := func(sql string) string {
+		var lines []string
+		for _, line := range strings.Split(sql, "\n") {
+			code, _, _ := strings.Cut(line, "--")
+			lines = append(lines, code)
+		}
+		return strings.Join(strings.Fields(strings.Join(lines, "\n")), " ")
+	}
+	if normalize(string(raw)+"\n"+string(extension)) != normalize(DDL) {
+		t.Error("006 + 049 migrations and service DDL differ")
 	}
 }

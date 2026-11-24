@@ -1,22 +1,27 @@
 /** Host half: keep DSH's native Web shell and add a same-origin Lumo control API. */
 import { readFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
-import { execFile } from 'node:child_process'
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { basename, dirname, extname, join, resolve } from 'node:path'
-import { promisify } from 'node:util'
+import { dirname, extname, join, resolve } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
+import { LIBRARY_UPLOAD_LIMIT, safeUploadFilename, libraryMimeType, extractLibraryText, documentChunks, publicLibraryFile, type LibraryFileInfo } from './library-document.ts'
 import { assertIdentityConfiguration, IdentityAssertionError, resolveRequestIdentity, type RequestIdentity } from './identity.ts'
 import { collaborationThreads, type AgentThreadReader, type FleetControl } from './collaboration-threads.ts'
 import { lumoBootThemeInjection } from './boot-theme.ts'
 import { registerDesktopHandoff } from './desktop-handoff.ts'
 import { registerComputerUseRoutes } from './computer-use-api.ts'
 import { registerRemoteComputerRoutes } from './remote-computer-api.ts'
+import { handleAsksRoute } from './asks-api.ts'
+import { handleDeviceRoutes, installDeviceActions } from './device-wiring.ts'
+import { createRemoteHosts, handleRemoteHostsRoute, type RemoteHostsService } from './remote-hosts-api.ts'
+import { handleRunTreeRoute, registerRunTreeCollector, RunTreeStore } from './run-tree-api.ts'
+import { handleMemorySyncRoute } from './memory-sync-proxy.ts'
+import { createAcpEngines, handleAcpRoute, type AcpEngines } from '../../acp-engines/src/embed.ts'
+import { installDualPlugins, acpMcpOptions } from './dual-plugins-api.ts'
+import { handleDualRoute, type DualHost } from '../../dual-plugins/src/index.ts'
 import { registerDesktopPetReceiptRoutes } from './desktop-pet-receipts.ts'
 import { discoverSkillDemos, resolveSkillDemoAsset, type SkillDemo } from './skill-demos.ts'
 import { allowedAssetUrl, createUpstreamDemoService, type GallerySkill, type UpstreamDemoService } from './upstream-demos.ts'
@@ -67,14 +72,6 @@ interface KnowledgeLibraryManagerService {
 
 interface LibraryFolderInfo {
   folderId: string; realm: string; parentId: string | null; name: string; ownerUserId: string; createdAt: string
-  revision?: number; canEdit?: boolean
-}
-
-interface LibraryFileInfo {
-  docId: string; realm: string; folderId: string | null; filename: string; mimeType: string
-  objectKey: string; byteSize: number; sha256: string; ownerUserId: string
-  extractionState: 'pending' | 'ready' | 'failed' | 'unsupported'
-  ocrState: 'not_needed' | 'pending' | 'ready' | 'failed' | 'unavailable'; createdAt: string
   revision?: number; canEdit?: boolean
 }
 
@@ -627,162 +624,6 @@ function knowledgeManagementStatus(error: unknown): number {
     }
   }
   return 502
-}
-
-const executeFile = promisify(execFile)
-const LIBRARY_UPLOAD_LIMIT = 50 * 1024 * 1024
-const OFFICE_TEXT_EXTRACTOR = String.raw`
-import sys, zipfile, xml.etree.ElementTree as ET
-path = sys.argv[1]
-with zipfile.ZipFile(path) as archive:
-    infos = archive.infolist()
-    if len(infos) > 1000 or sum(item.file_size for item in infos) > 80 * 1024 * 1024:
-        raise ValueError('office archive expands beyond the extraction limit')
-    names = set(archive.namelist())
-    def texts(name):
-        root = ET.fromstring(archive.read(name))
-        return [item.text or '' for item in root.iter() if item.tag.rsplit('}', 1)[-1] in ('t', 'v')]
-    if 'word/document.xml' in names:
-        selected = ['word/document.xml']
-    elif 'ppt/presentation.xml' in names:
-        selected = sorted((n for n in names if n.startswith('ppt/slides/slide') and n.endswith('.xml')), key=lambda n: int(''.join(c for c in n.rsplit('slide',1)[-1][:-4] if c.isdigit()) or '0'))
-    elif 'xl/workbook.xml' in names:
-        selected = sorted(n for n in names if n.startswith('xl/worksheets/sheet') and n.endswith('.xml'))
-        shared = texts('xl/sharedStrings.xml') if 'xl/sharedStrings.xml' in names else []
-        values = []
-        for name in selected:
-            root = ET.fromstring(archive.read(name))
-            for row in root.iter():
-                if row.tag.rsplit('}', 1)[-1] != 'row': continue
-                cells = []
-                for cell in list(row):
-                    if cell.tag.rsplit('}', 1)[-1] != 'c': continue
-                    kind = cell.attrib.get('t')
-                    value = next((child.text or '' for child in list(cell) if child.tag.rsplit('}', 1)[-1] in ('v','t')), '')
-                    if kind == 's' and value.isdigit() and int(value) < len(shared): value = shared[int(value)]
-                    cells.append(value)
-                if cells: values.append('\t'.join(cells))
-        print('\n'.join(values))
-        raise SystemExit(0)
-    else:
-        raise ValueError('unsupported Office document')
-    output = []
-    for name in selected:
-        output.extend(texts(name))
-    print('\n'.join(value for value in output if value))
-`
-
-function safeUploadFilename(value: string | undefined): string {
-  if (value === undefined || value.length > 1024) throw new TypeError('请提供有效的文件名')
-  let decoded = value
-  try { decoded = decodeURIComponent(value) } catch { throw new TypeError('文件名编码无效') }
-  const filename = basename(decoded.replaceAll('\\', '/')).replace(/[\u0000-\u001f\u007f]/gu, '').trim()
-  if (filename === '' || Buffer.byteLength(filename, 'utf8') > 240 || filename === '.' || filename === '..') throw new TypeError('文件名无效')
-  return filename
-}
-
-function libraryMimeType(filename: string): string | undefined {
-  const ext = extname(filename).toLowerCase()
-  const known: Record<string, string> = {
-    '.txt': 'text/plain; charset=utf-8', '.log': 'text/plain; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.markdown': 'text/markdown; charset=utf-8',
-    '.csv': 'text/csv; charset=utf-8', '.tsv': 'text/tab-separated-values; charset=utf-8', '.json': 'application/json; charset=utf-8',
-    '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.xml': 'application/xml; charset=utf-8', '.yaml': 'text/yaml; charset=utf-8', '.yml': 'text/yaml; charset=utf-8',
-    '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.tif': 'image/tiff', '.tiff': 'image/tiff', '.bmp': 'image/bmp',
-    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  }
-  return known[ext]
-}
-
-async function runDocumentCommand(command: string, args: string[], timeout: number, maxBuffer = 5 * 1024 * 1024): Promise<string> {
-  const result = await executeFile(command, args, { timeout, maxBuffer, encoding: 'utf8' })
-  return result.stdout
-}
-
-async function extractLibraryText(filename: string, mimeType: string, body: Buffer): Promise<{
-  text: string; extractionState: LibraryFileInfo['extractionState']; ocrState: LibraryFileInfo['ocrState']
-}> {
-  const ext = extname(filename).toLowerCase()
-  if (['.txt', '.log', '.md', '.markdown', '.csv', '.tsv', '.json', '.html', '.htm', '.xml', '.yaml', '.yml'].includes(ext)) {
-    const text = body.toString('utf8').replace(/^\uFEFF/u, '').trim()
-    return text ? { text, extractionState: 'ready', ocrState: 'not_needed' } : { text: '', extractionState: 'failed', ocrState: 'not_needed' }
-  }
-
-  const directory = await mkdtemp(join(tmpdir(), 'lumo-library-'))
-  const inputPath = join(directory, `document${ext || '.bin'}`)
-  try {
-    await writeFile(inputPath, body, { mode: 0o600 })
-    if (mimeType === 'application/pdf') {
-      let text = ''
-      try { text = (await runDocumentCommand('pdftotext', ['-layout', '-enc', 'UTF-8', inputPath, '-'], 30_000)).trim() }
-      catch { /* 扫描版/无可提取文本时继续尝试 OCR */ }
-      if (text.length >= 20) return { text, extractionState: 'ready', ocrState: 'not_needed' }
-      const prefix = join(directory, 'page')
-      try {
-        await runDocumentCommand('pdftoppm', ['-f', '1', '-l', '20', '-scale-to', '2200', '-jpeg', inputPath, prefix], 60_000, 2 * 1024 * 1024)
-        const pages = (await readdir(directory)).filter(name => /^page-\d+\.jpg$/u.test(name)).sort((left, right) => Number(left.match(/\d+/u)?.[0]) - Number(right.match(/\d+/u)?.[0]))
-        if (pages.length === 0) return { text: '', extractionState: 'failed', ocrState: 'failed' }
-        const recognized: string[] = []
-        for (const page of pages) recognized.push((await runDocumentCommand('tesseract', [join(directory, page), 'stdout', '-l', 'chi_sim+eng', '--psm', '3'], 60_000, 2 * 1024 * 1024)).trim())
-        const scannedText = recognized.filter(Boolean).join('\n\n').trim()
-        return scannedText ? { text: scannedText, extractionState: 'ready', ocrState: 'ready' } : { text: '', extractionState: 'failed', ocrState: 'failed' }
-      } catch (error) {
-        return { text: '', extractionState: 'failed', ocrState: isMissingExecutable(error) ? 'unavailable' : 'failed' }
-      }
-    }
-    if (mimeType.startsWith('image/')) {
-      try {
-        const text = (await runDocumentCommand('tesseract', [inputPath, 'stdout', '-l', 'chi_sim+eng', '--psm', '3'], 60_000, 4 * 1024 * 1024)).trim()
-        return text ? { text, extractionState: 'ready', ocrState: 'ready' } : { text: '', extractionState: 'failed', ocrState: 'failed' }
-      } catch (error) {
-        return { text: '', extractionState: 'failed', ocrState: isMissingExecutable(error) ? 'unavailable' : 'failed' }
-      }
-    }
-    if (['.docx', '.xlsx', '.pptx'].includes(ext)) {
-      try {
-        const text = (await runDocumentCommand('python3', ['-c', OFFICE_TEXT_EXTRACTOR, inputPath], 30_000)).trim()
-        return text ? { text, extractionState: 'ready', ocrState: 'not_needed' } : { text: '', extractionState: 'failed', ocrState: 'not_needed' }
-      } catch {
-        return { text: '', extractionState: 'failed', ocrState: 'not_needed' }
-      }
-    }
-    return { text: '', extractionState: 'unsupported', ocrState: 'not_needed' }
-  } finally { await rm(directory, { recursive: true, force: true }) }
-}
-
-function isMissingExecutable(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'ENOENT'
-}
-
-function documentChunks(text: string, filename: string, mimeType: string, entities: string[] = []): Array<{ text: string; metadata: Record<string, unknown> }> {
-  const maxChars = 5_000
-  const blocks = text.replaceAll('\r\n', '\n').split(/\n{2,}|\f/u).map(part => part.trim()).filter(Boolean)
-  const chunks: string[] = []
-  let current = ''
-  for (const block of blocks) {
-    let remaining = block
-    while (remaining.length > maxChars) {
-      if (current) { chunks.push(current); current = '' }
-      chunks.push(remaining.slice(0, maxChars))
-      remaining = remaining.slice(maxChars)
-    }
-    if (current.length + remaining.length + 2 > maxChars && current) { chunks.push(current); current = '' }
-    current = current ? `${current}\n\n${remaining}` : remaining
-  }
-  if (current) chunks.push(current)
-  if (chunks.length > 500) throw new RangeError('文件提取文本过长，当前单文件索引上限为 250 万字符')
-  return chunks.map((chunk, index) => ({ text: chunk, metadata: { filename, mimeType, chunkIndex: index, libraryFile: true, ...(entities.length === 0 ? {} : { entities }) } }))
-}
-
-function publicLibraryFile(file: LibraryFileInfo): Omit<LibraryFileInfo, 'objectKey'> {
-  return {
-    docId: file.docId, realm: file.realm, folderId: file.folderId, filename: file.filename, mimeType: file.mimeType,
-    byteSize: file.byteSize, ownerUserId: file.ownerUserId, extractionState: file.extractionState, ocrState: file.ocrState,
-    createdAt: file.createdAt, sha256: file.sha256,
-    ...(file.revision === undefined ? {} : { revision: file.revision }),
-    ...(file.canEdit === undefined ? {} : { canEdit: file.canEdit }),
-  }
 }
 
 function writeUpstream(res: ServerResponse, result: UpstreamResult): void {
@@ -2510,6 +2351,14 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     writeUpstream(res, await upstream(config, identity, 'connector', `/connectors${query}`, req)); return
   }
 
+  // 统一 Ask（P0-1）：旧 connector-approvals 路由保留兼容。
+  if (await handleRunTreeRoute(req, res, pathname, runTreeStore, { readBody })) return
+  if (await handleMemorySyncRoute(req, res, pathname, { readBody, reject: (s, e) => writeJson(res, s, { error: e }), forward: async (p, m, b) => writeUpstream(res, await upstream(config, identity, 'projects', p, req, m, b, 'application/json')) })) return
+  if (await handleRemoteHostsRoute(req, res, pathname, remoteHosts, { readBody, userId: identity.userId })) return
+  if (await handleDualRoute(req, res, pathname, { gateway: dualHost?.gateway, identity: { userId: identity.userId, realm: identity.realm, ...(identity.projectId === undefined ? {} : { projectId: identity.projectId }) }, readBody })) return
+  if (await handleAcpRoute(req, res, pathname, { host: acpEngines?.host, asks: acpEngines?.asks, identity: { userId: identity.userId, realm: identity.realm, ...(identity.projectId === undefined ? {} : { projectId: identity.projectId }) }, readBody })) return
+  if (await handleDeviceRoutes(req, res, pathname, { connectorUrl: config.connectorUrl, headers: identityHeaders(config, identity), timeoutMs: config.timeoutMs, readBody, userId: identity.userId })) return
+  if (await handleAsksRoute(req, res, pathname, { connectorUrl: config.connectorUrl, headers: identityHeaders(config, identity), timeoutMs: config.timeoutMs, readBody })) return
   if (req.method === 'GET' && pathname === '/lumo/api/connector-approvals') {
     writeUpstream(res, await upstream(config, identity, 'connector', '/approvals', req)); return
   }
@@ -2627,10 +2476,25 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
 
 function ops(_req: IncomingMessage, res: ServerResponse): void { res.writeHead(302, { location: '/?lumo=operations' }); res.end() }
 
+// P0-3 运行树：模块级单例，避免给 api() 增加参数；apply 时创建并开始监听 dsh 子 Agent 生命周期。
+let runTreeStore: RunTreeStore | undefined
+let remoteHosts: RemoteHostsService | undefined // P1 SSH 远端接入；LUMO_REMOTE_HOSTS=off 关闭
+// P1 ACP 引擎会话：仅本地单机形态；LUMO_ACP_ENGINES=off 关闭。
+let acpEngines: AcpEngines | undefined
+let dualHost: DualHost | undefined
+
 export function apply(ctx: Context, config: Config): void {
   assertIdentityConfiguration(config)
+  runTreeStore = new RunTreeStore(join(dirname(resolve(config.skillhubInstallFile ?? '.lumo/skillhub-installs.json')), 'run-tree.jsonl'))
+  registerRunTreeCollector(ctx, runTreeStore)
+  dualHost = installDualPlugins(ctx, config, runTreeStore, () => acpEngines?.host)
+  acpEngines = config.deploymentMode === 'local' ? createAcpEngines({ runTree: runTreeStore, ...acpMcpOptions(dualHost) }) : undefined
+  if (acpEngines) { const engines = acpEngines; ctx.effect(() => () => engines.host.closeAll(), 'lumo-ui: reap ACP engine processes') }
   registerComputerUseRoutes(ctx, config.deploymentMode === 'local')
   registerRemoteComputerRoutes(ctx, config.deploymentMode === 'local')
+  installDeviceActions(ctx, config.deploymentMode === 'local', runTreeStore)
+  remoteHosts = createRemoteHosts({ local: config.deploymentMode === 'local', stateDir: dirname(resolve(config.skillhubInstallFile ?? '.lumo/skillhub-installs.json')), runTree: runTreeStore, identity: { userId: config.userId, realm: config.realm } })
+  if (remoteHosts) { const rh = remoteHosts; ctx.effect(() => () => rh.closeAll(), 'lumo-ui: close remote SSH tunnels') }
   registerDesktopPetReceiptRoutes(ctx, config.deploymentMode === 'local')
   let skillhubRuntime: SkillHubRuntime | undefined
   if (config.deploymentMode === 'local') {

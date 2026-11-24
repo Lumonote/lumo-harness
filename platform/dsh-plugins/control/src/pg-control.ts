@@ -104,7 +104,9 @@ export class PgControlSeam implements ControlSeam {
   }
 
   async init(): Promise<void> {
-    await this.pool.query(CONTROL_DDL)
+    // A multi-statement simple query runs in one implicit transaction. Serialize
+    // concurrent cold starts before PostgreSQL allocates the table's row type.
+    await this.pool.query(`SELECT pg_advisory_xact_lock(18201, 1);\n${CONTROL_DDL}`)
   }
 
   /**

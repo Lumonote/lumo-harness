@@ -23,6 +23,7 @@ import { SessionModelPolicy, SessionTurnModelGuard, modelSelection, type Session
 import type { Principal } from './client.ts'
 import { installSessionKnowledge, USER_SESSION_KNOWLEDGE_TOOL, validateSessionKnowledge, type SessionKnowledgeConfig } from './session-knowledge.ts'
 import { SessionConnectorTools, USER_CONNECTOR_TOOLS, validateSessionConnectors, type SessionConnectorConfig } from './session-connectors.ts'
+import { SessionQuestionAsks, connectorAsksOf, isSessionAskAnswer } from './session-asks.ts'
 import { OwnedSessionMigration, SessionMigrationError, migrationActions } from './session-migration.ts'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
@@ -46,6 +47,9 @@ export interface SessionTransportConfig {
   /** Explicit bounded checkpoint/import; requires all nodes to mount the same
    * absolute workspaceRoot. Connector effects are excluded from this profile. */
   migration?: { enabled: true }
+  /** P0-1：显式开启后，Agent 的 ask_user_question 提问登记为统一 Ask（question/choice），
+   * 经 interactionList / interactionAnswer 回答并回传给会话。缺省关闭，行为与旧版一致。 */
+  questions?: { enabled: true }
   routing?: { routes: Record<string, string>; transportSecurity: 'tls' | 'mesh-mtls' | 'development'; nodeIdFromEnvironment?: boolean }
 }
 export type SessionAuthority = (() => Promise<Principal | void>) & { credential?: string }
@@ -170,6 +174,10 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
     async execution() { return runtime!.identity(agent.id) },
     signal: runtime!.signal,
   }), fetcher) : undefined
+  const questionAsks = config.questions?.enabled === true ? new SessionQuestionAsks(agent => {
+    const owner = known.get(agent.id)
+    return { realm: owner?.realm ?? '', owner: owner?.owner_user_id ?? '' }
+  }) : undefined
   const releasePolicy = access.registerPolicy('lumo-user', { bindings: p => grants.get(p.requestId) ?? [] })
   const remember = (ref: string, owner: SessionOwner): void => {
     if (!known.has(ref) && known.size >= 512) throw new Error('Authenticated Session identity capacity reached')
@@ -185,9 +193,10 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
     }
     pendingInputs.delete(owner.session_ref)
     if (ctx.agents.list().filter(current => prepared.has(current)).length >= 64) throw new Error('Authenticated Session active capacity reached')
-    agent.ctx.tools.restrict({ allow: [] })
-    agent.ctx.tools.guard(exec => (config.knowledge && exec.name === USER_SESSION_KNOWLEDGE_TOOL || attachments && exec.name === USER_SESSION_ATTACHMENT_TOOL || connectors && USER_CONNECTOR_TOOLS.some(name => name === exec.name)) ? undefined : 'Authenticated Session execution does not grant this tool access')
+    agent.ctx.tools.restrict({ allow: questionAsks ? ['ask_user_question'] : [] })
+    agent.ctx.tools.guard(exec => (questionAsks && exec.name === 'ask_user_question' || config.knowledge && exec.name === USER_SESSION_KNOWLEDGE_TOOL || attachments && exec.name === USER_SESSION_ATTACHMENT_TOOL || connectors && USER_CONNECTOR_TOOLS.some(name => name === exec.name)) ? undefined : 'Authenticated Session execution does not grant this tool access')
     connectors?.install(agent)
+    questionAsks?.install(agent)
     if (config.knowledge && knowledge) installSessionKnowledge(agent, knowledge, config.knowledge, config.projectId, async () => {
       const authority = authorities.get(owner.session_ref)
       if (!authority) throw new Error('Knowledge query requires current login authority')
@@ -363,9 +372,19 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
         await authority()
         if (Object.keys(request).some(key => key !== 'sessionId' && !(action === 'interactionAnswer' && key === 'answer'))) throw new Error('Invalid owned Session interaction request')
         const agent = ctx.agents.get(SessionId(ref))
-        if (action === 'interactionList' && (!connectors || !agent)) return { questions: [] }
+        // P0-1：统一 Ask。旧响应字段 questions 不变，新增 asks（连接器确认的只读投影 + 会话提问）。
+        if (action === 'interactionList' && ((!connectors && !questionAsks) || !agent)) return { questions: [], asks: [] }
+        if (action === 'interactionAnswer' && isSessionAskAnswer(request.answer)) {
+          if (!questionAsks || !agent || !prepared.has(agent)) throw new Error('Owned Session interaction is unavailable')
+          return questionAsks.answer(agent, request.answer, principal.user_id)
+        }
+        if (action === 'interactionList' && agent && prepared.has(agent) && !connectors) return { questions: [], asks: questionAsks!.list(agent) }
         if (!connectors || !agent || !prepared.has(agent)) throw new Error('Owned Session interaction is unavailable')
-        return action === 'interactionList' ? connectors.list(agent) : connectors.answer(agent, request.answer)
+        if (action === 'interactionList') {
+          const listed = await connectors.list(agent)
+          return { ...listed, asks: [...connectorAsksOf(ref, principal.realm, principal.user_id, listed.questions), ...(questionAsks?.list(agent) ?? [])] }
+        }
+        return connectors.answer(agent, request.answer)
       }
       if (action === 'models' || action === 'selectModel') {
         if (!authority) throw new Error('Authenticated model selection requires current login authority')

@@ -10,7 +10,32 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 import { GatewayError, type ConnectorClient } from './client.ts'
+import { AskRejectedError, askFromGatewayError, invokeWithAsk } from './asks.ts'
 import type { ConnectorSessionScope } from '../../../shared/seam-contracts/connector-scope.ts'
+import { ASK_RUN_TREE_EVENT, runTreeLinkOf, withAskContext, type Ask } from '../../../shared/seam-contracts/asks.ts'
+
+export interface ConnectorToolOptions {
+  /**
+   * 428 approval_required 后在工具内等待人工决议的上限（毫秒）。默认 10 分钟（网关 TTL 15 分钟）。
+   * 设为 0 恢复旧行为：立即把 approval_required 交回模型（仍会登记 Ask 到运行树）。
+   */
+  askWaitMs?: number
+  askPollMs?: number
+}
+
+/** 执行上下文里的 run id（防御式取值：ToolRunContext 的增强不一定在本插件类型图里）。 */
+function runIdOf(exec: ToolRunContext | undefined): string | undefined {
+  const e = exec as { runId?: unknown; run?: { id?: unknown }; agent?: { runId?: unknown } } | undefined
+  const raw = e?.runId ?? e?.run?.id ?? e?.agent?.runId
+  return raw === undefined || raw === null || String(raw) === '' ? undefined : String(raw)
+}
+
+/** 把 Ask 关联广播给运行树采集器（lumo-ui 监听 ASK_RUN_TREE_EVENT）；没有监听者时无副作用。 */
+function linkAsk(ctx: Context, ask: Ask): void {
+  try {
+    (ctx as unknown as { emit?: (name: string, ...args: unknown[]) => void }).emit?.(ASK_RUN_TREE_EVENT, runTreeLinkOf(ask))
+  } catch { /* 关联失败不影响调用本身 */ }
+}
 
 function sessionScope(exec: ToolRunContext | undefined, scope: ConnectorSessionScope): readonly string[] | undefined {
   const agent = (exec as { agent?: { session?: { id?: unknown } } } | undefined)?.agent
@@ -21,7 +46,8 @@ function sessionScope(exec: ToolRunContext | undefined, scope: ConnectorSessionS
   return raw === undefined || raw === null ? undefined : scope.allowedFor(String(raw))
 }
 
-export function defineConnectorTools(ctx: Context, client: ConnectorClient, scope: ConnectorSessionScope): () => void {
+export function defineConnectorTools(ctx: Context, client: ConnectorClient, scope: ConnectorSessionScope, options: ConnectorToolOptions = {}): () => void {
+  const askWaitMs = options.askWaitMs ?? 600_000
   const listTool: ToolDefinition = {
     name: 'connector_list',
     description:
@@ -118,6 +144,9 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient, scop
           error: { type: 'string' },
           code: { type: 'string' },
           retryable: { type: 'boolean' },
+          // 统一 Ask（P0-1）：等待人工时的 Ask id 与最终状态
+          askId: { type: 'string' },
+          askStatus: { type: 'string' },
         },
         additionalProperties: false,
       },
@@ -149,16 +178,29 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient, scop
         }
       }
 
+      const askContext = { ...(runIdOf(exec) ? { run_id: runIdOf(exec) } : {}), ...(sessionRef ? { session_ref: sessionRef } : {}) }
+      const request = {
+        connectorId: a.connectorId,
+        operation: a.operation,
+        pathParams: a.pathParams,
+        query: a.query,
+        body: a.body,
+        correlationId: a.correlationId,
+        sessionRef,
+      }
       try {
-        const result = await client.invoke({
-          connectorId: a.connectorId,
-          operation: a.operation,
-          pathParams: a.pathParams,
-          query: a.query,
-          body: a.body,
-          correlationId: a.correlationId,
-          sessionRef,
-        })
+        // P0-1：428 时取统一 Ask，挂到运行树节点，等待决议后用 approvalId 重放同一请求。
+        const result = askWaitMs > 0
+          ? await invokeWithAsk(client, request, {
+            fetchAsk: async (id, signal) => (await client.listAsks(undefined, signal)).find(ask => ask.id === id),
+            onAsk: ask => linkAsk(ctx, ask),
+            onSettled: ask => linkAsk(ctx, ask),
+            context: askContext,
+            maxWaitMs: askWaitMs,
+            ...(options.askPollMs ? { pollMs: options.askPollMs } : {}),
+            ...((exec as { signal?: AbortSignal } | undefined)?.signal ? { signal: (exec as { signal?: AbortSignal }).signal } : {}),
+          })
+          : await client.invoke(request)
         return {
           provenance: `external:connector/${a.connectorId}`,
           ok: result.status < 400,
@@ -172,7 +214,33 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient, scop
       } catch (e) {
         // 闸门拒绝是**正常结果**而非工具故障：把结构化原因交回模型，
         // 让它能自己判断该等待重试（限速/熔断）还是换路（权限/参数）。
+        if (e instanceof AskRejectedError) {
+          return {
+            provenance: `external:connector/${a.connectorId}`,
+            ok: false,
+            error: e.message,
+            code: 'approval_required',
+            retryable: false,
+            askId: e.ask.id,
+            askStatus: e.ask.status,
+          }
+        }
         if (e instanceof GatewayError) {
+          const pending = askFromGatewayError(e)
+          if (pending) {
+            // askWaitMs=0 的旧路径：仍把 Ask 登记到运行树，模型拿到 askId 可告知用户。
+            const ask = withAskContext(pending, askContext)
+            linkAsk(ctx, ask)
+            return {
+              provenance: `external:connector/${a.connectorId}`,
+              ok: false,
+              error: e.message,
+              code: e.code,
+              retryable: e.retryable,
+              askId: ask.id,
+              askStatus: ask.status,
+            }
+          }
           return {
             provenance: `external:connector/${a.connectorId}`,
             ok: false,

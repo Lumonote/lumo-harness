@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/lumo-harness/platform/connector-gateway/internal/approval"
+	"github.com/lumo-harness/platform/connector-gateway/internal/asks"
 	"github.com/lumo-harness/platform/connector-gateway/internal/breaker"
 	"github.com/lumo-harness/platform/connector-gateway/internal/domain"
 	"github.com/lumo-harness/platform/connector-gateway/internal/gateway"
@@ -33,6 +34,7 @@ type Server struct {
 	reg       registry.Registry
 	brk       *breaker.Group
 	approvals *approval.Store
+	askEvents *asks.Broker
 	oauth     *oauth.Manager
 	owned     *owned.Authority
 	auth      Authenticator
@@ -58,6 +60,8 @@ type Options struct {
 	// WebEgress 通用 web 出站配置（POST /web/fetch）。server 是配置汇合点：
 	// 零值时补 DefaultWebEgress()，随后下发给网关（SetWebEgress）。
 	WebEgress domain.WebEgress
+	// AskEvents 统一 Ask 事件广播（P0-1）；nil 时自动创建进程内 Broker。
+	AskEvents *asks.Broker
 }
 
 func New(o Options) *Server {
@@ -78,8 +82,11 @@ func New(o Options) *Server {
 	if o.Gateway != nil {
 		o.Gateway.SetWebEgress(o.WebEgress)
 	}
+	if o.AskEvents == nil {
+		o.AskEvents = asks.NewBroker()
+	}
 	return &Server{
-		gw: o.Gateway, reg: o.Registry, brk: o.Breakers, approvals: o.Approvals, oauth: o.OAuth, owned: o.Owned,
+		gw: o.Gateway, reg: o.Registry, brk: o.Breakers, approvals: o.Approvals, askEvents: o.AskEvents, oauth: o.OAuth, owned: o.Owned,
 		auth: o.Auth, audit: o.Audit, log: o.Logger,
 		maxBody: o.MaxBodyByte, AdminRoles: o.AdminRoles,
 	}
@@ -106,6 +113,8 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /approvals", s.handleListApprovals)
 	mux.HandleFunc("POST /approvals/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /approvals/{id}/reject", s.handleReject)
+	// 统一 Ask 接口（P0-1）：与 /approvals 同存储，旧路由保留兼容。
+	s.registerAskRoutes(mux)
 	// 审计查询。刻意用顶层 /audit 而不是 /connectors/audit —— 后者会与
 	// `/connectors/{id}/...` 同族，读起来像「某个叫 audit 的连接器」。
 	mux.HandleFunc("GET /audit", s.handleAudit)
@@ -302,7 +311,8 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "连接器不存在或不可用", "code": "connector_not_found"})
 			return
 		}
-		if _, consumeErr := s.approvals.Consume(r.Context(), input.ApprovalID, caller, inv, conn.Version); consumeErr != nil {
+		consumed, consumeErr := s.approvals.Consume(r.Context(), input.ApprovalID, caller, inv, conn.Version)
+		if consumeErr != nil {
 			status := http.StatusConflict
 			if !errors.Is(consumeErr, approval.ErrNotUsable) {
 				status = http.StatusInternalServerError
@@ -311,6 +321,7 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		caller.Approved = true
+		s.publishAsk(asks.FromApproval(consumed))
 	}
 
 	result, err := s.gw.Invoke(r.Context(), caller, inv)
@@ -330,7 +341,10 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "审批记录暂不可创建，调用未执行", "code": "approval_unavailable"})
 				return
 			}
-			writeJSON(w, status, map[string]any{"error": err.Error(), "code": code, "approval": request})
+			// 兼容：保留 428 + code + approval；新增统一 ask 投影供新客户端使用。
+			ask := asks.FromApproval(request)
+			s.publishAsk(ask)
+			writeJSON(w, status, map[string]any{"error": err.Error(), "code": code, "approval": request, "ask": ask})
 			return
 		}
 		s.log.Info("连接器调用被拒绝或失败",
@@ -391,6 +405,7 @@ func (s *Server) decideApproval(w http.ResponseWriter, r *http.Request, decision
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.publishAsk(asks.FromApproval(request))
 	writeJSON(w, http.StatusOK, request)
 }
 

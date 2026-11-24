@@ -1,5 +1,6 @@
 import { AUTHENTICATED_APP_HOME } from './app-home.ts'
 import { loginStyles } from './login-styles.ts'
+import { puzzleScript } from './login-puzzle.ts'
 
 export const LOGIN_THEME_IDS = ['obsidian-signal', 'ember-foundry', 'orbital-glass', 'infrared-grid'] as const
 export type LoginTheme = typeof LOGIN_THEME_IDS[number]
@@ -40,96 +41,37 @@ export function loginPage(options: LoginPageOptions = {}): string {
 </head>
 <body>
   <main class="shell">
-    <section class="manifest" aria-label="Lumo 平台说明">
-      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>Lumo Harness<small>智能协作工作台</small></span></div>
-      <div class="copy"><span class="kicker">AGENTIC WORKSPACE / LUMO</span><h1>进入你的<br><em>智能协作空间</em></h1><p>在一个工作台中衔接智能体、任务与产物。使用平台账号登录，继续上次的工作。</p></div>
-      <div class="system-note"><i></i><span>智能体 · 任务 · 产物</span></div>
-    </section>
+    <header class="mast"><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="6" fill="#edb37d"/><path d="M9 7v17h15v-5H14V7z" fill="#23251f"/></svg><b>Lumo Harness</b><span class="mast-divider"></span><span>工作台</span></header>
     <section class="entry">
       <div class="card">
-        <header class="card-head"><div><small>LUMO / ACCOUNT ACCESS</small><h2>欢迎回来</h2><p class="card-subtitle">登录后继续使用你的工作台</p></div></header>
+        <header class="card-head"><h1>登录工作台</h1><p>使用你的 Lumo 账号继续。</p></header>
         ${message}
         <form method="post" action="/auth/login" id="login-form">
           <div class="field"><label for="username">用户名</label><input id="username" name="username" autocomplete="username" maxlength="128" placeholder="输入用户名" required autofocus></div>
           <div class="field"><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="256" placeholder="输入密码" required></div>
           <div class="field"><label for="mfa">动态验证码 <small>启用 MFA 时填写</small></label><input id="mfa" name="mfa" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="输入 6 位验证码"></div>
-          <div class="field"><label for="captcha">交互验证</label><p class="captcha-prompt" id="captcha-prompt">正在加载验证码…</p><div class="captcha-grid" id="captcha-grid" role="group" aria-label="按提示顺序点击数字"><button type="button" class="tile" data-index="0" aria-label="第 1 格"></button><button type="button" class="tile" data-index="1" aria-label="第 2 格"></button><button type="button" class="tile" data-index="2" aria-label="第 3 格"></button><button type="button" class="tile" data-index="3" aria-label="第 4 格"></button><button type="button" class="tile" data-index="4" aria-label="第 5 格"></button><button type="button" class="tile" data-index="5" aria-label="第 6 格"></button><button type="button" class="tile" data-index="6" aria-label="第 7 格"></button><button type="button" class="tile" data-index="7" aria-label="第 8 格"></button><button type="button" class="tile" data-index="8" aria-label="第 9 格"></button></div><input type="hidden" id="captcha" name="captcha" autocomplete="off" required><div class="captcha-tools"><span id="captcha-count">已选 0 / 3</span><button type="button" class="captcha-refresh" id="captcha-refresh">换一张</button></div></div>
-          <div class="hint">按上方提示顺序点击数字</div>
-          <button class="submit" id="submit" type="submit"><span>进入工作台</span><span>→</span></button>
+          <input type="hidden" id="captcha" name="captcha" autocomplete="off">
+          <button class="submit" id="submit" type="submit">登录</button>
           <button class="passkey-submit" id="passkey-submit" type="button">使用 Passkey 登录</button>
         </form>
         ${options.oidcEnabled ? '<a class="oidc-login" href="/auth/oidc/start">使用企业账号登录</a>' : ''}
-        <footer class="trust"><span>登录需完成图形验证</span><b>Lumo Harness</b></footer>
+        <p id="login-status" role="status" aria-live="polite"></p>
+        <noscript>请启用 JavaScript 以完成登录验证。</noscript>
       </div>
     </section>
   </main>
+  <dialog id="puzzle" aria-labelledby="puzzle-title" aria-describedby="puzzle-status">
+    <header class="dialog-head"><h2 id="puzzle-title">拖动验证</h2><button type="button" id="puzzle-close" aria-label="取消验证" title="取消验证">×</button></header>
+    <p id="puzzle-status" role="status"></p>
+    <div id="board"><img id="scene" alt="带菱形缺口的图案"><button id="piece" type="button" aria-label="移动拼块，方向键微调后确认" disabled><span></span></button></div>
+    <footer><button type="button" id="refresh">换一张</button><button type="button" class="submit" id="confirm" disabled>确认并登录</button></footer>
+  </dialog>
 </body>
 </html>`
 }
 
 export const loginScript = `(() => {
-  const grid = document.getElementById('captcha-grid');
-  const promptEl = document.getElementById('captcha-prompt');
-  const countEl = document.getElementById('captcha-count');
-  const input = document.getElementById('captcha');
-  const refresh = document.getElementById('captcha-refresh');
-  const form = document.getElementById('login-form');
-  const submit = document.getElementById('submit');
-  const passkeySubmit = document.getElementById('passkey-submit');
-  let sequence = [];
-  const renderPrompt = (digits) => {
-    if (promptEl) promptEl.innerHTML = '请按顺序点击：<b>' + digits.split('').join(' \u2192 ') + '</b>';
-  };
-  const renderImage = (imageBase64) => {
-    const url = 'data:image/png;base64,' + imageBase64;
-    grid.querySelectorAll('.tile').forEach((tile, index) => {
-      const col = index % 3, row = Math.floor(index / 3);
-      tile.style.backgroundImage = 'url(' + url + ')';
-      tile.style.backgroundSize = '192px 192px';
-      tile.style.backgroundPosition = (-col * 64) + 'px ' + (-row * 64) + 'px';
-    });
-  };
-  const updateState = () => {
-    if (input) input.value = sequence.join('');
-    if (countEl) countEl.textContent = '已选 ' + sequence.length + ' / 3';
-    grid.querySelectorAll('.tile').forEach((tile, index) => {
-      const at = sequence.indexOf(index);
-      tile.classList.toggle('selected', at >= 0);
-      if (at >= 0) tile.dataset.order = String(at + 1);
-      else delete tile.dataset.order;
-      tile.setAttribute('aria-pressed', at >= 0 ? 'true' : 'false');
-    });
-  };
-  const load = async () => {
-    if (promptEl) promptEl.textContent = '正在加载验证码\u2026';
-    try {
-      const response = await fetch('/auth/captcha?t=' + Date.now(), { cache: 'no-store' });
-      if (!response.ok) throw new Error('captcha ' + response.status);
-      const data = await response.json();
-      sequence = [];
-      renderImage(data.image);
-      renderPrompt(data.prompt);
-      updateState();
-    } catch (error) {
-      if (promptEl) promptEl.textContent = '验证码加载失败，请点击「换一张」重试';
-    }
-  };
-  grid.querySelectorAll('.tile').forEach((tile) => tile.addEventListener('click', () => {
-    const index = Number(tile.dataset.index);
-    const at = sequence.indexOf(index);
-    if (at >= 0) sequence.splice(at, 1);
-    else if (sequence.length < 3) sequence.push(index);
-    updateState();
-  }));
-  refresh.addEventListener('click', load);
-  form.addEventListener('submit', (event) => {
-    if (sequence.length < 3) {
-      event.preventDefault();
-      if (promptEl) promptEl.textContent = '请先按顺序点击验证码中的数字';
-      return;
-    }
-    if (submit) { submit.disabled = true; submit.firstElementChild.textContent = '正在验证\u2026'; }
-  });
+  ${puzzleScript}
   const b64url = (buffer) => {
     const bytes = new Uint8Array(buffer);
     let value = '';
@@ -146,13 +88,10 @@ export const loginScript = `(() => {
     timeout: source.timeout, userVerification: source.user_verification,
     allowCredentials: (source.allow_credentials || []).map((credential) => ({ type: credential.type, id: bytes(credential.id) })),
   });
-  passkeySubmit.addEventListener('click', async () => {
+  async function passkeyLogin(answer) {
     const username = document.getElementById('username').value.trim();
-    if (!window.PublicKeyCredential) { if (promptEl) promptEl.textContent = '当前浏览器不支持 Passkey。'; return; }
-    if (!username || sequence.length < 3) { if (promptEl) promptEl.textContent = '请输入账号并完成点选验证码后使用 Passkey。'; return; }
-    passkeySubmit.disabled = true;
     try {
-      const optionsResponse = await fetch('/auth/passkey/login/options', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, captcha_code: sequence.join('') }) });
+      const optionsResponse = await fetch('/auth/passkey/login/options', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, captcha_code: answer }) });
       const options = await optionsResponse.json();
       if (!optionsResponse.ok || !options.public_key) throw new Error(options.message || 'Passkey 登录不可用');
       const credential = await navigator.credentials.get({ publicKey: passkeyOptions(options.public_key) });
@@ -166,9 +105,7 @@ export const loginScript = `(() => {
       if (!finish.ok) throw new Error(body.message || 'Passkey 验证失败');
       location.assign(${JSON.stringify(AUTHENTICATED_APP_HOME)});
     } catch (error) {
-      if (promptEl) promptEl.textContent = error instanceof Error ? error.message : 'Passkey 登录失败，请重新获取验证码后重试';
-      load();
-    } finally { passkeySubmit.disabled = false; }
-  });
-  load();
+      status.textContent = error instanceof Error ? error.message : 'Passkey 登录失败，请重试';
+    } finally { busy = false; submit.disabled = passkeySubmit.disabled = false; }
+  }
 })();`

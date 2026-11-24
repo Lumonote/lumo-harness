@@ -324,6 +324,7 @@ type controlRequest struct {
 	Actor         string `json:"actor"`
 	Reason        string `json:"reason"`
 	CorrelationID string `json:"correlation_id"`
+	AskID         string `json:"ask_id,omitempty"`
 }
 
 func (s *Server) handleControl(w http.ResponseWriter, r *http.Request, sessionRef string) {
@@ -346,7 +347,7 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request, sessionRe
 	res, err := s.opts.Execute(r.Context(), control.Request{
 		SessionRef: sessionRef, Command: state.Command(in.Command),
 		Realm: in.Realm, Role: in.Role, Actor: in.Actor,
-		Reason: in.Reason, CorrelationID: in.CorrelationID,
+		Reason: in.Reason, CorrelationID: in.CorrelationID, AskID: in.AskID,
 	})
 	if err != nil {
 		if errors.Is(err, control.ErrInvalidRequest) {

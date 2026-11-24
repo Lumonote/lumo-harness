@@ -1,5 +1,6 @@
 import { BREACH_DURATION, mountWhaleMotion } from './pet-motion.mjs'
 import { mountDevTools } from './dev-tools.mjs'
+import { mountMemorySync } from './memory-sync.mjs'
 
 export const PET_ATTACHMENT_LIMITS = Object.freeze({ count: 4, fileBytes: 8 * 1024 * 1024, totalBytes: 16 * 1024 * 1024 })
 
@@ -41,6 +42,8 @@ export function mountPet(view) {
     : Promise.reject(Error('desktop_unavailable'))
   const listen = (target, event, handler) => target.addEventListener(event, handler, { signal: events.signal })
   const devTools = mountDevTools({ doc, invoke, listen, getWorkspace: () => workspaceId })
+  const memorySync = mountMemorySync({ doc, invoke, listen, getWorkspace: () => workspaceId, timer: view })
+  listen(doc.getElementById('dev-sync') ?? doc, 'toggle', () => void memorySync.refresh())
   const cloudFields = () => {
     const item = snapshot.workbenches?.find(i => i.origin === $('cloud-list').value)
     $('cloud-name').value = item?.label ?? ''

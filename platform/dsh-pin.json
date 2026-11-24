@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/deepseek-ai/deepseek-harness.git",
+  "tag": "dsh-v0.2.3-alpha.2",
+  "sha": "4b399c39a6d1479cd84ca591b4d7c88e24d38a96",
+  "pinnedAt": "2026-11-24",
+  "lumoVersion": "1.2.3",
+  "note": "Release/CI/acceptance check out this immutable commit. master is only exercised by the nightly cluster-acceptance schedule. Bump with: node platform/tools/resolve-upstream-ref.mjs --bump <sha> [tag]; then update docs/dsh-compat.md."
+}

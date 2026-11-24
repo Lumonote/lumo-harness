@@ -169,12 +169,25 @@ func (s *Store) EnsureBootstrapAuthUser(ctx context.Context, input BootstrapAuth
 }
 
 func (s *Store) CreateCaptcha(ctx context.Context, ttl time.Duration) (CaptchaChallenge, error) {
-	if ttl <= 0 {
-		ttl = 2 * time.Minute
-	}
 	challenge, err := authcrypto.NewCaptcha()
 	if err != nil {
 		return CaptchaChallenge{}, err
+	}
+	return s.saveCaptcha(ctx, ttl, challenge)
+}
+
+func (s *Store) CreatePuzzle(ctx context.Context, ttl time.Duration) (CaptchaChallenge, []byte, error) {
+	c, image, err := authcrypto.NewPuzzle()
+	if err != nil {
+		return CaptchaChallenge{}, nil, err
+	}
+	challenge, err := s.saveCaptcha(ctx, ttl, c)
+	return challenge, image, err
+}
+
+func (s *Store) saveCaptcha(ctx context.Context, ttl time.Duration, challenge authcrypto.Captcha) (CaptchaChallenge, error) {
+	if ttl <= 0 {
+		ttl = 2 * time.Minute
 	}
 	expiresAt := time.Now().UTC().Add(ttl)
 	if _, err := s.pool.Exec(ctx, `DELETE FROM governance_auth_captchas WHERE expires_at <= now()`); err != nil {

@@ -1,0 +1,15 @@
+{
+  "name": "@lumo/dual-plugins",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "description": "Dual-audience plugins: one manifest declares human UI pages and agent tools; tool calls are gated by permission decisions, unified Asks and the run tree, and exposed to dsh agents and ACP engines (MCP)",
+  "exports": {
+    ".": { "types": "./src/index.ts", "import": "./src/index.ts", "default": "./src/index.ts" }
+  },
+  "engines": { "node": "^22.19.0 || >=24.0.0" },
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "link:../../../deepseek-harness/packages/core/tools"
+  }
+}

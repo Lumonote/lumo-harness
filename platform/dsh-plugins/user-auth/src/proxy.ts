@@ -593,7 +593,7 @@ export function createAuthProxy(options: AuthProxyOptions): Server {
         return
       }
       if (req.method === 'GET' && url.pathname === '/auth/captcha') {
-        const challenge = await options.client.captcha()
+        const challenge = await options.client.captcha(url.searchParams.get('kind') === 'puzzle')
         writeJson(res, 200, {
           id: challenge.id,
           prompt: challenge.prompt,

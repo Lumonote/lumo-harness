@@ -50,13 +50,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Validate upstream checkout identity
+        id: upstream
         env:
-          LUMO_UPSTREAM_REF: ${{ inputs.upstream_ref || 'master' }}
-        run: node platform/tools/resolve-upstream-ref.mjs --validate "$LUMO_UPSTREAM_REF"
+          # 夜间 schedule 跟 master 做前瞻兼容；其余触发用 platform/dsh-pin.json 钉住的 SHA
+          LUMO_UPSTREAM_REF: ${{ inputs.upstream_ref || (github.event_name == 'schedule' && 'master') || '' }}
+        run: node platform/tools/resolve-upstream-ref.mjs --select "$LUMO_UPSTREAM_REF"
       - uses: actions/checkout@v5
         with:
           repository: deepseek-ai/deepseek-harness
-          ref: ${{ inputs.upstream_ref || 'master' }}
+          ref: ${{ steps.upstream.outputs.ref }}
           fetch-depth: 0
           path: deepseek-harness
       - uses: pnpm/action-setup@v5

@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { upstreamCommit, validateUpstreamRef } from '../resolve-upstream-ref.mjs'
+import { upstreamCommit, validateUpstreamRef, pinnedUpstream, selectUpstreamRef } from '../resolve-upstream-ref.mjs'
 import { prepareSigning, signingInputs, cleanupSigning } from '../prepare-release-signing.mjs'
 
 const read = path => readFileSync(new URL(`../../../${path}`, import.meta.url), 'utf8')
@@ -16,6 +16,17 @@ test('only one full master SHA can become the release source identity', () => {
   for (const value of ['', 'dev', 'main', 'a'.repeat(39), `master\n${sha}`]) assert.throws(() => validateUpstreamRef(value))
 })
 
+test('dsh is pinned to an immutable commit; empty ref selects the pin', () => {
+  const pin = pinnedUpstream()
+  assert.match(pin.sha, /^[a-f0-9]{40}$/u)
+  assert.equal(selectUpstreamRef('', pin), pin.sha)
+  assert.equal(selectUpstreamRef(sha, pin), sha)
+  assert.equal(selectUpstreamRef('master', pin), 'master')
+  assert.throws(() => selectUpstreamRef('dev', pin))
+  assert.throws(() => pinnedUpstream('{"sha":"master"}'))
+  assert.ok(read('docs/dsh-compat.md').includes(pin.sha), 'docs/dsh-compat.md must list the pinned SHA')
+})
+
 export function releaseContract(release, ci, cluster) {
   assert.match(job(release, 'source-identity'), /node platform\/tools\/resolve-upstream-ref\.mjs/u)
   for (const name of ['basic-validation', 'cluster-validation']) {
@@ -26,18 +37,23 @@ export function releaseContract(release, ci, cluster) {
   assert.match(job(release, 'basic-validation'), /uses: \.\/\.github\/workflows\/ci\.yml/u)
   assert.match(job(release, 'cluster-validation'), /uses: \.\/\.github\/workflows\/cluster-acceptance\.yml/u)
   assert.match(job(release, 'desktop'), /ref: \$\{\{ needs\.source-identity\.outputs\.upstream-sha \}\}/u)
-  assert.match(job(release, 'release'), /needs: \[basic-validation, desktop, cluster-validation\]/u)
+  assert.match(job(release, 'release'), /needs: \[basic-validation, desktop, cluster-validation, server-bundle\]/u)
+  assert.match(job(release, 'server-bundle'), /ref: \$\{\{ needs\.source-identity\.outputs\.upstream-sha \}\}/u)
+  assert.match(job(release, 'server-bundle'), /pack-server\.mjs --tree/u)
+  assert.match(job(release, 'release'), /pack-server\.mjs --sums/u)
+  assert.match(job(release, 'release'), /-name 'SHA256SUMS'/u)
   assert.doesNotMatch(job(release, 'release'), /always\(\)|continue-on-error|!cancelled/u)
   for (const workflow of [ci, cluster]) {
     assert.match(workflow, /workflow_call:\n\s+inputs:\n\s+upstream_ref:/u)
-    assert.match(workflow, /ref: \$\{\{ inputs\.upstream_ref \|\| 'master' \}\}/u)
-    assert.match(workflow, /--validate "\$LUMO_UPSTREAM_REF"/u)
+    assert.match(workflow, /ref: \$\{\{ steps\.upstream\.outputs\.ref \}\}/u)
+    assert.match(workflow, /--select "\$LUMO_UPSTREAM_REF"/u)
+    assert.doesNotMatch(workflow, /inputs\.upstream_ref \|\| 'master'/u)
   }
 }
 test('release requires basic CI and cluster evidence from the same upstream commit', () => releaseContract(read('.github/workflows/release.yml'), read('.github/workflows/ci.yml'), read('.github/workflows/cluster-acceptance.yml')))
 test('release contract rejects missing CI dependency, independent master and failure bypass', () => {
   const release = read('.github/workflows/release.yml'), ci = read('.github/workflows/ci.yml'), cluster = read('.github/workflows/cluster-acceptance.yml')
-  for (const mutation of [release.replace('needs: [basic-validation, desktop, cluster-validation]', 'needs: [desktop, cluster-validation]'), release.replace('ref: ${{ needs.source-identity.outputs.upstream-sha }}', 'ref: master'), release.replace("  release:\n    if:", "  release:\n    continue-on-error: true\n    if:")]) assert.throws(() => releaseContract(mutation, ci, cluster))
+  for (const mutation of [release.replace('needs: [basic-validation, desktop, cluster-validation, server-bundle]', 'needs: [basic-validation, desktop, cluster-validation]'), release.replace('ref: ${{ needs.source-identity.outputs.upstream-sha }}', 'ref: master'), release.replace("  release:\n    if:", "  release:\n    continue-on-error: true\n    if:")]) assert.throws(() => releaseContract(mutation, ci, cluster))
 })
 test('Go CI supplies live gates, structured package coverage and concurrency checks', () => {
   const body = job(read('.github/workflows/ci.yml'), 'control-plane-go')

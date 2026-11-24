@@ -174,6 +174,9 @@ type Request struct {
 	Actor         string
 	Reason        string
 	CorrelationID string
+	// AskID（P0-1）：进入 awaiting-approval 时记下关联的统一 Ask；approve/reject 时
+	// 若状态行已关联 Ask，则必须回答同一个 Ask（防止把 A 的批准用在 B 上）。可为空。
+	AskID string
 }
 
 // Result 是一条控制指令的完整结论（HTTP 响应体就是它）。
@@ -317,7 +320,7 @@ func (c *Controller) Execute(ctx context.Context, req Request) (Result, error) {
 			Command: req.Command, ExpectedRevision: row.Revision,
 			ChangeState: v.change, ToState: v.toState,
 			Outcome: string(v.outcome), Reason: v.reason,
-			FromState: base, CorrelationID: req.CorrelationID,
+			FromState: base, CorrelationID: req.CorrelationID, AskID: req.AskID,
 		})
 		switch {
 		case errors.Is(err, store.ErrConflict):
@@ -407,6 +410,10 @@ func (c *Controller) decide(ctx context.Context, req Request, row store.Row, reg
 		return verdict{outcome: OutcomePolicyDenied, reason: dec.Reason, auditable: true}
 	}
 
+	if reason := askMismatch(row, req); reason != "" {
+		return verdict{outcome: OutcomeStateRejected, reason: reason, auditable: true}
+	}
+
 	out := state.Apply(row.State, req.Command)
 	if !out.OK {
 		return verdict{outcome: OutcomeStateRejected, reason: out.Reason, auditable: true}
@@ -433,6 +440,21 @@ func (c *Controller) load(ctx context.Context, req Request) (store.Row, bool, er
 		}, false, nil
 	}
 	return store.Row{}, false, err
+}
+
+// askMismatch 校验 approve/reject 回答的是状态行关联的那个 Ask（P0-1）。
+// 兼容旧数据：状态行未关联（''）或指令未携带 AskID 时不校验。
+func askMismatch(row store.Row, req Request) string {
+	if req.Command != state.CmdApprove && req.Command != state.CmdReject {
+		return ""
+	}
+	if row.State != state.StateAwaitingApproval || row.AskID == "" || req.AskID == "" {
+		return ""
+	}
+	if row.AskID != req.AskID {
+		return fmt.Sprintf("该会话等待的是 Ask %q，不是 %q", row.AskID, req.AskID)
+	}
+	return ""
 }
 
 // InitialState 是未登记会话的起点（首条控制指令把它建立为这个状态）。

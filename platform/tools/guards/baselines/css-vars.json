@@ -1,0 +1,12 @@
+{
+  "tokensFile": "dsh-plugins/lumo-ui/src/client/lumo.css",
+  "runtimeVars": [
+    "--lumo-order"
+  ],
+  "legacy": {
+    "dsh-plugins/lumo-ui/src/client/desktop-pet-tasks.css": [
+      "--lumo-accent",
+      "--lumo-text"
+    ]
+  }
+}

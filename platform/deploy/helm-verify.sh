@@ -523,7 +523,7 @@ for doc in render.split("\n---\n"):
         ports[name.group(1)] = int(port.group(1))
 
 expected_prefixes = [
-    "/v1/auth/", "/v1/chat/", "/v1/flows", "/v1/operators",
+    "/v1/auth/", "/v1/chat/", "/v1/flows", "/v1/memory-sync/", "/v1/operators",
     "/v1/projects", "/v1/providers", "/v1/tasks/", "/v1/terminals/",
 ]
 

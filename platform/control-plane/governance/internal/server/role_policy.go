@@ -19,6 +19,7 @@ import (
 var errPermissionPolicyUnavailable = errors.New("permission policy unavailable")
 
 func (s *Server) registerRolePolicyRoutes(mux *http.ServeMux) {
+	mux.Handle("POST /v1/permissions/decide", observability.RequireControlPlaneToken(s.cfg.ControlPlaneToken)(http.HandlerFunc(s.decideTool)))
 	mux.HandleFunc("GET /v1/permission-actions", s.permissionActionCatalog)
 	mux.HandleFunc("GET /v1/roles/{roleID}/permissions", s.rolePermissions)
 	mux.HandleFunc("PUT /v1/roles/{roleID}/permissions", s.rolePermissions)

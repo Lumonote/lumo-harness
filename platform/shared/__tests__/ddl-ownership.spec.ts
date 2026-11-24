@@ -285,6 +285,7 @@ function tablesIn(ddl: string): string[] {
  * 比较的表 = 两份 DDL 都建的表的交集（不手抄清单：手抄的那份会与 DDL 脱节）。
  */
 const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequisites?: DdlSource | DdlSource[] }> = [
+  { label: '跨设备记忆（projects ↔ 迁移 050）', a: {files:[`${MIGRATION_DIR}/050_memory_sync.sql`]}, b: {files:['control-plane/projects/internal/memsync/store.go'],constName:'DDL'} },
   {
     label: '受控仓库快照与发布回执（Go governance ↔ 迁移 040/043）',
     a: { files: [`${MIGRATION_DIR}/040_governance_controlled_repository.sql`, `${MIGRATION_DIR}/043_repository_publication_reconciliation.sql`] },
@@ -446,7 +447,7 @@ const SHAPE_CHECKS: Array<{ label: string; a: DdlSource; b: DdlSource; prerequis
   },
   {
     label: 'session-control（Go 服务 ↔ 迁移 006）',
-    a: { files: [`${MIGRATION_DIR}/006_session_control_single_owner.sql`] },
+    a: { files: [`${MIGRATION_DIR}/006_session_control_single_owner.sql`, `${MIGRATION_DIR}/049_session_control_ask_link.sql`] },
     b: { files: ['control-plane/session-control/internal/store/store.go'], constName: 'DDL' },
   },
   {
@@ -750,6 +751,8 @@ function statementsOf(sql: string): string[] {
 }
 
 function targetTables(stmt: string): string[] {
+  // This independent cursor sequence is created by every memory_sync_items owner.
+  if (stmt === 'CREATE SEQUENCE IF NOT EXISTS memory_sync_seq') return ['memory_sync_items']
   if (/^DO\s+\$/iu.test(stmt)) {
     const mutations = [...stmt.matchAll(/\b(?:ALTER\s+TABLE|UPDATE(?!\s+(?:OF|ON)\b)|INSERT\s+INTO|DELETE\s+FROM)\s+([A-Za-z_][A-Za-z0-9_]*)/giu)].map((m) => m[1]!)
     const triggers = [...stmt.matchAll(/\bCREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+\S+[\s\S]*?\bON\s+([A-Za-z_][A-Za-z0-9_]*)/giu)].map((m) => m[1]!)

@@ -38,6 +38,29 @@ CREATE TABLE IF NOT EXISTS connector_approvals (
   consumed_at       TIMESTAMPTZ
 );
 
+-- P0-1 撤回：允许 'cancelled'（与 deploy/migrations/048_connector_approval_cancel.sql 同一语句）。
+-- 按定义找旧 CHECK（内联约束名由 PG 生成），幂等：已含 cancelled 时不动。
+DO $$
+DECLARE c record;
+BEGIN
+  IF to_regclass('connector_approvals') IS NULL THEN
+    RETURN;
+  END IF;
+  FOR c IN SELECT conname FROM pg_constraint
+            WHERE conrelid = 'connector_approvals'::regclass AND contype = 'c'
+              AND pg_get_constraintdef(oid) LIKE '%consumed%'
+              AND pg_get_constraintdef(oid) NOT LIKE '%cancelled%'
+  LOOP
+    EXECUTE format('ALTER TABLE connector_approvals DROP CONSTRAINT %I', c.conname);
+  END LOOP;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conrelid = 'connector_approvals'::regclass AND contype = 'c'
+                    AND pg_get_constraintdef(oid) LIKE '%cancelled%') THEN
+    ALTER TABLE connector_approvals ADD CONSTRAINT connector_approvals_status_check
+      CHECK (status IN ('pending', 'approved', 'rejected', 'consumed', 'cancelled'));
+  END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_connector_approvals_realm_status
   ON connector_approvals (realm, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_connector_approvals_requester
@@ -154,6 +177,30 @@ func (s *Store) Decide(ctx context.Context, id, realm, approver, decision string
 	}
 	if err != nil {
 		return Request{}, fmt.Errorf("connector approval: decide: %w", err)
+	}
+	return request, nil
+}
+
+// Cancel lets the requester withdraw their own still-pending request (P0-1).
+// Only the requester may cancel, and only while pending and unexpired; an
+// approver's decision always wins a race because both predicates require
+// status = 'pending' under the same row update.
+func (s *Store) Cancel(ctx context.Context, id, realm, requester string) (Request, error) {
+	row := s.pool.QueryRow(ctx, `
+		UPDATE connector_approvals
+		SET status = 'cancelled', decided_at = now()
+		WHERE id = $1 AND realm = $2 AND requester_user_id = $3
+		  AND status = 'pending' AND expires_at > now()
+		RETURNING id, realm, requester_user_id, COALESCE(project_id,''), connector_id, connector_version,
+		          operation, status, COALESCE(approver_user_id,''), created_at, expires_at, request_hash`,
+		id, realm, requester,
+	)
+	request, err := scan(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Request{}, ErrNotApprovable
+	}
+	if err != nil {
+		return Request{}, fmt.Errorf("connector approval: cancel: %w", err)
 	}
 	return request, nil
 }

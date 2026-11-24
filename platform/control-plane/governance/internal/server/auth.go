@@ -54,13 +54,19 @@ func (s *Server) authPolicy() (store.AuthPolicy, error) {
 }
 
 func (s *Server) authCaptcha(w http.ResponseWriter, r *http.Request) {
-	challenge, err := s.store.CreateCaptcha(r.Context(), s.cfg.AuthCaptchaTTL)
-	if err != nil {
-		s.log.Error("create login captcha", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "unable to create verification image")
-		return
+	var challenge store.CaptchaChallenge
+	var image []byte
+	var err error
+	prompt := "puzzle-v1"
+	if r.URL.Query().Get("kind") == "puzzle" {
+		challenge, image, err = s.store.CreatePuzzle(r.Context(), s.cfg.AuthCaptchaTTL)
+	} else {
+		challenge, err = s.store.CreateCaptcha(r.Context(), s.cfg.AuthCaptchaTTL)
+		if err == nil {
+			image, err = authcrypto.RenderCaptchaGridPNG(challenge.Tiles)
+			prompt = authcrypto.Prompt(challenge.Targets)
+		}
 	}
-	image, err := authcrypto.RenderCaptchaGridPNG(challenge.Tiles)
 	if err != nil {
 		s.log.Error("render login captcha", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "unable to render verification image")
@@ -73,7 +79,7 @@ func (s *Server) authCaptcha(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Lumo-Captcha-Expires-In", strconv.Itoa(expiresIn))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":         challenge.ID,
-		"prompt":     authcrypto.Prompt(challenge.Targets),
+		"prompt":     prompt,
 		"expires_in": expiresIn,
 		"image":      base64.StdEncoding.EncodeToString(image),
 	})

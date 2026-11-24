@@ -1,32 +1,38 @@
-import { describe, expect, it } from 'vitest'
-
+import { describe, expect, it, vi } from 'vitest'
+import { JSDOM } from 'jsdom'
 import { loginPage, loginScript } from '../src/html.ts'
 
-describe('first-party login surface', () => {
-  it('renders an interactive click-captcha grid', () => {
-    const html = loginPage()
-    expect(html).toContain('id="captcha-grid"')
-    expect(html).toContain('name="captcha"')
-    expect(html).toContain('data-index="0"')
-    expect(html).toContain('按上方提示顺序点击数字')
-    expect(html).toContain('id="mfa"')
-    expect(html).toContain('pattern="[0-9]{6}"')
-    expect(html).not.toContain('captcha-image')
-    expect(html).not.toContain('deepseek-harness-auth')
+function fixture() {
+  const dom=new JSDOM(loginPage(),{url:'http://localhost/auth/login',runScripts:'outside-only'})
+  const w=dom.window, d=w.document, dialog=d.querySelector('dialog')!
+  dialog.showModal=()=>dialog.setAttribute('open','')
+  dialog.close=()=>{dialog.removeAttribute('open'); dialog.dispatchEvent(new w.Event('close'))}
+  const post=vi.fn(); w.HTMLFormElement.prototype.submit=post
+  w.HTMLImageElement.prototype.decode=async()=>{}
+  const fetch=vi.fn(async()=>({ok:true,json:async()=>({prompt:'puzzle-v1',image:'fixture',expires_in:120})})); w.fetch=fetch as never
+  w.eval(loginScript)
+  return {w,d,dialog,fetch,post,click:(id:string)=>d.querySelector<HTMLButtonElement>('#'+id)!.click()}
+}
+describe('first-party login',()=>{
+  it('only fetches a challenge after valid submission and discards cancelled answers',async()=>{
+    const {w,d,dialog,fetch,post,click}=fixture()
+    try {
+      expect(fetch).not.toHaveBeenCalled(); click('submit'); expect(dialog.open).toBe(false)
+      d.querySelector<HTMLInputElement>('#username')!.value='test'; d.querySelector<HTMLInputElement>('#password')!.value='test'
+      click('submit'); await vi.waitFor(()=>expect(d.querySelector<HTMLButtonElement>('#piece')!.disabled).toBe(false))
+      expect(dialog.open).toBe(true); click('puzzle-close'); expect(post).not.toHaveBeenCalled()
+      click('submit'); await vi.waitFor(()=>expect(d.querySelector<HTMLButtonElement>('#piece')!.disabled).toBe(false))
+      expect(fetch).toHaveBeenCalledTimes(2); expect(d.querySelector<HTMLButtonElement>('#confirm')!.disabled).toBe(true)
+      d.querySelector('#piece')!.dispatchEvent(new w.KeyboardEvent('keydown',{key:'ArrowRight'})); click('confirm'); expect(post).toHaveBeenCalledOnce(); expect(d.querySelector<HTMLInputElement>('#captcha')!.value).toBe('p:3:13')
+    } finally {w.close()}
   })
-
-  it('uses fixed messages instead of reflecting query input', () => {
-    expect(loginPage({ state: 'invalid' })).toContain('账号、密码或验证码不正确')
-    expect(loginPage({ state: 'locked' })).toContain('登录尝试次数过多')
-    expect(loginPage({ theme: 'orbital-glass' })).toContain('data-lumo-theme="orbital-glass"')
-    expect(loginPage({ theme: 'infrared-grid' })).toContain('--accent: #ff7799')
-    expect(loginScript).toContain("fetch('/auth/captcha")
-    expect(loginScript).toContain('请按顺序点击')
+  it('offers a retry after load failure without posting credentials',async()=>{
+    const {w,d,dialog,fetch,post,click}=fixture(); try {
+      fetch.mockRejectedValueOnce(Error('offline')); Object.defineProperty(w,'PublicKeyCredential',{value:class {}}); d.querySelector<HTMLInputElement>('#username')!.value='test'; click('passkey-submit')
+      await vi.waitFor(()=>expect(d.querySelector('#puzzle-status')!.textContent).toContain('失败')); expect(dialog.open).toBe(true); expect(post).not.toHaveBeenCalled(); click('refresh'); await vi.waitFor(()=>expect(d.querySelector<HTMLButtonElement>('#piece')!.disabled).toBe(false))
+    } finally {w.close()}
   })
-
-  it('records clicked tile indices into the captcha field', () => {
-    expect(loginScript).toContain("sequence.join('')")
-    expect(loginScript).toContain('tile.dataset.index')
-    expect(loginScript).toContain("'已选 ' + sequence.length")
+  it('preserves MFA, theme, OIDC and fixed state messages',()=>{
+    const html=loginPage({state:'invalid',theme:'orbital-glass',oidcEnabled:true}); expect(html).toContain('账号、密码或验证码不正确');expect(html).toContain('data-lumo-theme="orbital-glass"');expect(html).toContain('pattern="[0-9]{6}"');expect(html).toContain('/auth/oidc/start')
   })
 })

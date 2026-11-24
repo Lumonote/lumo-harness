@@ -192,7 +192,7 @@ run_mutation() {
 # 覆盖面的期望值**写死**：要的是「有人想过应该代理哪些面」，而不是「表里有什么就算什么」。
 # 少一条会报出来（比如有人以为路由改了其实没生效），多一条也会。两张表共用这一个期望值
 # ——compose 与 Helm 描述的是同一个系统，若两张表分叉，那本身就是缺陷。
-expected_prefixes='/v1/auth/ /v1/chat/ /v1/flows /v1/operators /v1/projects /v1/providers /v1/tasks/ /v1/terminals/'
+expected_prefixes='/v1/auth/ /v1/chat/ /v1/flows /v1/memory-sync/ /v1/operators /v1/projects /v1/providers /v1/tasks/ /v1/terminals/'
 
 # check_coverage <说明> <文件>：断言覆盖面与预期一致，且白名单无悬空条目。
 # 白名单里每一条都必须真的被某条路由用到：白名单拼错了主机、或路由删了但白名单没删，
@@ -213,7 +213,7 @@ check_coverage() {
   local label="$1" file="$2" actual dangling
   actual="$(prefixes_of "$file")"
   if [ "$actual" = "$expected_prefixes" ]; then
-    ok "${label}：覆盖面与预期一致（8 条：${expected_prefixes}）"
+    ok "${label}：覆盖面与预期一致（9 条：${expected_prefixes}）"
   else
     fail "${label}：覆盖面与预期不一致
   期望: $expected_prefixes

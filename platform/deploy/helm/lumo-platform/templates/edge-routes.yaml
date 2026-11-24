@@ -63,7 +63,14 @@ enforced by construction, one level up.
 {{- end }}
 {{- $host := printf "%s-%s:%v" $name $r.service $svc.port }}
 {{- $whitelist = append $whitelist $host }}
-{{- $routes = append $routes (dict "prefix" $r.prefix "upstream" (printf "http://%s" $host) "rate_limit_rpm" (int (default 0 $r.rateLimitRpm))) }}
+{{- $route := dict "prefix" $r.prefix "upstream" (printf "http://%s" $host) "rate_limit_rpm" (int (default 0 $r.rateLimitRpm)) }}
+{{- if $r.identity }}
+{{- if ne $r.identity "session" }}
+{{- fail (printf "edgeGateway.routes[%d] (prefix %s) has identity %q: only \"session\" (or omitting it) is valid" $i $r.prefix $r.identity) }}
+{{- end }}
+{{- $_ := set $route "identity" $r.identity }}
+{{- end }}
+{{- $routes = append $routes $route }}
 {{- end }}
 apiVersion: v1
 kind: ConfigMap

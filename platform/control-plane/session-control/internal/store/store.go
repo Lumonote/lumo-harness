@@ -216,6 +216,11 @@ CREATE INDEX IF NOT EXISTS idx_session_control_audit_realm_time
   ON session_control_audit (realm, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_session_control_audit_pending
   ON session_control_audit (id) WHERE projected_at IS NULL;
+
+-- P0-1：awaiting-approval 关联具体 Ask（deploy/migrations/049 同一语句）。'' = 旧数据 / 未关联，
+-- 读取与校验都把空串当「不校验」处理，所以老行无需回填。
+ALTER TABLE session_control_state ADD COLUMN IF NOT EXISTS ask_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE session_control_audit ADD COLUMN IF NOT EXISTS ask_id TEXT NOT NULL DEFAULT '';
 `
 
 var (
@@ -254,6 +259,9 @@ type Row struct {
 	LastReason    string
 	CorrelationID string
 	UpdatedAt     time.Time
+	// AskID 是 awaiting-approval 关联的统一 Ask（P0-1，如 `connector:<id>`）。
+	// 空串 = 旧数据或未关联：approve/reject 时不做 Ask 校验（兼容读取）。
+	AskID string
 }
 
 // AuditRow 是 session_control_audit 的一行（控制台时间线的一条）。
@@ -304,6 +312,9 @@ type Commit struct {
 	// FromState 用于审计；控制器传它读到的起点状态（未登记时传初始化状态）。
 	FromState     state.State
 	CorrelationID string
+	// AskID 仅在 ToState 为 awaiting-approval 时落到状态行；离开该状态时清空。
+	// 审计行总是记下本次指令携带的 AskID（approve/reject 回答的是哪个 Ask）。
+	AskID string
 }
 
 // CommitResult 是 Commit 的回执：状态行 + 本次审计行的 `id`。
@@ -361,7 +372,7 @@ func (s *Store) Load(ctx context.Context, sessionRef string) (Row, error) {
 	}
 	return scanRow(s.pool.QueryRow(ctx, `
 		SELECT session_ref, realm, state, revision, last_command, last_actor,
-		       last_reason, correlation_id, updated_at
+		       last_reason, correlation_id, updated_at, ask_id
 		FROM session_control_state WHERE session_ref = $1`, sessionRef))
 }
 
@@ -439,7 +450,7 @@ func (s *Store) Commit(ctx context.Context, in Commit) (CommitResult, error) {
 			sessionRef: in.SessionRef, realm: in.Realm, command: in.Command,
 			outcome: in.Outcome, fromState: from, toState: from,
 			actor: in.Actor, actorRole: in.ActorRole, reason: in.Reason,
-			correlationID: in.CorrelationID, revision: 0,
+			correlationID: in.CorrelationID, revision: 0, askID: in.AskID,
 		})
 		if err != nil {
 			return CommitResult{}, err
@@ -476,12 +487,13 @@ func (s *Store) Commit(ctx context.Context, in Commit) (CommitResult, error) {
 		row, err = scanRow(tx.QueryRow(ctx, `
 			UPDATE session_control_state
 			SET state = $2, revision = revision + 1, last_command = $3, last_actor = $4,
-			    last_reason = $5, correlation_id = $6, updated_at = now()
+			    last_reason = $5, correlation_id = $6, updated_at = now(),
+			    ask_id = CASE WHEN $2 = 'awaiting-approval' THEN $7 ELSE '' END
 			WHERE session_ref = $1
 			RETURNING session_ref, realm, state, revision, last_command, last_actor,
-			          last_reason, correlation_id, updated_at`,
+			          last_reason, correlation_id, updated_at, ask_id`,
 			in.SessionRef, string(in.ToState), string(in.Command), in.Actor,
-			in.Reason, in.CorrelationID))
+			in.Reason, in.CorrelationID, in.AskID))
 		if err != nil {
 			return CommitResult{}, err
 		}
@@ -497,7 +509,7 @@ func (s *Store) Commit(ctx context.Context, in Commit) (CommitResult, error) {
 		sessionRef: in.SessionRef, realm: row.Realm, command: in.Command,
 		outcome: in.Outcome, fromState: fromState, toState: toState,
 		actor: in.Actor, actorRole: in.ActorRole, reason: in.Reason,
-		correlationID: in.CorrelationID, revision: row.Revision,
+		correlationID: in.CorrelationID, revision: row.Revision, askID: in.AskID,
 	})
 	if err != nil {
 		return CommitResult{}, err
@@ -513,7 +525,7 @@ func (s *Store) Commit(ctx context.Context, in Commit) (CommitResult, error) {
 func lockState(ctx context.Context, tx pgx.Tx, sessionRef string) (Row, bool, error) {
 	row, err := scanRow(tx.QueryRow(ctx, `
 		SELECT session_ref, realm, state, revision, last_command, last_actor,
-		       last_reason, correlation_id, updated_at
+		       last_reason, correlation_id, updated_at, ask_id
 		FROM session_control_state WHERE session_ref = $1 FOR UPDATE`, sessionRef))
 	if errors.Is(err, ErrNotFound) {
 		return Row{}, false, nil
@@ -531,6 +543,7 @@ type auditRow struct {
 	outcome                                                    string
 	fromState, toState                                         state.State
 	revision                                                   int64
+	askID                                                      string
 }
 
 func insertAudit(ctx context.Context, tx pgx.Tx, a auditRow) (int64, error) {
@@ -538,11 +551,11 @@ func insertAudit(ctx context.Context, tx pgx.Tx, a auditRow) (int64, error) {
 	err := tx.QueryRow(ctx, `
 		INSERT INTO session_control_audit
 		  (session_ref, realm, command, outcome, from_state, to_state, actor,
-		   actor_role, reason, correlation_id, revision)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+		   actor_role, reason, correlation_id, revision, ask_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
 		a.sessionRef, a.realm, string(a.command), a.outcome,
 		string(a.fromState), string(a.toState), a.actor, a.actorRole,
-		a.reason, a.correlationID, a.revision).Scan(&id)
+		a.reason, a.correlationID, a.revision, a.askID).Scan(&id)
 	return id, err
 }
 
@@ -607,7 +620,7 @@ func scanRow(row pgx.Row) (Row, error) {
 	var r Row
 	var st, cmd string
 	if err := row.Scan(&r.SessionRef, &r.Realm, &st, &r.Revision, &cmd, &r.LastActor,
-		&r.LastReason, &r.CorrelationID, &r.UpdatedAt); err != nil {
+		&r.LastReason, &r.CorrelationID, &r.UpdatedAt, &r.AskID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Row{}, ErrNotFound
 		}

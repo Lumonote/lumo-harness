@@ -1,3 +1,4 @@
+import { localizedSkillName, localizedProvider, localizedSource, localizedSkillKind, localizedVisibility, localizedSkillDescription, localizedSkillWhenToUse, type RuntimeSkill } from './skill-labels.ts'
 import type { Surface, ServiceState, NodeState, DeploymentState, Row, Plugin, Overview, AuthAccount } from './surface-types.ts'
 import { ApiError, api, optionalApi, type OptionalApiResult } from './api.ts'
 import { surfaceMeta, availableSurfaces, navigationSurfaces, OPEN_EVENT, CLOSE_EVENT, querySurface, setQuerySurface, openSurface } from './surface-navigation.ts'
@@ -6,6 +7,11 @@ import { useFocusTrap } from './focus-trap.ts'
 import { KnowledgeSurface } from './knowledge-surface.tsx'
 import { MarketSurface } from './market-surface.tsx'
 import { AccountSurface } from './account-surface.tsx'
+import { AsksPanel } from './asks-panel.tsx'
+import { RemoteHostsPanel } from './remote-hosts-panel.tsx'
+import { DeviceActionsPanel } from './device-actions-panel.tsx'
+import { RunTreePanel, runTreeEnabled } from './run-tree-panel.tsx'
+import { AcpSessionSection } from './acp-session-panel.tsx'
 export { KnowledgeSurface } from './knowledge-surface.tsx'
 import {
   useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore,
@@ -123,7 +129,6 @@ interface ProbeResult { status?: number; url?: string; durationMs?: number; reda
 
 /** 单机版 vault 知识源运行态（/lumo/api/knowledge/vault/status；未装配=集群版） */
 
-interface RuntimeSkill { name: string; description: string; whenToUse?: string; invocation: { modelInvocable: boolean; userInvocable: boolean }; source: string; provider: string }
 interface SkillSnapshot { complete: boolean; skills: RuntimeSkill[]; error?: string }
 interface SkillHubSkill { id: string; name: string; tag: string; description: string; rating: number; downloads: number; source: string; verified: boolean; command: string; apiKey: boolean; icon?: string; publisher?: string; tags?: string[]; homepage?: string }
 interface SkillHubPack { id: string; name: string; role: string; category: string; description: string; skills: number; source: string; command?: string; icon?: string }
@@ -142,68 +147,6 @@ interface StudioScope { projectId: string; spaceId: string }
 interface GovernanceSnapshot { local?: boolean; features: UpstreamResult; departments: UpstreamResult; roles: UpstreamResult; catalog: UpstreamResult; effective: UpstreamResult; permissions: UpstreamResult }
 
 const emptyOverview: Overview = { generatedAt: '', deployment: { mode: 'standalone', label: '服务器单例', storage: 'postgres', middleware: [], distributed: false, desktop: false, clusterReady: false, clusterOnly: false }, services: {}, cluster: { nodes: [] }, projects: [], flows: [], connectors: [], plugins: [] }
-
-const skillNameLabels: Record<string, string> = {
-  'open-design': '开放设计',
-  '@lumo/open-design': '开放设计',
-  archify: '架构与调度图',
-  '@lumo/archify': '架构与调度图',
-  'gpt-image-2-style-library': '图像风格库',
-  'ppt-master': '演示文稿生成',
-  'ruflo-orchestration': '多智能体编排',
-  'dsh-market': '插件市场',
-  dshmarket: '插件市场',
-  modlens: '视觉理解',
-  '@liustack/modlens': '视觉理解',
-  'dsh-browser': '浏览器自动化',
-  '@anweat/dsh-browser': '浏览器自动化',
-  'dsh-context': '上下文洞察',
-  'dsh-cost-meter': '费用统计',
-}
-const skillProviderLabels: Record<string, string> = {
-  'lumo-open-design': 'Lumo 内置',
-  'lumo-archify': 'Lumo 内置',
-  'lumo-creative-skills': 'Lumo 创作能力',
-  'lumo-ruflo': 'Lumo 编排能力',
-  'lumo-local-snapshot': '本地技能快照',
-  '@lumo/open-design': 'Lumo 内置',
-  '@lumo/archify': 'Lumo 内置',
-  dshmarket: '插件市场',
-  '@liustack/modlens': '视觉理解',
-  '@anweat/dsh-browser': '浏览器自动化',
-  'dsh-context': '上下文洞察',
-  'dsh-cost-meter': '费用统计',
-}
-
-function localizedSkillName(name: string): string {
-  const normalized = name.toLowerCase()
-  if (normalized.includes('open-design')) return '开放设计'
-  if (normalized.includes('archify')) return '架构与调度图'
-  if (normalized.includes('gpt-image-2') || normalized.includes('style-library')) return '图像风格库'
-  if (normalized.includes('ppt-master')) return '演示文稿生成'
-  if (normalized.includes('ruflo')) return '多智能体编排'
-  if (normalized.includes('modlens')) return '视觉理解'
-  if (normalized.includes('browser')) return '浏览器自动化'
-  if (normalized.includes('context')) return '上下文洞察'
-  if (normalized.includes('cost-meter') || normalized.includes('costmeter')) return '费用统计'
-  if (normalized.includes('dshmarket') || normalized.includes('dsh-market')) return '插件市场'
-  const fallback = name.replace(/^.*\//u, '').replace(/[-_]+/gu, ' ').trim()
-  return skillNameLabels[name] ?? skillNameLabels[name.replace(/^.*\//u, '')] ?? (fallback || '未命名技能')
-}
-
-function localizedProvider(provider: string): string {
-  const normalized = provider.toLowerCase()
-  if (normalized.includes('open-design')) return '开放设计'
-  if (normalized.includes('archify')) return '架构图'
-  if (normalized.includes('creative-skills')) return 'Lumo 创作能力'
-  if (normalized.includes('ruflo')) return 'Lumo 编排能力'
-  if (normalized.includes('modlens')) return '视觉理解'
-  if (normalized.includes('browser')) return '浏览器自动化'
-  if (normalized.includes('context')) return '上下文洞察'
-  if (normalized.includes('cost-meter') || normalized.includes('costmeter')) return '费用统计'
-  if (normalized.includes('dshmarket') || normalized.includes('dsh-market')) return '插件市场'
-  return skillProviderLabels[provider] ?? '已装配插件'
-}
 
 function localizedServiceName(name: string): string {
   return ({
@@ -241,48 +184,6 @@ function localizedTaskState(state: string): string {
 // the independently tracked business state (for example, ASSIGNED).
 function localizedTaskDisplayState(task: DelegatedTask): string {
   return localizedTaskState(task.state === 'CANCELLING' ? task.state : task.business_state ?? task.state)
-}
-
-function localizedSource(source: string): string {
-  if (source === 'bundled') return '随应用内置'
-  if (source === 'custom') return '本地快照'
-  if (source === 'remote') return '远程插件'
-  if (source === 'community') return '社区插件'
-  return '已装配插件'
-}
-
-function localizedSkillKind(kind: string): string {
-  return ({ prompt: '提示词', workflow: '工作流', tool: '工具', connector: '连接器' } as Record<string, string>)[kind] ?? '其他能力'
-}
-
-function localizedVisibility(visibility: string): string {
-  return ({ private: '私有', public: '公开', internal: '内部' } as Record<string, string>)[visibility] ?? '未分类'
-}
-
-function localizedSkillDescription(skill: Pick<RuntimeSkill, 'name' | 'description'>): string {
-  const name = skill.name.toLowerCase()
-  if (name.includes('dshmarket') || name.includes('dsh-market')) return '浏览、搜索、安装和更新 DSH 社区插件。'
-  if (name.includes('modlens')) return '读取图片、截图和附件，提供 OCR 与视觉证据。'
-  if (name.includes('browser')) return '通过 Playwright 和 OpenCLI 打开页面、点击、输入、滚动、读取和截图。'
-  if (name.includes('context')) return '查看当前会话上下文组成、趋势、事件和消息。'
-  if (name.includes('cost-meter') || name.includes('costmeter')) return '统计会话、当日与历史费用，支持预算和模型价格。'
-  if (name.includes('gpt-image-2') || name.includes('style-library')) return '从固定版本风格库选择图片模板、风格标签和提示词结构。'
-  if (name.includes('ppt-master')) return '从主题、文档或模板生成、编辑和增强原生可编辑 PPTX。'
-  if (name.includes('ruflo')) return '在 Lumo 任务运行边界内组织多智能体拓扑、分工、复核和回收。'
-  return /[\u4e00-\u9fff]/u.test(skill.description) ? skill.description : '由已装配插件提供的运行时能力。'
-}
-
-function localizedSkillWhenToUse(skill: Pick<RuntimeSkill, 'name' | 'whenToUse'>): string {
-  const name = skill.name.toLowerCase()
-  if (name.includes('dshmarket') || name.includes('dsh-market')) return '用于发现、安装和管理 DSH 插件。'
-  if (name.includes('modlens')) return '用于图片理解、截图分析和 OCR。'
-  if (name.includes('browser')) return '用于网页访问、交互操作和页面证据采集。'
-  if (name.includes('context')) return '用于查看上下文预算、组成与注入事件。'
-  if (name.includes('cost-meter') || name.includes('costmeter')) return '用于费用、预算、价格和用量分析。'
-  if (name.includes('gpt-image-2') || name.includes('style-library')) return '用于海报、UI、信息图、品牌视觉和系列图片提示词。'
-  if (name.includes('ppt-master')) return '用于演示文稿生成、模板填充、PPT 美化、动画和旁白。'
-  if (name.includes('ruflo')) return '用于复杂任务的多智能体并行、复核、分阶段交付和失败重派。'
-  return skill.whenToUse && /[\u4e00-\u9fff]/u.test(skill.whenToUse) ? skill.whenToUse : '可在当前工作区按策略调用。'
 }
 
 const studioProjects: StudioProject[] = [
@@ -1509,6 +1410,7 @@ function ConnectorsSurface({ onClose }: { onClose: () => void }) {
     <Section title="连接器目录" meta={`${connectors.length} 个可见能力`} actions={<label className="lumo-filter"><span>搜索</span><input value={filter} onChange={event => setFilter(event.target.value)} placeholder="连接器名称、协议或 ID" /></label>}>
       {connectors.length ? <div className="lumo-connector-layout"><div className="lumo-connector-grid">{connectors.map((connector, index) => <SpotlightCard className={`lumo-connector-card ${selected?.id === connector.id ? 'selected' : ''}`} index={index} key={connector.id} onClick={() => setSelectedId(connector.id ?? '')}><header><span className="lumo-connector-mark">{(connector.name ?? connector.id ?? 'C').slice(0, 1).toUpperCase()}</span><div><b>{connector.name ?? connector.id}</b><small>{connector.protocol ?? '未知协议'} · {connector.operations?.length ?? 0} 项操作</small></div><i className={`lumo-status-dot ${connector.enabled === false ? 'disabled' : ''}`} /></header><div className="lumo-operation-list">{connector.operations?.slice(0, 5).map(operation => <span key={operation.name}>{operation.method || '调用'} · {operation.name}</span>)}</div><footer><span>{connector.enabled === false ? '已停用 · 可恢复' : connector.version ? `能力清单 v${connector.version}` : '能力清单已启用'}</span><span>查看能力 ↗</span></footer>{connector.enabled === false ? <BusyButton className="lumo-primary lumo-small" onClick={event => { event.stopPropagation(); void enable(connector) }}>恢复连接器</BusyButton> : confirm === connector.id ? <div className="lumo-inline-confirm" onClick={event => event.stopPropagation()}><p>停用后运行中的工作流将无法调用它。</p><span><BusyButton onClick={() => setConfirm(null)}>取消</BusyButton><BusyButton className="lumo-danger" onClick={() => void remove(connector)}>确认停用</BusyButton></span></div> : <BusyButton className="lumo-danger lumo-small" onClick={event => { event.stopPropagation(); setConfirm(connector.id ?? null) }}>停用连接器</BusyButton>}</SpotlightCard>)}</div><aside className="lumo-inspector lumo-connector-inspector">{selected ? <><span className="lumo-inspector-label">连接器检查</span><h3>连接器详情 · {selected.name ?? selected.id}</h3><p>所有外部调用都经过网关策略、凭证闸门、限流、熔断和审计。</p><div className="lumo-detail-stack"><div><span>连接器 ID</span><b>{selected.id}</b></div><div><span>协议</span><b>{selected.protocol ?? '未声明'}</b></div><div><span>版本</span><b>{selected.version ?? '未声明'}</b></div><div><span>可用操作</span><b>{selected.operations?.length ?? 0}</b></div></div><div className="lumo-operation-detail"><span>操作面</span>{selected.operations?.length ? selected.operations.map(operation => <div key={operation.name}><b>{operation.name}</b><small>{operation.method || '调用'} · {operation.write ? '写入需审批' : '只读'}</small></div>) : <Empty>该能力清单没有声明操作。</Empty>}</div>{selected.enabled === false ? <Empty>该连接器已停用，恢复后才能再次调用。</Empty> : <form className="lumo-invoke-form" onSubmit={invoke}><label><span>操作</span><select value={invokeOperation} onChange={event => setInvokeOperation(event.target.value)}><option value="" disabled>选择操作</option>{operations.map(operation => <option key={operation.name} value={operation.name}>{operation.name} · {operation.method || '调用'}</option>)}</select></label><label><span>路径参数 JSON</span><textarea rows={2} value={pathParams} onChange={event => setPathParams(event.target.value)} placeholder='{"id":"order-42"}' /></label><label><span>查询参数 JSON</span><textarea rows={2} value={queryParams} onChange={event => setQueryParams(event.target.value)} placeholder='{"limit":"20"}' /></label><label><span>请求体 JSON</span><textarea rows={3} value={invokeBody} onChange={event => setInvokeBody(event.target.value)} placeholder='{"dryRun":true}' /></label><BusyButton type="submit" busy={invokeBusy} className="lumo-primary">受控调用</BusyButton></form>}{invokeResult ? <div className="lumo-invoke-result"><div><b>{invokeResult.status ?? '未返回'}</b><span>{invokeResult.contentType ?? '响应'} · {invokeResult.durationMs ?? 0} ms</span></div><small>{invokeResult.redacted ? '响应已按策略脱敏' : '响应未脱敏'}</small><pre>{typeof invokeResult.body === 'string' ? invokeResult.body : JSON.stringify(invokeResult.body ?? {}, null, 2)}</pre></div> : null}</> : <Empty>当前没有可见连接器。</Empty>}</aside></div> : <Empty>{loading ? '正在读取连接器能力清单' : '连接器清单为空；登记成功的能力清单会出现在这里。'}</Empty>}
     </Section>
+    <AsksPanel onChange={() => void load()} />
     {data.deployment.clusterReady ? <ConnectorManifestPanel request={api} refresh={load} /> : <div className="lumo-workspace-note" role="status">连接器配置与 OAuth 管理需要集群模式。当前仍可查看已登记连接器、审批和 Web 出站诊断。</div>}
     {data.deployment.clusterReady && selected?.enabled !== false && selected?.id ? <ConnectorAccountPanel request={api} connectorID={selected.id} /> : null}
     <Section title="高敏感写入审批" meta="审批绑定连接器版本、操作和请求参数；每次批准只能执行一次" actions={<BusyButton busy={loading} onClick={() => void load()}>刷新</BusyButton>}>
@@ -1591,6 +1493,9 @@ function OrchestrationTopology({ tasks, busy, cancel, retry, reassign, showRuns 
 function LocalModePanel({ plugins }: { plugins: Plugin[] }) {
   const capabilities = plugins.filter(plugin => plugin.id !== 'platform-ui')
   return <div className="lumo-local-mode">
+    <Section title="本机设备动作" meta="打开 / 剪贴板 / 通知 / 截图 · 高风险本机确认"><DeviceActionsPanel /></Section>
+    <Section title="远端机器" meta="SSH 一键接入 · 安装 / 升级 / 隧道"><RemoteHostsPanel /></Section>
+    <AcpSessionSection />
     <div className="lumo-local-intro"><span className="lumo-eyebrow">本地优先运行时</span><h2>离线工作台已就绪</h2><p>数据写入本机 SQLite；本模式不连接 PostgreSQL、Redis、MinIO、RocketMQ 或 Nacos。跨用户委派、集群调度和服务端治理请切换到服务器形态。</p></div>
     <div className="lumo-local-grid"><Section title="本机已装配能力" meta={`${capabilities.length} 个本地能力`}><div className="lumo-local-capabilities">{capabilities.length ? capabilities.map(plugin => <button type="button" key={plugin.id} onClick={() => openSurface(plugin.surface)}><span>{plugin.label.slice(0, 1)}</span><div><b>{plugin.label}</b><small>{plugin.description}</small></div><i>本机</i></button>) : <Empty>当前没有额外的本地能力。</Empty>}</div></Section><Section title="服务器能力边界" meta="按形态显式隔离"><div className="lumo-boundary-list"><div><i>01</i><span><b>知识库语义检索</b><small>依赖服务端向量/图引擎，本地不会用 SQLite 冒充。</small></span><em>服务器</em></div><div><i>02</i><span><b>上下游任务协同</b><small>意图、标签、技能和节点负载匹配仅在集群开放。</small></span><em>集群</em></div><div><i>03</i><span><b>连接器与 Web 出站</b><small>凭证、策略、审计和外部网络调用由服务器网关承载。</small></span><em>网关</em></div></div></Section></div>
     <Section title="下一步" meta="保持数据边界清晰"><div className="lumo-local-next"><span><i className="lumo-live-dot" /> 当前是可独立运行的桌面应用</span><b>需要团队协同？启动服务器集群并从这里继续。</b><small>桌面端可以作为上游老板工作台连接 Cluster；本地 SQLite 数据不会自动上传。</small></div></Section>
@@ -2554,7 +2459,8 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
     {area === 'recovery' && organizationAllowed && data.deployment.clusterReady ? <RecoveryWorkflowPanel request={api} /> : null}
     {area === 'storage' && organizationAllowed && data.deployment.clusterReady ? <StorageQuotaPanel request={api} /> : null}
     {area === 'delivery' ? <>
-    <Section title="任务执行视图" meta="Task → 当前 Run 投影 · 非子 Agent 运行树"><OrchestrationTopology tasks={delegations} busy={busy} cancel={cancelTask} retry={retryTask} reassign={reassignTask} showRuns={showTaskRuns} /></Section>
+    <AcpSessionSection />
+    {runTreeEnabled() ? <Section title="运行树" meta="任务 → 运行 → 子 Agent · 实时"><RunTreePanel tasks={delegations} showRuns={showTaskRuns} /></Section> : <Section title="任务执行视图" meta="Task → 当前 Run 投影 · 非子 Agent 运行树"><OrchestrationTopology tasks={delegations} busy={busy} cancel={cancelTask} retry={retryTask} reassign={reassignTask} showRuns={showTaskRuns} /></Section>}
     {runsTask ? <Section title={`执行详情 · ${runsTask.title}`} meta={`${taskRuns.length} 次不可变 Run · ${taskCollaboration?.summary.total ?? 0} 个子任务`} actions={<BusyButton className="lumo-secondary lumo-small" onClick={closeTaskRuns}>关闭</BusyButton>}>
       <TaskIntentContractPanel task={taskCollaboration?.task ?? runsTask} />
       <TaskProgressPanel key={runsTask.id} request={api} taskID={runsTask.id} />

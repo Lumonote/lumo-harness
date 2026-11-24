@@ -154,14 +154,16 @@ describe(`§8.4 下发链路对真 PG（需 LUMO_TEST_PG_DSN，当前${suffix}�
       await admin.query('TRUNCATE session_control_state, session_control_audit')
 
       // 2. TS 插件的 init 不得改动这两张表（它只建自己那张）。
-      await seam.init()
-      const after = await admin.query<{ column_name: string }>(
+      const readColumns = () => admin.query<{ column_name: string }>(
         `SELECT column_name FROM information_schema.columns
           WHERE table_schema = current_schema() AND table_name = 'session_control_state'
           ORDER BY ordinal_position`,
       )
-      const columns = after.rows.map((r) => r.column_name)
-      expect(columns, 'TS 的 init 动了 Go 的表结构').toEqual(goTableColumns('session_control_state'))
+      const before = (await readColumns()).rows
+      expect(before.map(r => r.column_name)).toContain('ask_id')
+      await admin.query('DROP TABLE IF EXISTS session_controllers')
+      await Promise.all([seam.init(), seam.init(), seam.init(), seam.init()])
+      expect((await readColumns()).rows, 'TS 的 init 动了 Go 的表结构').toEqual(before)
 
       // 3. 用 Go 的列形状写一行 paused（store.go 的 INSERT）。
       await admin.query(

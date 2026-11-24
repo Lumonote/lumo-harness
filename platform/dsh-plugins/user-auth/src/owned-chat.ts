@@ -108,6 +108,29 @@ async function refreshInteractions(id = selected, revision = generation) {
     }
     root.append(card);
   }
+  for (const ask of (view.asks || []).filter(a => a.source && a.source.kind === 'session' && a.kind !== 'approval' && a.status === 'pending')) {
+    const card = document.createElement('div'); card.className = 'approval-card';
+    const title = document.createElement('h2'); title.textContent = ask.title || 'Agent 提问';
+    card.append(title);
+    if (ask.detail) { const detail = document.createElement('p'); detail.textContent = ask.detail; card.append(detail); }
+    const send = async (value, controls) => {
+      if (!current(id,revision) || answering.has(ask.id)) return;
+      answering.add(ask.id); for (const control of controls) control.disabled = true;
+      try { await api('interactionAnswer',{sessionId:id,answer:{askId:ask.id,value:value}},viewController.signal); if (current(id,revision)) status('已回答，Agent 将继续'); }
+      catch(e) { if (current(id,revision)) report(e); }
+      finally { answering.delete(ask.id); if (current(id,revision)) await refreshInteractions(id,revision).catch(report); }
+    };
+    if (ask.kind === 'choice') {
+      const buttons = (ask.options || []).map(option => { const b = document.createElement('button'); b.type = 'button'; b.textContent = option.label; return [b, option.id]; });
+      for (const [b, value] of buttons) { b.onclick = () => send(value, buttons.map(x => x[0])); card.append(b); }
+    } else {
+      const input = document.createElement('textarea'); input.setAttribute('aria-label','回答 Agent 提问');
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'primary'; b.textContent = '提交回答';
+      b.onclick = () => { const value = input.value.trim(); if (value) send(value, [b, input]); };
+      card.append(input, b);
+    }
+    root.append(card);
+  }
 }
 async function refreshMigration(id = selected, revision = generation) {
   if (!id) return; const read = ++migrationReads;
