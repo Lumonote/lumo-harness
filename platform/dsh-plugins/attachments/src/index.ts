@@ -22,6 +22,8 @@ export interface AttachmentsConfig {
   normalizedImageMaxPixels?: number
   normalizedImageMaxDimension?: number
   normalizedImageMaxBytes?: number
+  requestImageMinShrinkFactor?: number
+  requestImageByteHeadroom?: number
   maxFileBytes?: number
   maxConcurrentTransfers?: number
   transferTimeoutMs?: number
@@ -44,6 +46,8 @@ export const Config: z<AttachmentsConfig> = z.object({
   normalizedImageMaxPixels: z.number().step(1).min(1).default(2048 * 2048),
   normalizedImageMaxDimension: z.number().step(1).min(1).default(2048),
   normalizedImageMaxBytes: z.number().step(1).min(1).default(4 * 1024 * 1024),
+  requestImageMinShrinkFactor:z.number().min(1+Number.EPSILON).default(1.1),
+  requestImageByteHeadroom:z.number().min(Number.MIN_VALUE).max(1).default(0.95),
   maxFileBytes:z.number().step(1).min(1).max(1024*1024*1024).default(50*1024*1024),
   maxConcurrentTransfers:z.number().step(1).min(1).max(16).default(4),
   transferTimeoutMs:z.number().step(1).min(1).max(300000).default(60000),

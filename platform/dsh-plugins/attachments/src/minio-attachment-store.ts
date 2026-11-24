@@ -36,7 +36,7 @@ import {
   readImageFile,
   readRequestImageFile,
 } from '@deepseek-ai/dsh-attachment-local'
-import type { NormalizationPolicy } from '@deepseek-ai/dsh-attachment-local'
+import type { NormalizationPolicy, RequestImageResizePolicy } from '@deepseek-ai/dsh-attachment-local'
 import type { Context } from '@deepseek-ai/cordis'
 
 import type { ObjectStoreSeam } from '../../../shared/seam-contracts/object-store.ts'
@@ -66,6 +66,10 @@ export interface MinioAttachmentOptions {
   normalizedImageMaxPixels?: number
   /** 归一化后编码字节安全上限。默认 4 MiB。 */
   normalizedImageMaxBytes?: number
+  /** 超预算编码后长边的最小收缩倍数。默认 1.1（镜像 dsh-attachment-local）。 */
+  requestImageMinShrinkFactor?: number
+  /** 逐级编码时相对硬上限使用的字节余量系数。默认 0.95（镜像 dsh-attachment-local）。 */
+  requestImageByteHeadroom?: number
   /** Server-side admission limits; no host path or executable is granted. */
   maxFileBytes?: number
   maxConcurrentTransfers?: number
@@ -80,12 +84,20 @@ const DEFAULT_MAX_IMAGE_DIMENSION = 8192
 const DEFAULT_NORMALIZED_MAX_PIXELS = 2048 * 2048
 const DEFAULT_NORMALIZED_MAX_DIMENSION = 2048
 const DEFAULT_NORMALIZED_MAX_BYTES = 4 * 1024 * 1024
+const DEFAULT_REQUEST_IMAGE_MIN_SHRINK_FACTOR = 1.1
+const DEFAULT_REQUEST_IMAGE_BYTE_HEADROOM = 0.95
 
 function positiveSetting(value: number | undefined, fallback: number, max = Number.MAX_SAFE_INTEGER): number {
   const resolved = value ?? fallback
   if (!Number.isSafeInteger(resolved) || resolved < 1 || resolved > max) {
     throw new TypeError('Invalid attachment limit')
   }
+  return resolved
+}
+
+function resizeSetting(value: number | undefined, fallback: number, valid: (resolved: number) => boolean): number {
+  const resolved = value ?? fallback
+  if (!Number.isFinite(resolved) || !valid(resolved)) throw new TypeError('Invalid image resize policy')
   return resolved
 }
 
@@ -103,6 +115,7 @@ export class MinioAttachmentStore extends AttachmentStore {
 
   private readonly objectStore: ObjectStoreSeam
   private readonly normalizationPolicy: Readonly<NormalizationPolicy>
+  private readonly requestImageResizePolicy: Readonly<RequestImageResizePolicy>
   private readonly maxFileBytes:number
   private readonly maxConcurrentTransfers:number
   private readonly transferTimeoutMs:number
@@ -125,6 +138,18 @@ export class MinioAttachmentStore extends AttachmentStore {
       maxPixels: positiveSetting(options.normalizedImageMaxPixels, DEFAULT_NORMALIZED_MAX_PIXELS),
       maxDimension: positiveSetting(options.normalizedImageMaxDimension, DEFAULT_NORMALIZED_MAX_DIMENSION),
       maxBytes: positiveSetting(options.normalizedImageMaxBytes, DEFAULT_NORMALIZED_MAX_BYTES),
+    })
+    this.requestImageResizePolicy = Object.freeze({
+      minShrinkFactor: resizeSetting(
+        options.requestImageMinShrinkFactor,
+        DEFAULT_REQUEST_IMAGE_MIN_SHRINK_FACTOR,
+        resolved => resolved > 1,
+      ),
+      byteHeadroom: resizeSetting(
+        options.requestImageByteHeadroom,
+        DEFAULT_REQUEST_IMAGE_BYTE_HEADROOM,
+        resolved => resolved > 0 && resolved <= 1,
+      ),
     })
     this.maxFileBytes=positiveSetting(options.maxFileBytes,50*1024*1024,1024*1024*1024)
     this.maxConcurrentTransfers=positiveSetting(options.maxConcurrentTransfers,4,16)
@@ -160,7 +185,7 @@ export class MinioAttachmentStore extends AttachmentStore {
       // Await the bounded-pixel native codec itself before releasing capacity
       // or deleting its transient directory; cancellation is checked by the
       // public helper around the codec, never a race that leaks late writes.
-      try{return await readRequestImageFile(directory,stored,target,active)}finally{await rm(directory,{recursive:true,force:true})}
+      try{return await readRequestImageFile(directory,stored,target,this.requestImageResizePolicy,active)}finally{await rm(directory,{recursive:true,force:true})}
     })
   }
 
