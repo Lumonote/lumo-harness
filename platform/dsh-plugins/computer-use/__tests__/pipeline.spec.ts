@@ -27,6 +27,8 @@ async function fixture(body: ToolDefinition['execute'] = async () => ({ ok: true
   contexts.push(ctx)
   const folder = await mkdtemp(join(tmpdir(), 'lumo-computer-pipeline-'))
   folders.push(folder)
+  // 上游 SystemPrompt 必填注入 sessionProjections；本套件不组合提示词，仅需注册可用。
+  ctx.provide('sessionProjections', { register: async () => ({ stateOf: () => undefined }) } as never)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
   await ctx.plugin(NativeExecutor)

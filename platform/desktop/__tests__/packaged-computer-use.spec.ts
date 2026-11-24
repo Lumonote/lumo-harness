@@ -45,6 +45,7 @@ import Tools from '@deepseek-ai/dsh-tools'
 import * as ComputerUse from '@lumo/computer-use'
 const ctx = new Context()
 try {
+  ctx.provide('sessionProjections', { register: async () => ({ stateOf: () => undefined }) })
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
   await ctx.plugin(ComputerUse, { lockFile: join(process.cwd(), 'state/desktop') })

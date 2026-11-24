@@ -41,6 +41,8 @@ createInterface({input:process.stdin}).on('line',line=>{
     const child = spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: ['pipe', 'pipe', 'pipe'] })
     children.push(child); spawned.push(child); return child
   } })
+  // 上游 SystemPrompt 必填注入 sessionProjections；本套件不组合提示词，仅需注册可用。
+  ctx.provide('sessionProjections', { register: async () => ({ stateOf: () => undefined }) } as never)
   await ctx.plugin(SystemPrompt); await ctx.plugin(Tools); await ctx.plugin(NativeExecutor)
   await ctx.plugin(Registry); await ctx.plugin(Control, { lockFile: join(folder, 'desktop') })
   const provider = await ctx.plugin({ name: 'windows-process-fixture', inject, apply: (ctx: Context) => mountWindowsProvider(ctx, runtime) })
