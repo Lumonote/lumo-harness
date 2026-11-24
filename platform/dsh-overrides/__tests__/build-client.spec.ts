@@ -93,7 +93,15 @@ describe('fresh-checkout Client type prerequisite', () => {
     expect(existsSync(join(root, 'packages/client/sidebar/lib'))).toBe(false)
     git(root, 'add', '.')
     git(root, '-c', 'user.name=Lumo test', '-c', 'user.email=ci@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'upstream compiler diagnostic fixture')
-    expect(() => buildDshClientArtifacts(root)).toThrow('client build failed')
+    // Keep the expected compiler diagnostic out of GitHub's TypeScript problem matcher.
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e',
+      'const { buildDshClientArtifacts } = await import(process.argv[1]); buildDshClientArtifacts(process.argv[2])',
+      new URL('../build-client.mjs', import.meta.url).href, root,
+    ], { encoding: 'utf8' })
+    expect(result.error).toBeUndefined()
+    expect(result.status, result.stderr).toBe(1)
+    expect(result.stdout).toMatch(/packages[/\\]test-support[/\\]pure[/\\]src[/\\]index\.ts\(1,\d+\): error TS2322:/u)
+    expect(result.stderr).toContain('client build failed')
     expect(git(root, 'status', '--porcelain', '--untracked-files=no')).toBe('')
   })
 
