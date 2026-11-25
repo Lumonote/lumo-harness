@@ -1,6 +1,6 @@
 {
   "extends": "./tsconfig.json",
-  "compilerOptions": { "noEmit": true, "rootDir": "../..", "composite": false },
+  "compilerOptions": { "noEmit": true },
   "references": [
     {"path":"../../../deepseek-harness/packages/client/ui-theme/tsconfig.client.json"}
   ]

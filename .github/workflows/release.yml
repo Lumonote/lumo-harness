@@ -371,76 +371,10 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ endsWith(steps.suffix.outputs.suffix, '-test') && 7 || 30 }}
 
-  # 服务端安装包（P1 SSH 一键接入，格式见 platform/tools/remote/README.md）：
-  # lumo-server-<version>-linux-<arch>.tar.gz。运行树与 dsh-node 镜像同源（docker build --target dsh-node），
-  # dsh 按 source-identity 输出的 pin 检出；每个架构在原生 runner 上构建（原生插件不可跨架构）。
-  server-bundle:
-    needs: source-identity
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: x64
-          - runner: ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Checkout upstream dsh
-        uses: actions/checkout@v5
-        with:
-          repository: deepseek-ai/deepseek-harness
-          ref: ${{ needs.source-identity.outputs.upstream-sha }}
-          fetch-depth: 0
-          path: deepseek-harness
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-
-      - name: Build server runtime tree (same Dockerfile as dsh-node image)
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker build --target dsh-node -f platform/data-plane/dsh-node/Dockerfile -t lumo-server-tree:ci .
-          cid="$(docker create lumo-server-tree:ci)"
-          mkdir -p "$RUNNER_TEMP/server-tree"
-          docker cp "$cid:/workspace/." "$RUNNER_TEMP/server-tree/"
-          docker rm "$cid"
-
-      - name: Pack server bundle
-        shell: bash
-        run: |
-          set -euo pipefail
-          node platform/tools/remote/pack-server.mjs --tree "$RUNNER_TEMP/server-tree" --os linux --arch ${{ matrix.arch }} \
-            --dsh-sha '${{ needs.source-identity.outputs.upstream-sha }}' --out dist-server
-          node --test platform/tools/__tests__/remote-installer.test.mjs platform/tools/__tests__/server-bundle.test.mjs
-
-      - name: Compute server artifact suffix
-        id: server-suffix
-        shell: bash
-        run: |
-          case "${GITHUB_REF}" in
-            refs/heads/main|refs/tags/v*) echo "suffix=" >> "$GITHUB_OUTPUT" ;;
-            *) echo "suffix=-test" >> "$GITHUB_OUTPUT" ;;
-          esac
-
-      - name: Upload server bundle
-        uses: actions/upload-artifact@v6
-        with:
-          name: lumo-server-linux-${{ matrix.arch }}${{ steps.server-suffix.outputs.suffix }}
-          path: |
-            dist-server/lumo-server-*.tar.gz
-            dist-server/lumo-server-*.tar.gz.sha256
-          if-no-files-found: error
-          retention-days: ${{ steps.server-suffix.outputs.suffix == '-test' && 7 || 30 }}
-
   # 只在 tag 上运行：桌面包和完整集群验收全部成功后才发布 Release。
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [basic-validation, desktop, cluster-validation, server-bundle]
+    needs: [basic-validation, desktop, cluster-validation]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -453,23 +387,6 @@ jobs:
         with:
           path: artifacts
 
-      # 服务端包汇总为一份 SHA256SUMS（远端 lumo-remote.sh 下载后按它校验）；
-      # 配置了 LUMO_SERVER_SIGNING_KEY（PEM 私钥）时另附 SHA256SUMS.sig（openssl dgst -sha256 -sign）。
-      - name: Server bundle SHA256SUMS
-        env:
-          LUMO_SERVER_SIGNING_KEY: ${{ secrets.LUMO_SERVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/server-sums
-          find artifacts -type f -name 'lumo-server-*.tar.gz' -exec mv -t artifacts/server-sums {} +
-          node platform/tools/remote/pack-server.mjs --sums artifacts/server-sums
-          (cd artifacts/server-sums && sha256sum -c SHA256SUMS)
-          if [ -n "${LUMO_SERVER_SIGNING_KEY}" ]; then
-            key="$RUNNER_TEMP/sums-key.pem"; umask 077; printf '%s\n' "$LUMO_SERVER_SIGNING_KEY" > "$key"
-            openssl dgst -sha256 -sign "$key" -out artifacts/server-sums/SHA256SUMS.sig artifacts/server-sums/SHA256SUMS
-            rm -f "$key"
-          fi
-
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -477,7 +394,7 @@ jobs:
           set -euo pipefail
           files=()
           while IFS= read -r f; do files+=("$f"); done < <(
-            find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.release.json' -o -name 'lumo-server-*.tar.gz' -o -name 'SHA256SUMS' -o -name 'SHA256SUMS.sig' \) | sort
+            find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.release.json' \) | sort
           )
           test "${#files[@]}" -gt 0 || { echo "没有可发布的安装包" >&2; exit 1; }
           printf '发布 %s 个文件：\n' "${#files[@]}"

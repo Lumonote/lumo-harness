@@ -1,8 +1,11 @@
 {
   "extends": "../../../deepseek-harness/tsconfig.base.client.json",
   "compilerOptions": {
-    "rootDir": "src",
+    // The bundled UI imports sibling plugins and shared seam contracts. Emit
+    // their declarations together under the platform root, following imports.
+    "rootDir": "../..",
     "outDir": "lib/types",
+    "composite": false,
     "types": ["node"],
     "jsx": "react-jsx",
     // Platform plugins consume the patched, projected DSH declarations. The

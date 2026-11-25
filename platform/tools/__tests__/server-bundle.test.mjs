@@ -1,5 +1,4 @@
 // 服务端安装包打包脚本单测：命名、VERSION/manifest、文件清单、SHA256SUMS；pack() 用一棵假运行树端到端跑一次。
-// 在 CI server-bundle job 中打包后再跑一次（此时 dist-server 下应有真实产物）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'

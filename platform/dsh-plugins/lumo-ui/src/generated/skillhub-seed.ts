@@ -5,9 +5,8 @@
  * 重新生成：pnpm run codegen:skillhub-seed
  * 一致性：platform/shared/manifests/__tests__/skillhub-seed.spec.ts 的漂移锁
  *
- * 为什么是生成物而不是直接 import 清单：lumo-ui 的 tsconfig 是 rootDir: src，跨出包边界的
- * import 直接编译失败；且这份数据是 SkillHub 不可达时的最后兜底，必须编译进包，不能变成
- * 运行期文件读取。
+ * 生成器将共享 JSON 清单转换为 UI 使用的类型、分组和常量。这份数据是 SkillHub 不可达时的
+ * 最后兜底，必须编译进包，不能变成运行期文件读取。
  *
  * 注意：本文件是远端数据的**镜像**（rating / downloads / stars / forks 都是抓取那一刻的
  * 快照）。重新同步时整表替换，不要逐条手改。

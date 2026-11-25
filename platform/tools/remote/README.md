@@ -20,18 +20,19 @@ lumo-server-<version>-<os>-<arch>.tar.gz        os ∈ linux|darwin，arch ∈ x
     └── app/               deepseek-harness（按 platform/dsh-pin.json 构建）+ platform（含 node_modules）
 ```
 
-发布目录（GitHub Release `v<version>/`）里另有 `SHA256SUMS`，可选 `SHA256SUMS.sig`（`openssl dgst -sha256 -sign`）。
+服务端安装包需手动构建并上传到下载目录。当前 release 工作流只发布 macOS / Windows 桌面包。
+服务端下载目录还需提供 `SHA256SUMS`，可选 `SHA256SUMS.sig`（`openssl dgst -sha256 -sign`）。
 
 远端要求：node `^22.19 || >=24`、tar、curl、sha256sum 或 shasum；有 `systemd --user` 时注册 `lumo-server.service`，否则 nohup 兜底。
 
 ## 手动使用
 
 ```sh
-# 打包（CI 中运行树取自 docker build --target dsh-node 的 /workspace）
+# 打包（运行树可取自 docker build --target dsh-node 的 /workspace）
 node platform/tools/remote/pack-server.mjs --tree /tmp/server-tree --os linux --arch x64 --out dist-server
 node platform/tools/remote/pack-server.mjs --sums dist-server
 
-# 在线安装（远端按版本拼包名，下载 SHA256SUMS 校验；可加 --sig-pubkey ~/.lumo-release.pem）
+# 在线安装（先将服务端包与 SHA256SUMS 上传到下载目录；可加 --sig-pubkey ~/.lumo-release.pem）
 ssh host sh -s -- install --root ~/.lumo-remote --version 1.2.3 --dsh-sha <40hex> --dsh-tag <tag> \
   --bundle-url https://github.com/Lumonote/lumo-harness/releases/download/v1.2.3/ < platform/tools/remote/lumo-remote.sh
 

@@ -141,7 +141,7 @@ const EMPTY_INSTALLS: SkillHubInstalls = { skills: [], packs: [], plugins: [] }
  * 数据不写在这里：它是远端首页的快照，也是 refreshCatalog 的最后兜底（实时 → 磁盘缓存 →
  * 本数据），必须编译进包，不能变成运行期文件读取。真相源是
  * shared/manifests/skillhub-seed.manifest.json，由 tools/gen-skillhub-seed.mjs 生成到
- * ./generated/skillhub-seed.ts（lumo-ui 的 tsconfig 是 rootDir: src，跨包 import 编译不过）。
+ * ./generated/skillhub-seed.ts，转换为 UI 使用的类型、分组和常量。
  * 要改数据就改清单，不要改生成物。
  */
 const SEED_SKILLS: SkillHubSkill[] = GENERATED_SEED_SKILLS

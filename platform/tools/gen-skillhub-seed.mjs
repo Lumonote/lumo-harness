@@ -7,7 +7,7 @@
  *   node tools/gen-skillhub-seed.mjs --check    # 只校验是否陈旧，陈旧则退出码 1
  *
  * 为什么要有生成器，而不是让 lumo-ui 直接 import 清单：
- * ① lumo-ui 的 tsconfig 是 `rootDir: src`，跨出包边界的 import 直接编译失败；
+ * ① 将共享 JSON 清单转换为 UI 使用的类型、分组和常量，构建时校验数据；
  * ② 这份数据是 SkillHub 不可达时的**最后兜底**（refreshCatalog → 磁盘缓存 → 本数据），必须
  *    编译进包，不能改成运行期读文件 —— 多一个文件读取就多一个失败点。
  * 生成物落在包内、随包构建，运行期一定在；代价是必须锁住它与原件的一致性
@@ -206,9 +206,8 @@ function render({ source, categories, entries }) {
  * 重新生成：pnpm run codegen:skillhub-seed
  * 一致性：platform/shared/manifests/__tests__/skillhub-seed.spec.ts 的漂移锁
  *
- * 为什么是生成物而不是直接 import 清单：lumo-ui 的 tsconfig 是 rootDir: src，跨出包边界的
- * import 直接编译失败；且这份数据是 SkillHub 不可达时的最后兜底，必须编译进包，不能变成
- * 运行期文件读取。
+ * 生成器将共享 JSON 清单转换为 UI 使用的类型、分组和常量。这份数据是 SkillHub 不可达时的
+ * 最后兜底，必须编译进包，不能变成运行期文件读取。
  *
  * 注意：本文件是远端数据的**镜像**（rating / downloads / stars / forks 都是抓取那一刻的
  * 快照）。重新同步时整表替换，不要逐条手改。

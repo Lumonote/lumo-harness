@@ -6,10 +6,10 @@
   "private": true,
   "type": "module",
   "main": "lib/index.js",
-  "types": "lib/types/index.d.ts",
+  "types": "lib/types/dsh-plugins/lumo-ui/src/index.d.ts",
   "exports": {
-    ".": { "types": "./lib/types/index.d.ts", "default": "./lib/index.js" },
-    "./client": { "types": "./lib/types/client/index.d.ts", "default": "./lib/client.js" },
+    ".": { "types": "./lib/types/dsh-plugins/lumo-ui/src/index.d.ts", "default": "./lib/index.js" },
+    "./client": { "types": "./lib/types/dsh-plugins/lumo-ui/src/client/index.d.ts", "default": "./lib/client.js" },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
