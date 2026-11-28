@@ -26,6 +26,7 @@ import { MilvusKnowledgeProvider, NebulaGraphProvider } from './remote-provider.
 import { TeiRerankClient } from './rerank.ts'
 import { authenticatedKnowledgeRequest, type AuthenticatedKnowledgeQuery, type KnowledgeSeam } from '../../../shared/seam-contracts/knowledge.ts'
 import type { GraphSeam } from '../../../shared/seam-contracts/graph.ts'
+import { initializeProviders } from './startup.ts'
 
 export interface EmbeddingConfig {
   /** TEI HTTP 地址（deploy/compose.local.yml 的 lumo-platform-tei :55433） */
@@ -131,7 +132,7 @@ declare module '@deepseek-ai/cordis' {
 /** 依赖注入：ctx.tools 必须先于本插件 mount（Consumer 注册工具面） */
 export const inject = ['tools']
 
-export function apply(ctx: Context, config: KnowledgeConfig): void {
+export async function apply(ctx: Context, config: KnowledgeConfig): Promise<void> {
   const roles = config.roles ?? ['viewer']
   const defaultTopK = config.defaultTopK ?? 5
   const remote = config.providerMode === 'remote'
@@ -160,12 +161,26 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
     graph,
   )
 
-  ctx.effect(() => () => {
-    if (remote) return
-    if ('close' in provider && typeof provider.close === 'function') void provider.close()
-    if ('close' in graph && typeof graph.close === 'function') void graph.close()
-    void projector?.close()
-  })
+  const lifetime = new AbortController()
+  let closing: Promise<unknown> | undefined
+  const close = () => closing ??= Promise.allSettled((remote ? [] : [provider, graph, projector]).map(async resource => {
+      if (resource && 'close' in resource && typeof resource.close === 'function') await resource.close()
+    }))
+  // Cordis awaits async apply before invoking effect disposers. The public
+  // plugin-removal event is emitted immediately and breaks that wait cycle.
+  ctx.on('internal/plugin', fiber => { if (fiber === ctx.fiber && fiber.uid === null) lifetime.abort() }, { global: true })
+  ctx.effect(() => () => { lifetime.abort(); void close() })
+
+  if (!remote) {
+    const deadline = setTimeout(() => lifetime.abort(new Error('knowledge: 初始化超过 60 秒，请检查数据库连接或锁等待')), 60_000)
+    try {
+      await initializeProviders([provider, graph].map(resource => () =>
+        (resource as { init?: (signal?: AbortSignal) => Promise<void> }).init?.(lifetime.signal) ?? Promise.resolve()), lifetime.signal,
+      error => ctx.logger.warn('knowledge: 初始化暂不可用，将重试: %s', error))
+      lifetime.signal.throwIfAborted()
+    } catch (error) { void close(); throw error }
+    finally { clearTimeout(deadline) }
+  }
 
   // seam 注册：一 ctx 一 provider（重复注册抛错是 Cordis 标准行为）
   if (!remote) {
@@ -219,21 +234,11 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
   })
   if (remote || !projector) return
 
-  // 幂等初始化（建表/索引）；失败即加载失败（响亮失败，§15）
-  // 投影轮询必须等建表完成再起，否则前几轮全是「表不存在」噪音。
-  const providerInit = (provider as KnowledgeSeam & { init?: () => Promise<void> }).init?.() ?? Promise.resolve()
-  const graphInit = (graph as GraphSeam & { init?: () => Promise<void> }).init?.() ?? Promise.resolve()
-  const ready = Promise.all([providerInit, graphInit])
-
   // unref 不阻塞进程退出；插件卸载时随 effect 一起清掉。
   // 投影失败只 warn 不抛 —— outbox 未标记 projected_at，下一轮自然重放。
   const intervalMs = Math.max(config.graph?.projectIntervalMs ?? 2000, 200)
   ctx.effect(() => {
-    let timer: ReturnType<typeof setInterval> | undefined
-    let disposed = false
-    void ready.then(() => {
-      if (disposed) return
-      timer = setInterval(() => {
+    const timer = setInterval(() => {
         projector.drain().catch((e: unknown) => {
           ctx.logger.warn('knowledge: 图投影失败（将在下一轮重放）: %s', e)
         })
@@ -242,15 +247,9 @@ export function apply(ctx: Context, config: KnowledgeConfig): void {
             ctx.logger.warn('knowledge: vector projection failed; retrying from outbox: %s', error)
           })
         }
-      }, intervalMs)
-      timer.unref?.()
-    }).catch((e: unknown) => {
-      ctx.logger.error('knowledge: 初始化失败，图投影未启动: %s', e)
-    })
-    return () => {
-      disposed = true
-      if (timer) clearInterval(timer)
-    }
+    }, intervalMs)
+    timer.unref?.()
+    return () => clearInterval(timer)
   })
 }
 

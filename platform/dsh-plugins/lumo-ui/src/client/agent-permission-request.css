@@ -1,0 +1,16 @@
+.lumo-chat-thread > .lumo-role-permissions { padding: 0; border: 1px solid var(--lumo-line-strong); border-radius: 10px; margin: 8px max(24px,calc((100% - 780px)/2)); max-height: min(320px,45%); background: var(--dsw-alias-bg-layer-1,var(--lumo-panel)); overflow: auto; flex: none; }
+.lumo-permission-request { padding: 12px; min-width: 0; font-size: 12px; }
+.lumo-permission-request + .lumo-permission-request { border-top: 1px solid var(--lumo-line); }
+.lumo-permission-request > header { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.lumo-permission-request > header > svg { flex: none; color: var(--lumo-muted); }
+.lumo-permission-request > header > strong { min-width: 0; flex: 1; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.lumo-permission-request > header > span { flex: none; font-size: 10px; color: var(--lumo-muted); }
+.lumo-permission-source { display: block; padding: 3px 0 0 24px; color: var(--lumo-muted); font-size: 11px; }
+.lumo-permission-target { display: block; margin-top: 8px; color: var(--lumo-muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.lumo-permission-details { margin-top: 8px; }
+.lumo-permission-details > summary { cursor: pointer; width: fit-content; font-size: 11px; color: var(--lumo-muted); }
+.lumo-permission-request pre { margin: 8px 0 0; padding: 8px 10px; border-radius: 6px; background: var(--dsw-alias-bg-layer-2,var(--lumo-bg)); font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 140px; overflow: auto; }
+.lumo-permission-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.lumo-permission-actions > .lumo-native-button { height: auto; min-height: 28px; padding: 5px 10px; font-size: 12px; line-height: 1.4; }
+.lumo-permission-actions > [data-permission-kind^="reject"] { margin-left: auto; }
+@container (max-width: 760px) { .lumo-chat-thread > .lumo-role-permissions { margin-inline: 10px; } }

@@ -7,6 +7,8 @@ import { runGovernedTask, startGovernedDispatch } from '../src/governed-run.ts'
 import { ExecutionConflictError, type GovernedExecution, type GovernedResult } from '../src/governed-dispatch.ts'
 import { binding, config, execution } from './governed-fixtures.ts'
 import { KNOWLEDGE_TOOL_NAMES } from '../../../shared/seam-contracts/knowledge.ts'
+import { resolveToolCaller } from '../../../shared/seam-contracts/tool-caller.ts'
+import { SessionId } from '@deepseek-ai/dsh-session'
 
 const contexts: Context[] = []
 afterEach(async () => {
@@ -15,7 +17,7 @@ afterEach(async () => {
   vi.useRealTimers()
 })
 
-async function context(text: string) {
+async function context(text: string, beforeStream?: () => Promise<void>) {
   const ctx = new Context()
   contexts.push(ctx)
   await mountAgentLoopTestDependencies(ctx)
@@ -24,12 +26,26 @@ async function context(text: string) {
   ctx.llm.registerAdapter(['mock'], new (class extends LlmAdapter {
     override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
       requests.push(options)
+      await beforeStream?.()
       if (text) yield { type: 'text-delta', index: 0, text }
       yield { type: 'finish', reason: { kind: 'stop' } }
     }
   })())
   return { ctx, requests }
 }
+
+it('binds current governed identity without expanding its tool allowlist and revokes it on completion', async () => {
+  let active: object | undefined, identity: unknown
+  const { ctx, requests } = await context('Verified output', async () => {
+    active = ctx.agents.get(SessionId('session-run-1'))!
+    identity = await resolveToolCaller(active)
+  })
+  const result = await runGovernedTask(ctx, execution(), binding, config.nodeId, new AbortController().signal)
+  expect(result.state).toBe('COMPLETED')
+  expect(identity).toEqual({ realm: 'realm', userId: 'owner', projectId: 'project', agentId: 'writer', runId: 'run-1', depth: 1 })
+  expect(requests.every(request => (request.tools ?? []).length === 0)).toBe(true)
+  await expect(resolveToolCaller(active!)).rejects.toThrow('no longer active')
+})
 
 it('executes a governed turn through the public Agent API with its installed identity and inherited contract', async () => {
   const { ctx, requests } = await context('Verified output')

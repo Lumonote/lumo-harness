@@ -2,11 +2,14 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/lumo-harness/platform/flows/internal/domain"
 	"github.com/lumo-harness/platform/flows/internal/lineage"
 )
 
@@ -217,4 +220,21 @@ func (s *Store) LineageNeighbors(ctx context.Context, flowID string, version int
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// publishLineage is used by both first publication and reviewed version changes.
+// A capture failure rolls the publication back instead of silently dropping its provenance.
+func (s *Store) publishLineage(ctx context.Context, tx pgx.Tx, id, realm string, version int, definition json.RawMessage) error {
+	if !s.lineageEnabled {
+		return nil
+	}
+	var d domain.Definition
+	if err := json.Unmarshal(definition, &d); err != nil {
+		return fmt.Errorf("decode published flow lineage: %w", err)
+	}
+	edges, err := lineage.Extract(&d, id, version, realm)
+	if err != nil {
+		return fmt.Errorf("extract published flow lineage: %w", err)
+	}
+	return s.writeLineageWithinTx(ctx, tx, edges)
 }

@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { EventEmitter } from 'node:events'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { askEvents, handleRunTreeRoute, linkEvents, registerRunTreeCollector, RunTreeStore } from '../src/run-tree-api.ts'
 
@@ -48,4 +49,21 @@ describe('run-tree api', () => {
     store.apply({ type: 'node.upsert', node: { id: 'task:c', kind: 'task' } })
     expect(seen).toEqual([1, 2])
   })
+  it('keeps SSE alive after request completion and cleans up on response close', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = new RunTreeStore()
+      const req = Object.assign(new EventEmitter(), { method: 'GET', url: '/lumo/api/run-tree/events' })
+      const res = Object.assign(new EventEmitter(), { writeHead: vi.fn(), write: vi.fn(() => true) })
+      await handleRunTreeRoute(req as IncomingMessage, res as unknown as ServerResponse, req.url, store, deps({}))
+      req.emit('close')
+      store.apply({ type: 'node.upsert', node: { id: 'task:a', kind: 'task' } })
+      expect(res.write).toHaveBeenCalledTimes(2)
+      res.emit('close')
+      store.apply({ type: 'node.upsert', node: { id: 'task:b', kind: 'task' } })
+      expect(res.write).toHaveBeenCalledTimes(2)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
+  })
+
 })

@@ -30,7 +30,7 @@ async function readJson(req: IncomingMessage, deps: DualRouteDeps): Promise<Reco
   return v as Record<string, unknown>
 }
 
-const STATUS: Record<string, number> = { unknown_tool: 404, channel_closed: 403, invalid_args: 400, denied: 403, rejected: 409, ask_expired: 409, failed: 502, disabled: 501 }
+const STATUS: Record<string, number> = { unknown_tool: 404, channel_closed: 403, invalid_args: 400, denied: 403, rejected: 409, ask_expired: 409, aborted: 409, result_unknown: 504, failed: 502, disabled: 501 }
 
 export async function handleDualRoute(req: IncomingMessage, res: ServerResponse, pathname: string, deps: DualRouteDeps): Promise<boolean> {
   if (pathname !== DUAL_PREFIX && !pathname.startsWith(`${DUAL_PREFIX}/`)) return false

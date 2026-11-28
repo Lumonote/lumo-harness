@@ -223,3 +223,59 @@ func pairs(records []store.LineageEdgeRecord) []string {
 	}
 	return out
 }
+
+func TestReviewedVersionChangePublishesLineageAtomically(t *testing.T) {
+	st, pool := newStore(t)
+	ctx := context.Background()
+	st.SetLineageEnabled(true)
+	f := publishChain(t, st, ctx, "version-lineage", "r1", "op.a", "op.b")
+	for _, query := range []string{
+		`CREATE TABLE projects (id TEXT PRIMARY KEY,realm TEXT NOT NULL,status TEXT NOT NULL)`,
+		`CREATE TABLE project_members(project_id TEXT NOT NULL,user_id TEXT NOT NULL,role TEXT NOT NULL,PRIMARY KEY(project_id,user_id))`,
+		`INSERT INTO projects VALUES ('p_lineage','r1','active')`,
+		`INSERT INTO project_members VALUES ('p_lineage','author1','editor'),('p_lineage','rev1','editor')`,
+	} {
+		if _, err := pool.Exec(ctx, query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := store.FlowChangeCommand{ID: "change", Command: "create"}
+	if err := st.ApplyFlowChange(ctx, f.ID, "r1", "author1", false, command); err != nil {
+		t.Fatal(err)
+	}
+	command.Command = "save"
+	command.Revision = 1
+	command.Definition = def(t, "op.a", "op.c", "op.d")
+	if err := st.ApplyFlowChange(ctx, f.ID, "r1", "author1", false, command); err != nil {
+		t.Fatal(err)
+	}
+	command.Command = "submit"
+	command.Revision = 2
+	if err := st.ApplyFlowChange(ctx, f.ID, "r1", "author1", false, command); err != nil {
+		t.Fatal(err)
+	}
+	command.Command = "review"
+	command.Revision = 3
+	command.Approve = true
+	// A failed lineage write must not leave a published version without provenance.
+	if _, err := pool.Exec(ctx, `ALTER TABLE flow_lineage_outbox ADD CONSTRAINT reject_new_version CHECK(version<2)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ApplyFlowChange(ctx, f.ID, "r1", "rev1", true, command); err == nil {
+		t.Fatal("lineage failure did not roll back publication")
+	}
+	var version int
+	if err := pool.QueryRow(ctx, `SELECT version FROM flows WHERE id=$1`, f.ID).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("published version: %d %v", version, err)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE flow_lineage_outbox DROP CONSTRAINT reject_new_version`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ApplyFlowChange(ctx, f.ID, "r1", "rev1", true, command); err != nil {
+		t.Fatal(err)
+	}
+	var edges int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM flow_lineage_outbox WHERE flow_id=$1 AND version=2 AND realm='r1'`, f.ID).Scan(&edges); err != nil || edges != 2 {
+		t.Fatalf("v2 lineage: %d %v", edges, err)
+	}
+}

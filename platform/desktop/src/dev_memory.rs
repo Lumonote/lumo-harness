@@ -517,17 +517,18 @@ fn with_project<T>(
     .map_err(|e| format!("项目开发记忆访问失败：{e}"))
 }
 
-/// 跨设备同步（memory_sync.rs）专用：在项目锁内读写长期记忆卡片；回调返回 true 时落盘。
-pub fn with_cards<T>(
+/// 跨设备同步专用：先持久化卡片，再提交同步状态，避免游标越过尚未保存的内容。
+pub fn with_cards<T, Commit: FnOnce() -> io::Result<()>>(
     root: &Path,
     workspace_id: &str,
-    action: impl FnOnce(&Path, &mut Vec<Card>) -> io::Result<(T, bool)>,
+    action: impl FnOnce(&Path, &mut Vec<Card>) -> io::Result<(T, bool, Commit)>,
 ) -> Result<T, String> {
     with_project(root, workspace_id, |dir, mut memory| {
-        let (value, changed) = action(dir, &mut memory.library.cards)?;
+        let (value, changed, commit) = action(dir, &mut memory.library.cards)?;
         if changed {
             replace(&dir.join("library.json"), &serde_json::to_vec(&memory.library)?)?;
         }
+        commit()?;
         Ok(value)
     })
 }

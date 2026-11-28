@@ -42,7 +42,7 @@ export function mountPet(view) {
     : Promise.reject(Error('desktop_unavailable'))
   const listen = (target, event, handler) => target.addEventListener(event, handler, { signal: events.signal })
   const devTools = mountDevTools({ doc, invoke, listen, getWorkspace: () => workspaceId })
-  const memorySync = mountMemorySync({ doc, invoke, listen, getWorkspace: () => workspaceId, timer: view })
+  const memorySync = mountMemorySync({ doc, invoke, listen, getWorkspace: () => workspaceId, onChanged: () => devTools.refresh(), timer: view })
   listen(doc.getElementById('dev-sync') ?? doc, 'toggle', () => void memorySync.refresh())
   const cloudFields = () => {
     const item = snapshot.workbenches?.find(i => i.origin === $('cloud-list').value)
@@ -220,6 +220,7 @@ export function mountPet(view) {
         $('workspace-status').textContent = '原工作空间已不可用，请重新选择。'
       } else $('workspace-status').textContent = workspaces.length ? '' : '请先在工作台创建工作空间，然后刷新。'
       select.value = workspaceId
+      void memorySync.refresh()
       $('workspace-status').hidden = !$('workspace-status').textContent
     } catch {
       if (!disposed) {
@@ -403,6 +404,7 @@ export function mountPet(view) {
   listen($('workspace'), 'change', () => {
     if (busy) return
     workspaceId = $('workspace').value
+    void memorySync.refresh()
     sendRequestId = undefined
     controls()
   })
@@ -494,6 +496,7 @@ export function mountPet(view) {
   const dispose = () => {
     if (disposed) return
     disposed = true
+    memorySync.dispose()
     devTools.close(false)
     requestVersion++
     events.abort()

@@ -1,0 +1,38 @@
+.lumo-management-header { padding: 0 0 18px; }
+.lumo-management-breadcrumb, .lumo-management-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.lumo-management-breadcrumb { justify-content: flex-start; flex-wrap: wrap; margin-bottom: 16px; }
+.lumo-management-breadcrumb code { margin-left: auto; color: var(--lumo-muted); font-size: 12px; }
+.lumo-management-heading h1 { margin: 0 0 8px; font-size: 20px; }
+.lumo-management-heading p { margin: 0; color: var(--lumo-muted); line-height: 1.6; }
+.lumo-management-search { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+.lumo-management-search input { flex: 1; min-width: 0; }
+.lumo-management-sections { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 0 24px; }
+.lumo-management-sections button { padding: 9px 16px; border: 1px solid var(--lumo-line); border-radius: 8px; background: transparent; color: inherit; cursor: pointer; }
+.lumo-management-sections button[aria-current="page"] { background: var(--lumo-panel-raised); border-color: var(--lumo-mint); font-weight: 600; }
+.lumo-management-sections button:focus-visible, .lumo-directory-entry:focus-visible { outline: 2px solid var(--lumo-mint); outline-offset: 3px; }
+/* Embedded capability pages share the management heading and navigation. */
+.lumo-management-content > .lumo-surface { padding: 0; }
+.lumo-management-content .lumo-workspace-hero { display: block; min-height: 0; padding: 0; margin-bottom: 20px; border: 0; background: none; }
+.lumo-management-content .lumo-workspace-hero-copy { display: none; }
+.lumo-management-search input { padding: 12px; color: var(--lumo-ink); background: var(--lumo-panel); border: 1px solid var(--lumo-line); border-radius: var(--lumo-radius-sm); font: inherit; }
+@media (max-width: 600px) {
+  .lumo-management-heading { align-items: flex-start; }
+  .lumo-management-search { align-items: stretch; flex-direction: column; gap: 8px; }
+}
+.lumo-management-page { font-size: 13px; }
+.lumo-management-mobile { display: none; }
+.lumo-management-layout { display: grid; grid-template-columns: 190px minmax(0,1fr); gap: 28px; align-items: start; }
+.lumo-management-menu { position: sticky; top: 0; display: grid; gap: 10px; min-width: 0; max-height: calc(100dvh - 200px); overflow: auto; padding-right: 14px; border-right: 1px solid var(--lumo-line); }
+.lumo-management-menu nav { display: grid; gap: 18px; }
+.lumo-management-menu section { display: grid; gap: 3px; }
+.lumo-management-menu button { justify-content: flex-start; text-align: left; width: 100%; }
+.lumo-management-menu button[aria-current="page"] { background: var(--lumo-panel-raised); color: var(--lumo-ink); font-weight: 600; }
+.lumo-management-menu .lumo-management-group { border: 0; background: none; padding: 5px 8px; color: var(--lumo-muted); font: inherit; font-size: 11px; cursor: pointer; }
+.lumo-management-body { min-width: 0; }
+.lumo-management-body .lumo-directory-domain h2 { font-size: 15px; }
+.lumo-management-heading p { font-size: 12px; }
+@media(max-width:760px) {
+  .lumo-management-layout { grid-template-columns: minmax(0,1fr); gap: 18px; }
+  .lumo-management-menu { display: none; }
+  .lumo-management-mobile { display: block; width: 100%; min-width: 0; padding: 8px 10px; background: var(--lumo-panel); color: var(--lumo-ink); border: 1px solid var(--lumo-line); border-radius: 8px; font: inherit; }
+}

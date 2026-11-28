@@ -50,7 +50,7 @@ describe('cross feature coordination', () => {
   ] }
   async function delivery() {
     render(<LumoOverlay {...{} as never} />)
-    fireEvent.click(await screen.findByRole('button', { name: '协作执行委派、专家与运行证据' }))
+    fireEvent.click(await screen.findByRole('button', { name: '协作执行' }))
     const input = screen.getByPlaceholderText(/描述交付结果/u)
     fireEvent.change(input, { target: { value: '整理合同' } })
     return input

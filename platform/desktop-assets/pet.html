@@ -79,9 +79,14 @@
         <details id="dev-sync"><summary>跨设备同步 <span id="dev-sync-summary"></span></summary>
           <label class="dev-check"><input id="dev-sync-enabled" type="checkbox">同步长期记忆到云工作台</label>
           <label for="dev-sync-server">同步服务器</label><input id="dev-sync-server" type="url" maxlength="512" spellcheck="false" placeholder="https://lumo.example.com">
+          <label for="dev-sync-project">同步项目标识</label><input id="dev-sync-project" type="text" minlength="64" maxlength="64" spellcheck="false" autocapitalize="off" placeholder="64 位项目标识">
+          <p>在另一台设备选择对应项目，填写同一标识，并使用同一云端账户。保存后会合并两端长期记忆；切换服务器、账户或项目时各自保留同步进度与冲突。本机内容不会被清空。</p>
+          <p id="dev-sync-account"></p>
           <label for="dev-sync-token">访问令牌</label><input id="dev-sync-token" type="password" maxlength="4096" autocomplete="off">
-          <div class="dev-actions"><button type="button" id="dev-sync-save">保存设置</button><button type="button" id="dev-sync-now">立即同步</button></div>
+          <div class="dev-actions"><button type="button" id="dev-sync-save">保存设置</button><button type="button" id="dev-sync-now">立即同步</button><button type="button" id="dev-sync-full">完整对齐</button></div>
           <p class="feedback" id="dev-sync-status" role="status" aria-live="polite"></p>
+          <p id="dev-sync-full-status"></p>
+          <p>每 24 小时的下一次成功同步会完整对齐；服务器恢复备份后可立即手动对齐。应用须运行且服务器可用；单次最多读取 20 页，未收齐时不判定记录缺失。内容差异会保留为冲突，可选择本机、当前云端或已保留版本。</p>
           <ol id="dev-sync-conflicts" aria-label="同步冲突" hidden></ol>
         </details>
         <details id="dev-handoff">

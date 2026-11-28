@@ -169,3 +169,30 @@ func TestHTTPFlowIsolationAndConflict(t *testing.T) {
 }
 
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
+
+func TestIdentityUsesAuthenticatedHeaders(t *testing.T) {
+	mux := http.NewServeMux()
+	(&Handler{}).Register(mux)
+	for _, complete := range []bool{false, true} {
+		r := httptest.NewRequest(http.MethodGet, "/v1/memory-sync/identity?realm=forged&userId=forged", nil)
+		r.Header.Set("X-Lumo-User", "alice")
+		if complete {
+			r.Header.Set("X-Lumo-Realm", "realm-a")
+		}
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if !complete {
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("missing realm: %d", w.Code)
+			}
+			continue
+		}
+		var got map[string]string
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != http.StatusOK || got["realm"] != "realm-a" || got["userId"] != "alice" || len(got) != 2 || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("identity response: %d %v", w.Code, got)
+		}
+	}
+}

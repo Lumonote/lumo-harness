@@ -1,0 +1,35 @@
+.lumo-environment-entry > button { width: 100%; display: flex; align-items: center; justify-content: flex-start; gap: 9px; }
+.lumo-environment-entry > button > span { flex: 1; text-align: left; }
+.lumo-environment { display: grid; gap: 24px; max-width: 900px; font-size: 13px; }
+.lumo-environment section { border: 1px solid var(--lumo-line); border-radius: 10px; padding: 18px; min-width: 0; }
+.lumo-environment header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.lumo-environment h2 { margin: 0; font-size: 15px; line-height: 1.5; font-weight: 600; }
+.lumo-environment small, .lumo-environment p { color: var(--lumo-muted); }
+.lumo-environment p { line-height: 1.65; margin: 8px 0 12px; }
+.lumo-environment [role="alert"] { color: var(--lumo-danger); }
+.lumo-environment-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.lumo-environment-status code { margin-left: auto; color: var(--lumo-muted); font-size: 12px; overflow-wrap: anywhere; }
+.lumo-environment-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.lumo-environment-actions button { display: inline-flex; align-items: center; gap: 6px; }
+.lumo-server-book ul { padding: 0; margin: 10px 0; list-style: none; }
+.lumo-server-book li { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--lumo-line); }
+.lumo-server-book li > svg { flex-shrink: 0; margin-right: 6px; color: var(--lumo-muted); }
+.lumo-server-name { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.lumo-server-name b { font-weight: 500; }
+.lumo-server-name :is(b,small) { overflow-wrap: anywhere; }
+.lumo-server-book a { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 30px; color: inherit; border-radius: 6px; }
+.lumo-server-book a:hover { background: var(--lumo-panel-raised); }
+.lumo-server-active { font-size: 11px; color: var(--lumo-muted); }
+.lumo-server-form { display: grid; grid-template-columns: minmax(100px,1fr) minmax(160px,2fr); gap: 12px; margin: 16px 0; }
+.lumo-server-form label { display: grid; gap: 6px; min-width: 0; }
+.lumo-server-form > div { grid-column: 1 / -1; display: flex; gap: 8px; }
+.lumo-server-note { display: block; line-height: 1.65; font-size: 12px; }
+.lumo-device-details { display: grid; grid-template-columns: max-content minmax(0,1fr); gap: 8px 14px; margin: 12px 0 16px; }
+.lumo-device-details dt { color: var(--lumo-muted); }
+.lumo-device-details dd { margin: 0; overflow-wrap: anywhere; }
+.lumo-device-form { display: grid; gap: 12px; max-width: 620px; }
+.lumo-device-form label, .lumo-device-form details { display: grid; gap: 6px; }
+.lumo-device-form details label { margin-top: 10px; }
+.lumo-device-form summary { cursor: pointer; color: var(--lumo-muted); }
+.lumo-device-form input { width: 100%; min-width: 0; }
+@media(max-width:600px) { .lumo-environment section { padding: 12px; } .lumo-server-form { grid-template-columns: minmax(0,1fr); } .lumo-environment-status code { margin-left: 0; width: 100%; } }

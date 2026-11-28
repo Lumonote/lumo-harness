@@ -17,7 +17,7 @@
     "bundle": { "patch": "cordis.patch.yml" },
     "client": {
       "inject": ["@deepseek-ai/dsh-client-ui-renderer", "@deepseek-ai/dsh-client-ui-layout", "@deepseek-ai/dsh-client-ui-sidebar", "@deepseek-ai/dsh-client-ui-slots", "@deepseek-ai/dsh-client-ui-conversation", "@deepseek-ai/dsh-client-ui-theme"],
-      "external": ["@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client"],
+      "external": ["@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client", "@deepseek-ai/dsh-client-ui-primitives"],
       "platform": "web",
       "immediately": true
     }
@@ -31,6 +31,7 @@
     "@deepseek-ai/dsh-atomic-write": "link:../../../deepseek-harness/packages/util/atomic-write",
     "@deepseek-ai/dsh-client-connection": "link:../../../deepseek-harness/packages/client/connection",
     "@deepseek-ai/dsh-credentials": "link:../../../deepseek-harness/packages/credentials/credentials",
+    "@deepseek-ai/dsh-client-ui-primitives": "link:../../../deepseek-harness/packages/client/ui-primitives",
     "@deepseek-ai/dsh-client-ui-renderer": "link:../../../deepseek-harness/packages/client/ui-renderer",
     "@deepseek-ai/dsh-client-ui-sidebar-documentpreview": "link:../../../deepseek-harness/packages/client/ui-sidebar-documentpreview",
     "@deepseek-ai/dsh-client-ui-layout": "link:../../../deepseek-harness/packages/client/ui-layout",
@@ -41,12 +42,13 @@
     "@deepseek-ai/dsh-host-webserver": "link:../../../deepseek-harness/packages/host/webserver",
     "@deepseek-ai/dsh-host-authentication-token": "link:../../../deepseek-harness/packages/host/authentication-token",
     "@deepseek-ai/schemastery": "link:../../../deepseek-harness/vendor/schemastery",
+    "react-dom": "link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react-dom",
     "react": "link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react"
   },
   "devDependencies": {
     "@types/node": "link:../../../deepseek-harness/node_modules/@types/node",
-    "@types/react": "~18.3.1",
-    "react-dom": "link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react-dom"
+    "@types/react-dom": "link:../../../deepseek-harness/node_modules/@types/react-dom",
+    "@types/react": "~18.3.1"
   },
   "files": ["lib/index.js", "lib/client.js", "lib/types/**/*.d.ts", "cordis.patch.yml"]
 }

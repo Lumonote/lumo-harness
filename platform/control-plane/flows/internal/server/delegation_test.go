@@ -49,7 +49,7 @@ func TestManualDelegationKeyAndAuthorization(t *testing.T) {
 			t.Fatalf("%s key=%q: %d want %d: %s", tc.user, tc.key, res.StatusCode, tc.want, body)
 		}
 	}
-	if len(keys) != 3 || keys[0] != keys[1] || keys[0] == keys[2] {
+	if len(keys) != 2 || keys[0] == keys[1] {
 		t.Fatalf("manual scope: %v", keys)
 	}
 }

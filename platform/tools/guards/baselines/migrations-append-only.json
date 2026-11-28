@@ -48,6 +48,7 @@
     "046_recovery_provider_protocol.sql": "b94ae49ca3c22a1ef2a56ac158c52abbc2d7c875001814db7edcf75d305e3d06",
     "047_scheduler_leader_forwarding.sql": "f20a8bf1d005869ecef2879bc4d23647b99e1ae361b6921de8ce917a35883e83",
     "048_connector_approval_cancel.sql": "ca756b4ef129a158a1cddcce42099a712f8f3bd00e8687ac73ce17ea91f686b0",
-    "049_session_control_ask_link.sql": "c32461d7d69aa60cb7690f525a4e8921c88797e2439373c49f00afbcd1d86342"
+    "049_session_control_ask_link.sql": "c32461d7d69aa60cb7690f525a4e8921c88797e2439373c49f00afbcd1d86342",
+    "050_memory_sync.sql": "faa4c18bb5d4e47e013ef90b8a57d413b03c74da1711a5f51a1af92df6d24579"
   }
 }

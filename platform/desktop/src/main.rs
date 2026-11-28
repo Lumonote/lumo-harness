@@ -32,6 +32,8 @@ mod memory_sync;
 mod device_actions;
 mod device_exec;
 mod device_server;
+mod desktop_connections;
+mod server_book;
 mod pet;
 mod pet_acp;
 
@@ -374,7 +376,7 @@ fn spawn_runtime(app: &AppHandle) -> Result<String, String> {
     let handoff_file = state_dir.join("web-url");
     let _ = fs::remove_file(&handoff_file);
     // P1 设备动作：本机 127.0.0.1 + token 调用面；失败只记日志，不影响 runtime 启动。
-    let device_actions_file = device_server::start(&data_dir, &state_dir).unwrap_or_else(|e| { log_stage(app, &e); PathBuf::new() });
+    let device_actions_file = device_server::start(&data_dir, &state_dir, desktop_connections::agent_binary(app)).unwrap_or_else(|e| { log_stage(app, &e); PathBuf::new() });
 
     // The desktop worker is deliberately a child process rather than a second
     // copy of the control plane. It owns one SQLite file and never receives
@@ -583,6 +585,7 @@ fn show_main_window(app: &AppHandle) {
 }
 
 fn kill_runtime(app: &AppHandle) {
+    desktop_connections::shutdown();
     if let Some(shutdown) = app.try_state::<RuntimeShutdown>() {
         shutdown.0.store(true, Ordering::SeqCst);
     }

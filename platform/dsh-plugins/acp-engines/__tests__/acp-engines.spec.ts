@@ -87,7 +87,7 @@ describe('registry', () => {
   it('按候选顺序解析、禁用与未知引擎报错', () => {
     const r = new EngineRegistry(BUILTIN_ENGINES, new Set(['gemini']), { isExecutable: f => f === '/opt/homebrew/bin/npx', pathEnv: '', home: '/nonexistent' })
     const claude = r.resolve('claude-code')
-    expect('error' in claude ? claude.error : claude.args).toEqual(['-y', '@zed-industries/claude-code-acp'])
+    expect('error' in claude ? claude.error : claude.args).toEqual(['-y', '@agentclientprotocol/claude-agent-acp@0.113.0'])
     expect(r.resolve('gemini')).toMatchObject({ error: expect.stringContaining('禁用') })
     expect(r.resolve('codex')).toMatchObject({ error: expect.stringContaining('未找到') })
     expect(r.resolve('x')).toMatchObject({ error: expect.stringContaining('未知') })
@@ -110,23 +110,37 @@ describe('permission → Ask', () => {
   it('投影成 choice Ask，source 带会话与 run', () => {
     const ask = askFromPermission({ realm: 'r', userId: 'u', lumoSessionId: 's', runId: 'acp-s', engineId: 'claude-code' }, 'acp-e-1',
       { sessionId: 'e', toolCall: { toolCallId: 't', kind: 'edit', title: '改 a.ts' }, options: [{ optionId: 'y', name: '允许', kind: 'allow_once' }] }, 0, 1000)
-    expect(ask).toMatchObject({ id: 'session:acp-e-1', kind: 'choice', status: 'pending', source: { kind: 'session', session_ref: 's', run_id: 'acp-s', operation: 'edit' }, options: [{ id: 'y', label: '允许' }] })
+    expect(ask).toMatchObject({ id: 'session:acp-e-1', kind: 'choice', status: 'pending', source: { kind: 'session', session_ref: 's', run_id: 'acp-s', operation: 'edit' }, options: [{ id: 'y', label: '允许', permissionKind: 'allow_once' }] })
   })
   it('reject_* 记为 rejected；非发起人不能答；终态幂等', async () => {
     const b = new SessionAskBroker(0)
     const { ask, response } = b.request({ realm: 'r', userId: 'u', lumoSessionId: 's', engineId: 'x' }, 'e', { sessionId: 'e', toolCall: { toolCallId: 't' }, options: [{ optionId: 'n', name: '拒绝', kind: 'reject_once' }] })
-    expect(b.answer(ask.id, 'n', 'other').ok).toBe(false)
-    expect(b.answer(ask.id, 'zzz', 'u').ok).toBe(false)
-    expect(b.answer(ask.id, 'n', 'u').ok).toBe(true)
+    expect(b.answer(ask.id, 'n', { realm: 'r', userId: 'other' }).ok).toBe(false)
+    expect(b.answer(ask.id, 'zzz', { realm: 'r', userId: 'u' }).ok).toBe(false)
+    expect(b.answer(ask.id, 'n', { realm: 'r', userId: 'u' }).ok).toBe(true)
     await expect(response).resolves.toEqual({ outcome: { outcome: 'selected', optionId: 'n' } })
-    expect(b.get(ask.id)?.status).toBe('rejected')
-    expect(b.answer(ask.id, 'n', 'u').ok).toBe(false)
+    expect(b.get(ask.id, { realm: 'r', userId: 'u' })?.status).toBe('rejected')
+    expect(b.answer(ask.id, 'n', { realm: 'r', userId: 'u' }).ok).toBe(false)
   })
   it('TTL 过期回 cancelled', async () => {
     const b = new SessionAskBroker(10)
     const { ask, response } = b.request({ realm: 'r', userId: 'u', lumoSessionId: 's', engineId: 'x' }, 'e', { sessionId: 'e', toolCall: { toolCallId: 't' }, options: [] })
     await expect(response).resolves.toEqual({ outcome: { outcome: 'cancelled' } })
-    expect(b.get(ask.id)?.status).toBe('expired')
+    expect(b.get(ask.id, { realm: 'r', userId: 'u' })?.status).toBe('expired')
+  })
+  it('恢复相同引擎会话后，旧审批 ID 不能回答新请求', async () => {
+    const context = { realm: 'r', userId: 'u', lumoSessionId: 's', engineId: 'claude-code' }
+    const request = { sessionId: 'same-native-session', toolCall: { toolCallId: 'write' }, options: [{ optionId: 'yes', name: 'Yes', kind: 'allow_once' as const }] }
+    const before = new SessionAskBroker(0), after = new SessionAskBroker(0)
+    const old = before.request(context, request.sessionId, request)
+    before.cancelSession('s')
+    const next = after.request(context, request.sessionId, request)
+    expect(next.ask.id).not.toBe(old.ask.id)
+    expect(after.answer(old.ask.id, 'yes', context).ok).toBe(false)
+    expect(after.get(next.ask.id, context)?.status).toBe('pending')
+    expect(after.answer(next.ask.id, 'yes', context).ok).toBe(true)
+    await expect(old.response).resolves.toEqual({ outcome: { outcome: 'cancelled' } })
+    await expect(next.response).resolves.toEqual({ outcome: { outcome: 'selected', optionId: 'yes' } })
   })
 })
 
@@ -139,26 +153,28 @@ describe('EngineHost（假 ACP agent）', () => {
     const s = await h.createSession({ engineId: 'fake', cwd, realm: 'r', userId: 'u' })
     expect(s).toMatchObject({ engineSessionId: 'eng-1', state: 'idle' })
     const events: SessionEvent[] = []
-    h.subscribe(s.id, 'u', 0, (_seq, e) => events.push(e))
-    expect(h.prompt(s.id, 'other', 'hi').ok).toBe(false)
-    expect(h.prompt(s.id, 'u', 'hi').ok).toBe(true)
-    await until(() => asks.list({ status: 'pending' }).length === 1)
-    const pending = asks.list({ status: 'pending' })[0]!
+    h.subscribe(s.id, { realm: 'r', userId: 'u' }, 0, (_seq, e) => events.push(e))
+    expect(h.prompt(s.id, { realm: 'r', userId: 'other' }, 'hi').ok).toBe(false)
+    expect(h.prompt(s.id, { realm: 'r', userId: 'u' }, 'hi').ok).toBe(true)
+    await until(() => asks.list({ realm: 'r', userId: 'u' }, { status: 'pending' }).length === 1)
+    const pending = asks.list({ realm: 'r', userId: 'u' }, { status: 'pending' })[0]!
     // run 节点进入 awaiting_ask，工具调用是它的子节点
     const run = sink.state.nodes[`run:acp-${s.id}`]!
     expect(run.status).toBe('awaiting_ask')
     expect(run.askIds).toContain(pending.id)
     const tool = Object.values(sink.state.nodes).find(n => n.kind === 'subagent')!
     expect(tool.parentId).toBe(run.id)
-    expect(asks.answer(pending.id, 'ok', 'u').ok).toBe(true)
+    expect(asks.answer(pending.id, 'ok', { realm: 'r', userId: 'u' }).ok).toBe(true)
     await until(() => events.some(e => e.type === 'turn.ended'))
     const text = events.filter(e => e.type === 'message.chunk' && e.role === 'agent').map(e => (e as { text: string }).text).join('')
     expect(text).toBe('hello')
     expect(events.find(e => e.type === 'turn.ended')).toMatchObject({ stopReason: 'end_turn' })
     expect(sink.state.nodes[tool.id]!.status).toBe('succeeded')
-    expect(h.close(s.id, 'completed', 'u')).toBe(true)
+    expect(h.close(s.id, { realm: 'r', userId: 'u' })).toBe(true)
     expect(sink.state.nodes[run.id]!.status).toBe('succeeded')
-    expect(h.list()).toHaveLength(0)
+    expect(h.list({ realm: 'r', userId: 'u' })).toEqual([expect.objectContaining({ id: s.id, historyOnly: true })])
+    expect(h.delete(s.id, { realm: 'r', userId: 'u' })).toBe(true)
+    expect(h.list({ realm: 'r', userId: 'u' })).toHaveLength(0)
   })
 
   it('cancel：挂起的权限请求回 cancelled，回合以 cancelled 结束', async () => {
@@ -166,13 +182,13 @@ describe('EngineHost（假 ACP agent）', () => {
     const { host: h, asks } = host(fakeAcpAgent, sink)
     const s = await h.createSession({ engineId: 'fake', cwd, realm: 'r', userId: 'u' })
     const events: SessionEvent[] = []
-    h.subscribe(s.id, 'u', 0, (_q, e) => events.push(e))
-    h.prompt(s.id, 'u', 'go')
-    await until(() => asks.list({ status: 'pending' }).length === 1)
-    expect(h.cancel(s.id, 'u').ok).toBe(true)
+    h.subscribe(s.id, { realm: 'r', userId: 'u' }, 0, (_q, e) => events.push(e))
+    h.prompt(s.id, { realm: 'r', userId: 'u' }, 'go')
+    await until(() => asks.list({ realm: 'r', userId: 'u' }, { status: 'pending' }).length === 1)
+    expect(h.cancel(s.id, { realm: 'r', userId: 'u' }).ok).toBe(true)
     await until(() => events.some(e => e.type === 'turn.ended'))
     expect(events.find(e => e.type === 'turn.ended')).toMatchObject({ stopReason: 'cancelled' })
-    expect(asks.list({ status: 'cancelled' })).toHaveLength(1)
+    expect(asks.list({ realm: 'r', userId: 'u' }, { status: 'cancelled' })).toHaveLength(1)
     expect(sink.state.nodes[`run:acp-${s.id}`]!.status).toBe('cancelled')
     h.closeAll()
   })
@@ -212,12 +228,12 @@ describe('Codex app-server 桥', () => {
     const s = await h.createSession({ engineId: 'fake', cwd, realm: 'r', userId: 'u' })
     expect(s.engineSessionId).toBe('th-1')
     const events: SessionEvent[] = []
-    h.subscribe(s.id, 'u', 0, (_q, e) => events.push(e))
-    h.prompt(s.id, 'u', '列一下目录')
-    await until(() => asks.list({ status: 'pending' }).length === 1)
-    const ask = asks.list({ status: 'pending' })[0]!
+    h.subscribe(s.id, { realm: 'r', userId: 'u' }, 0, (_q, e) => events.push(e))
+    h.prompt(s.id, { realm: 'r', userId: 'u' }, '列一下目录')
+    await until(() => asks.list({ realm: 'r', userId: 'u' }, { status: 'pending' }).length === 1)
+    const ask = asks.list({ realm: 'r', userId: 'u' }, { status: 'pending' })[0]!
     expect(ask.options?.map(o => o.id)).toEqual(['accept', 'acceptForSession', 'decline'])
-    asks.answer(ask.id, 'accept', 'u')
+    asks.answer(ask.id, 'accept', { realm: 'r', userId: 'u' })
     await until(() => events.some(e => e.type === 'turn.ended'))
     expect(events.some(e => e.type === 'message.chunk' && e.text === '好的')).toBe(true)
     expect(events.some(e => e.type === 'tool.update' && e.status === 'completed')).toBe(true)

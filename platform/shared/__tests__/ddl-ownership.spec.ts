@@ -615,6 +615,16 @@ const EXTERNAL_SCHEDULER_WRITES: Record<string, { writes: Record<string, number>
       '把任务与 attempt 从 PLACED 推到 RUNNING / FAILED（CompleteDeviceCommand）。每一处都与 ' +
       'governance 自己的命令行、run 行在同一事务内提交——这正是它没有走 HTTP 的原因。',
   },
+  'control-plane/governance/internal/store/task_results.go': {
+    writes: {
+      'UPDATE scheduler_task_attempts': 1,
+      'UPDATE scheduler_tasks': 1,
+    },
+    reason:
+      '设备最终回执必须与 governance 的结果、run、任务终态原子提交，HTTP 调用无法加入这笔事务。' +
+      '按 task/run/attempt/node/worker 精确匹配并锁定当前 Scheduler 行；失配整体回滚，旧回执不能释放新 attempt 容量。' +
+      '只补齐既有 devices.go 认领路径的终态结算，真实 PG 回归覆盖容量释放、重复回执及旧 attempt。',
+  },
   'dsh-plugins/subagent-host/src/governed-dispatch.ts': {
     writes: {
       'UPDATE scheduler_dispatch_outbox': 1,

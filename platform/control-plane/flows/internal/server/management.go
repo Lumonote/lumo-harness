@@ -79,7 +79,7 @@ func (s *Server) managedFlow(w http.ResponseWriter, r *http.Request) {
 		s.writeManagementError(w, err)
 		return
 	}
-	canAuthor := active && f.Author == c.user && (role == domain.RoleOwner || role == domain.RoleEditor)
+	canAuthor := store.CanMutateFlow(f, "edit", role, active, mutationActor(c))
 	published := active && (f.Status == domain.StatusPublished || f.Status == domain.StatusTargeted)
 	editable := canAuthor && (f.Status == domain.StatusDraft || (published && change != nil && change.Status == domain.StatusDraft))
 	if r.Method == http.MethodPatch {
@@ -211,4 +211,8 @@ func (s *Server) changeFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+func mutationActor(c caller) store.MutationActor {
+	return store.MutationActor{Realm: c.realm, UserID: c.user, Admin: c.hasRole("admin"), Reviewer: flowReviewer(c)}
 }

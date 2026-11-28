@@ -337,6 +337,9 @@ importers:
       '@deepseek-ai/dsh-client-ui-layout':
         specifier: link:../../../deepseek-harness/packages/client/ui-layout
         version: link:../../../deepseek-harness/packages/client/ui-layout
+      '@deepseek-ai/dsh-client-ui-primitives':
+        specifier: link:../../../deepseek-harness/packages/client/ui-primitives
+        version: link:../../../deepseek-harness/packages/client/ui-primitives
       '@deepseek-ai/dsh-client-ui-renderer':
         specifier: link:../../../deepseek-harness/packages/client/ui-renderer
         version: link:../../../deepseek-harness/packages/client/ui-renderer
@@ -373,16 +376,19 @@ importers:
       react:
         specifier: link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react
         version: link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react
+      react-dom:
+        specifier: link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react-dom
+        version: link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react-dom
     devDependencies:
       '@types/node':
         specifier: link:../../../deepseek-harness/node_modules/@types/node
         version: link:../../../deepseek-harness/node_modules/@types/node
+      '@types/react-dom':
+        specifier: link:../../../deepseek-harness/node_modules/@types/react-dom
+        version: link:../../../deepseek-harness/node_modules/@types/react-dom
       '@types/react':
         specifier: ~18.3.1
         version: 18.3.31
-      react-dom:
-        specifier: link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react-dom
-        version: link:../../../deepseek-harness/packages/client/ui-jobs/node_modules/react-dom
 
   dsh-plugins/mailbox:
     dependencies:

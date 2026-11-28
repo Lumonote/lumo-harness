@@ -2,6 +2,8 @@
 
 对照版本：Gugu [`474319f`](https://github.com/GUYI-AI/gugu/tree/474319f38d9bc0cb80e90c08833d38c3f81f479b)。下面的“已有”指 Lumo 源码中能定位到的能力，不代表某个安装包已经发布，也不代表已连接真实云主机。
 
+2026-11-26 补充：早期对照偏重项目、设备与记忆。此次进一步实现了开发工具目录、真实模型读取与切换、可复用 Agent 通讯录、选成员建群、点名角色和成员执行详情，见[个人 Agent 与管理工作台整合](personal-agents-management-2026-11-26.md)。当前群组仍为顺序编排，不能据此宣称具有 Gugu 的动态并行委派、话题分支或跨设备群聊同步。
+
 | 用户问题 | Gugu 的具体做法 | Lumo 已有基础与值得借鉴的部分 |
 | --- | --- | --- |
 | 谁可以加入或管理项目？ | [群成员权限](https://github.com/GUYI-AI/gugu/blob/474319f38d9bc0cb80e90c08833d38c3f81f479b/apps/desktop/src/lib/groupMemberPermissions.ts)区分群主、管理员、普通成员和项目群；项目群不能通过普通群入口直接邀请人类。 | Lumo 已有[项目角色判定](../platform/control-plane/projects/internal/domain/domain.go)、[末位所有者保护](../platform/control-plane/projects/internal/store/store.go)和[空间细分授权](../platform/dsh-plugins/lumo-ui/src/client/project-space-grants-panel.tsx)。借鉴的是让界面解释谁能做什么；项目成员和群聊成员仍是两种关系。 |

@@ -14,7 +14,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import { dualGateway } from './global.ts'
 import type { ToolHandler } from './gateway.ts'
-import { registerDshTools } from './dsh-tools.ts'
+import { registerDshTools, type CallerResolver } from './dsh-tools.ts'
 import type { DualPluginManifest } from './manifest.ts'
 
 export * from './manifest.ts'
@@ -30,9 +30,9 @@ export { PROJECT_MANIFEST, PROJECT_CONTEXT_OUTPUT } from './project-manifest.ts'
 export { ACP_ENGINES_MANIFEST } from './acp-tools-manifest.ts'
 
 /** 注册到共享网关 + 把 platform 通道的工具注册为 dsh 工具。返回总注销函数。 */
-export function registerDualPlugin(tools: { register(def: ToolDefinition): () => void } | undefined, manifest: DualPluginManifest, handlers: Record<string, ToolHandler>): () => void {
+export function registerDualPlugin(tools: { register(def: ToolDefinition): () => void } | undefined, manifest: DualPluginManifest, handlers: Record<string, ToolHandler>, resolveCaller?: CallerResolver): () => void {
   const gateway = dualGateway()
   const off = gateway.register(manifest, handlers)
-  const offTools = tools ? registerDshTools(tools, gateway, manifest.tools) : () => {}
+  const offTools = tools ? registerDshTools(tools, gateway, manifest.tools, resolveCaller) : () => {}
   return () => { offTools(); off() }
 }

@@ -1,3 +1,4 @@
+import { acpSkills, type SkillRegistryService } from './acp-skills.ts'
 /** Host half: keep DSH's native Web shell and add a same-origin Lumo control API. */
 import { readFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
@@ -19,6 +20,8 @@ import { handleDeviceRoutes, installDeviceActions } from './device-wiring.ts'
 import { createRemoteHosts, handleRemoteHostsRoute, type RemoteHostsService } from './remote-hosts-api.ts'
 import { handleRunTreeRoute, registerRunTreeCollector, RunTreeStore } from './run-tree-api.ts'
 import { handleMemorySyncRoute } from './memory-sync-proxy.ts'
+import { flowRunHeaders, flowRunTarget } from './flow-run-api.ts'
+import { writeUpstreamResult, type UpstreamResult } from './upstream-result.ts'
 import { createAcpEngines, handleAcpRoute, type AcpEngines } from '../../acp-engines/src/embed.ts'
 import { installDualPlugins, acpMcpOptions } from './dual-plugins-api.ts'
 import { handleDualRoute, type DualHost } from '../../dual-plugins/src/index.ts'
@@ -130,19 +133,6 @@ interface KnowledgeSourceManagerService {
   rebuild(realm: string): Promise<void>
 }
 
-/** Human-safe projection of the DSH SkillRegistry; bodies and paths stay host-side. */
-interface SkillRegistryService {
-  snapshot(): Promise<{
-    complete: boolean
-    skills: Array<{
-      name: string; description: string; whenToUse?: string
-      invocation: { modelInvocable: boolean; userInvocable: boolean }
-      source: string; provider: string
-      /** 目录型 resourceBase 才有原生示例可扫；路径只在宿主侧使用，永不下发。 */
-      resourceBase?: { kind: 'directory'; path: string } | { kind: 'url'; url: string } | { kind: 'opaque'; description: string }
-    }>
-  }>
-}
 
 export const name = 'lumo-platform-ui'
 // Local Desktop only needs the native DSH Web server. Knowledge/governance/
@@ -224,7 +214,6 @@ export const Config: z<Config> = z.object({
 })
 
 type ServiceName = 'scheduler' | 'projects' | 'flows' | 'connector' | 'governance' | 'collaborator' | 'registry' | 'session-control' | 'llm-gateway' | 'usage-ledger' | 'edge-gateway' | 'terminal-gateway'
-interface UpstreamResult { ok: boolean; status: number; data: unknown; error?: string }
 
 interface PluginSummary {
   id: string
@@ -287,7 +276,7 @@ async function upstream(config: Config, identity: RequestIdentity, service: Serv
     const text = await response.text()
     let data: unknown = null
     try { data = text === '' ? null : JSON.parse(text) } catch { data = text }
-    return { ok: response.ok, status: response.status, data }
+    return { ok: response.ok, status: response.status, data, ...(service === 'flows' ? { headers: flowRunHeaders(path, response.headers) } : {}) }
   } catch (error) {
     return { ok: false, status: 0, data: null, error: error instanceof Error ? error.message : String(error) }
   }
@@ -626,15 +615,7 @@ function knowledgeManagementStatus(error: unknown): number {
   return 502
 }
 
-function writeUpstream(res: ServerResponse, result: UpstreamResult): void {
-  if (result.ok) {
-    // 204 No Content 必须无 body；其余用 JSON 承载，避免 DELETE 写回 "null"。
-    if (result.status === 204) { res.writeHead(204, { 'cache-control': 'no-store' }); res.end(); return }
-    writeJson(res, result.status, result.data); return
-  }
-  const upstreamError = typeof result.data === 'object' && result.data !== null ? result.data : undefined
-  writeJson(res, result.status || 502, upstreamError ?? { error: result.error || 'upstream unavailable' })
-}
+const writeUpstream = (res: ServerResponse, result: UpstreamResult) => writeUpstreamResult(res, result, writeJson)
 
 function writeLocalAssetError(res: ServerResponse, error: unknown): void {
   const status = error instanceof LocalAssetError ? error.status
@@ -2189,11 +2170,11 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
     writeJson(res, 405, { error: 'method not allowed' }); return
   }
 
-  const flowRunReplay = pathname.match(/^\/lumo\/api\/flows\/([^/]+)\/runs\/([1-9]\d*)\/replay$/u)
-  if (req.method === 'POST' && flowRunReplay !== null) {
-    const flowID = safeID(flowRunReplay[1])
-    if (flowID === undefined) { writeJson(res, 400, { error: 'invalid flow id' }); return }
-    writeUpstream(res, await upstream(config, identity, 'flows', `/v1/flows/${encodeURIComponent(flowID)}/runs/${flowRunReplay[2]}/replay`, req, 'POST')); return
+  const runTarget = flowRunTarget(pathname, req.method ?? 'GET')
+  if (runTarget) {
+    if ('error' in runTarget) writeJson(res, runTarget.status, { error: runTarget.error })
+    else writeUpstream(res, await upstream(config, identity, 'flows', runTarget.path, req, runTarget.method))
+    return
   }
 
   const flow = pathname.match(/^\/lumo\/api\/flows\/([^/]+)(?:\/(submit|run|runs|review|target|deprecate|rollback|definition))?$/u)
@@ -2356,7 +2337,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   if (await handleMemorySyncRoute(req, res, pathname, { readBody, reject: (s, e) => writeJson(res, s, { error: e }), forward: async (p, m, b) => writeUpstream(res, await upstream(config, identity, 'projects', p, req, m, b, 'application/json')) })) return
   if (await handleRemoteHostsRoute(req, res, pathname, remoteHosts, { readBody, userId: identity.userId })) return
   if (await handleDualRoute(req, res, pathname, { gateway: dualHost?.gateway, identity: { userId: identity.userId, realm: identity.realm, ...(identity.projectId === undefined ? {} : { projectId: identity.projectId }) }, readBody })) return
-  if (await handleAcpRoute(req, res, pathname, { host: acpEngines?.host, asks: acpEngines?.asks, identity: { userId: identity.userId, realm: identity.realm, ...(identity.projectId === undefined ? {} : { projectId: identity.projectId }) }, readBody })) return
+  if (await handleAcpRoute(req, res, pathname, { ...acpEngines, identity: { userId: identity.userId, realm: identity.realm, ...(identity.projectId === undefined ? {} : { projectId: identity.projectId }) }, readBody })) return
   if (await handleDeviceRoutes(req, res, pathname, { connectorUrl: config.connectorUrl, headers: identityHeaders(config, identity), timeoutMs: config.timeoutMs, readBody, userId: identity.userId })) return
   if (await handleAsksRoute(req, res, pathname, { connectorUrl: config.connectorUrl, headers: identityHeaders(config, identity), timeoutMs: config.timeoutMs, readBody })) return
   if (req.method === 'GET' && pathname === '/lumo/api/connector-approvals') {
@@ -2488,8 +2469,8 @@ export function apply(ctx: Context, config: Config): void {
   runTreeStore = new RunTreeStore(join(dirname(resolve(config.skillhubInstallFile ?? '.lumo/skillhub-installs.json')), 'run-tree.jsonl'))
   registerRunTreeCollector(ctx, runTreeStore)
   dualHost = installDualPlugins(ctx, config, runTreeStore, () => acpEngines?.host)
-  acpEngines = config.deploymentMode === 'local' ? createAcpEngines({ runTree: runTreeStore, ...acpMcpOptions(dualHost) }) : undefined
-  if (acpEngines) { const engines = acpEngines; ctx.effect(() => () => engines.host.closeAll(), 'lumo-ui: reap ACP engine processes') }
+  acpEngines = config.deploymentMode === 'local' ? createAcpEngines({ skills: acpSkills(() => ctx.get('skills') as import('@deepseek-ai/dsh-skill').SkillRegistry | undefined), recoveryIndexPath: join(dirname(resolve(config.skillhubInstallFile ?? '.lumo/skillhub-installs.json')), 'acp-sessions.json'), runTree: runTreeStore, ...acpMcpOptions(dualHost) }) : undefined
+  if (acpEngines) { const engines = acpEngines; ctx.effect(() => () => { engines.rooms.dispose(); engines.host.closeAll() }, 'lumo-ui: reap ACP engine processes') }
   registerComputerUseRoutes(ctx, config.deploymentMode === 'local')
   registerRemoteComputerRoutes(ctx, config.deploymentMode === 'local')
   installDeviceActions(ctx, config.deploymentMode === 'local', runTreeStore)

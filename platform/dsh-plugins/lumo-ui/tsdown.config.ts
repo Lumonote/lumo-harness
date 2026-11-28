@@ -21,7 +21,7 @@ const browser = {
   name: `${id}/client`,
   entry: { client: 'src/client/index.tsx' },
   outDir: 'lib', format: 'cjs', platform: 'browser', dts: false, sourcemap: true, clean: false,
-  external: [/^@deepseek-ai\/dsh-client-ui-renderer(\/|$)/u, /^@deepseek-ai\/dsh-client-ui-theme(\/|$)/u,
+  external: [/^react-dom(?:\/|$)/u, /^@deepseek-ai\/dsh-client-ui-primitives$/u, /^@deepseek-ai\/dsh-client-ui-renderer(\/|$)/u, /^@deepseek-ai\/dsh-client-ui-theme(\/|$)/u,
     /^@deepseek-ai\/dsh-client-ui-sidebar-documentpreview\/client$/u],
   plugins: [cssPlugin],
   outputOptions: {

@@ -28,19 +28,19 @@ import { createAcpEngines } from './embed.ts'
 
 export const name = 'lumo-acp-engines'
 export const inject = ['webServer']
-export interface Config { realm?: string }
+export interface Config { realm?: string; recoveryIndexPath?: string }
 
 /** 独立插件形态：单用户本机，身份固定为 local。 */
 export function apply(ctx: Context, config: Config = {}): void {
-  const engines = createAcpEngines()
+  const engines = createAcpEngines({ recoveryIndexPath: config.recoveryIndexPath ?? '.lumo/acp-sessions.json' })
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix', path: ACP_PREFIX,
     handler: (req, res) => {
       const pathname = new URL(req.url ?? '/', 'http://lumo.local').pathname
-      void handleAcpRoute(req, res, pathname, { host: engines?.host, asks: engines?.asks, identity: { userId: 'local', realm: config.realm ?? 'local' }, readBody })
+      void handleAcpRoute(req, res, pathname, { host: engines?.host, asks: engines?.asks, rooms: engines?.rooms, attachments: engines?.attachments, skills: engines?.skills, identity: { userId: 'local', realm: config.realm ?? 'local' }, readBody })
     },
   }), 'lumo-acp-engines: session routes')
-  ctx.effect(() => () => engines?.host.closeAll(), 'lumo-acp-engines: reap engine processes')
+  ctx.effect(() => () => { engines?.rooms.dispose(); engines?.host.closeAll() }, 'lumo-acp-engines: reap engine processes')
 }
 
 async function readBody(req: import('node:http').IncomingMessage, maxBytes = 1 << 20): Promise<Buffer> {

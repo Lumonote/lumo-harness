@@ -135,6 +135,12 @@ jobs:
           cache: 'pnpm'
           cache-dependency-path: platform/pnpm-lock.yaml
 
+      - name: Setup Go for managed desktop agent
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: platform/control-plane/registry/go.sum
+
       - name: Select signed or unsigned desktop packaging
         id: signing-mode
         shell: bash
@@ -186,11 +192,11 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.cargo/bin
-          key: cargo-tauri-cli-${{ runner.os }}-${{ runner.arch }}
+          key: cargo-tauri-cli-2.11.2-${{ runner.os }}-${{ runner.arch }}
 
       - name: Install tauri CLI
         if: steps.tauri-cli-cache.outputs.cache-hit != 'true'
-        run: cargo install tauri-cli --version "^2.0.0" --locked
+        run: cargo install tauri-cli --version "=2.11.2" --locked
 
       # NSIS 由 Tauri 官方下载并校验；与 Cargo 编译缓存分开保存，避免每次构建
       # 都依赖 GitHub Release 下载。useLocalToolsDir 将工具放到 target/.tauri。

@@ -1,15 +1,18 @@
+import { installAgentProjectServices, type AgentProjectServices } from './agent-project-picker.tsx'
+import { installEnvironmentConnection, type EnvironmentConnection } from './environment-connection.ts'
+import { EnvironmentEntry } from './environment-panel.tsx'
 import { localizedSkillName, localizedProvider, localizedSource, localizedSkillKind, localizedVisibility, localizedSkillDescription, localizedSkillWhenToUse, type RuntimeSkill } from './skill-labels.ts'
-import type { Surface, ServiceState, NodeState, DeploymentState, Row, Plugin, Overview, AuthAccount } from './surface-types.ts'
+import type { Surface, ServiceState, NodeState, DeploymentState, Row, Overview, AuthAccount } from './surface-types.ts'
 import { ApiError, api, optionalApi, type OptionalApiResult } from './api.ts'
 import { surfaceMeta, availableSurfaces, navigationSurfaces, OPEN_EVENT, CLOSE_EVENT, querySurface, setQuerySurface, openSurface } from './surface-navigation.ts'
-import { Glyph, MagneticButton, BusyButton, ConfirmButton, SpotlightCard, ClickSpark, Section, Empty, Notice, formatSync, WorkspaceHero, DomainTabs, Metric } from './surface-shell.tsx'
+import { Glyph, WorkbenchRail, MagneticButton, BusyButton, ConfirmButton, SpotlightCard, ClickSpark, Section, Empty, Notice, formatSync, WorkspaceHero, Metric } from './surface-shell.tsx'
 import { useFocusTrap } from './focus-trap.ts'
 import { KnowledgeSurface } from './knowledge-surface.tsx'
 import { MarketSurface } from './market-surface.tsx'
 import { AccountSurface } from './account-surface.tsx'
 import { AsksPanel } from './asks-panel.tsx'
-import { RemoteHostsPanel } from './remote-hosts-panel.tsx'
-import { DeviceActionsPanel } from './device-actions-panel.tsx'
+import { LocalManagementPanel } from './local-management-panel.tsx'
+import { SettingsManagement } from './settings-management.tsx'
 import { RunTreePanel, runTreeEnabled } from './run-tree-panel.tsx'
 import { AcpSessionSection } from './acp-session-panel.tsx'
 export { KnowledgeSurface } from './knowledge-surface.tsx'
@@ -54,16 +57,18 @@ import { ProjectSettingsPanel } from './project-settings-panel.tsx'
 import { ProjectBudgetPanel } from './project-budget-panel.tsx'
 import { ProjectSpacesPanel, ProjectAutomationsPanel, ProjectArtifactsPanel, type ProjectResourceSpace, type ProjectResourceArtifact } from './project-resources-panel.tsx'
 import { TeamLauncher, type TeamCapabilities } from './team-launcher.tsx'
-import { OPERATIONS_TARGET_EVENT, PROJECTS_CHANGED_EVENT, queueOperationsTarget, takeOperationsTarget, type OperationsTarget } from './operations-navigation.ts'
+import { OPERATIONS_TARGET_EVENT, PROJECTS_CHANGED_EVENT, queueOperationsTarget, takeOperationsTarget, type OperationsTarget, type OperationsArea } from './operations-navigation.ts'
 import { RunReviewPanel, type ReviewActor } from './run-review-panel.tsx'
 import { UserDirectoryPagination, userDirectoryURL } from './user-directory.tsx'
 import { DirectoryUserPicker } from './directory-user-picker.tsx'
 import { RolePermissionsPanel } from './role-permissions-panel.tsx'
 import { RecoveryWorkflowPanel } from './recovery-workflow-panel.tsx'
+import { FlowRunsPanel, flowVersionChanges, type FlowDefinition } from './flow-runs-panel.tsx'
 import { StorageQuotaPanel } from './storage-quota-panel.tsx'
 import type { ThreadFacts } from './thread-board.ts'
 import { installDesktopPetBridge, registerDesktopPetSurface, type DesktopPetServices } from './desktop-pet.ts'
 import { DesktopPetTasks } from './desktop-pet-tasks.tsx'
+import { RoleRoomSurface } from './role-room-surface.tsx'
 import { ComputerUsePanel } from './computer-use-panel.tsx'
 import { installComputerUseServices, type ComputerUseClientServices } from './computer-use-services.ts'
 import { installAnchoredOverlayFallback } from './anchored-overlays.ts'
@@ -93,7 +98,6 @@ type ComposerDockProps = PropsRuntime<'conversation.input.dock'>
 type HeroComposerDockProps = PropsRuntime<'conversation.hero.composer.dock'>
 
 interface Automation { automationId: string; projectId: string; triggerKind: string; triggerSpec: string; flowRef: string; enabled: boolean; revision: number }
-interface FlowDefinition { nodes?: Array<{ id?: string; operator?: string }>; edges?: Array<{ from?: string; to?: string }> }
 interface FlowVersionSnapshot { flow_id: string; version: number; reviewer: string; definition: FlowDefinition }
 interface FlowVersionDiff { flow: Row; previous: FlowVersionSnapshot; current: FlowVersionSnapshot }
 interface Placement { task_id?: string; realm?: string; node_id?: string; attempt?: number; state?: string; fencing_token?: number; preemption_requested_task_id?: string }
@@ -768,25 +772,6 @@ function rowsOf<T>(result: UpstreamResult | undefined, key: string): T[] { const
 /** vault 名 = 目录 basename（Obsidian 以目录名标识 vault）；无配置时为空串。 */
 
 /** vault docId（base64url(相对路径)）→ vault 相对路径（与 Provider 的编码互逆）。 */
-
-function flowVersionChanges(previous: FlowDefinition, current: FlowDefinition): string[] {
-  const nodeMap = (definition: FlowDefinition) => new Map((definition.nodes ?? []).filter(node => node.id).map(node => [node.id!, node.operator ?? '']))
-  const edgeSet = (definition: FlowDefinition) => new Set((definition.edges ?? []).filter(edge => edge.from && edge.to).map(edge => `${edge.from}→${edge.to}`))
-  const beforeNodes = nodeMap(previous); const afterNodes = nodeMap(current)
-  const added = [...afterNodes.keys()].filter(id => !beforeNodes.has(id))
-  const removed = [...beforeNodes.keys()].filter(id => !afterNodes.has(id))
-  const changed = [...afterNodes.entries()].filter(([id, operator]) => beforeNodes.has(id) && beforeNodes.get(id) !== operator).map(([id, operator]) => `${id}（${beforeNodes.get(id)} → ${operator}）`)
-  const beforeEdges = edgeSet(previous); const afterEdges = edgeSet(current)
-  const edgeAdded = [...afterEdges].filter(edge => !beforeEdges.has(edge))
-  const edgeRemoved = [...beforeEdges].filter(edge => !afterEdges.has(edge))
-  const changes: string[] = []
-  if (added.length) changes.push(`新增节点：${added.join('、')}`)
-  if (removed.length) changes.push(`移除节点：${removed.join('、')}`)
-  if (changed.length) changes.push(`节点算子变更：${changed.join('、')}`)
-  if (edgeAdded.length) changes.push(`新增连线：${edgeAdded.join('、')}`)
-  if (edgeRemoved.length) changes.push(`移除连线：${edgeRemoved.join('、')}`)
-  return changes.length ? changes : ['两个发布快照的节点、算子和连线一致。']
-}
 
 function SkillsSurface({ onClose }: { onClose: () => void }) {
   const [runtime, setRuntime] = useState<SkillSnapshot | null>(null)
@@ -1490,18 +1475,6 @@ function OrchestrationTopology({ tasks, busy, cancel, retry, reassign, showRuns 
   </div>
 }
 
-function LocalModePanel({ plugins }: { plugins: Plugin[] }) {
-  const capabilities = plugins.filter(plugin => plugin.id !== 'platform-ui')
-  return <div className="lumo-local-mode">
-    <Section title="本机设备动作" meta="打开 / 剪贴板 / 通知 / 截图 · 高风险本机确认"><DeviceActionsPanel /></Section>
-    <Section title="远端机器" meta="SSH 一键接入 · 安装 / 升级 / 隧道"><RemoteHostsPanel /></Section>
-    <AcpSessionSection />
-    <div className="lumo-local-intro"><span className="lumo-eyebrow">本地优先运行时</span><h2>离线工作台已就绪</h2><p>数据写入本机 SQLite；本模式不连接 PostgreSQL、Redis、MinIO、RocketMQ 或 Nacos。跨用户委派、集群调度和服务端治理请切换到服务器形态。</p></div>
-    <div className="lumo-local-grid"><Section title="本机已装配能力" meta={`${capabilities.length} 个本地能力`}><div className="lumo-local-capabilities">{capabilities.length ? capabilities.map(plugin => <button type="button" key={plugin.id} onClick={() => openSurface(plugin.surface)}><span>{plugin.label.slice(0, 1)}</span><div><b>{plugin.label}</b><small>{plugin.description}</small></div><i>本机</i></button>) : <Empty>当前没有额外的本地能力。</Empty>}</div></Section><Section title="服务器能力边界" meta="按形态显式隔离"><div className="lumo-boundary-list"><div><i>01</i><span><b>知识库语义检索</b><small>依赖服务端向量/图引擎，本地不会用 SQLite 冒充。</small></span><em>服务器</em></div><div><i>02</i><span><b>上下游任务协同</b><small>意图、标签、技能和节点负载匹配仅在集群开放。</small></span><em>集群</em></div><div><i>03</i><span><b>连接器与 Web 出站</b><small>凭证、策略、审计和外部网络调用由服务器网关承载。</small></span><em>网关</em></div></div></Section></div>
-    <Section title="下一步" meta="保持数据边界清晰"><div className="lumo-local-next"><span><i className="lumo-live-dot" /> 当前是可独立运行的桌面应用</span><b>需要团队协同？启动服务器集群并从这里继续。</b><small>桌面端可以作为上游老板工作台连接 Cluster；本地 SQLite 数据不会自动上传。</small></div></Section>
-  </div>
-}
-
 // 协作空间：**节点是注册节点的员工，边是员工之间的上下游，智能体挂在它服务的员工下面。**
 //
 // 拼接全在 `collaboration-layout.ts` 的纯函数里（有单测）；这里只负责取四个面、渲染，
@@ -2065,8 +2038,7 @@ function CollaborationSurface({ onClose }: { onClose: () => void }) {
   </section>
 }
 
-function OperationsSurface({ onClose }: { onClose: () => void }) {
-  const [area, setArea] = useState<'projects' | 'delivery' | 'progress' | 'operations' | 'token-usage' | 'users' | 'departments' | 'roles' | 'permissions' | 'recovery' | 'storage'>(() => pendingDelegationGoal ? 'delivery' : 'projects')
+function OperationsSurface({ area, setArea }: { area: OperationsArea; setArea: (area: OperationsArea) => void }) {
   const [data, setData] = useState<Overview>(emptyOverview)
   const [organizationAllowed, setOrganizationAllowed] = useState(false)
   const [platformAdmin, setPlatformAdmin] = useState(false)
@@ -2136,11 +2108,12 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
   // 所以这里直接写 DOM 值——把它改成受控组件会牵动整个表单的取值路径，而收益只是这一处。
   // 取用即清空（见 takeDelegationGoal），所以手动进「项目」不会被上一次的目标污染。
   useEffect(() => {
+    if (area !== 'delivery') return
     const goal = takeDelegationGoal()
     if (goal === '') return
     const field = delegationFormRef.current?.elements.namedItem('intent')
     if (field instanceof HTMLTextAreaElement) field.value = goal
-  }, [])
+  }, [area])
 
   useEffect(() => {
     let active = true
@@ -2164,24 +2137,28 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
     const generation = ++overviewEpoch.current
     setLoading(true)
     try {
-      const [overview, governed, taskData, directoryData, presetResult, workerResult] = await Promise.all([
-        api<Overview>('/lumo/api/overview'), api<GovernanceSnapshot>('/lumo/api/governance'),
-        optionalApi<{ tasks?: DelegatedTask[] }>('/lumo/api/delegations', { tasks: [] }),
-        optionalApi<{ users?: DirectoryUser[] }>('/lumo/api/users', { users: [] }),
-			api<{ agent_presets?: AgentPreset[] }>('/lumo/api/agent-presets')
-				.then(result => ({ presets: result.agent_presets ?? [], error: '' }))
-				.catch(reason => ({ presets: [] as AgentPreset[], error: reason instanceof Error ? reason.message : String(reason) })),
-			api<{ workers?: WorkerProfile[] }>('/lumo/api/workers')
-				.then(result => ({ workers: (result.workers ?? []).filter(worker => worker.worker_kind === 'agent'), error: '' }))
-				.catch(reason => ({ workers: [] as WorkerProfile[], error: reason instanceof Error ? reason.message : String(reason) })),
+      const overview = await api<Overview>('/lumo/api/overview')
+      const server = overview.deployment.mode !== 'local'
+      const delivery = server && area === 'delivery'
+      const [governed, taskData, directoryData, presetResult, workerResult] = await Promise.all([
+        server && (delivery || area === 'permissions') ? api<GovernanceSnapshot>('/lumo/api/governance') : null,
+        delivery ? optionalApi<{ tasks?: DelegatedTask[] }>('/lumo/api/delegations', { tasks: [] }) : { data: { tasks: [] }, error: '' },
+        delivery ? optionalApi<{ users?: DirectoryUser[] }>('/lumo/api/users', { users: [] }) : { data: { users: [] }, error: '' },
+        delivery ? api<{ agent_presets?: AgentPreset[] }>('/lumo/api/agent-presets')
+          .then(result => ({ presets: result.agent_presets ?? [], error: '' }))
+          .catch(reason => ({ presets: [] as AgentPreset[], error: reason instanceof Error ? reason.message : String(reason) })) : { presets: [], error: '' },
+        delivery ? api<{ workers?: WorkerProfile[] }>('/lumo/api/workers')
+          .then(result => ({ workers: (result.workers ?? []).filter(worker => worker.worker_kind === 'agent'), error: '' }))
+          .catch(reason => ({ workers: [] as WorkerProfile[], error: reason instanceof Error ? reason.message : String(reason) })) : { workers: [], error: '' },
       ])
 		if (generation !== overviewEpoch.current) return
 		setData(overview); setGovernance(governed); setDelegations(taskData.data.tasks ?? []); setDirectory(directoryData.data.users ?? []); setDelegationError(taskData.error ?? ''); setDirectoryError(directoryData.error ?? ''); setAgentPresets(presetResult.presets); setAgentPresetError(presetResult.error); setAgentWorkers(workerResult.workers); setAgentRuntimeError(workerResult.error)
     }
     catch (reason) { if (generation === overviewEpoch.current) setNotice(reason instanceof Error ? reason.message : String(reason)) }
     finally { if (generation === overviewEpoch.current) setLoading(false) }
-  }, [])
-  useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 30_000); return () => { window.clearInterval(timer); overviewEpoch.current++; projectDetailEpoch.current++; taskDetailEpoch.current++; evidenceEpoch.current++ } }, [load])
+  }, [area])
+  useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 30_000); return () => { window.clearInterval(timer); overviewEpoch.current++ } }, [load])
+  useEffect(() => () => { projectDetailEpoch.current++; taskDetailEpoch.current++; evidenceEpoch.current++ }, [])
   useEffect(() => { if (!directory.some(user => user.id === profileUserID)) setProfileUserID(directory[0]?.id ?? '') }, [directory, profileUserID])
   useEffect(() => {
     const generation = ++profileReadEpoch.current
@@ -2393,7 +2370,8 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
     const navigate = () => {
       const target = takeOperationsTarget()
       if (!target) return
-      if (target.kind === 'task') { setArea('delivery'); void openTaskByID(target.id) }
+      if (target.kind === 'area') { setArea(target.area) }
+      else if (target.kind === 'task') { setArea('delivery'); void openTaskByID(target.id) }
       else { setArea('projects'); void openProject({ id: target.id }) }
     }
     navigate()
@@ -2409,29 +2387,9 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
 		if (worker.runtime_status === 'not_reported') return '执行态未上报'
 		return `执行态 ${worker.runtime_status ?? worker.status} · ${worker.active_tasks}/${worker.max_concurrency} 运行中`
 	}
-  const configured = data.plugins
-  if (data.deployment.mode === 'local') {
-    return <div className="lumo-surface lumo-workspace-page lumo-project-surface"><WorkspaceHero surface="operations" onClose={onClose} statement="让每个项目都有清楚的边界与下一步。" description="从项目资产到流程执行，在一个工作区里确认状态、推进任务并追踪结果。"><div className="lumo-workspace-status"><span>local workspace</span><b><i aria-hidden="true" />{loading ? '正在同步' : '本地运行'}</b><dl><div><dt>项目</dt><dd>{data.projects.length}</dd></div><div><dt>插件</dt><dd>{configured.length}</dd></div><div><dt>存储</dt><dd>本机</dd></div></dl><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>刷新状态</BusyButton></div></WorkspaceHero><DeploymentBanner deployment={data.deployment} /><LocalModePanel plugins={configured} /></div>
-  }
-  return <div className="lumo-surface lumo-workspace-page lumo-project-surface">
-    <WorkspaceHero surface="operations" onClose={onClose} statement="让每个项目都有清楚的边界与下一步。" description="从项目资产到流程执行，在一个工作区里确认状态、推进任务并追踪结果。">
-      <div className={`lumo-workspace-status ${online === 0 && !loading ? 'degraded' : ''}`}><span>project control</span><b><i aria-hidden="true" />{loading ? '正在同步' : online > 0 ? '控制面已连接' : '等待控制服务'}</b><dl><div><dt>项目</dt><dd>{data.projects.length}</dd></div><div><dt>流程</dt><dd>{data.flows.length}</dd></div><div><dt>执行节点</dt><dd>{data.cluster.nodes.length}</dd></div></dl><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>重新读取</BusyButton></div>
-    </WorkspaceHero>
-    <DomainTabs label="项目与运营分区" value={area} onChange={setArea} items={[
-      { id: 'projects', title: '项目资产', description: '项目、流程与项目详情' },
-      { id: 'delivery', title: '协作执行', description: '委派、专家与运行证据' },
-      ...(data.deployment.clusterReady ? [{ id: 'progress' as const, title: '团队进度', description: '员工、智能体、阻塞与交接' }] : []),
-      { id: 'operations', title: '集群与服务', description: '节点、调度与服务健康' },
-      ...(platformAdmin ? [{ id: 'token-usage' as const, title: 'Token 用量', description: '平台模型 token 与费用统计' }] : []),
-      ...(organizationAllowed && data.deployment.clusterReady ? [
-        { id: 'users' as const, title: '用户管理', description: '用户资料、登录方式与角色分配' },
-        { id: 'departments' as const, title: '部门管理', description: '部门目录、上下级关系与负责人' },
-        { id: 'roles' as const, title: '角色管理', description: '角色目录、启停与授权维护' },
-        { id: 'recovery' as const, title: '恢复审批', description: '双人审批、恢复执行与回执核对' },
-        { id: 'storage' as const, title: '存储配额', description: '逻辑引用容量与租户、项目上限' },
-      ] : []),
-      ...(data.deployment.clusterReady ? [{ id: 'permissions' as const, title: '权限', description: '查看当前身份的有效权限和判定原因' }] : []),
-    ]} />
+  if (data.deployment.mode === 'local') return <LocalManagementPanel area={area} plugins={data.plugins} />
+  return <div className="lumo-operations-content">
+    <div className="lumo-surface-actions"><BusyButton className="lumo-secondary" busy={loading} onClick={() => void load()}>重新读取</BusyButton></div>
     {notice ? <Notice error={notice.includes('失败') || notice.includes('unavailable')} close={() => setNotice('')}>{notice}</Notice> : null}
     {area === 'progress' && data.deployment.clusterReady ? <WorkforceProgressPanel request={api} onOpen={id => { setArea('delivery'); void openTaskByID(id) }} /> : null}
     {area === 'operations' ? <>
@@ -2444,9 +2402,11 @@ function OperationsSurface({ onClose }: { onClose: () => void }) {
     <Section title="提交调度任务" meta="调度放置 · 支持能力、驻留和队列约束"><form className="lumo-placement-form" onSubmit={scheduleTask}><label><span>任务 ID</span><input name="task_id" required placeholder="例如 report-2026-001" /></label><label><span>集群 ID</span><input name="cluster_id" placeholder="cluster-a" /></label><label><span>队列</span><input name="queue" defaultValue="default" /></label><label><span>优先级</span><input name="priority" type="number" defaultValue="0" /></label><label><span>截止时间戳</span><input name="deadline_ms" type="number" placeholder="可选，Unix ms" /></label><label><span>权重</span><input name="weight" type="number" min="1" defaultValue="1" /></label><label className="wide"><span>能力要求</span><input name="requires" placeholder="gpu=1, region=cn-east" /></label><label><span>数据驻留</span><input name="residency" placeholder="cn-east" /></label><label><span>避让节点</span><input name="avoid_nodes" placeholder="node-b, node-c" /></label><BusyButton type="submit" busy={busy === 'placement'} className="lumo-primary">提交调度</BusyButton></form>{placement ? <div className="lumo-placement-result"><div><b>{placement.state ?? '等待中'}</b><span>{placement.task_id} · {placement.node_id ?? '等待节点'} · 尝试 {placement.attempt ?? 0}{placement.preemption_requested_task_id ? ` · 已向 ${placement.preemption_requested_task_id} 请求抢占，等待其终态释放名额` : ''}</span></div><small>隔离令牌 {placement.fencing_token ?? '未分配'}</small><BusyButton className="lumo-secondary lumo-small" busy={busy === 'placement-refresh'} onClick={() => void refreshPlacement()}>刷新任务状态</BusyButton></div> : null}</Section>
     </div>
     </> : null}
-    {area === 'projects' ? <>
+    {area === 'projects' ? <Section title="项目边界" meta={`${data.projects.length} 个`}><form className="lumo-inline-form" onSubmit={createProject}><label><span>新项目</span><input name="name" placeholder="项目名称" /></label><BusyButton type="submit" busy={busy === 'project'} className="lumo-primary">创建</BusyButton></form><ProjectDirectoryPanel request={api} actor={reviewActor} onOpen={id => void openProject({ id })} openingId={busy} refreshKey={data.generatedAt} /></Section> : null}
+    {area === 'flows' ? <>
+    <Section title="流程管理" meta={`${data.flows.length} 条`}><form className="lumo-flow-form" onSubmit={createFlow}><label><span>归属项目</span><select name="project" defaultValue="" aria-label="归属项目"><option value="" disabled>选择项目</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name ?? project.id}</option>)}</select></label><label><span>流程名称</span><input name="name" placeholder="流程名称" /></label><BusyButton type="submit" busy={busy === 'flow'} disabled={data.projects.length === 0} className="lumo-primary">新建</BusyButton></form><div className="lumo-compact-list">{data.flows.length ? data.flows.map(flow => <div key={flow.id}><span><b>{flow.name ?? flow.id}</b><small>{flow.status === 'unknown' || !flow.status ? '未声明状态' : flow.status} · v{flow.version ?? 1}</small></span>{flow.status === 'draft' ? <BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'submit')}>提交审核</BusyButton> : flow.status === 'submitted' ? <BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'review')}>审核通过</BusyButton> : ['published', 'targeted'].includes(flow.status ?? '') ? <span className="lumo-flow-actions"><BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'run')}>试运行</BusyButton><BusyButton busy={busy === `flow-diff-${flow.id}`} disabled={(flow.version ?? 0) < 2} className="lumo-small lumo-secondary" onClick={() => void compareFlowVersions(flow)}>版本差异</BusyButton><BusyButton busy={busy === flow.id} className="lumo-small lumo-danger" onClick={() => void triggerFlow(flow, 'deprecate')}>停用</BusyButton></span> : flow.status === 'deprecated' ? <em>已停用</em> : <em>治理中</em>}</div>) : <Empty>还没有流程。流程从草稿开始，提交后进入治理审核。</Empty>}</div>{flowVersionDiff ? <div className="lumo-flow-version-diff"><header><span><b>流程版本对比</b><small>{flowVersionDiff.flow.name ?? flowVersionDiff.flow.id} · v{flowVersionDiff.previous.version} → v{flowVersionDiff.current.version} · 审核人 {flowVersionDiff.previous.reviewer || '未记录'} / {flowVersionDiff.current.reviewer || '未记录'}</small></span><button type="button" className="lumo-quiet" onClick={() => setFlowVersionDiff(null)} aria-label="关闭版本对比">×</button></header><ul>{flowVersionChanges(flowVersionDiff.previous.definition, flowVersionDiff.current.definition).map(change => <li key={change}>{change}</li>)}</ul><p>对比的是已发布不可变快照；草稿编辑不会改变此结果。</p></div> : null}</Section>
     {data.deployment.clusterReady ? <FlowManagementPanel request={api} projects={data.projects} refresh={load} /> : null}
-    <div className="lumo-split"><Section title="项目边界" meta={`${data.projects.length} 个`}><form className="lumo-inline-form" onSubmit={createProject}><label><span>新项目</span><input name="name" placeholder="项目名称" /></label><BusyButton type="submit" busy={busy === 'project'} className="lumo-primary">创建</BusyButton></form><ProjectDirectoryPanel request={api} actor={reviewActor} onOpen={id => void openProject({ id })} openingId={busy} refreshKey={data.generatedAt} /></Section><Section title="流程管理" meta={`${data.flows.length} 条`}><form className="lumo-flow-form" onSubmit={createFlow}><label><span>归属项目</span><select name="project" defaultValue="" aria-label="归属项目"><option value="" disabled>选择项目</option>{data.projects.map(project => <option key={project.id} value={project.id}>{project.name ?? project.id}</option>)}</select></label><label><span>流程名称</span><input name="name" placeholder="流程名称" /></label><BusyButton type="submit" busy={busy === 'flow'} disabled={data.projects.length === 0} className="lumo-primary">新建</BusyButton></form><div className="lumo-compact-list">{data.flows.length ? data.flows.map(flow => <div key={flow.id}><span><b>{flow.name ?? flow.id}</b><small>{flow.status === 'unknown' || !flow.status ? '未声明状态' : flow.status} · v{flow.version ?? 1}</small></span>{flow.status === 'draft' ? <BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'submit')}>提交审核</BusyButton> : flow.status === 'submitted' ? <BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'review')}>审核通过</BusyButton> : ['published', 'targeted'].includes(flow.status ?? '') ? <span className="lumo-flow-actions"><BusyButton busy={busy === flow.id} className="lumo-small" onClick={() => void triggerFlow(flow, 'run')}>试运行</BusyButton><BusyButton busy={busy === `flow-diff-${flow.id}`} disabled={(flow.version ?? 0) < 2} className="lumo-small lumo-secondary" onClick={() => void compareFlowVersions(flow)}>版本差异</BusyButton><BusyButton busy={busy === flow.id} className="lumo-small lumo-danger" onClick={() => void triggerFlow(flow, 'deprecate')}>停用</BusyButton></span> : flow.status === 'deprecated' ? <em>已停用</em> : <em>治理中</em>}</div>) : <Empty>还没有流程。流程从草稿开始，提交后进入治理审核。</Empty>}</div>{flowVersionDiff ? <div className="lumo-flow-version-diff"><header><span><b>流程版本对比</b><small>{flowVersionDiff.flow.name ?? flowVersionDiff.flow.id} · v{flowVersionDiff.previous.version} → v{flowVersionDiff.current.version} · 审核人 {flowVersionDiff.previous.reviewer || '未记录'} / {flowVersionDiff.current.reviewer || '未记录'}</small></span><button type="button" className="lumo-quiet" onClick={() => setFlowVersionDiff(null)} aria-label="关闭版本对比">×</button></header><ul>{flowVersionChanges(flowVersionDiff.previous.definition, flowVersionDiff.current.definition).map(change => <li key={change}>{change}</li>)}</ul><p>对比的是已发布不可变快照；草稿编辑不会改变此结果。</p></div> : null}</Section></div>
+    <FlowRunsPanel flows={data.flows} />
     </> : null}
     {area === 'delivery' ? <>
     {data.deployment.clusterReady ? <AgentPresetEditor request={api} presets={agentPresets} refresh={load} /> : null}
@@ -2918,29 +2878,6 @@ function useActiveThemeIdentity(): { surface: string; emphasis: string; effects:
   return { surface: identity.surface, emphasis: identity.emphasis, effects: identity.effects }
 }
 
-function WorkbenchRail({ surface, available, select }: { surface: Surface; available: Surface[]; select: (surface: Surface) => void }) {
-  return <aside className="lumo-workbench-rail" aria-label="工作台导航">
-    <div className="lumo-rail-brand"><span className="lumo-brand-mark" aria-hidden="true">L</span><div><b>Lumo</b><small>WORKSPACE</small></div></div>
-    <div className="lumo-rail-menu-head"><span>工作领域</span><kbd>⌘K</kbd></div>
-    <nav aria-label="工作领域">
-      <div className="lumo-nav-group">
-        {available.map(item => <button
-          type="button"
-          key={item}
-          className={surface === item ? 'active' : ''}
-          title={surfaceMeta[item].label}
-          aria-label={surfaceMeta[item].label}
-          aria-current={surface === item ? 'page' : undefined}
-          onClick={() => select(item)}
-        >
-          <Glyph surface={item} />
-          <span>{surfaceMeta[item].label}</span>
-        </button>)}
-      </div>
-    </nav>
-    <div className="lumo-rail-footer"><span><i className="lumo-live-dot" />Lumo 工作台</span></div>
-  </aside>
-}
 
 function Workbench({ surface, close, select, commandOpen, toggleCommand }: { surface: Surface; close: () => void; select: (surface: Surface) => void; commandOpen: boolean; toggleCommand: () => void }) {
   const ref = useRef<HTMLElement>(null)
@@ -2953,7 +2890,7 @@ function Workbench({ surface, close, select, commandOpen, toggleCommand }: { sur
       .catch(() => setLocalMode(false))
   }, [])
   const primaryNavigation = navigationSurfaces(localMode)
-  const available = availableSurfaces(localMode)
+  const available = availableSurfaces(localMode).filter(item => item !== 'operations')
   useFocusTrap(ref, !commandOpen)
   // 各工作区共用同一只滚动容器。若不在切换时归零，从长页面（尤其协作空间、项目）
   // 进入另一页会直接落到页面中段，连标题、事实摘要和返回入口都看不到。
@@ -2963,7 +2900,7 @@ function Workbench({ surface, close, select, commandOpen, toggleCommand }: { sur
   }, [surface])
   return <div className="lumo-backdrop"><section ref={ref} tabIndex={-1} className="lumo-workbench" data-lumo-surface={identity.surface} data-lumo-emphasis={identity.emphasis} data-lumo-effects={identity.effects} data-lumo-view={surface} role="dialog" aria-modal="true" aria-label={`${meta.label}工作台`}>
     <WorkbenchRail surface={surface} available={primaryNavigation} select={select} />
-    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>Lumo 工作台</span><i>›</i><b>{meta.label}</b><small>{meta.eyebrow}</small></div></header><main>{surface === 'computer' ? <ComputerUsePanel onClose={close} /> : surface === 'collaboration' ? <CollaborationSurface onClose={close} /> : surface === 'knowledge' ? <KnowledgeSurface onClose={close} /> : surface === 'skills' ? <SkillsSurface onClose={close} /> : surface === 'connectors' ? <ConnectorsSurface onClose={close} /> : surface === 'operations' ? <OperationsSurface onClose={close} /> : surface === 'design' ? <OpenDesignSurface onConversationStart={close} /> : surface === 'presentation' ? <PresentationSurface onConversationStart={close} /> : surface === 'market' ? <MarketSurface onClose={close} /> : surface === 'skillhub' ? <SkillHubSurface onClose={close} /> : <AccountSurface onClose={close} />}</main><footer className="lumo-workbench-footer"><span>在对话中输入 /design 或 /ppt，开始创作</span><span>Esc 返回对话</span></footer></div>
+    <div className="lumo-workbench-main"><header className="lumo-workbench-header"><div className="lumo-header-location"><span>Lumo 工作台</span><i>›</i><b>{meta.label}</b><small>{meta.eyebrow}</small></div></header><main>{surface === 'agents' ? <RoleRoomSurface onClose={close} /> : surface === 'computer' ? <ComputerUsePanel onClose={close} /> : surface === 'collaboration' ? <CollaborationSurface onClose={close} /> : surface === 'knowledge' ? <KnowledgeSurface onClose={close} /> : surface === 'skills' ? <SkillsSurface onClose={close} /> : surface === 'connectors' ? <ConnectorsSurface onClose={close} /> : surface === 'design' ? <OpenDesignSurface onConversationStart={close} /> : surface === 'presentation' ? <PresentationSurface onConversationStart={close} /> : surface === 'market' || surface === 'operations' ? <MarketSurface onClose={close} initialArea={surface === 'operations' ? (pendingDelegationGoal ? 'delivery' : 'projects') : undefined} renderOperations={(area, setArea) => <OperationsSurface area={area} setArea={setArea} />} renderSurface={target => target === 'skills' ? <SkillsSurface onClose={close} /> : target === 'connectors' ? <ConnectorsSurface onClose={close} /> : target === 'skillhub' ? <SkillHubSurface onClose={close} /> : target === 'agents' ? <RoleRoomSurface onClose={close} /> : <AccountSurface onClose={close} />} /> : surface === 'skillhub' ? <SkillHubSurface onClose={close} /> : <AccountSurface onClose={close} />}</main><footer className="lumo-workbench-footer"><span>在对话中输入 /design 或 /ppt，开始创作</span><span>Esc 返回对话</span></footer></div>
     <CommandPalette open={commandOpen} surface={surface} available={available} select={select} close={toggleCommand} />
   </section></div>
 }
@@ -3087,6 +3024,12 @@ export function apply(ctx: ClientContext): void {
   roots.add(root)
   ctx.effect(() => () => { roots.delete(root) }, 'lumo-ui: singleton client mount')
   if (typeof window !== 'undefined') ctx.effect(() => installAnchoredOverlayFallback(window), 'lumo-ui: CSS anchor compatibility')
+  ctx.inject(['connection'], scope => {
+    scope.effect(() => installEnvironmentConnection(scope.get('connection') as unknown as EnvironmentConnection), 'lumo-ui: native connection state')
+  })
+  ctx.inject(['workspaces', 'uiWorkspace'], projectCtx => {
+    projectCtx.effect(() => installAgentProjectServices({ workspaces: projectCtx.get('workspaces'), uiWorkspace: projectCtx.get('uiWorkspace') } as AgentProjectServices), 'lumo-ui: agent project selection')
+  })
   if (typeof window !== 'undefined' && (window as Window & { __LUMO_DESKTOP__?: boolean }).__LUMO_DESKTOP__ === true) {
     ctx.inject(['sessions', 'workspaces', 'conversation', 'uiWorkspace', 'layout'], (desktopCtx) => {
       const services = Object.fromEntries(['sessions', 'workspaces', 'conversation', 'uiWorkspace', 'layout'].map(name => [name, desktopCtx.get(name)]))
@@ -3159,6 +3102,8 @@ export function apply(ctx: ClientContext): void {
     { name: 'sidebar.footer.action', id: 'lumo-identity', order: 1000, label: '登录身份' },
     SidebarIdentityChip,
   ))
+  ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'lumo-management', label: '管理工作台', order: 80 }, SettingsManagement))
+  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'lumo-environment', order: 990, label: '环境与连接' }, EnvironmentEntry))
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'lumo-platform', order: 100 }, LumoOverlay))
 
   ctx.slots.inject('conversation.input.dock', () => ctx.slots.register(

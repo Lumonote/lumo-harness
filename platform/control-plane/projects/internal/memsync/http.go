@@ -20,6 +20,7 @@ type Handler struct {
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
+	mux.HandleFunc("GET /v1/memory-sync/identity", h.identity)
 	mux.HandleFunc("GET /v1/memory-sync/changes", h.changes)
 	mux.HandleFunc("POST /v1/memory-sync/push", h.push)
 }
@@ -116,4 +117,15 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	write(w, http.StatusOK, map[string]any{"results": res})
+}
+
+// identity returns the principal verified by the session gateway. The entire
+// projects mux is protected by the existing control-plane service token.
+func (h *Handler) identity(w http.ResponseWriter, r *http.Request) {
+	realm, user, ok := ident(w, r)
+	if !ok {
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	write(w, http.StatusOK, map[string]string{"realm": realm, "userId": user})
 }

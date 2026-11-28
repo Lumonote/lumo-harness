@@ -473,6 +473,8 @@ type message struct {
 	Arch          string          `json:"arch,omitempty"`
 }
 type options struct {
+	statusFile, controlFile                                                                                  string
+	reporter                                                                                                 *localStatusReporter
 	computerHostFile                                                                                         string
 	gateway, realm, nodeID, stateDir, installDir, caFile, codeFile, clientVersion, allowed, taskRunnerSocket string
 	trustFile, shapeJSON                                                                                     string
@@ -487,7 +489,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (runErr error) {
 	var o options
 	flag.StringVar(&o.gateway, "gateway", "", "HTTPS device gateway origin")
 	flag.StringVar(&o.realm, "realm", "", "registered realm")
@@ -502,6 +504,8 @@ func run() error {
 	flag.StringVar(&o.allowed, "allow-runtime-digests", "", "explicit local consent: comma-separated exact manifest digests permitted to execute")
 	flag.StringVar(&o.taskRunnerSocket, "task-runner-socket", "", "optional absolute mode-0600 Unix socket for the provisioned task runner")
 	flag.StringVar(&o.computerHostFile, "computer-host-file", "", "optional private local computer-use Host discovery file; requires a local human decision for each request")
+	flag.StringVar(&o.statusFile, "status-file", "", "optional private status JSON inside state-dir; contains no identity secrets")
+	flag.StringVar(&o.controlFile, "control-file", "", "optional private local pause control JSON inside state-dir")
 	flag.DurationVar(&o.maxRuntime, "max-runtime", time.Minute, "maximum lifetime of a locally approved process (up to 5m)")
 	flag.Parse()
 	if o.computerHostFile != "" && !filepath.IsAbs(o.computerHostFile) {
@@ -549,9 +553,28 @@ func run() error {
 	if err = os.Chmod(o.stateDir, 0o700); err != nil {
 		return err
 	}
+	if err = validateLocalFiles(o); err != nil {
+		return err
+	}
+	o.reporter = newLocalStatusReporter(o)
+	o.reporter.update(func(s *localAgentStatus) { s.State = "enrolling" })
+	defer func() {
+		o.reporter.update(func(s *localAgentStatus) {
+			s.Connected = false
+			s.State = "stopped"
+			if runErr != nil {
+				s.State = "failed"
+				s.Error = "设备启动或身份更新失败，请检查网关、激活码与信任配置"
+			}
+		})
+	}()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	id, err := loadIdentity(ctx, o)
+	// The desktop-created activation file is one-use input, never a stored credential.
+	if o.controlFile != "" && o.codeFile != "" && filepath.Dir(filepath.Clean(o.codeFile)) == filepath.Clean(o.stateDir) {
+		_ = os.Remove(o.codeFile)
+	}
 	if err != nil {
 		return err
 	}
@@ -562,7 +585,9 @@ func run() error {
 				return err
 			}
 		}
+		o.reporter.update(func(s *localAgentStatus) { s.State = "connecting"; s.CertificateExpires = id.ExpiresAt })
 		err = connect(ctx, o, id)
+		o.reporter.update(func(s *localAgentStatus) { s.Connected = false; s.State = "reconnecting" })
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -777,6 +802,11 @@ func connect(parent context.Context, o options, id identity) error {
 		return errors.New("desktop-agent: device connection failed")
 	}
 	defer ws.Close()
+	o.reporter.update(func(s *localAgentStatus) {
+		s.State = "connected"
+		s.Connected = true
+		s.CertificateExpires = id.ExpiresAt
+	})
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	ws.SetReadLimit(4 << 20)
@@ -804,6 +834,12 @@ func connect(parent context.Context, o options, id identity) error {
 	snapshot := message{Type: "heartbeat", ClientVersion: o.clientVersion, Error: "reconcile_required"}
 	write := func(value message) error {
 		if value.Type == "heartbeat" {
+			paused := locallyPaused(o)
+			if paused {
+				value.Revision = 0
+				value.Error = "reconcile_required"
+			}
+			o.reporter.update(func(s *localAgentStatus) { s.Paused = paused })
 			value.OS, value.Arch = runtime.GOOS, runtime.GOARCH
 			if value.OS == "darwin" {
 				value.OS = "macos"
@@ -851,6 +887,7 @@ func connect(parent context.Context, o options, id identity) error {
 			_ = ws.SetReadDeadline(time.Now().Add(30 * time.Second))
 			// Lease messages are consumed immediately even during a long download.
 			if next.Type == "status" {
+				o.reporter.update(func(s *localAgentStatus) { s.GatewayState = next.State; s.LastGatewayAt = time.Now().UTC() })
 				continue
 			}
 			select {
@@ -995,6 +1032,14 @@ func connect(parent context.Context, o options, id identity) error {
 				var acceptedContext context.Context
 				accepted := false
 				if cmd.ExpiresAt.After(time.Now()) && cmd.Revision == revision && desired != nil {
+					// Pause leaves accepted work and cancellation alive, but refuses new execution.
+					if locallyPaused(o) && (cmd.Action == "execute_task" || cmd.Action == "start" || cmd.Action == "computer_use_request") {
+						result.Result = json.RawMessage(`{"error":"paused_locally"}`)
+						if write(result) != nil {
+							return errors.New("desktop-agent: result delivery failed")
+						}
+						continue
+					}
 					switch cmd.Action {
 					case "computer_use_request", "computer_use_revoke":
 						if deliverComputerCommand(ctx, o, cmd) == nil {
@@ -1037,6 +1082,7 @@ func connect(parent context.Context, o options, id identity) error {
 						taskCtx, taskCancel := context.WithCancel(ctx)
 						inflight.begin(task.RunID, taskCancel)
 						acceptedTask, acceptedContext, accepted = task, taskCtx, true
+						o.reporter.update(func(s *localAgentStatus) { s.ActiveTasks++ })
 						result.State = "completed"
 						result.Result = json.RawMessage(`{"accepted":true}`)
 					case "cancel_task":
@@ -1122,6 +1168,11 @@ func connect(parent context.Context, o options, id identity) error {
 				// must not run inline, or a long task would stall the heartbeat.
 				if accepted {
 					go func(commandID string, task taskEnvelope, taskCtx context.Context) {
+						defer o.reporter.update(func(s *localAgentStatus) {
+							if s.ActiveTasks > 0 {
+								s.ActiveTasks--
+							}
+						})
 						defer func() { <-taskSlot }()
 						// Deregisters before the slot is released, so a cancel that
 						// arrives after the run ends finds nothing rather than

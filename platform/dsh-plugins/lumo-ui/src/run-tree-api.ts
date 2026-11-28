@@ -115,7 +115,8 @@ export async function handleRunTreeRoute(req: IncomingMessage, res: ServerRespon
     res.write(`event: hello\ndata: ${JSON.stringify({ seq: store.snapshot().seq })}\n\n`)
     const off = store.subscribe(delta => { res.write(`event: delta\ndata: ${JSON.stringify(delta)}\n\n`) })
     const ping = setInterval(() => res.write(': ping\n\n'), 25_000)
-    req.on('close', () => { off(); clearInterval(ping); res.end() })
+    ping.unref?.()
+    res.once('close', () => { off(); clearInterval(ping) })
     return true
   }
   if (req.method === 'POST' && (pathname === '/lumo/api/run-tree/links' || pathname === '/lumo/api/run-tree/asks')) {

@@ -1,0 +1,2 @@
+.lumo-native-button { font-family: inherit; }
+.lumo-native-button:focus-visible { outline: 2px solid var(--dsw-alias-border-focus,var(--lumo-mint)); outline-offset: 2px; }

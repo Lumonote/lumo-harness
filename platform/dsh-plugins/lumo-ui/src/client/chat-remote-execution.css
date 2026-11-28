@@ -1,0 +1,18 @@
+.lumo-chat-remote { display: grid; gap: 12px; min-width: 0; font-size: 12px; }
+.lumo-chat-remote form, .lumo-chat-remote label, .lumo-chat-remote-status { display: grid; gap: 8px; min-width: 0; }
+.lumo-chat-remote form { gap: 12px; }
+.lumo-chat-remote :is(select,textarea) { box-sizing: border-box; width: 100%; min-width: 0; background: var(--lumo-panel); color: inherit; border: 1px solid var(--lumo-line); border-radius: 7px; font: inherit; padding: 7px 8px; }
+.lumo-chat-remote textarea { resize: vertical; min-height: 66px; max-height: 180px; }
+.lumo-chat-remote small { color: var(--lumo-muted); overflow-wrap: anywhere; }
+.lumo-chat-remote p { margin: 0; overflow-wrap: anywhere; }
+.lumo-chat-remote [role="alert"] { color: var(--lumo-danger); }
+.lumo-chat-remote-toolbar, .lumo-chat-remote-controls, .lumo-chat-remote-status header { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.lumo-chat-remote-toolbar > small { flex: 1; }
+.lumo-chat-remote-history, .lumo-chat-remote-status { border-top: 1px solid var(--lumo-line); padding-top: 12px; }
+.lumo-chat-remote-status dl { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 6px 10px; margin: 0; }
+.lumo-chat-remote-status dt { color: var(--lumo-muted); }
+.lumo-chat-remote-status dd { margin: 0; overflow-wrap: anywhere; }
+.lumo-chat-remote-status pre { max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.lumo-chat-remote-status summary { cursor: pointer; }
+.lumo-chat-remote-status ul { padding-left: 18px; margin: 0; }
+.lumo-chat-remote-pending { display: grid; gap: 8px; border: 1px solid var(--lumo-line); border-radius: 8px; padding: 10px; }

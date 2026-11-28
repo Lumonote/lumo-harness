@@ -37,11 +37,11 @@ function cliEngine(id: string, label: string, bin: string, args: string[]): Engi
 export const BUILTIN_ENGINES: readonly EngineDefinition[] = [
   {
     id: 'claude-code', label: 'Claude Code', protocol: 'acp', provider: 'claude-code',
-    // Zed 维护的官方 ACP 适配器；全局安装时是 claude-code-acp，否则用 npx 拉起
+    // ACP 维护的适配器优先；兼容旧命令，按需安装固定到联调验证版本。
     commands: [
-      { bin: 'claude-code-acp', args: [] },
       { bin: 'claude-agent-acp', args: [] },
-      { bin: 'npx', args: ['-y', '@zed-industries/claude-code-acp'] },
+      { bin: 'claude-code-acp', args: [] },
+      { bin: 'npx', args: ['-y', '@agentclientprotocol/claude-agent-acp@0.113.0'] },
     ],
     authHint: '需要先在终端执行 claude 完成登录，或设置 ANTHROPIC_API_KEY',
   },
@@ -79,6 +79,7 @@ export const ENGINE_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/u
 export interface ResolvedEngine { definition: EngineDefinition; bin: string; args: string[] }
 
 export interface EngineProbe {
+  launchKind?: 'installed' | 'on-demand'
   id: string
   label: string
   protocol: EngineProtocol
@@ -171,7 +172,7 @@ export class EngineRegistry {
   probeStatic(): EngineProbe[] {
     return this.list().map(d => {
       const r = this.resolve(d.id)
-      return { id: d.id, label: d.label, protocol: d.protocol, available: !('error' in r), ...('error' in r ? { reason: r.error } : {}), ...(d.authHint ? { authHint: d.authHint } : {}) }
+      return { id: d.id, label: d.label, protocol: d.protocol, available: !('error' in r), ...(!('error' in r) ? { launchKind: r.args.includes('-y') ? 'on-demand' as const : 'installed' as const } : {}), ...('error' in r ? { reason: r.error } : {}), ...(d.authHint ? { authHint: d.authHint } : {}) }
     })
   }
 }

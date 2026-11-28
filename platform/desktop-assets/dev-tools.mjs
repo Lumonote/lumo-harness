@@ -456,5 +456,5 @@ export function mountDevTools({ doc, invoke, listen, getWorkspace }) {
     const text = $('dev-note').value.trim()
     if (text) void write('pet_dev_note', { text }, 'dev-note', '补记已保存。')
   })
-  return { update, close, isOpen: () => !panel.hidden }
+  return { update, close, refresh: () => { if (!panel.hidden) void load() }, isOpen: () => !panel.hidden }
 }

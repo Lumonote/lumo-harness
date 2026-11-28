@@ -84,7 +84,7 @@ describe('project and employee read coordination', () => {
     await mount((path, init) => path === '/lumo/api/users/u-a/tags' && init?.method !== 'PUT'
       ? ++reads === 1 ? json({ message: '标签服务暂不可用' }, 503) : json({ tags: ['合同'] })
       : undefined)
-    fireEvent.click(screen.getByRole('button', { name: '协作执行委派、专家与运行证据' }))
+    fireEvent.click(screen.getByRole('button', { name: '协作执行' }))
     await screen.findByText('标签服务暂不可用')
     expect((screen.getByRole('textbox', { name: '标签' }) as HTMLInputElement).disabled).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: '重新读取标签' }))
@@ -96,8 +96,8 @@ describe('project and employee read coordination', () => {
   it('treats a null tag list from Go as an empty profile that can receive its first tag', async () => {
     const fetch = await mount((path, init) => path === '/lumo/api/users/u-a/tags'
       ? json({ tags: init?.method === 'PUT' ? ['合同'] : null }) : undefined)
-    fireEvent.click(screen.getByRole('button', { name: '协作执行委派、专家与运行证据' }))
-    const input = screen.getByRole('textbox', { name: '标签' }) as HTMLInputElement
+    fireEvent.click(screen.getByRole('button', { name: '协作执行' }))
+    const input = await screen.findByRole('textbox', { name: '标签' }) as HTMLInputElement
     await waitFor(() => expect(input.disabled).toBe(false))
     expect(input.value).toBe('')
     fireEvent.change(input, { target: { value: '合同' } })
@@ -115,8 +115,8 @@ describe('project and employee read coordination', () => {
       if (path === '/lumo/api/users/u-b/tags') return init?.method === 'PUT' ? currentWrite.promise : json({ tags: ['B 原标签'] })
       return undefined
     })
-    fireEvent.click(screen.getByRole('button', { name: '协作执行委派、专家与运行证据' }))
-    const input = screen.getByRole('textbox', { name: '标签' }) as HTMLInputElement
+    fireEvent.click(screen.getByRole('button', { name: '协作执行' }))
+    const input = await screen.findByRole('textbox', { name: '标签' }) as HTMLInputElement
     await waitFor(() => expect(input.value).toBe('A 原标签'))
     fireEvent.change(input, { target: { value: 'A 新标签' } })
     fireEvent.click(screen.getByRole('button', { name: '保存标签' }))

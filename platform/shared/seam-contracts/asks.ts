@@ -24,7 +24,11 @@ export interface AskSource {
   operation?: string
 }
 
-export interface AskOption { id: string; label: string }
+export interface AskOption {
+  id: string; label: string
+  /** ACP 原生授权范围，仅用于展示；回答仍提交不变的选项 ID。 */
+  permissionKind?: 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always'
+}
 
 export interface AskAnswer {
   /** approval: 'approve' | 'reject'；choice: 选项 id；question: 自由文本 */

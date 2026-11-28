@@ -16,7 +16,7 @@
 use super::device_actions::{self as da, CallRecord, CallState, Caller, Decision, Ledger, Permission, Switches};
 use super::device_exec;
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -31,6 +31,7 @@ struct State {
     ledger: Mutex<Ledger>,
     /// 同一时刻只弹一个确认框，避免叠窗诱导误点
     confirm_lock: Mutex<()>,
+    connections: Arc<Mutex<super::desktop_connections::Connections>>,
 }
 
 fn now() -> u64 {
@@ -40,7 +41,7 @@ fn now() -> u64 {
 static ENDPOINT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
 /// 启动一次（重复调用返回同一端点文件）。失败不影响桌面其他功能，返回错误由调用方记日志。
-pub fn start(data_dir: &Path, state_dir: &Path) -> Result<PathBuf, String> {
+pub fn start(data_dir: &Path, state_dir: &Path, agent_binary: Option<PathBuf>) -> Result<PathBuf, String> {
     ENDPOINT
         .get_or_init(|| {
             let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("设备动作端口绑定失败：{e}"))?;
@@ -48,7 +49,8 @@ pub fn start(data_dir: &Path, state_dir: &Path) -> Result<PathBuf, String> {
             let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
             let file = state_dir.join("device-actions.json");
             write_endpoint(&file, &json!({ "url": format!("http://127.0.0.1:{port}"), "token": token, "pid": std::process::id() }))?;
-            let state = Arc::new(State { token, data_dir: data_dir.to_path_buf(), switches: Switches::from_env(), ledger: Mutex::new(Ledger::default()), confirm_lock: Mutex::new(()) });
+            let connections = super::desktop_connections::service(data_dir, agent_binary);
+            let state = Arc::new(State { token, data_dir: data_dir.to_path_buf(), switches: Switches::from_env(), ledger: Mutex::new(Ledger::default()), confirm_lock: Mutex::new(()), connections });
             std::thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
                     let state = state.clone();
@@ -149,6 +151,17 @@ fn handle(mut stream: TcpStream, state: &State) -> std::io::Result<()> {
 }
 
 fn route(state: &State, method: &str, path: &str, body: &Value) -> (u16, Value) {
+    if path == "/v1/environment/servers" {
+        let out = match method { "GET" => super::server_book::read(&state.data_dir), "POST" => super::server_book::update(&state.data_dir,body), _ => return (405,json!({"error":"method_not_allowed"})) };
+        return match out { Ok(items) => (200,json!({"servers":items})),Err(e)=>(400,json!({"error":e})) };
+    }
+    if path == "/v1/environment/device" || path.starts_with("/v1/environment/device/") {
+        let Ok(mut connections) = state.connections.lock() else {return (503,json!({"error":"设备管理暂不可用"}));};
+        let out = if method == "GET" && path == "/v1/environment/device" { connections.snapshot() }
+            else if method == "POST" { connections.action(path.trim_start_matches("/v1/environment/device/"),body,|detail| { let _guard=state.confirm_lock.lock().map_err(|_|"本机确认暂不可用")?; device_exec::confirm("Lumo 本机设备接入",detail) }) }
+            else {return (405,json!({"error":"method_not_allowed"}));};
+        return match out { Ok(out)=>(200,out),Err(e)=>(400,json!({"error":e})) };
+    }
     match (method, path) {
         ("GET", "/v1/device-actions") => (200, da::catalog_json(&state.switches, device_exec::granted)),
         ("GET", "/v1/device-actions/calls") => (200, json!({ "calls": state.ledger.lock().map(|l| l.list()).unwrap_or_default() })),
@@ -269,7 +282,7 @@ mod tests {
     }
 
     fn state(switches: Switches) -> State {
-        State { token: "t".into(), data_dir: std::env::temp_dir(), switches, ledger: Mutex::new(Ledger::default()), confirm_lock: Mutex::new(()) }
+        State { token: "t".into(), data_dir: std::env::temp_dir(), switches, ledger: Mutex::new(Ledger::default()), confirm_lock: Mutex::new(()), connections: super::super::desktop_connections::service(&std::env::temp_dir(),None) }
     }
 
     #[test]

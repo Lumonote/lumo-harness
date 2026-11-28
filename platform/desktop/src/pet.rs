@@ -98,18 +98,19 @@ fn cloud_origin(raw: &str) -> Result<tauri::Url, String> {
     {
         return Err(err.into());
     }
-    let rest = raw.strip_prefix("https://").ok_or(err)?;
+    let rest = raw.split_once("://").ok_or(err)?.1;
     let authority = rest.strip_suffix('/').unwrap_or(rest);
     if authority.is_empty() || authority.contains('/') || authority.chars().any(char::is_control) {
         return Err(err.into());
     }
-    let url: tauri::Url = raw.parse().map_err(|_| err)?;
+    let url: tauri::Url = super::server_book::origin(raw)?.parse().map_err(|_| err)?;
     if !is_external_web_link(&url) || url.path() != "/" {
         return Err(err.into());
     }
     Ok(url)
 }
 
+#[cfg(test)]
 fn change_workbenches(
     current: &[CloudWorkbench],
     change: &str,
@@ -204,6 +205,11 @@ pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_default();
     let visible = preferences.launch_on_start;
     let always_on_top = preferences.always_on_top;
+    let directory = file.parent().ok_or("缺少配置目录")?;
+    if !directory.join("server-book.json").exists() && !preferences.workbenches.is_empty() {
+        let legacy: Vec<_> = preferences.workbenches.iter().map(|w| serde_json::json!({"name":w.label,"origin":w.origin})).collect();
+        super::server_book::update(directory,&serde_json::json!({"merge":legacy}))?;
+    }
     app.manage(PetState {
         file,
         data: Mutex::new(PetData {
@@ -592,7 +598,7 @@ pub fn pet_snapshot(window: WebviewWindow, app: AppHandle) -> Result<Snapshot, S
         always_on_top: data.preferences.always_on_top,
         launch_on_start: data.preferences.launch_on_start,
         compact: !data.expanded,
-        workbenches: data.preferences.workbenches.clone(),
+        workbenches: shared_workbenches(state.file.parent().ok_or("缺少配置目录")?)?,
     })
 }
 
@@ -605,27 +611,30 @@ pub fn pet_cloud_workbench(
 ) -> Result<Vec<CloudWorkbench>, String> {
     authorize(&window)?;
     let state = window.app_handle().state::<PetState>();
-    let mut data = state.data.lock().map_err(|_| "桌宠设置暂不可用")?;
+    let directory=state.file.parent().ok_or("缺少配置目录")?;
+    let current=shared_workbenches(directory)?;
     if action == "open" {
-        let saved = data
-            .preferences
-            .workbenches
+        let normalized=super::server_book::origin(&origin)?;
+        let saved = current
             .iter()
-            .find(|item| item.origin == origin)
+            .find(|item| item.origin == normalized)
             .ok_or("请先保存云工作台地址")?;
         let url = cloud_origin(&saved.origin)?;
-        let items = data.preferences.workbenches.clone();
-        drop(data);
         open_external_link(&url)?;
-        return Ok(items);
+        return Ok(current);
     }
-    let next = change_workbenches(&data.preferences.workbenches, &action, &origin, &label)?;
-    let previous = std::mem::replace(&mut data.preferences.workbenches, next);
-    if let Err(err) = save(&state, &data) {
-        data.preferences.workbenches = previous;
-        return Err(err);
-    }
-    Ok(data.preferences.workbenches.clone())
+    let normalized=super::server_book::origin(&origin)?;
+    let change=match action.as_str() {
+        "save" => { let mut value=serde_json::json!({"save":{"name":label,"origin":normalized}}); if current.iter().any(|i|i.origin==normalized) {value["previous"]=serde_json::json!(normalized);} value },
+        "remove" => serde_json::json!({"remove":normalized}),
+        _ => return Err("未知地址簿操作".into()),
+    };
+    super::server_book::update(directory,&change)?;
+    shared_workbenches(directory)
+}
+
+fn shared_workbenches(directory:&Path)->Result<Vec<CloudWorkbench>,String> {
+    Ok(super::server_book::read(directory)?.into_iter().map(|s|CloudWorkbench{label:s.name,origin:s.origin}).collect())
 }
 
 #[tauri::command]

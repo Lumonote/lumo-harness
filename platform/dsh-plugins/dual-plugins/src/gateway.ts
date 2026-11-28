@@ -35,7 +35,7 @@ export type ToolHandler = (args: Record<string, unknown>, ctx: HandlerContext) =
 
 export type InvokeResult =
   | { ok: true; value: unknown; decisionId: string; callId: string }
-  | { ok: false; code: 'unknown_tool' | 'channel_closed' | 'invalid_args' | 'denied' | 'rejected' | 'ask_expired' | 'failed' | 'disabled'; error: string; decisionId?: string; askId?: string; callId?: string }
+  | { ok: false; code: 'unknown_tool' | 'channel_closed' | 'invalid_args' | 'denied' | 'rejected' | 'ask_expired' | 'aborted' | 'result_unknown' | 'failed' | 'disabled'; error: string; decisionId?: string; askId?: string; callId?: string }
 
 export interface RunTreeSink { apply(event: RunTreeEvent): unknown }
 
@@ -124,6 +124,7 @@ export class DualPluginGateway {
   }
 
   async invoke(name: string, rawArgs: unknown, callerIn: Caller, signal?: AbortSignal): Promise<InvokeResult> {
+    if (signal?.aborted) return { ok: false, code: 'aborted', error: '调用已取消，尚未开始执行' }
     const entry = this.tools.get(name)
     if (!entry) return { ok: false, code: 'unknown_tool', error: `未知工具：${name}` }
     const { manifest, tool } = entry
@@ -135,14 +136,20 @@ export class DualPluginGateway {
     const caller = { ...callerIn, realm: callerIn.realm ?? d.realm ?? '', userId: callerIn.userId ?? d.userId ?? '', ...(callerIn.projectId ?? d.projectId ? { projectId: callerIn.projectId ?? d.projectId } : {}) }
     const callId = randomUUID()
 
-    let decision = await this.decider.decide({
+    let decision: ToolDecision
+    try {
+      decision = await abortable(this.decider.decide({
       realm: caller.realm, principal: { kind: 'user', id: caller.userId },
       ...(caller.agentId ? { actor: { kind: 'agent', agent_id: caller.agentId, ...(caller.runId ? { run_id: caller.runId } : {}), depth: caller.depth ?? 0 } } : {}),
       ...(caller.sessionRef ? { session_ref: caller.sessionRef } : {}),
       action: tool.action,
       resource: { realm: caller.realm, kind: 'dual-tool', id: `${manifest.id}/${tool.name}`, ...(caller.projectId ? { project_id: caller.projectId } : {}) },
       risk: tool.risk, approval: approvalOf(tool),
-    })
+      }), signal)
+      signal?.throwIfAborted()
+    } catch (error) {
+      return { ok: false, code: signal?.aborted ? 'aborted' : 'failed', error: signal?.aborted ? '调用已取消，尚未开始执行' : messageOf(error), callId }
+    }
     if (decision.effect === 'deny' && this.mode === 'shadow' && decision.reason_code === 'advisory_deny') {
       const ask = approvalOf(tool) === 'always' || (approvalOf(tool) === 'auto' && tool.risk === 'high')
       decision = { ...decision, effect: ask ? 'ask' : 'allow', matched: [...decision.matched, `shadow:deny:${decision.reason_code}`] }
@@ -162,9 +169,18 @@ export class DualPluginGateway {
           pluginId: manifest.id, tool: tool.name, action: tool.action, risk: tool.risk, decisionId: decision.decision_id, ...(argsPreview === undefined ? {} : { argsPreview }),
         })
         tree.askPending(ask.id)
-        const answer: ToolAskOutcome = await outcome
+        const cancelAsk = () => { this.asks.cancel(ask.id) }
+        signal?.addEventListener('abort', cancelAsk, { once: true })
+        if (signal?.aborted) cancelAsk()
+        let answer: ToolAskOutcome
+        try { answer = await outcome }
+        finally { signal?.removeEventListener('abort', cancelAsk) }
         tree.askResolved(ask.id)
-        if (answer === 'rejected' || answer === 'expired' || answer === 'cancelled') {
+        if (signal?.aborted || answer === 'cancelled') {
+          tree.end('aborted', '调用已取消，尚未开始执行')
+          return { ok: false, code: 'aborted', error: '调用已取消，尚未开始执行', decisionId: decision.decision_id, askId: ask.id, callId }
+        }
+        if (answer === 'rejected' || answer === 'expired') {
           tree.end(answer === 'rejected' ? 'refusal' : 'aborted', `审批${answer}`)
           return { ok: false, code: answer === 'rejected' ? 'rejected' : 'ask_expired', error: answer === 'rejected' ? '用户拒绝了本次调用' : `审批未完成（${answer}）`, decisionId: decision.decision_id, askId: ask.id, callId }
         }
@@ -172,21 +188,45 @@ export class DualPluginGateway {
       }
     }
 
-    const timeout = AbortSignal.timeout(this.options.handlerTimeoutMs ?? DEFAULT_HANDLER_TIMEOUT_MS)
-    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
+    if (signal?.aborted) {
+      tree.end('aborted', '调用已取消，尚未开始执行')
+      return { ok: false, code: 'aborted', error: '调用已取消，尚未开始执行', decisionId: decision.decision_id, callId }
+    }
+    const deadline = new AbortController()
+    const timer = setTimeout(() => deadline.abort(new Error('工具执行等待超时')), this.options.handlerTimeoutMs ?? DEFAULT_HANDLER_TIMEOUT_MS)
+    timer.unref?.()
+    const combined = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal
     try {
-      const value = await entry.handler(args, { caller, signal: combined, decision, callId })
+      const value = await abortable(Promise.resolve(entry.handler(args, { caller, signal: combined, decision, callId })), combined)
+      combined.throwIfAborted()
       tree.end('completed')
       return { ok: true, value, decisionId: decision.decision_id, callId }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      tree.end(combined.aborted ? 'aborted' : 'error', message)
-      return { ok: false, code: 'failed', error: message, decisionId: decision.decision_id, callId }
-    }
+      // 终止等待并不能证明 handler 的外部副作用已取消，迟到结果也不能覆盖终态。
+      const message = combined.aborted ? '等待已结束，底层执行结果尚未确认；请查询执行结果后再重试' : messageOf(error)
+      tree.end('error', message)
+      return { ok: false, code: combined.aborted ? 'result_unknown' : 'failed', error: message, decisionId: decision.decision_id, callId }
+    } finally { clearTimeout(timer) }
   }
 
   private now(): number { return this.options.now?.() ?? Date.now() }
   private changed(): void { for (const l of this.changeListeners) { try { l() } catch { /* 忽略 */ } } }
+}
+
+function messageOf(error: unknown): string { return error instanceof Error ? error.message : String(error) }
+
+/** 只取消等待；始终接收原 promise 的迟到拒绝，避免未处理 rejection。 */
+function abortable<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return pending
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => { signal.removeEventListener('abort', abort); reject(signal.reason ?? new Error('调用已取消')) }
+    signal.addEventListener('abort', abort, { once: true })
+    pending.then(
+      value => { signal.removeEventListener('abort', abort); resolve(value) },
+      error => { signal.removeEventListener('abort', abort); reject(error) },
+    )
+    if (signal.aborted) abort()
+  })
 }
 
 function preview(args: Record<string, unknown>): string | undefined {

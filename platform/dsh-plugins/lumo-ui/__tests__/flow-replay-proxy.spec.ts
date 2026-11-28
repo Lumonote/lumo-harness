@@ -2,6 +2,7 @@ import { Readable } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { api, type Config } from '../src/index.ts'
+import { flowRunHeaders } from '../src/flow-run-api.ts'
 
 const config = {
   schedulerUrl: '', projectsUrl: '', flowsUrl: 'http://flows.test', connectorUrl: '', governanceUrl: '', registryUrl: '',
@@ -10,8 +11,8 @@ const config = {
   deploymentMode: 'standalone', storageBackend: 'postgres', middleware: [], clusterStatus: 'not_ready', plugins: [],
 } as Config
 
-function request() {
-  return Object.assign(Readable.from([]), { method: 'POST', url: '/lumo/api/flows/flow-ops/runs/42/replay', headers: {} })
+function request(method = 'POST', url = '/lumo/api/flows/flow-ops/runs/42/replay') {
+  return Object.assign(Readable.from([]), { method, url, headers: {} })
 }
 
 function response(): { res: import('node:http').ServerResponse; result: { status: number; body: unknown } } {
@@ -41,4 +42,34 @@ describe('failed flow run replay proxy', () => {
       expect.objectContaining({ method: 'POST' }),
     )
   })
+  it('forwards authenticated manual result reads', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 42, status: 'running', nodes: [] })))
+    vi.stubGlobal('fetch', fetchMock)
+    const { res, result } = response()
+    await api(config, undefined, undefined, undefined, undefined, request('GET', '/lumo/api/flows/flow-ops/runs/42/result') as never, res)
+    expect(result.status).toBe(200)
+    expect(fetchMock).toHaveBeenCalledWith('http://flows.test/v1/flows/flow-ops/runs/42/result', expect.objectContaining({ headers: expect.objectContaining({ 'X-Lumo-User': 'editor-a', 'X-Lumo-Realm': 'realm-a' }) }))
+  })
+  it.each(['0', '-1', '1.2', '9223372036854775808'])('rejects invalid result id %s without forwarding', async id => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock)
+    const { res, result } = response()
+    await api(config, undefined, undefined, undefined, undefined, request('GET', `/lumo/api/flows/flow-ops/runs/${id}/result`) as never, res)
+    expect(result.status).toBe(400); expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('preserves durable run receipts while rewriting the Location to the same-origin API', () => {
+    expect(flowRunHeaders('/v1/flows/flow-ops/run', new Headers({ 'X-Lumo-Flow-Run': '42', Location: 'https://untrusted.test/' }))).toEqual({ 'X-Lumo-Flow-Run': '42', Location: '/lumo/api/flows/flow-ops/runs/42/result' })
+    expect(flowRunHeaders('/v1/flows/flow-ops/run', new Headers({ 'X-Lumo-Flow-Run': '-42' }))).toEqual({})
+  })
+
+  it('returns the durable receipt headers through the full POST BFF', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ runId: 42, status: 'running' }), { status: 202, headers: { 'X-Lumo-Flow-Run': '42', Location: '/v1/flows/flow-ops/runs/42/result' } })))
+    const { res, result } = response()
+    res.setHeader = vi.fn()
+    await api(config, undefined, undefined, undefined, undefined, request('POST', '/lumo/api/flows/flow-ops/run') as never, res)
+    expect(result.status).toBe(202)
+    expect(res.setHeader).toHaveBeenCalledWith('X-Lumo-Flow-Run', '42')
+    expect(res.setHeader).toHaveBeenCalledWith('Location', '/lumo/api/flows/flow-ops/runs/42/result')
+  })
+
 })

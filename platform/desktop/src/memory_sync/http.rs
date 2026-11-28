@@ -26,7 +26,11 @@ pub fn parse_server(raw: &str) -> Result<Url, String> {
         return Err(bad());
     }
     let url = Url::parse(raw).map_err(|_| bad())?;
-    if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
         return Err(bad());
     }
     let host = url.host_str().unwrap_or_default();
@@ -52,7 +56,9 @@ pub fn endpoint(base: &Url, name: &str) -> Url {
 
 pub fn pull_url(base: &Url, workspace: &str, since: i64) -> Url {
     let mut url = endpoint(base, "changes");
-    url.query_pairs_mut().append_pair("workspace", workspace).append_pair("since", &since.to_string());
+    url.query_pairs_mut()
+        .append_pair("workspace", workspace)
+        .append_pair("since", &since.to_string());
     url
 }
 
@@ -95,7 +101,8 @@ impl Remote {
         let auth = match token.trim() {
             "" => None,
             t => {
-                let mut v = HeaderValue::from_str(&format!("Bearer {t}")).map_err(|_| "访问令牌无效".to_string())?;
+                let mut v = HeaderValue::from_str(&format!("Bearer {t}"))
+                    .map_err(|_| "访问令牌无效".to_string())?;
                 v.set_sensitive(true);
                 Some(v)
             }
@@ -123,14 +130,44 @@ impl Remote {
         serde_json::from_slice(&bytes).map_err(|_| format!("{tag}_invalid_response"))
     }
 
+    pub async fn identity(&self) -> Result<super::storage::Identity, String> {
+        let identity: super::storage::Identity = self
+            .send(
+                self.client.get(endpoint(&self.base, "identity")),
+                "identity",
+            )
+            .await
+            .map_err(|e| {
+                if e == "identity_404" {
+                    "同步服务器需要升级：缺少账户验证接口".into()
+                } else {
+                    e
+                }
+            })?;
+        identity.validate()?;
+        Ok(identity)
+    }
+
     pub async fn push<T: DeserializeOwned>(&self, body: &serde_json::Value) -> Result<T, String> {
         let body = serde_json::to_vec(body).map_err(|e| e.to_string())?;
-        let req = self.client.post(endpoint(&self.base, "push")).header(CONTENT_TYPE, "application/json").body(body);
+        let req = self
+            .client
+            .post(endpoint(&self.base, "push"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(body);
         self.send(req, "push").await
     }
 
-    pub async fn pull<T: DeserializeOwned>(&self, workspace: &str, since: i64) -> Result<T, String> {
-        self.send(self.client.get(pull_url(&self.base, workspace, since)), "pull").await
+    pub async fn pull<T: DeserializeOwned>(
+        &self,
+        workspace: &str,
+        since: i64,
+    ) -> Result<T, String> {
+        self.send(
+            self.client.get(pull_url(&self.base, workspace, since)),
+            "pull",
+        )
+        .await
     }
 }
 
@@ -146,9 +183,16 @@ mod tests {
         assert!(parse_server("http://localhost:3000").is_ok());
         assert!(parse_server("http://[::1]:3000").is_ok());
         for bad in [
-            "", "http://lumo.example.com", "http://127.0.0.1.evil.com", "ftp://x", "https://a b",
-            "https://user:pw@lumo.example.com", "https://lumo.example.com/?q=1", "https://lumo.example.com/#f",
-            "javascript:alert(1)", "lumo.example.com",
+            "",
+            "http://lumo.example.com",
+            "http://127.0.0.1.evil.com",
+            "ftp://x",
+            "https://a b",
+            "https://user:pw@lumo.example.com",
+            "https://lumo.example.com/?q=1",
+            "https://lumo.example.com/#f",
+            "javascript:alert(1)",
+            "lumo.example.com",
         ] {
             assert!(parse_server(bad).is_err(), "{bad}");
         }
@@ -158,9 +202,15 @@ mod tests {
     #[test]
     fn endpoints_keep_base_path_and_encode_query() {
         let base = parse_server("https://lumo.example.com/sync/").unwrap();
-        assert_eq!(endpoint(&base, "push").as_str(), "https://lumo.example.com/sync/v1/memory-sync/push");
+        assert_eq!(
+            endpoint(&base, "push").as_str(),
+            "https://lumo.example.com/sync/v1/memory-sync/push"
+        );
         let root = parse_server("https://lumo.example.com").unwrap();
-        assert_eq!(pull_url(&root, "a&b", 3).as_str(), "https://lumo.example.com/v1/memory-sync/changes?workspace=a%26b&since=3");
+        assert_eq!(
+            pull_url(&root, "a&b", 3).as_str(),
+            "https://lumo.example.com/v1/memory-sync/changes?workspace=a%26b&since=3"
+        );
     }
 
     #[test]
@@ -169,16 +219,30 @@ mod tests {
         let same = Url::parse("https://lumo.example.com/v2/x").unwrap();
         assert!(redirect_allowed(&base, &same, 0));
         assert!(!redirect_allowed(&base, &same, MAX_REDIRECTS));
-        for other in ["https://evil.example.com/x", "http://lumo.example.com/x", "https://lumo.example.com:444/x"] {
-            assert!(!redirect_allowed(&base, &Url::parse(other).unwrap(), 0), "{other}");
+        for other in [
+            "https://evil.example.com/x",
+            "http://lumo.example.com/x",
+            "https://lumo.example.com:444/x",
+        ] {
+            assert!(
+                !redirect_allowed(&base, &Url::parse(other).unwrap(), 0),
+                "{other}"
+            );
         }
     }
 
     #[test]
     fn token_must_be_header_safe() {
         assert!(Remote::new("https://lumo.example.com", "bad\ntoken").is_err());
-        assert!(Remote::new("https://lumo.example.com", "").unwrap().auth.is_none());
-        assert!(Remote::new("https://lumo.example.com", "t").unwrap().auth.unwrap().is_sensitive());
+        assert!(Remote::new("https://lumo.example.com", "")
+            .unwrap()
+            .auth
+            .is_none());
+        assert!(Remote::new("https://lumo.example.com", "t")
+            .unwrap()
+            .auth
+            .unwrap()
+            .is_sensitive());
         assert!(Remote::new("http://lumo.example.com", "t").is_err());
     }
 }

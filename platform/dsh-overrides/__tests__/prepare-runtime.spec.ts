@@ -1,9 +1,10 @@
+import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, readFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { ensureLibEntriesReexport, ensureNativeAddonsBuilt, hasTypertRemoteProjection } from '../prepare-runtime.mjs'
+import { ensureLibEntriesReexport, ensureNativeAddonsBuilt, fingerprint, hasTypertRemoteProjection } from '../prepare-runtime.mjs'
 
 /**
  * prepare-runtime 的「源树自愈」回归护栏。
@@ -23,6 +24,26 @@ import { ensureLibEntriesReexport, ensureNativeAddonsBuilt, hasTypertRemoteProje
 const temporaries: string[] = []
 afterEach(() => {
   for (const path of temporaries.splice(0)) rmSync(path, { recursive: true, force: true })
+})
+
+describe('runtime cache inputs', () => {
+  it.each(['PdfDataPreview.tsx', 'ExcelDataPreview.tsx'])('invalidates when only %s changes', name => {
+    const root = mkdtempSync(resolve(tmpdir(), 'lumo-fingerprint-'))
+    temporaries.push(root)
+    write(root, 'package.json', '{"name":"cache-fixture"}')
+    execFileSync('git', ['init', root])
+    execFileSync('git', ['-C', root, 'add', 'package.json'])
+    execFileSync('git', ['-C', root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'fixture'])
+    const overlay = resolve(root, 'overlay')
+    for (const script of ['apply.mjs', 'prepare-runtime.mjs', 'workspace-source-paths.mjs']) write(overlay, script, 'stable script')
+    for (const asset of ['PdfDataPreview.tsx', 'ExcelDataPreview.tsx']) write(overlay, `sidebar-documentpreview/${asset}`, 'original')
+    const before = fingerprint(root, overlay)
+    expect(fingerprint(root, overlay)).toBe(before)
+    write(overlay, `sidebar-documentpreview/${name}`, 'updated component')
+    expect(fingerprint(root, overlay)).not.toBe(before)
+    write(overlay, `sidebar-documentpreview/${name}`, 'original')
+    expect(fingerprint(root, overlay)).toBe(before)
+  })
 })
 
 function write(root: string, relativePath: string, content: string): void {

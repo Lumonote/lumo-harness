@@ -21,6 +21,7 @@ import type { AuthenticatedKnowledgeQuery, AuthenticatedKnowledgeRequest, Knowle
 import type { Principal } from '../src/client.ts'
 import { createSessionTransport } from '../src/session-transport.ts'
 import { USER_SESSION_KNOWLEDGE_TOOL, validateSessionKnowledge } from '../src/session-knowledge.ts'
+import { resolveToolCaller } from '../../../shared/seam-contracts/tool-caller.ts'
 
 const closers: Array<() => Promise<unknown>> = []
 afterEach(async () => { for (const close of closers.splice(0).reverse()) await close() })
@@ -103,6 +104,27 @@ async function fixture(enabled = true) {
 }
 
 describe('owned Session knowledge with real AgentLoop', () => {
+  it('binds tool identity to the live owner and rejects logout, changed ownership and stale Agents', async () => {
+    const f = await fixture(); const id = await f.create(alice)
+    const current = () => f.ctx.agents.get(SessionId(id))!
+    const seen: unknown[] = []
+    f.onQuery(async () => { seen.push(await resolveToolCaller(current())) })
+    await f.send(alice, id)
+    expect(seen).toEqual([{ realm: 'r', userId: 'alice', projectId: 'p' }])
+    expect(await resolveToolCaller({ id, session: { id } })).toBeUndefined()
+    f.facts.get(id)!.project_id = 'other'
+    await expect(resolveToolCaller(current())).rejects.toThrow('ownership')
+    f.facts.get(id)!.project_id = 'p'
+    f.facts.get(id)!.owner_user_id = 'bob'
+    await expect(resolveToolCaller(current())).rejects.toThrow('ownership')
+    f.facts.get(id)!.owner_user_id = 'alice'
+    f.revoke()
+    await expect(resolveToolCaller(current())).rejects.toThrow('revoked')
+    const stale = current()
+    await stale.ctx.fiber.dispose()
+    await expect(resolveToolCaller(stale)).rejects.toThrow('no longer active')
+  })
+
   it('keeps default text Sessions tool-free and blocks the deployment tool', async () => {
     const f = await fixture(false); const id = await f.create(alice)
     await f.send(alice, id, 'knowledge_query', {})

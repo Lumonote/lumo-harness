@@ -24,6 +24,14 @@ type Result struct {
 	Order   []string       `json:"order"`
 }
 
+// NodeRecorder must durably acknowledge a node before execution and before its
+// dependants can start. Finished must be able to record an expired execution's
+// outcome, using an independently bounded context where necessary.
+type NodeRecorder interface {
+	Started(context.Context, domain.FlowNode) error
+	Finished(context.Context, domain.FlowNode, any, error) error
+}
+
 func New(configs ...RuntimeConfig) *Engine {
 	e := &Engine{operators: map[string]Operator{}, unavailable: map[string]string{}}
 	e.Register("identity", func(_ context.Context, input any) (any, error) { return input, nil })
@@ -44,6 +52,10 @@ func (e *Engine) Register(name string, op Operator) {
 }
 
 func (e *Engine) Run(ctx context.Context, def *domain.Definition, input any) (*Result, error) {
+	return e.RunWithRecorder(ctx, def, input, nil)
+}
+
+func (e *Engine) RunWithRecorder(ctx context.Context, def *domain.Definition, input any, recorder NodeRecorder) (*Result, error) {
 	if err := e.Validate(def); err != nil {
 		return nil, err
 	}
@@ -75,13 +87,13 @@ func (e *Engine) Run(ctx context.Context, def *domain.Definition, input any) (*R
 	result := &Result{Outputs: map[string]any{}, Order: make([]string, 0, len(nodes))}
 	for len(ready) > 0 {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return result, err
 		}
 		id := ready[0]
 		ready = ready[1:]
 		operator, ok := e.operators[nodes[id].Operator]
 		if !ok {
-			return nil, fmt.Errorf("flow engine: 未注册算子 %q（节点 %s）", nodes[id].Operator, id)
+			return result, fmt.Errorf("flow engine: 未注册算子 %q（节点 %s）", nodes[id].Operator, id)
 		}
 		var nodeInput any = input
 		parents := incoming[id]
@@ -95,9 +107,19 @@ func (e *Engine) Run(ctx context.Context, def *domain.Definition, input any) (*R
 			}
 			nodeInput = values
 		}
+		if recorder != nil {
+			if err := recorder.Started(ctx, nodes[id]); err != nil {
+				return result, fmt.Errorf("flow engine: record node %s start: %w", id, err)
+			}
+		}
 		output, err := operator(context.WithValue(ctx, nodeKey{}, nodes[id]), nodeInput)
+		if recorder != nil {
+			if receiptErr := recorder.Finished(ctx, nodes[id], output, err); receiptErr != nil {
+				return result, fmt.Errorf("flow engine: node %s outcome could not be recorded; inspect effects before retry: %w", id, receiptErr)
+			}
+		}
 		if err != nil {
-			return nil, fmt.Errorf("flow engine: 节点 %s 执行失败: %w", id, err)
+			return result, fmt.Errorf("flow engine: 节点 %s 执行失败: %w", id, err)
 		}
 		result.Outputs[id] = output
 		result.Order = append(result.Order, id)
@@ -110,7 +132,7 @@ func (e *Engine) Run(ctx context.Context, def *domain.Definition, input any) (*R
 		sort.Strings(ready)
 	}
 	if len(result.Order) != len(nodes) {
-		return nil, fmt.Errorf("flow engine: DAG 执行未收敛")
+		return result, fmt.Errorf("flow engine: DAG 执行未收敛")
 	}
 	return result, nil
 }

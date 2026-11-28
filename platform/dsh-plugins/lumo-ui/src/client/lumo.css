@@ -157,7 +157,7 @@
 }
 
 .lumo-click-spark * { box-sizing: border-box; }
-.lumo-click-spark button, .lumo-click-spark input, .lumo-click-spark select, .lumo-click-spark textarea { font-family: inherit; }
+.lumo-click-spark :is(button,input,select,textarea):not(:where(.lumo-native-content *, .lumo-native-button)) { font-family: inherit; }
 .lumo-click-spark > div { pointer-events: auto; }
 .lumo-spark { position: fixed; z-index: 1100; width: 2px; height: 2px; pointer-events: none; }
 .lumo-spark i { --spark-angle: 0deg; position: absolute; left: 0; top: 0; width: 12px; height: 1.5px; border-radius: 2px; background: linear-gradient(90deg, var(--lumo-mint), transparent); transform: rotate(var(--spark-angle)); transform-origin: 0 50%; animation: lumo-spark .6s cubic-bezier(.18, .8, .2, 1) forwards; }
@@ -285,7 +285,7 @@
 .lumo-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 38px; padding: 8px 13px; border: 1px solid var(--lumo-line-strong); border-radius: 8px; outline: 0; color: var(--lumo-ink); background: var(--lumo-panel-raised); cursor: pointer; font-size: var(--lumo-fs-xs-13); line-height: var(--lumo-lh-flat); transition: border-color .15s, background .15s; }
 .lumo-button:hover:not(:disabled) { border-color: var(--lumo-line-strong); background: var(--lumo-panel-soft); box-shadow: none; }
 .lumo-button:active:not(:disabled) { transform: none; }
-.lumo-button:focus-visible, .lumo-workbench button:focus-visible, .lumo-workbench input:focus-visible, .lumo-workbench textarea:focus-visible, .lumo-workbench select:focus-visible { outline: 2px solid var(--lumo-accent-75); outline-offset: 2px; }
+.lumo-button:focus-visible, .lumo-workbench :is(button,input,textarea,select):focus-visible:not(:where(.lumo-native-content *, .lumo-native-button)) { outline: 2px solid var(--lumo-accent-75); outline-offset: 2px; }
 .lumo-button:disabled { opacity: .5; cursor: wait; }
 .lumo-primary { border-color: var(--lumo-accent-52); color: var(--lumo-bg); background: linear-gradient(145deg, var(--lumo-accent-hover), var(--lumo-mint)); font-weight: var(--lumo-fw-bold); }
 .lumo-primary:hover:not(:disabled) { border-color: var(--lumo-ink); background: linear-gradient(145deg, var(--lumo-ink), var(--lumo-accent-hover)); }

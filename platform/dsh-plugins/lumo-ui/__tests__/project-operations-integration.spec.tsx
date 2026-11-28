@@ -76,18 +76,15 @@ async function mount(status = 'active', options: {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); history.replaceState({}, '', '/') })
 
 describe('project operations parent callbacks', () => {
-  it('opens the current project row when the overview replaces the preliminary directory', async () => {
+  it('waits for deployment capabilities before loading the project directory', async () => {
     let releaseOverview!: () => void
     const overviewReady = new Promise<void>(resolve => { releaseOverview = resolve })
     const mounting = mount('active', { overviewReady })
-    const preliminary = await screen.findByRole('button', { name: '打开项目 团队项目' })
-    const overviewLoading = (screen.getByRole('button', { name: '重新读取' }) as HTMLButtonElement).disabled
-    const openedPreliminary = vi.mocked(fetch).mock.calls.some(([path]) => String(path) === '/lumo/api/projects/project-a/dashboard')
+    await screen.findByText('正在读取可用管理功能…')
+    expect(screen.queryByRole('button', { name: '打开项目 团队项目' })).toBeNull()
+    expect(vi.mocked(fetch).mock.calls.some(([path]) => String(path).includes('/projects/directory'))).toBe(false)
     releaseOverview()
     const f = await mounting
-    expect(overviewLoading).toBe(true)
-    expect(openedPreliminary).toBe(false)
-    expect(preliminary.isConnected).toBe(false)
     expect(f.reads()).toBe(1)
     expect(f.sheet().getByRole('heading', { name: '团队项目' })).toBeTruthy()
   })

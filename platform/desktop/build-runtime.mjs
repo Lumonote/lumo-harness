@@ -35,6 +35,8 @@ import { stageOptionalComputerUse } from './optional-computer-use.mjs'
 import { copyPortablePythonTree } from './portable-python.mjs'
 import { writeRuntimeSizeReport } from './runtime-size.mjs'
 import { verifyWorkbenchClient } from './verify-workbench-client.mjs'
+import { stageDeviceAgent } from './build-device-agent.mjs'
+import { curl } from './runtime-download.mjs'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(desktopRoot, '..', '..')
@@ -575,6 +577,7 @@ assertBinaryArchitecture(runtimeNode, '打包 Node')
 // 把随 Node 发行的 corepack/npm 与 pnpm shim 塞进 runtime，并落到 PATH——否则打包后插件市场
 // 更新插件时会报“未找到 pnpm/corepack/npx”（见 stageNodeTooling 与 lumo-runtime.sh）。
 stageNodeTooling(nodeSource, resolve(stagingRoot, 'bin'), resolve(stagingRoot, 'lib', 'node_modules'))
+stageDeviceAgent(resolve(stagingRoot, 'bin'), buildTarget)
 // Both launchers export bin/skillhub.mjs. Ship the actual CLI and check it using
 // the final, pruned Python runtime before Tauri is allowed to bundle resources.
 const skillhub = stageSkillHub(stagingRoot, skillhubArchive.archive, targetPlatform, skillhubArchive.source)
@@ -1424,19 +1427,6 @@ function stageNodeTooling(nodeBinary, binDir, libDir) {
     if (targetPlatform !== 'win32') chmodSync(path, 0o755)
   }
   console.log(`桌面 runtime 已注入 corepack/npm/pnpm shim（${binDir}）`)
-}
-
-function curl(url, destination) {
-  // 与 SkillHub 归档同一类单点：只试一个地址、短窗口，DNS 抖动即构建失败。
-  // 口径与 skillhub-tooling.mjs 一致 —— 只对连接类失败退避重试（--retry-connrefused），
-  // 404 这类永久性错误立刻失败，不靠退避硬扛。
-  const result = spawnSync('curl', [
-    '-fsSL', '--retry', '4', '--retry-connrefused', '--retry-delay', '5', '--retry-max-time', '240',
-    '--connect-timeout', '20', '--max-time', '300', '-o', destination, url,
-  ], { encoding: 'utf8', timeout: 360_000 })
-  if (result.error !== undefined || result.status !== 0) {
-    throw new Error(`下载失败：${url}\n${result.stderr || result.error?.message || ''}`.trim())
-  }
 }
 
 function isPortableRuntimeBinary(candidate) {

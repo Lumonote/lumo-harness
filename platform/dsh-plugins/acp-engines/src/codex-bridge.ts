@@ -19,6 +19,7 @@
  *
  * app-server 的方法名在 Codex 版本间有过调整；未知通知一律忽略，不让桥崩。
  */
+import { CodexModels } from './codex-models.ts'
 import { JsonRpcConnection, RpcRemoteError, memoryTransportPair, type MessageTransport } from './jsonrpc.ts'
 import { ACP_METHODS, ACP_PROTOCOL_VERSION, textOf, type ContentBlock, type PermissionOption, type RequestPermissionResponse, type StopReason, type ToolKind } from './acp-protocol.ts'
 
@@ -89,7 +90,32 @@ function codexInput(prompt: ContentBlock[]): Array<Record<string, unknown>> {
   return out
 }
 
-interface TurnWaiter { turnId?: string; resolve: (stop: StopReason) => void }
+interface CodexTurn { id?: string; status?: string; error?: { message?: string } }
+interface TurnWaiter { turnId?: string; cancelRequested?: boolean; interruptSent?: boolean; earlyCompletions: Map<string, CodexTurn>; resolve: (stop: StopReason) => void }
+
+/** app-server config overrides are scoped to this thread, never the user's config file. */
+function mcpConfiguration(servers: unknown): { config?: Record<string, unknown> } {
+  if (servers === undefined) return {}
+  if (!Array.isArray(servers)) throw new RpcRemoteError(-32602, 'MCP 配置须为数组')
+  const config: Record<string, unknown> = {}
+  for (const value of servers) {
+    const server = value as { name?: unknown; command?: unknown; args?: unknown; env?: unknown } | null
+    if (!server || typeof server.name !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(server.name)
+      || typeof server.command !== 'string' || !server.command.trim() || server.command.includes('\0')
+      || !Array.isArray(server.args) || server.args.some(arg => typeof arg !== 'string' || arg.includes('\0'))
+      || !Array.isArray(server.env)) throw new RpcRemoteError(-32602, 'MCP stdio 配置无效')
+    const key = `mcp_servers.${server.name}`
+    if (Object.hasOwn(config, key)) throw new RpcRemoteError(-32602, 'MCP 名称重复')
+    const env: Record<string, string> = Object.create(null)
+    for (const pair of server.env) {
+      if (!pair || typeof pair.name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(pair.name)
+        || typeof pair.value !== 'string' || pair.value.includes('\0') || Object.hasOwn(env, pair.name)) throw new RpcRemoteError(-32602, 'MCP 环境变量无效或重复')
+      env[pair.name] = pair.value
+    }
+    config[key] = { command: server.command, args: server.args, env }
+  }
+  return servers.length ? { config } : {}
+}
 
 /**
  * 在 codex 传输之上开一个 ACP agent 端，返回给上层 AcpClient 使用的 ACP 传输。
@@ -99,11 +125,26 @@ export function bridgeCodexToAcp(codex: MessageTransport, options: { approvalPol
   const [upstream, agentSide] = memoryTransportPair()
   const acp = new JsonRpcConnection(agentSide, 0)
   const cx = new JsonRpcConnection(codex, 120_000)
+  const models = new CodexModels(cx)
   /** ACP sessionId 直接用 Codex threadId */
   const turns = new Map<string, TurnWaiter>()
   const toolStatus = new Map<string, string>()
+  const interrupt = (sessionId: string, waiter: TurnWaiter) => {
+    if (!waiter.cancelRequested || !waiter.turnId || waiter.interruptSent) return
+    waiter.interruptSent = true
+    void cx.request(CODEX_METHODS.turnInterrupt, { threadId: sessionId, turnId: waiter.turnId }).catch(() => {
+      // A later explicit Stop may retry a failed request; completed turns were removed.
+      if (turns.get(sessionId) === waiter) waiter.interruptSent = false
+    })
+  }
 
   const update = (sessionId: string, u: Record<string, unknown>) => acp.notify(ACP_METHODS.sessionUpdate, { sessionId, update: u })
+  const finish = (sessionId: string, waiter: TurnWaiter, turn: CodexTurn) => {
+    if (turns.get(sessionId) !== waiter || !waiter.turnId || turn.id !== waiter.turnId) return
+    if (turn.status === 'failed' && turn.error?.message) update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `\n[Codex 回合失败] ${turn.error.message}` } })
+    turns.delete(sessionId)
+    waiter.resolve(turnStop(turn.status))
+  }
 
   acp.onRequest(ACP_METHODS.initialize, async () => {
     await cx.request(CODEX_METHODS.initialize, { clientInfo: { name: 'lumo-acp-engines', title: 'Lumo', version: options.clientVersion ?? '0.1.0' } })
@@ -111,27 +152,41 @@ export function bridgeCodexToAcp(codex: MessageTransport, options: { approvalPol
     return { protocolVersion: ACP_PROTOCOL_VERSION, agentCapabilities: { loadSession: true, promptCapabilities: { image: true, audio: false, embeddedContext: false } }, authMethods: [], agentInfo: { name: 'codex (app-server bridge)' } }
   })
   acp.onRequest(ACP_METHODS.sessionNew, async params => {
-    const p = params as { cwd?: string }
-    const result = await cx.request<{ thread?: { id?: string } }>(CODEX_METHODS.threadStart, { cwd: p.cwd, approvalPolicy: options.approvalPolicy ?? 'on-request', sandbox: options.sandbox ?? 'workspace-write' })
+    const p = params as { cwd?: string; mcpServers?: unknown }
+    const result = await cx.request<{ thread?: { id?: string }; model?: string }>(CODEX_METHODS.threadStart, { cwd: p.cwd, approvalPolicy: options.approvalPolicy ?? 'on-request', sandbox: options.sandbox ?? 'workspace-write', ...mcpConfiguration(p.mcpServers) })
     const id = result?.thread?.id
     if (typeof id !== 'string' || id === '') throw new RpcRemoteError(-32603, 'codex thread/start 未返回 thread.id')
-    return { sessionId: id }
+    return { sessionId: id, ...await models.load(id, result.model) }
   })
   acp.onRequest(ACP_METHODS.sessionLoad, async params => {
-    const p = params as { sessionId: string; cwd?: string }
-    await cx.request(CODEX_METHODS.threadResume, { threadId: p.sessionId, cwd: p.cwd })
-    return {}
+    const p = params as { sessionId: string; cwd?: string; mcpServers?: unknown }
+    const result = await cx.request<{ model?: string }>(CODEX_METHODS.threadResume, { threadId: p.sessionId, cwd: p.cwd, ...mcpConfiguration(p.mcpServers) })
+    return models.load(p.sessionId, result?.model)
+  })
+  acp.onRequest('session/set_model', params => {
+    const p = params as { sessionId: string; modelId: string }
+    if (turns.has(p.sessionId)) throw new RpcRemoteError(-32602, '请等待当前回合完成')
+    models.set(p.sessionId, p.modelId); return {}
   })
   acp.onRequest(ACP_METHODS.sessionPrompt, async params => {
     const p = params as { sessionId: string; prompt: ContentBlock[] }
     if (turns.has(p.sessionId)) throw new RpcRemoteError(-32602, '该会话已有进行中的回合')
-    const done = new Promise<StopReason>(resolve => { turns.set(p.sessionId, { resolve }) })
+    let resolve!: (stop: StopReason) => void
+    const done = new Promise<StopReason>(r => { resolve = r })
+    const waiter: TurnWaiter = { resolve, earlyCompletions: new Map() }
+    turns.set(p.sessionId, waiter)
     try {
-      const started = await cx.request<{ turn?: { id?: string } }>(CODEX_METHODS.turnStart, { threadId: p.sessionId, input: codexInput(p.prompt) })
-      const waiter = turns.get(p.sessionId)
-      if (waiter && started?.turn?.id) waiter.turnId = started.turn.id
+      const started = await cx.request<{ turn?: { id?: string } }>(CODEX_METHODS.turnStart, { threadId: p.sessionId, input: codexInput(p.prompt), ...models.params(p.sessionId) })
+      if (turns.get(p.sessionId) === waiter) {
+        if (typeof started?.turn?.id !== 'string' || !started.turn.id) throw new RpcRemoteError(-32603, 'codex turn/start 未返回 turn.id')
+        waiter.turnId = started.turn.id
+        const completed = waiter.earlyCompletions.get(waiter.turnId)
+        waiter.earlyCompletions.clear()
+        if (completed) finish(p.sessionId, waiter, completed)
+        else interrupt(p.sessionId, waiter)
+      }
     } catch (error) {
-      turns.delete(p.sessionId)
+      if (turns.get(p.sessionId) === waiter) turns.delete(p.sessionId)
       throw error
     }
     return { stopReason: await done }
@@ -139,7 +194,7 @@ export function bridgeCodexToAcp(codex: MessageTransport, options: { approvalPol
   acp.onNotification(ACP_METHODS.sessionCancel, params => {
     const p = params as { sessionId: string }
     const waiter = turns.get(p.sessionId)
-    if (waiter?.turnId) void cx.request(CODEX_METHODS.turnInterrupt, { threadId: p.sessionId, turnId: waiter.turnId }).catch(() => { /* 已结束 */ })
+    if (waiter) { waiter.cancelRequested = true; interrupt(p.sessionId, waiter) }
   })
 
   cx.onNotification(CODEX_METHODS.agentDelta, params => {
@@ -168,12 +223,16 @@ export function bridgeCodexToAcp(codex: MessageTransport, options: { approvalPol
     update(p.threadId, { sessionUpdate: 'tool_call_update', toolCallId: p.item.id, status: failed ? 'failed' : 'completed', rawOutput: p.item, ...(p.item.aggregatedOutput ? { content: [{ type: 'content', content: { type: 'text', text: p.item.aggregatedOutput.slice(-8000) } }] } : {}) })
   })
   cx.onNotification(CODEX_METHODS.turnCompleted, params => {
-    const p = params as { threadId: string; turn?: { id?: string; status?: string; error?: { message?: string } } }
+    const p = params as { threadId: string; turn?: CodexTurn }
     const waiter = turns.get(p.threadId)
-    if (!waiter) return
-    if (p.turn?.status === 'failed' && p.turn.error?.message) update(p.threadId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `\n[Codex 回合失败] ${p.turn.error.message}` } })
-    turns.delete(p.threadId)
-    waiter.resolve(turnStop(p.turn?.status))
+    if (!waiter || typeof p.turn?.id !== 'string' || !p.turn.id) return
+    if (waiter.turnId) finish(p.threadId, waiter, p.turn)
+    else {
+      // Completion may arrive before turn/start returns. Keep the session busy
+      // until that response identifies which completion belongs to this call.
+      waiter.earlyCompletions.set(p.turn.id, p.turn)
+      if (waiter.earlyCompletions.size > 32) waiter.earlyCompletions.delete(waiter.earlyCompletions.keys().next().value!)
+    }
   })
 
   const approval = (kind: ToolKind) => async (params: unknown): Promise<unknown> => {

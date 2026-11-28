@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url'
 
 const overlayRoot = dirname(fileURLToPath(import.meta.url))
 
+// Copying and cache invalidation must use the same asset inventory.
+export const overlayAssetPaths = ['sidebar-documentpreview/PdfDataPreview.tsx', 'sidebar-documentpreview/ExcelDataPreview.tsx']
+
 /**
  * 锚点失配诊断开关。
  *
@@ -47,12 +50,12 @@ function patchFile(root, relativePath, replacements, marker = 'LUMO_DSH_OVERLAY'
 }
 
 function addLibraryDocumentPreview(root) {
-  const sourceRoot = resolve(overlayRoot, 'sidebar-documentpreview')
   const targetRoot = resolve(root, 'packages/client/ui-sidebar-documentpreview/src/client')
-  for (const name of ['PdfDataPreview.tsx', 'ExcelDataPreview.tsx']) {
+  for (const asset of overlayAssetPaths) {
+    const name = asset.slice(asset.lastIndexOf('/') + 1)
     const target = resolve(targetRoot, name)
     mkdirSync(dirname(target), { recursive: true })
-    copyFileSync(resolve(sourceRoot, name), target)
+    copyFileSync(resolve(overlayRoot, asset), target)
   }
   const exportLine = "export type { DocumentLoadMode, DocumentPreviewDefinition } from './document/registry.ts'\n"
   patchFile(root, 'packages/client/ui-sidebar-documentpreview/src/client/index.ts', [[
@@ -86,7 +89,7 @@ export const overriddenPackageDirectories = [
 ]
 
 /**
- * Add the two homepage composer extension seats required by Lumo. This must
+ * Apply the existing overlay inventory (9 package scopes and root tsdown). This must
  * only be called for an isolated checkout/copy, never the upstream worktree.
  */
 export function applyLumoDshOverrides(root) {

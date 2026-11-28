@@ -7,8 +7,8 @@
     "desktop/build-runtime.mjs": 81251,
     "dsh-plugins/lumo-ui/__tests__/client.spec.tsx": 91936,
     "dsh-plugins/lumo-ui/src/client/cluster-panels.tsx": 119403,
-    "dsh-plugins/lumo-ui/src/client/index.tsx": 283105,
+    "dsh-plugins/lumo-ui/src/client/index.tsx": 281334,
     "dsh-plugins/lumo-ui/src/client/lumo.css": 287475,
-    "dsh-plugins/lumo-ui/src/index.ts": 169510
+    "dsh-plugins/lumo-ui/src/index.ts": 169167
   }
 }

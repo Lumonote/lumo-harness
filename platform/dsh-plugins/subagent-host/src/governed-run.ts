@@ -14,6 +14,7 @@ import { readChildResult } from './tturn.ts'
 import { CLOSED_FILES_PROFILE,CONTROLLED_FILE_TOOL,ControlledFiles } from './controlled-files.ts'
 import { GovernedProgressReporter } from './task-progress.ts'
 import { CLOSED_REPOSITORY_PROFILE,ControlledRepository,REPOSITORY_TOOLS } from './controlled-repository.ts'
+import { bindToolCaller } from '../../../shared/seam-contracts/tool-caller.ts'
 
 /** One explicitly scoped text turn. No host tools or parent cwd/model/policy
  * are inherited from the dispatch payload. The existing process plugins retain
@@ -28,6 +29,7 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
   let knowledgeBound = false
   let connectorBound = false
   let releaseMeter: (() => void) | undefined
+  let releaseCaller: (() => void) | undefined
   let files:ControlledFiles|undefined
   let repository:ControlledRepository|undefined
   try {
@@ -132,7 +134,14 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
       sessionId: SessionId(execution.sessionRef), signal,
       meta: { delegationDepth: depth },
       agentOptions: { provider: binding.provider, model: binding.model },
-      setup(childCtx) {
+      setup(childCtx, agent) {
+        releaseCaller = bindToolCaller(agent, () => {
+          signal.throwIfAborted()
+          assertExecutionPreset(binding, execution.task.realm, execution.preset)
+          if (execution.task.project_id !== binding.projectId || ctx.agents.get(SessionId(execution.sessionRef)) !== agent) throw new Error('Tool call requires the exact governed Agent and project')
+          return { realm: execution.task.realm, userId: binding.userId, projectId: binding.projectId, agentId: binding.agentId, runId: execution.runId, depth }
+        })
+        childCtx.effect(() => releaseCaller!)
         files?.install(childCtx,execution.sessionRef)
         repository?.install(childCtx,execution.sessionRef)
         if (progress && !closedText && !closedFiles&&!closedRepository) progress.install(childCtx, signal)
@@ -198,6 +207,7 @@ export async function runGovernedTask(ctx: Context, execution: GovernedExecution
     ctx.logger.warn('governed task %s stopped: %s', execution.runId, error)
     return { ...result, state: signal.aborted ? 'CANCELLED' : 'FAILED', summary: signal.aborted ? 'Execution cancelled or timed out' : 'Agent execution failed; inspect its session log' }
   } finally {
+    releaseCaller?.()
     files?.seal()
     repository?.seal()
     // Keep tool scopes until the child has stopped. Clearing first would turn an

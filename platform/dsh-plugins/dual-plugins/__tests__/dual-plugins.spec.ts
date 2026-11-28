@@ -145,7 +145,7 @@ describe('gateway', () => {
     const p4 = gw.invoke('demo_echo', { text: 'a' }, c)
     await until(() => gw.asks.list({ status: 'pending' }).length === 1)
     gw.asks.cancelSession('s9')
-    expect(await p4).toMatchObject({ ok: false, code: 'ask_expired' })
+    expect(await p4).toMatchObject({ ok: false, code: 'aborted' })
   })
   it('Ask 过期按拒绝处理', async () => {
     const gw = new DualPluginGateway({ decider: new LocalDecider(), asks: new ToolAskBroker(5) })

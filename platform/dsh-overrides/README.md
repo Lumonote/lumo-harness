@@ -1,18 +1,33 @@
-# DSH 覆盖层 —— 上游改动的合法落点
+# DSH 历史覆盖层与退出计划
 
-`deepseek-harness/` 是只读的（[第一铁律](../../CLAUDE.md)）。产品需要的每一处上游行为
-变更，都必须落在本目录或某个 platform 插件里，**不能落在那棵树上**。
+`deepseek-harness/` 是只读的（[第一铁律](../../CLAUDE.md)）。新产品能力优先使用公开插件、服务、插槽和构建装配扩展。本目录记录已有隔离副本源码覆盖的兼容债务；不把“没有直接改原树”当作任意新增源码覆盖的授权。
 
 本文件同时是一份迁移账本：曾经直接改在上游树里的 20 个文件，各自搬到了哪。
 
-## 三个脚本
+## 构建与检查脚本
 
 | 脚本 | 作用 | 谁调用 |
 |---|---|---|
 | `assert-pristine.mjs` | 上游洁净度闸门。已跟踪文件有改动，或 `apps/`、`packages/` 下出现未跟踪且未被 gitignore 排除的文件，立即失败 | `prepare-runtime.mjs`（构建前）、`build-runtime.mjs` 与 `local-runtime.sh`（构建后） |
 | `prepare-runtime.mjs` | 把 `git ls-files` 列出的文件复制成隔离副本（`platform/.build/deepseek-harness`），软链 workspace 的 `node_modules`，再对**副本**打 `apply.mjs` 的补丁 | `desktop/build-runtime.mjs`、`desktop/local-runtime.sh` |
-| `apply.mjs` | 给副本加两个首页 composer 扩展位。**只允许作用于隔离副本，永不作用于上游工作区** | `prepare-runtime.mjs` |
+| `apply.mjs` | 处理 9 个包的覆盖/兼容分支和根 `tsdown.config.ts`；包括插槽、资料预览、分组、模型目录、传输恢复与旧版启动隔离。**仅作用于隔离副本** | `prepare-runtime.mjs` |
 | `brand-web.mjs` | 在 `apps/web/dist/` 构建产物上覆盖 Lumo 品牌（图标、标题、PWA manifest） | 同上 |
+| `check-compatibility.mjs` | 在一次性副本检查全部锚点，并比对实际文件变化与 `inventory.json`，不修改源工作区 | CI、pin 升级与本地诊断 |
+
+## 当前范围与退出顺序
+
+机器可读清单是 [`inventory.json`](inventory.json)：每项含具体文件、目的、替代机制、退出优先级和验收门槛。`inventory.mjs` 将清单与 `apply.mjs` 的 9 个构建包范围比对，并对临时副本的前后文件字节做审计；新增未登记变化、漏掉声明文件、或已不再需要的必改覆盖都会使检查失败。
+
+2026-11-28 对上游提交 `4b399c39a6d1479cd84ca591b4d7c88e24d38a96` 的实测为 **9 个登记包范围 + 1 个根配置，实际变化 16 个文件**。`client/modules` 与 `client/web` 在该提交复用原生启动审计，仅验证锚点，不改字节；保留在构建清单是旧版本兼容范围，不能把登记数量等同于每个版本实际改写数量。
+
+| 顺序 | 范围 | 退出条件 |
+|---|---|---|
+| 0 | `client/modules`、`client/web` 的旧启动分支 | 最低支持版本和发布 pin 均具备原生必需插件审计、可选失败隔离后，删除旧分支及不必要的重建例外，保留黑盒回归 |
+| 0 | 根 `tsdown.config.ts` | 上游构建或平台独立构建配置可完整生成 host/client/typert 产物后移除根入口替换 |
+| 1 | `api/gateway`、`api/session-controller`、`client/ui-model-selection` | 上游原生版本通过慢消费者、断线恢复、历史保留和模型目录先后到达测试后，删除对应修复 |
+| 2 | `client/ui-conversation`、`client/ui-sidebar`、`client/ui-workspace`、`client/ui-sidebar-documentpreview` | 迁移到公开插槽、分组菜单和文件预览导出，完成原生界面回归后删除组件复制与源码注入 |
+
+这里的顺序是迁移计划，不宣称上游已提供尚不存在的 API。每次移除都应同时收紧 `overriddenPackageDirectories`、机器清单和相关缓存/重建范围。新功能不得借此扩大覆盖层。
 
 隔离副本会为 workspace 包明确导出的 `./src/*` 补齐 TypeScript 路径映射，并保留上游已有
 映射。这样源码子路径与公开入口都解析到同一份副本，避免共享 `node_modules` 软链把
@@ -55,7 +70,8 @@ workspace 链接把编译产物写回 `deepseek-harness/packages`——仓库里
 迁移已完成，上游那 20 个改动已还原：20 个已跟踪文件 `checkout`，345 个未跟踪残留（344 个
 tsc 泄漏的 `.js`/`.d.ts`/`.map`，外加一张 `apps/web/public/branding/logo.png`——它的真相源是
 `platform/desktop-assets/lumo-logo.png`，由 `brand-web.mjs` 在 dist 上重新落地）一并 `clean` 掉。
-随后 checkout 从 `dsh-v0.1.1-rc.2` 快进到 `origin/master`，**不再 pin 版本**。
+随后 checkout 曾从 `dsh-v0.1.1-rc.2` 快进到 `origin/master`。当前发布与 CI 使用
+`platform/dsh-pin.json` 固定提交；nightly 才跟踪 master，更新 pin 前先跑兼容检查。
 
 复核用的三条命令，任何时候都应当全绿：
 
@@ -92,12 +108,7 @@ corepack pnpm -C platform test dsh-overrides/__tests__/overlay.spec.ts
 `ambiguous`），不必等到打桌面包。它跟其余用例一样对着 `git show HEAD:` 的原文跑，所以
 `git pull` 之后先跑它，比 `cargo tauri build` 快几个数量级。
 
-**但它只对着本地 checkout 的 HEAD 跑，而 CI 是 `actions/checkout` 拉 `ref: master`。**
-两者一旦分叉（2026-10 那次：本地停在 `dsh-v0.2.1-alpha.1`，master 已改过
-`stream-server.ts` 的回调体），护栏在本地全绿、Windows 打包却在 `beforeBuildCommand` 上
-失配——「本机结论是假的」那一类。所以：**动覆盖层之前先确认本地 dsh 树不落后于
-`origin/master`**（`git -C deepseek-harness log --oneline -1 origin/master` 与 `HEAD` 对比），
-落后就先快进再改；不便快进时，至少把上游**当前 master 的一份干净副本**拿来做诊断：
+检查针对传入 checkout 的 HEAD；发布和 CI 使用 `platform/dsh-pin.json` 固定提交，nightly 才跟踪 master。2026-10 曾因本地与 CI 的提交不同造成“本机全绿、打包失败”。因此升级时必须对准拟发布提交检查，不能用旧 HEAD 的通过代替目标 pin 的证据。master 的一次性诊断可以额外检查前向兼容：
 
 ```sh
 curl -sSL -o /tmp/dsh-master.tar.gz https://codeload.github.com/deepseek-ai/deepseek-harness/tar.gz/refs/heads/master
@@ -107,7 +118,7 @@ node -e "import('./platform/dsh-overrides/apply.mjs').then(m => console.log(m.di
 
 诊断会就地改坏传进去的那棵树（收集模式照常落盘），所以每次都重新解包一份，别复用。
 
-覆盖层本身**零补丁 rebase** —— 这正是第一铁律要证的那一条（`docs/architecture.md` §22.1）。
+上游工作区保持洁净不等于覆盖层“零 rebase”。这些字符串锚点仍需要升级适配，隔离副本也不是已兑现零源码覆盖的证明。上面的退出计划用于逐步归还这些兼容成本；本轮仅补清单、真实审计和文档，没有新增覆盖行为。
 
 **快进之后必须在 dsh 树里重跑装配**，否则平台套件会撞上过期产物：
 

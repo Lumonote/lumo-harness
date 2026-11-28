@@ -16,7 +16,7 @@ import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { applyLumoDshOverrides, overriddenPackageDirectories } from './apply.mjs'
+import { applyLumoDshOverrides, overlayAssetPaths, overriddenPackageDirectories } from './apply.mjs'
 import { assertPristineProductSource, git } from './assert-pristine.mjs'
 import { isolateWorkspaceSourcePaths } from './workspace-source-paths.mjs'
 
@@ -107,11 +107,13 @@ function projectedNativeBinDirectories(sourceRoot) {
     .filter((bin) => existsSync(bin))
 }
 
-function fingerprint(root) {
+export function fingerprint(root, overlayDirectory = scriptRoot) {
   const commit = git(root, ['rev-parse', 'HEAD']).trim()
   const hash = createHash('sha256')
-  for (const script of ['apply.mjs', 'prepare-runtime.mjs', 'workspace-source-paths.mjs']) {
-    hash.update(readFileSync(resolve(scriptRoot, script)))
+  for (const input of ['apply.mjs', 'prepare-runtime.mjs', 'workspace-source-paths.mjs', ...overlayAssetPaths]) {
+    const contents = readFileSync(resolve(overlayDirectory, input))
+    hash.update(`${input}\0${contents.length}\0`)
+    hash.update(contents)
   }
   for (const libDirectory of projectedLibDirectories(root)) {
     hashTree(libDirectory, libDirectory, hash)

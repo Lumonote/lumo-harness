@@ -1,11 +1,7 @@
-// P1 跨设备记忆同步：桌宠「开发工具」里的同步状态与冲突处理（独立组件）。
-// 本地状态、差量计算和网络请求都在 Rust（memory_sync.rs：pet_memory_sync / pet_memory_sync_run），
-// 页面不再 fetch 外部地址，令牌也不经过 JS（CSP connect-src 不放行 https:）。先推后拉；离线失败不丢数据——待推送内容就是本地相对同步快照的差，下次重连自动补推。
+// Sync transport and credentials stay in Rust. The shared project ID is a pairing label,
+// not a credential: the server also isolates all content by the verified cloud account.
 const call = (invoke, workspaceId, request) => invoke('pet_memory_sync', { workspaceId, request })
-
-export async function syncOnce({ invoke, workspaceId }) {
-  return invoke('pet_memory_sync_run', { workspaceId })
-}
+export async function syncOnce({ invoke, workspaceId, full = false }) { return invoke('pet_memory_sync_run', { workspaceId, full }) }
 
 function preview(payload) {
   if (payload == null || payload === '') return '（已删除）'
@@ -14,62 +10,108 @@ function preview(payload) {
 
 export function mountMemorySync({ doc, invoke, listen, getWorkspace, onChanged = () => {}, timer = globalThis }) {
   const $ = id => doc.getElementById(id)
-  const root = $('dev-sync')
-  if (!root) return { refresh: async () => {}, dispose() {} }
-  let busy = false, view = null, interval = null
+  if (!$('dev-sync')) return { refresh: async () => {}, sync: async () => {}, dispose() {} }
+  let busy = false, view = null, interval = null, workspace = '', generation = 0, disposed = false
   const status = (text, error = false) => { $('dev-sync-status').textContent = text; $('dev-sync-status').dataset.error = String(error) }
-  function render() {
-    if (!view) return
-    $('dev-sync-enabled').checked = view.enabled
-    if (doc.activeElement !== $('dev-sync-server')) $('dev-sync-server').value = view.server
-    $('dev-sync-token').placeholder = view.hasToken ? '已保存（留空不修改）' : '访问令牌（可选）'
-    $('dev-sync-now').disabled = busy || !view.enabled
+  function select() {
+    const next = getWorkspace() || ''
+    if (next !== workspace) {
+      workspace = next; generation++; busy = false; view = null
+      for (const id of ['dev-sync-server', 'dev-sync-project', 'dev-sync-token']) $(id).value = ''
+      status(''); render()
+    }
+    return workspace
+  }
+  const current = (ticket, ws) => !disposed && generation === ticket && workspace === ws && getWorkspace() === ws
+  function render(preserveFields = false) {
+    const disabled = busy || !workspace || !view
+    for (const id of ['dev-sync-save', 'dev-sync-enabled', 'dev-sync-server', 'dev-sync-project', 'dev-sync-token']) $(id).disabled = disabled
+    $('dev-sync-now').disabled = disabled || !view?.enabled
+    $('dev-sync-full').disabled = disabled || !view?.enabled
+    $('dev-sync-conflicts').replaceChildren()
+    $('dev-sync-conflicts').hidden = !view?.conflicts.length
+    if (!view) {
+      $('dev-sync-enabled').checked = false
+      $('dev-sync-summary').textContent = workspace ? '正在读取…' : '请先选择工作空间'
+      $('dev-sync-account').textContent = ''
+      $('dev-sync-full-status').textContent = ''
+      return
+    }
+    if (!preserveFields) $('dev-sync-enabled').checked = view.enabled
+    if (!preserveFields && doc.activeElement !== $('dev-sync-server')) $('dev-sync-server').value = view.server
+    if (!preserveFields && doc.activeElement !== $('dev-sync-project')) $('dev-sync-project').value = view.projectId
+    $('dev-sync-token').placeholder = view.hasToken ? '已保存（留空不修改）' : '云端账户访问令牌'
+    $('dev-sync-account').textContent = view.identity ? `已验证账户：${view.identity.realm} / ${view.identity.userId}` : '下次同步将先验证云端账户。'
     const when = view.lastSyncMs ? new Date(view.lastSyncMs).toLocaleString() : '尚未同步'
-    $('dev-sync-summary').textContent = view.enabled ? `待推送 ${view.pending} 条 · 冲突 ${view.conflicts.length} 条 · ${when}${view.skipped ? ` · 跳过 ${view.skipped} 条` : ''}` : '未开启'
+    $('dev-sync-summary').textContent = view.enabled ? `待推送 ${view.pending} 条 · 待接收 ${view.deferred ?? 0} 条 · 冲突 ${view.conflicts.length} 条 · ${when}` : '未开启'
+    $('dev-sync-full-status').textContent = `上次完整对齐：${view.lastFullSyncMs ? new Date(view.lastFullSyncMs).toLocaleString() : '尚未完成'}`
     const list = $('dev-sync-conflicts')
-    list.replaceChildren(...view.conflicts.map(c => {
-      const li = doc.createElement('li')
-      const text = doc.createElement('p')
-      text.textContent = `本机：${preview(c.local)}\n云端（${c.remote.device.slice(0, 8)}）：${preview(c.remote.deleted ? '' : c.remote.payload)}`
-      const keep = doc.createElement('button'); keep.type = 'button'; keep.textContent = '保留本机'
-      const take = doc.createElement('button'); take.type = 'button'; take.textContent = '采用云端'
-      keep.addEventListener('click', () => resolve(c.id, 'local'))
-      take.addEventListener('click', () => resolve(c.id, 'remote'))
+    for (const c of view.conflicts) {
+      const li = doc.createElement('li'), text = doc.createElement('p')
+      text.textContent = `本机：${preview(c.local)}\n当前云端${c.remoteMissing ? '（记录缺失）' : `（${c.remote.device.slice(0, 8)}）`}：${preview(c.remote.deleted ? '' : c.remote.payload)}`
+      const scope = view.scope
+      const keep = doc.createElement('button'); keep.type = 'button'; keep.textContent = '保留本机'; keep.disabled = busy
+      const take = doc.createElement('button'); take.type = 'button'; take.textContent = '采用云端'; take.disabled = busy
+      keep.addEventListener('click', () => resolve(c.id, 'local', scope))
+      take.addEventListener('click', () => resolve(c.id, 'remote', scope))
       li.append(text, keep, take)
-      return li
-    }))
-    list.hidden = view.conflicts.length === 0
+      for (const [index, item] of (c.alternatives ?? []).entries()) {
+        const saved = doc.createElement('p'), choose = doc.createElement('button')
+        saved.textContent = `已保留版本 ${index + 1}：${preview(item.deleted ? '' : item.payload)}`
+        choose.type = 'button'; choose.textContent = `采用已保留版本 ${index + 1}`; choose.disabled = busy
+        choose.addEventListener('click', () => resolve(c.id, `saved:${index}`, scope))
+        li.append(saved, choose)
+      }
+      list.append(li)
+    }
   }
   async function run(request, message) {
-    const ws = getWorkspace()
-    if (!ws || busy) return
-    busy = true; render()
-    try { view = await call(invoke, ws, request); if (message) status(message) } catch (e) { status(String(e?.message ?? e), true) } finally { busy = false; render() }
-  }
-  async function sync() {
-    const ws = getWorkspace()
-    if (!ws || busy || !view?.enabled) return
-    busy = true; render(); status('正在同步…')
+    const ws = select()
+    if (disposed || !ws || busy) return false
+    const ticket = generation
+    let accepted = false
+    busy = true; render(request.op === 'configure')
     try {
-      const before = view.conflicts.length
-      view = await syncOnce({ invoke, workspaceId: ws }) ?? view
-      status(view.conflicts.length > before ? '有条目在两台设备上都被修改，请在下方选择保留哪一版。' : '已同步。')
+      const result = await call(invoke, ws, request)
+      if (!current(ticket, ws)) return false
+      view = result; accepted = true
+      if (message) status(message)
+      return true
+    } catch (e) {
+      if (current(ticket, ws)) status(String(e?.message ?? e), true)
+      return false
+    } finally { if (current(ticket, ws)) { busy = false; render(!accepted && request.op === 'configure') } }
+  }
+  async function sync(full = false) {
+    const ws = select()
+    if (disposed || !ws || busy || !view?.enabled) return
+    const ticket = generation
+    busy = true; render(); status(full ? '正在验证账户并完整对齐…' : '正在验证账户并同步…')
+    try {
+      const result = await syncOnce({ invoke, workspaceId: ws, full })
+      if (!current(ticket, ws)) return
+      view = result ?? view
+      status(view.conflicts.length ? '存在同步冲突，请选择保留哪一版。' : view.deferred ? `还有 ${view.deferred} 条待接收内容；释放记忆容量后会自动重试。` : '已同步。')
       onChanged()
     } catch (e) {
-      status(`暂时无法连接同步服务器，修改已在本机排队，重连后自动补同步（${e?.message ?? e}）`, true)
-    } finally { busy = false; render() }
+      if (current(ticket, ws)) status(`同步未完成，本机修改和待接收内容均已保留（${e?.message ?? e}）`, true)
+    } finally { if (current(ticket, ws)) { busy = false; render() } }
   }
-  function resolve(id, choice) { void run({ op: 'resolve', id, choice }, choice === 'local' ? '已保留本机版本，下次同步覆盖云端。' : '已采用云端版本。').then(onChanged) }
+  function resolve(id, choice, scope) {
+    void run({ op: 'resolve', id, choice, scope }, choice === 'local' ? '已保留本机版本，下次同步提交。' : choice.startsWith('saved:') ? '已采用保留版本，下次同步提交。' : '已采用当前云端版本。').then(ok => { if (ok) onChanged() })
+  }
   listen($('dev-sync-save'), 'click', () => {
-    const token = $('dev-sync-token').value
-    void run({ op: 'configure', enabled: $('dev-sync-enabled').checked, server: $('dev-sync-server').value, token: token ? token : null }, '同步设置已保存。').then(() => { $('dev-sync-token').value = '' })
+    const ws = select(), ticket = generation, token = $('dev-sync-token').value
+    void run({ op: 'configure', enabled: $('dev-sync-enabled').checked, server: $('dev-sync-server').value, projectId: $('dev-sync-project').value, token: token || null }, '同步设置已保存。下次同步会验证账户，并合并当前项目的长期记忆。')
+      .then(ok => { if (ok && current(ticket, ws)) $('dev-sync-token').value = '' })
   })
   listen($('dev-sync-now'), 'click', () => void sync())
+  listen($('dev-sync-full'), 'click', () => void sync(true))
   listen(doc.defaultView ?? globalThis, 'online', () => void sync())
   interval = timer.setInterval?.(() => void sync(), 5 * 60 * 1000)
+  render()
   return {
-    refresh: () => run({ op: 'status' }),
-    sync,
-    dispose() { if (interval != null) timer.clearInterval?.(interval) },
+    refresh: () => run({ op: 'status' }), sync,
+    dispose() { disposed = true; generation++; if (interval != null) timer.clearInterval?.(interval) },
   }
 }

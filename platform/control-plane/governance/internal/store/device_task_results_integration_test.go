@@ -9,15 +9,9 @@ import (
 	"github.com/lumo-harness/platform/governance/internal/domain"
 )
 
-// seedDeviceCommand stages the node, the connection lease and one execute_task
-// command exactly as the device gateway leaves them once it has handed the
-// assignment to a device.
-//
-// state is written directly rather than driven through CompleteDeviceCommand
-// because that method's acceptance path also demands PLACED scheduler rows; the
-// only thing these tests need from it is its outcome, which is the precondition
-// RecordDeviceTaskResult is defined against.
-func seedDeviceCommand(t *testing.T, s *Store, taskID, runID, nodeID, connection, state string) (commandID string) {
+// seedDeviceCommand includes matching scheduling ledgers, as every accepted
+// desktop command must originate in a scheduler placement.
+func seedDeviceCommand(t *testing.T, s *Store, taskID, runID, nodeID, connection, state string, skipScheduler ...bool) (commandID string) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := s.pool.Exec(ctx, `INSERT INTO governance_desktop_nodes
@@ -37,6 +31,24 @@ func seedDeviceCommand(t *testing.T, s *Store, taskID, runID, nodeID, connection
 	  VALUES ($1,'realm',$2,'device-gateway',1,$3,'execute_task',$4,now()+interval '5 minutes',$5,1,$6)`,
 		commandID, nodeID, connection, state, runID, taskID+"-session"); err != nil {
 		t.Fatal(err)
+	}
+	if len(skipScheduler) == 0 || !skipScheduler[0] {
+		if _, err := s.pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS scheduler_tasks (
+        task_id TEXT PRIMARY KEY,realm TEXT NOT NULL,worker_id TEXT NOT NULL,node_id TEXT NOT NULL,
+        attempt INT NOT NULL,state TEXT NOT NULL,updated_at BIGINT NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS scheduler_task_attempts (
+        task_id TEXT NOT NULL,realm TEXT NOT NULL,node_id TEXT NOT NULL,attempt INT NOT NULL,
+        state TEXT NOT NULL,updated_at BIGINT NOT NULL DEFAULT 0,PRIMARY KEY(task_id,attempt));`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.pool.Exec(ctx, `INSERT INTO scheduler_tasks(task_id,realm,worker_id,node_id,attempt,state)
+        VALUES($1,'realm','user:employee',$2,1,'RUNNING') ON CONFLICT DO NOTHING`, runID, nodeID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.pool.Exec(ctx, `INSERT INTO scheduler_task_attempts(task_id,realm,node_id,attempt,state)
+        VALUES($1,'realm',$2,1,'RUNNING') ON CONFLICT DO NOTHING`, runID, nodeID); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return commandID
 }
@@ -227,5 +239,77 @@ func TestDeviceResultOnlyAppliesToTaskCommandsWithALiveRun(t *testing.T) {
 	orphan := resultFor("ghost")
 	if err := s.RecordDeviceTaskResult(ctx, "realm", "device-c", "conn-c", ghost, orphan); !errors.Is(err, ErrConflict) {
 		t.Fatalf("result accepted for a missing run: %v", err)
+	}
+}
+
+func TestDeviceAcceptanceThenResultReleasesCapacity(t *testing.T) {
+	for _, terminal := range []string{domain.DelegationCompleted, domain.DelegationFailed, domain.DelegationCancelled} {
+		t.Run(terminal, func(t *testing.T) {
+			s := taskTestStore(t)
+			ctx := context.Background()
+			seedResultTask(t, s, "task", "")
+			cmd := seedDeviceCommand(t, s, "task", "task-run-1", "device-a", "conn-a", "delivered")
+			for _, query := range []string{
+				`UPDATE governance_task_runs SET state='ASSIGNED',session_ref='task-session' WHERE id='task-run-1'`,
+				`UPDATE governance_delegation_tasks SET state='ASSIGNED',business_state='ASSIGNED' WHERE id='task'`,
+				`UPDATE scheduler_tasks SET state='PLACED'`, `UPDATE scheduler_task_attempts SET state='PLACED'`,
+			} {
+				if _, err := s.pool.Exec(ctx, query); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.CompleteDeviceCommand(ctx, "realm", "device-a", "conn-a", cmd, "completed", json.RawMessage(`{}`)); err != nil {
+				t.Fatal(err)
+			}
+			if n := countRows(t, s, `SELECT count(*) FROM scheduler_tasks WHERE node_id='device-a' AND state IN ('PLACED','RUNNING','CANCELLING')`); n != 1 {
+				t.Fatalf("accepted capacity=%d", n)
+			}
+			result := resultFor("task")
+			result.State = terminal
+			if err := s.RecordDeviceTaskResult(ctx, "realm", "device-a", "conn-a", cmd, result); err != nil {
+				t.Fatal(err)
+			}
+			if n := countRows(t, s, `SELECT count(*) FROM scheduler_tasks WHERE node_id='device-a' AND state IN ('PLACED','RUNNING','CANCELLING')`); n != 0 {
+				t.Fatalf("finished capacity=%d", n)
+			}
+			want := terminal
+			if want == domain.DelegationCancelled {
+				want = "ABORTED"
+			}
+			if n := countRows(t, s, `SELECT count(*) FROM scheduler_task_attempts WHERE task_id='task-run-1' AND state=$1`, want); n != 1 {
+				t.Fatalf("attempt state != %s", want)
+			}
+			if err := s.RecordDeviceTaskResult(ctx, "realm", "device-a", "conn-a", cmd, result); err != nil {
+				t.Fatalf("duplicate final: %v", err)
+			}
+			if _, err := s.pool.Exec(ctx, `UPDATE scheduler_tasks SET attempt=2,state='RUNNING' WHERE task_id='task-run-1'`); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.RecordDeviceTaskResult(ctx, "realm", "device-a", "conn-a", cmd, result); !errors.Is(err, ErrConflict) {
+				t.Fatalf("stale final: %v", err)
+			}
+			if n := countRows(t, s, `SELECT count(*) FROM scheduler_tasks WHERE task_id='task-run-1' AND attempt=2 AND state='RUNNING'`); n != 1 {
+				t.Fatal("stale final released new attempt")
+			}
+		})
+	}
+}
+
+func TestDeviceResultSchedulerMismatchRollsBackReceipt(t *testing.T) {
+	s := taskTestStore(t)
+	ctx := context.Background()
+	seedResultTask(t, s, "task", "")
+	cmd := seedDeviceCommand(t, s, "task", "task-run-1", "device-a", "conn-a", "completed")
+	if _, err := s.pool.Exec(ctx, `UPDATE scheduler_task_attempts SET node_id='other'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordDeviceTaskResult(ctx, "realm", "device-a", "conn-a", cmd, resultFor("task")); !errors.Is(err, ErrConflict) {
+		t.Fatalf("mismatch: %v", err)
+	}
+	if countRows(t, s, `SELECT count(*) FROM governance_task_results`) != 0 {
+		t.Fatal("partial receipt committed")
+	}
+	if countRows(t, s, `SELECT count(*) FROM scheduler_tasks WHERE state='RUNNING'`) != 1 {
+		t.Fatal("partial capacity release committed")
 	}
 }

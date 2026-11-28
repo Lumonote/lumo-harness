@@ -25,6 +25,7 @@ import { installSessionKnowledge, USER_SESSION_KNOWLEDGE_TOOL, validateSessionKn
 import { SessionConnectorTools, USER_CONNECTOR_TOOLS, validateSessionConnectors, type SessionConnectorConfig } from './session-connectors.ts'
 import { SessionQuestionAsks, connectorAsksOf, isSessionAskAnswer } from './session-asks.ts'
 import { OwnedSessionMigration, SessionMigrationError, migrationActions } from './session-migration.ts'
+import { bindToolCaller } from '../../../shared/seam-contracts/tool-caller.ts'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface PrincipalMap { 'lumo-user': { readonly kind: 'lumo-user'; readonly realm: string; readonly userId: string; readonly requestId: string } }
@@ -133,6 +134,7 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
   const pendingInputs = new Set<string>()
   const prepared = new WeakSet<Agent>()
   const authorities = new Map<string, SessionAuthority>()
+  let closed = false
   const attachmentAdmissions = new Set<string>()
   const polls = new Map<string, ReturnType<typeof setInterval>>()
   const handles = new Set<AgentHandle>()
@@ -229,13 +231,27 @@ export function createSessionTransport(ctx: Context, config: SessionTransportCon
       ...(models.dynamic ? { modelRoutes: models.billingRoutes() } : {}) })
     agent.ctx.effect(() => release, 'lumo-user: meter attribution')
     prepared.add(agent)
+    const releaseCaller = bindToolCaller(agent, async () => {
+      const authority = authorities.get(owner.session_ref)
+      const checkLive = () => {
+        if (closed || !authority || authorities.get(owner.session_ref) !== authority || !prepared.has(agent) || ctx.agents.get(SessionId(owner.session_ref)) !== agent) throw new Error('Tool call requires the exact live authenticated Session Agent')
+      }
+      checkLive()
+      const principal = await authority!()
+      if (!principal || principal.user_id !== owner.owner_user_id || principal.realm !== owner.realm) throw new Error('Tool call requires the current authenticated Session owner')
+      await authorizeProject(principal)
+      await own(principal, owner.session_ref)
+      checkLive()
+      return { realm: principal.realm, userId: principal.user_id, projectId: owner.project_id }
+    })
+    agent.ctx.effect(() => releaseCaller, 'lumo-user: tool caller identity')
   }
   ctx.on('agent/created', ({ agent }) => {
     const owner = known.get(agent.id)
     if (owner) prepare(agent, owner)
     return undefined
   })
-  ctx.effect(() => async () => { releasePolicy(); grants.clear(); known.clear(); pendingInputs.clear(); authorities.clear(); for (const timer of polls.values()) clearInterval(timer); polls.clear(); await Promise.allSettled([...handles].map(h => h.dispose())); await runtime?.dispose() }, 'lumo-user: Session transport')
+  ctx.effect(() => async () => { closed = true; releasePolicy(); grants.clear(); known.clear(); pendingInputs.clear(); authorities.clear(); for (const timer of polls.values()) clearInterval(timer); polls.clear(); await Promise.allSettled([...handles].map(h => h.dispose())); await runtime?.dispose() }, 'lumo-user: Session transport')
   async function own(principal: Principal, ref: string): Promise<SessionOwner> {
     migration?.assert(ref)
     const owner = await owners.get(principal.realm, ref)

@@ -1,0 +1,4 @@
+{
+  "build": { "frontendDist": "../desktop-assets" },
+  "bundle": { "resources": [] }
+}

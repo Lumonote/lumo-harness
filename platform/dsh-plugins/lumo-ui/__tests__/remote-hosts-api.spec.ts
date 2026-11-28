@@ -17,7 +17,7 @@ function setup(script: Array<{ code: number; stdout?: string; stderr?: string }>
   let closed = 0
   const runner: SshRunner = {
     async run(_h, args) { calls.push(args); const r = script.shift() ?? { code: 0, stdout: PROBE_OK }; return { code: r.code, stdout: r.stdout ?? '', stderr: r.stderr ?? '' } },
-    forward() { return { pid: 42, close: () => { closed++ }, done: new Promise<number>(() => {}) } },
+    forward() { return { pid: 42, ready: Promise.resolve(), close: () => { closed++ }, done: new Promise<number>(() => {}) } },
   }
   const svc = new RemoteHostsService({ file: join(dir, 'remote-hosts.json'), target, runner, scriptPath, runTree: { apply: e => events.push(e) }, identity: { userId: 'u1', realm: 'r' } })
   return { svc, calls, events, dir, closed: () => closed }

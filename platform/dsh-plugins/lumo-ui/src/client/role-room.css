@@ -1,0 +1,26 @@
+.lumo-role-page { display: grid; gap: 20px; min-width: 0; }
+.lumo-role-page label:not(:where(.lumo-native-content *, .lumo-native-button)) { display: grid; gap: 7px; min-width: 0; }
+/* Page controls must not restyle controls rendered by the native message components. */
+.lumo-role-page :is(input,select,textarea):not(:where(.lumo-native-content *, .lumo-native-button)) { width: 100%; min-width: 0; padding: 10px; border: 1px solid var(--lumo-line); border-radius: var(--lumo-radius-sm); color: var(--lumo-ink); background: var(--lumo-panel); font: inherit; }
+.lumo-role-page button:not(:where(.lumo-native-content *, .lumo-native-button)) { padding: 9px 13px; border: 1px solid var(--lumo-line); border-radius: var(--lumo-radius-sm); color: var(--lumo-ink); background: var(--lumo-panel-raised); cursor: pointer; }
+.lumo-role-page button:disabled:not(:where(.lumo-native-content *, .lumo-native-button)) { opacity: .5; cursor: default; }
+.lumo-role-page .lumo-primary { background: var(--lumo-mint); color: var(--lumo-bg); }
+.lumo-role-page :is(button,input,select,textarea):focus-visible:not(:where(.lumo-native-content *, .lumo-native-button)) { outline: 2px solid var(--lumo-mint); outline-offset: 3px; }
+.lumo-role-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 14px 0; }
+.lumo-role-toolbar small { color: var(--lumo-muted); align-self: center; }
+.lumo-role-fields { display: grid; grid-template-columns: 1fr 2fr; gap: 16px; }
+.lumo-role-cards, .lumo-role-roster { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,240px),1fr)); gap: 14px; margin: 18px 0; }
+.lumo-role-cards fieldset, .lumo-role-roster article { min-width: 0; margin: 0; display: grid; gap: 12px; border: 1px solid var(--lumo-line); border-radius: var(--lumo-radius); padding: 16px; background: var(--lumo-panel); }
+.lumo-role-roster article > span, .lumo-role-roster small, .lumo-role-reply > small, .lumo-role-reply > header small { color: var(--lumo-muted); }
+.lumo-role-roster small { overflow-wrap: anywhere; }
+.lumo-role-log { max-height: 620px; overflow: auto; border-block: 1px solid var(--lumo-line); padding: 14px 0; }
+.lumo-role-round { display: grid; gap: 12px; margin-bottom: 24px; }
+.lumo-role-question, .lumo-role-reply { padding: 16px; border-radius: var(--lumo-radius); border: 1px solid var(--lumo-line); background: var(--lumo-panel); }
+.lumo-role-question { background: var(--lumo-mint-soft); }
+.lumo-role-reply > header { display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; }
+.lumo-role-reply.running { border-color: var(--lumo-mint); }
+.lumo-role-reply > p, .lumo-role-question > p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+.lumo-role-permissions { border: 1px solid var(--lumo-warn); padding: 16px; border-radius: var(--lumo-radius); margin: 16px 0; }
+.lumo-role-permissions pre { white-space: pre-wrap; max-height: 180px; overflow: auto; }
+.lumo-role-conversation > header p { overflow-wrap: anywhere; }
+@media (max-width: 640px) { .lumo-role-fields { grid-template-columns: 1fr; } .lumo-role-page :is(input,select,textarea):not(:where(.lumo-native-content *, .lumo-native-button)) { font-size: 16px; } .lumo-role-log { max-height: 60vh; } }

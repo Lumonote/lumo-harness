@@ -45,7 +45,7 @@ func TestDispatchDeviceCancellationReachesTheRunningDevice(t *testing.T) {
 	schedulerTasksWithCancellation(t, s)
 	ctx := context.Background()
 	seedResultTask(t, s, "task", "")
-	seedDeviceCommand(t, s, "task", "task-run-1", "device-a", "conn-a", "delivered")
+	seedDeviceCommand(t, s, "task", "task-run-1", "device-a", "conn-a", "delivered", true)
 	// Pin a body on the assignment that the cancel has to carry over. The marker
 	// key is what makes "carried" distinguishable from "rebuilt": dispatchDeviceTask
 	// builds the envelope from a fixed key set and would never produce it, so a
@@ -104,7 +104,7 @@ func TestDispatchDeviceCancellationIgnoresTasksNobodyCancelled(t *testing.T) {
 	s := taskTestStore(t)
 	schedulerTasksWithCancellation(t, s)
 	seedResultTask(t, s, "task", "")
-	seedDeviceCommand(t, s, "task", "task-run-1", "device-a", "conn-a", "delivered")
+	seedDeviceCommand(t, s, "task", "task-run-1", "device-a", "conn-a", "delivered", true)
 	setSchedulerState(t, s, "task-run-1", "RUNNING")
 
 	if n, err := s.DispatchDeviceCancellations(context.Background(), 4); err != nil || n != 0 {
@@ -122,7 +122,7 @@ func TestDispatchDeviceCancellationIgnoresTheInflightCap(t *testing.T) {
 	schedulerTasksWithCancellation(t, s)
 	ctx := context.Background()
 	seedResultTask(t, s, "task", "")
-	seedDeviceCommand(t, s, "task", "task-run-1", "device-a", "conn-a", "delivered")
+	seedDeviceCommand(t, s, "task", "task-run-1", "device-a", "conn-a", "delivered", true)
 	for i := 0; i < 16; i++ {
 		if _, err := s.pool.Exec(ctx, `INSERT INTO governance_device_commands
 		  (id,realm,node_id,actor_id,revision,connection_id,action,state,expires_at)

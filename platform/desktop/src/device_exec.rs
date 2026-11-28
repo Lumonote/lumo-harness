@@ -99,6 +99,15 @@ pub fn confirm_approved(stdout: &str, success: bool) -> bool {
 
 /// 本机原生确认。阻塞到用户点选或超时。只有本机键鼠能点到这个框，HTTP 调用方无法代答。
 pub fn confirm(title: &str, detail: &str) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        // WScript's native modal has a timeout and a default No button. Values are
+        // quoted as literal PowerShell strings; no shell interpolation is used.
+        let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        let script = format!("$popup = New-Object -ComObject WScript.Shell; $answer = $popup.Popup({}, 120, {}, 292); Write-Output $answer", literal(detail), literal(title));
+        let output = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &script]).output().map_err(|e|format!("无法弹出本机确认框：{e}"))?;
+        return Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "6");
+    }
     #[cfg(target_os = "macos")]
     {
         let out = Command::new("osascript")

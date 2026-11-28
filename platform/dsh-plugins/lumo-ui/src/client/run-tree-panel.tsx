@@ -8,10 +8,11 @@
  * 回退开关：localStorage `lumo.runTree = 'legacy'`（或 URL `?runTree=legacy`）恢复旧拼接视图。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { applyRunTreeEvent, buildRunTree, emptyRunTree, runNodeId, statusFromTaskState, taskNodeId, type RunTreeDelta, type RunTreeItem, type RunTreeNode, type RunTreeState, type RunTreeStatus } from '../../../../shared/seam-contracts/run-tree.ts'
+import { buildRunTree, emptyRunTree, runNodeId, statusFromTaskState, taskNodeId, type RunTreeDelta, type RunTreeItem, type RunTreeNode, type RunTreeState, type RunTreeStatus } from '../../../../shared/seam-contracts/run-tree.ts'
 import type { Ask } from '../../../../shared/seam-contracts/asks.ts'
 import { effectiveStatus } from '../../../../shared/seam-contracts/asks.ts'
 import { api } from './api.ts'
+import { RunTreeStream } from './run-tree-stream.ts'
 import { BusyButton, Empty, Notice } from './surface-shell.tsx'
 import './run-tree-panel.css'
 
@@ -46,26 +47,32 @@ export function RunTreePanel<T extends RunTreeTask>({ tasks, showRuns, limit = 8
   const [selected, setSelected] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [notice, setNotice] = useState('')
-  const seqRef = useRef(0)
+  const streamRef = useRef<RunTreeStream | null>(null)
+  const syncGeneration = useRef(0)
   const visible = useMemo(() => tasks.slice(0, limit), [tasks, limit])
 
-  const loadSnapshot = useCallback(async () => {
-    const snap = await api<{ seq: number; nodes: RunTreeNode[] }>('/lumo/api/run-tree')
-    const state = emptyRunTree()
-    for (const node of snap.nodes) {
-      state.nodes[node.id] = node
-      if (node.sessionId) state.sessions[node.sessionId] = node.id
-    }
-    state.seq = snap.seq
-    seqRef.current = snap.seq
-    setTree(state)
+  const loadSnapshot = useCallback(() => streamRef.current?.refresh() ?? Promise.resolve(), [])
+  useEffect(() => {
+    const stream = new RunTreeStream(signal => api('/lumo/api/run-tree', { signal }), setTree, setNotice)
+    streamRef.current = stream
+    const source = typeof EventSource === 'undefined' ? undefined : new EventSource('/lumo/api/run-tree/events')
+    source?.addEventListener('hello', () => stream.hello())
+    source?.addEventListener('delta', message => {
+      try { stream.delta(JSON.parse((message as MessageEvent<string>).data) as RunTreeDelta) }
+      catch { void stream.refresh() }
+    })
+    if (source) source.onerror = () => stream.disconnected()
+    return () => { source?.close(); stream.dispose(); streamRef.current = null; syncGeneration.current++ }
   }, [])
 
   const sync = useCallback(async () => {
+    const generation = ++syncGeneration.current
+    const current = () => generation === syncGeneration.current
     setLoading(true); setNotice('')
     try {
       const links: Array<Record<string, unknown>> = []
       const runsByTask = await Promise.all(visible.map(task => api<{ runs?: TaskRunLite[] }>(`/lumo/api/tasks/${encodeURIComponent(task.id)}/runs`).then(r => r.runs ?? []).catch(() => [] as TaskRunLite[])))
+      if (!current()) return
       visible.forEach((task, index) => {
         links.push({ id: taskNodeId(task.id), kind: 'task', title: task.title, status: statusFromTaskState(task.state), agent: task.assignee_name ?? task.assignee_worker_id ?? task.assignee_user_id, startedAt: task.created_at })
         for (const run of runsByTask[index]!) {
@@ -77,31 +84,19 @@ export function RunTreePanel<T extends RunTreeTask>({ tasks, showRuns, limit = 8
       })
       if (links.length) await api('/lumo/api/run-tree/links', { method: 'POST', body: JSON.stringify({ nodes: links }) })
       const askList = await api<{ asks: Ask[] }>('/lumo/api/asks').then(r => r.asks ?? []).catch(() => [] as Ask[])
+      if (!current()) return
       setAsks(askList)
       for (const ask of askList) {
+        if (!current()) return
         if (!ask.source.run_id && !ask.source.session_ref) continue
         const state = effectiveStatus(ask) === 'pending' ? 'pending' : 'resolved'
         await api('/lumo/api/run-tree/asks', { method: 'POST', body: JSON.stringify({ askId: ask.id, state, runId: ask.source.run_id, sessionRef: ask.source.session_ref }) }).catch(() => undefined)
       }
-      await loadSnapshot()
-    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { setLoading(false) }
+      if (current()) await loadSnapshot()
+    } catch (reason) { if (current()) setNotice(reason instanceof Error ? reason.message : String(reason)) } finally { if (current()) setLoading(false) }
   }, [visible, loadSnapshot])
 
-  useEffect(() => { void sync() }, [sync])
-  useEffect(() => {
-    if (typeof EventSource === 'undefined') return
-    const source = new EventSource('/lumo/api/run-tree/events')
-    source.addEventListener('delta', message => {
-      try {
-        const delta = JSON.parse((message as MessageEvent<string>).data) as RunTreeDelta
-        if (delta.seq !== seqRef.current + 1) { void loadSnapshot(); return }
-        seqRef.current = delta.seq
-        setTree(current => applyRunTreeEvent(current, delta.event))
-      } catch { void loadSnapshot() }
-    })
-    source.onerror = () => source.close()
-    return () => source.close()
-  }, [loadSnapshot])
+  useEffect(() => { void sync(); return () => { syncGeneration.current++ } }, [sync])
 
   const forest = useMemo(() => {
     const ids = new Set(visible.map(task => taskNodeId(task.id)))

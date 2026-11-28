@@ -9,14 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/lumo-harness/platform/flows/internal/domain"
-	"github.com/lumo-harness/platform/flows/internal/lineage"
 )
 
 const DDL = `
@@ -289,6 +287,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, DDL); err != nil {
 		return fmt.Errorf("建 flows 表失败: %w", err)
 	}
+	if _, err := s.pool.Exec(ctx, manualDDL); err != nil {
+		return fmt.Errorf("initialize manual flow runs: %w", err)
+	}
 	if _, err := s.pool.Exec(ctx, managementDDL); err != nil {
 		return fmt.Errorf("initialize flow change drafts: %w", err)
 	}
@@ -372,16 +373,17 @@ func (s *Store) EnqueueReplay(ctx context.Context, flowID, realm string, runID i
 
 	var (
 		status, eventName, automationID, pinnedFlowID string
+		manual                                        bool
 		payload, botScope                             json.RawMessage
 		version                                       int
 	)
 	err = tx.QueryRow(ctx, `
-		SELECT r.status, t.event_name, t.payload, r.automation_id, r.flow_id, r.flow_version, t.bot_scope
+		SELECT r.status, t.event_name, t.payload, r.automation_id, r.flow_id, r.flow_version, t.bot_scope, EXISTS(SELECT 1 FROM flow_manual_requests m WHERE m.trigger_id=r.trigger_id)
 		FROM flow_runs r
 		JOIN flow_trigger_outbox t ON t.id = r.trigger_id
 		WHERE r.id = $1 AND r.flow_id = $2 AND t.realm = $3
 		FOR UPDATE OF r, t`, runID, flowID, realm).Scan(
-		&status, &eventName, &payload, &automationID, &pinnedFlowID, &version, &botScope,
+		&status, &eventName, &payload, &automationID, &pinnedFlowID, &version, &botScope, &manual,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ReplayEnqueue{}, ErrNotFound
@@ -389,7 +391,7 @@ func (s *Store) EnqueueReplay(ctx context.Context, flowID, realm string, runID i
 	if err != nil {
 		return ReplayEnqueue{}, err
 	}
-	if status != "failed" {
+	if status != "failed" || manual {
 		return ReplayEnqueue{}, ErrRunNotReplayable
 	}
 
@@ -532,6 +534,9 @@ func (s *Store) FinishTriggerRun(ctx context.Context, triggerID uint64, automati
 // returning output payloads. Outputs can contain source-system data, so the
 // management view gets only their existence plus bounded operational metadata.
 func (s *Store) ListTriggerRuns(ctx context.Context, flowID string, limit int) ([]TriggerRun, error) {
+	if err := s.expireManualRuns(ctx, flowID); err != nil {
+		return nil, err
+	}
 	if flowID == "" {
 		return nil, ErrNotFound
 	}
@@ -667,22 +672,33 @@ func (s *Store) CreateFlow(ctx context.Context, id, projectID, realm, name, auth
 }
 
 // UpdateDefinition 改草稿（server 层已验作者 + draft 态）。
-func (s *Store) UpdateDefinition(ctx context.Context, id string, def json.RawMessage) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE flows SET definition = $2, updated_at = now() WHERE id = $1 AND status = 'draft'`,
-		id, def)
+func (s *Store) UpdateDefinition(ctx context.Context, id string, definition json.RawMessage, actors ...MutationActor) error {
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	defer func() { _ = tx.Rollback(ctx) }()
+	f, err := lockMutationFlow(ctx, tx, id, "edit", actors)
+	if err != nil {
+		return err
+	}
+	if f.Status != domain.StatusDraft {
 		return ErrOnlyDraft
 	}
-	return nil
+	if _, err := tx.Exec(ctx, `UPDATE flows SET definition=$2,updated_at=clock_timestamp() WHERE id=$1`, id, definition); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
-// Transition 状态机执行：非法转移报 domain 错（server 映射 409）。
-func (s *Store) Transition(ctx context.Context, id, event string) (*domain.Flow, error) {
-	f, err := s.GetFlow(ctx, id, "")
+// Transition validates and writes under the same row lock as publication.
+func (s *Store) Transition(ctx context.Context, id, event string, actors ...MutationActor) (*domain.Flow, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	f, err := lockMutationFlow(ctx, tx, id, event, actors)
 	if err != nil {
 		return nil, err
 	}
@@ -690,64 +706,37 @@ func (s *Store) Transition(ctx context.Context, id, event string) (*domain.Flow,
 	if err != nil {
 		return nil, err
 	}
-	if next == f.Status {
-		return f, nil // 幂等（targeted 重定）
-	}
-	var ts *time.Time
-	switch next {
-	case domain.StatusSubmitted:
-		now := time.Now().UTC()
-		ts = &now
-	case domain.StatusPublished:
-		now := time.Now().UTC()
-		ts = &now
-	case domain.StatusDeprecated:
-		now := time.Now().UTC()
-		ts = &now
-	}
-	var col string
-	switch next {
-	case domain.StatusSubmitted:
-		col = "submitted_at"
-	case domain.StatusPublished:
-		col = "published_at"
-	case domain.StatusDeprecated:
-		col = "deprecated_at"
-	case domain.StatusDraft:
-		col = "" // reject 回 draft：不动时间戳
-	}
-	set := "status = $2, updated_at = now()"
-	if col != "" {
-		set = fmt.Sprintf("status = $2, updated_at = now(), %s = $3", col)
-		if _, err := s.pool.Exec(ctx,
-			`UPDATE flows SET `+set+` WHERE id = $1`, id, next, ts); err != nil {
-			return nil, err
-		}
-	} else if _, err := s.pool.Exec(ctx,
-		`UPDATE flows SET `+set+` WHERE id = $1`, id, next); err != nil {
+	updated, err := scanFlow(tx.QueryRow(ctx, `UPDATE flows SET status=$2,updated_at=clock_timestamp(),
+        submitted_at=CASE WHEN $2='submitted' THEN now() ELSE submitted_at END,
+        published_at=CASE WHEN $2='published' THEN now() ELSE published_at END,
+        deprecated_at=CASE WHEN $2='deprecated' THEN now() ELSE deprecated_at END
+        WHERE id=$1 RETURNING `+flowCols, id, next))
+	if err != nil {
 		return nil, err
 	}
-	return s.GetFlow(ctx, id, "")
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // Review 审核事务：approve = 状态转移 + 发布快照（flow_versions v+1）+ 重指 version +
 // 审计行；reject = 回 draft + 审计行。**同一事务**——快照与指向分家会让「已发布但
 // 指向旧版本」这种半态出现在崩溃窗口里。
-func (s *Store) Review(ctx context.Context, id, reviewer string, approve bool, comment string) (*domain.Flow, error) {
+func (s *Store) Review(ctx context.Context, id, reviewer string, approve bool, comment string, actors ...MutationActor) (*domain.Flow, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var status string
-	var realm string
-	var def json.RawMessage
-	err = tx.QueryRow(ctx, `SELECT status, definition, realm FROM flows WHERE id = $1 FOR UPDATE`, id).Scan(&status, &def, &realm)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
+	current, err := lockMutationFlow(ctx, tx, id, "review", actors)
 	if err != nil {
+		return nil, err
+	}
+	status, realm := current.Status, current.Realm
+	var def json.RawMessage
+	if err := tx.QueryRow(ctx, `SELECT definition FROM flows WHERE id=$1`, id).Scan(&def); err != nil {
 		return nil, err
 	}
 
@@ -775,25 +764,10 @@ func (s *Store) Review(ctx context.Context, id, reviewer string, approve bool, c
 			VALUES ($1, $2, $3, $4)`, id, version, def, reviewer); err != nil {
 			return nil, fmt.Errorf("写发布快照失败: %w", err)
 		}
-		// 把已发布的规范化定义解析成 domain.Definition 供血缘抽取；解析失败只记日志不阻断发布
-		// （def 来自刚写入 flow_versions 的同一字节，理论上必然可解析）。
-		var d domain.Definition
-		if err := json.Unmarshal(def, &d); err != nil {
-			slog.Warn("血缘定义反序列化失败，跳过", "flow_id", id, "version", version, "err", err)
+		if err := s.publishLineage(ctx, tx, id, realm, version, def); err != nil {
+			return nil, err
 		}
-		// 血缘写入点：与发布快照同一事务。def 已通过入库校验（防环等），Extract 通常
-		// 不会失败；这里仅把「编译后 DAG」的血缘边落成 outbox 行，Nebula 投影由后台异步完成，
-		// 所以 Nebula 不可用不会让发布变慢或失败。Extract 万一失败（理论不可达）只记日志、
-		// 不阻断发布——血缘缺失比发布失败可接受。
-		if s.lineageEnabled {
-			if edges, eerr := lineage.Extract(&d, id, version, realm); eerr == nil {
-				if werr := s.writeLineageWithinTx(ctx, tx, edges); werr != nil {
-					return nil, fmt.Errorf("写血缘 outbox 失败: %w", werr)
-				}
-			} else {
-				slog.Warn("血缘抽取失败，跳过（发布仍继续）", "flow_id", id, "version", version, "err", eerr)
-			}
-		}
+
 		if _, err := tx.Exec(ctx, `
 			UPDATE flows SET status = $2, version = $3, published_at = now(),
 			  updated_at = now(), review_comment = NULL WHERE id = $1`,
@@ -822,8 +796,13 @@ func (s *Store) Review(ctx context.Context, id, reviewer string, approve bool, c
 }
 
 // Target 定向分发：published/targeted → targeted，audience + visibility 同部落库。
-func (s *Store) Target(ctx context.Context, id string, audience *domain.Audience, visibility string) (*domain.Flow, error) {
-	f, err := s.GetFlow(ctx, id, "")
+func (s *Store) Target(ctx context.Context, id string, audience *domain.Audience, visibility string, actors ...MutationActor) (*domain.Flow, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	f, err := lockMutationFlow(ctx, tx, id, domain.EventTarget, actors)
 	if err != nil {
 		return nil, err
 	}
@@ -835,28 +814,40 @@ func (s *Store) Target(ctx context.Context, id string, audience *domain.Audience
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.pool.Exec(ctx, `
-		UPDATE flows SET status = $2, visibility = $3, audience = $4, updated_at = now()
-		WHERE id = $1`, id, next, visibility, aud); err != nil {
-		return nil, err
-	}
-	return s.GetFlow(ctx, id, "")
-}
-
-// Rollback 重指版本（不改状态）。目标版本必须存在于 flow_versions——快照是唯一
-// 可指的东西，指向空版本会让运行时拿到 404。
-func (s *Store) Rollback(ctx context.Context, id string, version int) (*domain.Flow, error) {
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE flows SET version = $2, updated_at = now()
-		WHERE id = $1 AND EXISTS (
-		  SELECT 1 FROM flow_versions WHERE flow_id = $1 AND version = $2)`, id, version)
+	updated, err := scanFlow(tx.QueryRow(ctx, `UPDATE flows SET status=$2,visibility=$3,audience=$4,updated_at=clock_timestamp()
+        WHERE id=$1 RETURNING `+flowCols, id, next, visibility, aud))
 	if err != nil {
 		return nil, err
 	}
-	if tag.RowsAffected() == 0 {
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// Rollback changes only the version, under the same lock as a new publication.
+func (s *Store) Rollback(ctx context.Context, id string, version int, actors ...MutationActor) (*domain.Flow, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := lockMutationFlow(ctx, tx, id, "rollback", actors); err != nil {
+		return nil, err
+	}
+	updated, err := scanFlow(tx.QueryRow(ctx, `UPDATE flows SET version=$2,updated_at=clock_timestamp()
+        WHERE id=$1 AND EXISTS(SELECT 1 FROM flow_versions WHERE flow_id=$1 AND version=$2)
+        RETURNING `+flowCols, id, version))
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrVersionGone
 	}
-	return s.GetFlow(ctx, id, "")
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // GetVersion 取发布快照（回滚/查看历史版本）。

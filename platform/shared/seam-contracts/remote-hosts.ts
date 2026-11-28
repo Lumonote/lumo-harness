@@ -2,7 +2,7 @@
  * 远端机器 SSH 一键接入契约（P1：SSH remote）。
  *
  * 流程：录入主机 → 连通性/环境探测 → 一键安装 lumo 服务端（与本地同版本、同 dsh pin）
- *       → 版本检查/升级/回滚 → 建立隧道 → 注册为设备。
+ *       → 版本检查/升级/回滚 → 建立隧道 → 打开远端工作台；集群设备注册由接入流程另行完成。
  * 借鉴 gugu `electron/server/ssh-*.ts` + `ssh-install/*` + `tunnel-*.ts` 的分步思路，实现是纯函数 + 小的执行器。
  *
  * 安全约束：
@@ -23,7 +23,7 @@ export interface RemoteHostInput {
   port?: number
   user: string
   auth: RemoteAuth
-  /** 已知主机指纹（SHA256:...）。不填时首次连接用 accept-new，并把探测到的指纹钉住。 */
+  /** 已知主机指纹（SHA256:...），连接前实际验证。不填时首次连接用 accept-new，后续沿用独立 known_hosts。 */
   hostKeyFingerprint?: string
   /** 远端安装根目录；默认 `~/.lumo-remote`。 */
   installRoot?: string
@@ -43,11 +43,11 @@ export interface RemoteTunnel {
   mode: 'ssh-local-forward' | 'frpc'
   localPort: number
   remotePort: number
-  status: 'up' | 'down'
+  status: 'starting' | 'up' | 'down'
   pid?: number
 }
 
-export type RemoteHostState = 'registered' | 'probed' | 'installing' | 'installed' | 'upgrading' | 'failed' | 'connected'
+export type RemoteHostState = 'registered' | 'probed' | 'installing' | 'installed' | 'upgrading' | 'failed' | 'connecting' | 'connected'
 
 export interface RemoteHost {
   id: string
@@ -237,5 +237,5 @@ export function remoteAskTitle(host: Pick<RemoteHost, 'name' | 'user' | 'address
   return target ? `远端${OP_LABEL[op]} lumo ${target.version}（dsh ${target.dshTag}）→ ${host.name}（${where}）` : `远端${OP_LABEL[op]} → ${host.name}（${where}）`
 }
 
-/** 远端机器注册成设备时的设备 ID（稳定、可推导）。 */
+/** SSH 接入记录的稳定 ID；该标识本身不代表已注册到分布式调度器。 */
 export function remoteDeviceId(hostId: string): string { return `remote:${hostId}` }

@@ -23,6 +23,7 @@ import {
   type KnowledgeLibraryPrincipal,
 } from '../../../shared/seam-contracts/knowledge.ts'
 import { spaceAllowed } from '../../../shared/seam-contracts/knowledge.ts'
+import { withInitializationClient } from './pg-initialization.ts'
 import { forbidden } from '../../../shared/seam-contracts/errors.ts'
 import type { EmbeddingClient } from './embedding.ts'
 import { OUTBOX_DDL, collectProjection } from './graph-projector.ts'
@@ -247,16 +248,15 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
   private projecting = false
 
   constructor(config: PgProviderConfig) {
-    this.pool = new pg.Pool({ connectionString: config.connectionString })
+    this.pool = new pg.Pool({ connectionString: config.connectionString, connectionTimeoutMillis: 10_000 })
     this.allowedRoles = new Set(config.allowedRoles)
     this.embedding = config.embedding
     this.embeddingModel = config.embeddingModel
     this.vectorProjection = config.vectorProjection
   }
 
-  async init(): Promise<void> {
-    const client = await this.pool.connect()
-    try {
+  async init(signal?: AbortSignal): Promise<void> {
+    await withInitializationClient(this.pool, signal, async client => {
       await client.query('BEGIN')
       await client.query('SELECT pg_advisory_xact_lock(823054)')
       await client.query(ddl(this.embedding.dimension))
@@ -276,10 +276,8 @@ export class PgKnowledgeProvider implements KnowledgeSeam, KnowledgeSourceManage
       await client.query('SELECT pg_advisory_xact_lock(823055)')
       await backfillKnowledgeStorage(client)
       await client.query('COMMIT')
-    } catch (error) {
-      await client.query('ROLLBACK')
-      throw error
-    } finally { client.release() }
+    })
+    signal?.throwIfAborted()
     await this.vectorProjection?.init?.()
   }
 

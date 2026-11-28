@@ -1,6 +1,6 @@
 /** Shared read models for the independently mounted workbench domains. */
 
-export type Surface = 'knowledge' | 'skills' | 'connectors' | 'operations' | 'design' | 'presentation' | 'account' | 'market' | 'skillhub' | 'collaboration' | 'computer'
+export type Surface = 'knowledge' | 'skills' | 'connectors' | 'operations' | 'design' | 'presentation' | 'account' | 'market' | 'skillhub' | 'collaboration' | 'computer' | 'agents'
 
 export interface ServiceState { ok: boolean; status: number; error?: string }
 

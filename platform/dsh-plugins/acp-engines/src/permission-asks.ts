@@ -2,7 +2,7 @@
  * ACP session/request_permission → P0-1 统一 Ask。
  *
  * 一次权限请求投影成一个 `kind='choice'` 的 Ask：
- *   id         = `session:acp-<engineSessionId>-<seq>`（与 P0-1 `<source>:<ref>` 约定一致）
+ *   id         = `session:acp-<engineSessionId>-<uuid>`（与 P0-1 `<source>:<ref>` 约定一致）
  *   source     = { kind:'session', ref, session_ref:<lumo 会话 id>, run_id:<运行树 run id>, operation:<ACP tool kind> }
  *   options    = ACP PermissionOption 原样映射（optionId → id，name → label）
  *   answer     = 选中的 optionId；reject_* 选项记为 rejected，其余 answered
@@ -11,6 +11,8 @@
  * 状态机复用 shared/seam-contracts/asks.ts 的 transition()，存储为进程内（会话级 Ask 只活在引擎进程生命周期内，
  * 真正的审计在 ACP 会话事件日志里）。统一列表/订阅由 BFF 路由暴露（acp-routes.ts）。
  */
+import { randomUUID } from 'node:crypto'
+import { sameScope, type SessionScope } from './session-scope.ts'
 import { transition, type Ask, type AskEvent, type AskEventType } from '../../../shared/seam-contracts/asks.ts'
 import type { PermissionOption, RequestPermissionRequest, RequestPermissionResponse } from './acp-protocol.ts'
 
@@ -21,21 +23,22 @@ interface PendingAsk { ask: Ask; options: PermissionOption[]; resolve: (response
 export const DEFAULT_PERMISSION_TTL_MS = 15 * 60_000
 
 export class SessionAskBroker {
-  private seq = 0
   private readonly pending = new Map<string, PendingAsk>()
   private readonly history = new Map<string, Ask>()
   private readonly listeners = new Set<(event: AskEvent) => void>()
   constructor(private readonly ttlMs = DEFAULT_PERMISSION_TTL_MS, private readonly now: () => number = Date.now) {}
 
   subscribe(listener: (event: AskEvent) => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
-  list(filter: { status?: string; userId?: string } = {}): Ask[] {
-    return [...this.history.values()].filter(a => (!filter.status || a.status === filter.status) && (!filter.userId || a.requester_user_id === filter.userId))
+  list(scope: SessionScope, filter: { status?: string } = {}): Ask[] {
+    return [...this.history.values()].filter(a => (!filter.status || a.status === filter.status) && sameScope({ realm: a.realm, userId: a.requester_user_id, projectId: a.project_id }, scope))
   }
-  get(id: string): Ask | undefined { return this.history.get(id) }
+  get(id: string, scope: SessionScope): Ask | undefined { return this.list(scope).find(a => a.id === id) }
 
   /** 返回的 Promise 在有人回答 / 过期 / 取消时 resolve，直接作为 ACP 响应体。 */
   request(context: PermissionContext, engineSessionId: string, request: RequestPermissionRequest): { ask: Ask; response: Promise<RequestPermissionResponse> } {
-    const ask = askFromPermission(context, `acp-${engineSessionId}-${++this.seq}`, request, this.now(), this.ttlMs)
+    // A native session can resume in another host process. A counter alone would
+    // reuse IDs and let a stale client answer a new request after that restart.
+    const ask = askFromPermission(context, `acp-${engineSessionId}-${randomUUID()}`, request, this.now(), this.ttlMs)
     this.history.set(ask.id, ask)
     let resolve!: (r: RequestPermissionResponse) => void
     const response = new Promise<RequestPermissionResponse>(r => { resolve = r })
@@ -50,16 +53,18 @@ export class SessionAskBroker {
   }
 
   /** value 必须是选项 id；返回 false 表示已终态或选项非法（幂等）。 */
-  answer(id: string, value: string, answeredBy: string): { ok: boolean; error?: string; ask?: Ask } {
+  answer(id: string, value: string, scope: SessionScope): { ok: boolean; error?: string; ask?: Ask } {
+    const owned = this.get(id, scope)
+    if (!owned) return { ok: false, error: 'ask 不存在' }
     const entry = this.pending.get(id)
-    if (entry === undefined) return { ok: false, error: this.history.has(id) ? 'ask 已结束' : 'ask 不存在' }
+    if (entry === undefined) return { ok: false, error: 'ask 已结束' }
     const option = entry.options.find(o => o.optionId === value)
     if (option === undefined) return { ok: false, error: '无效选项' }
-    if (entry.ask.requester_user_id !== answeredBy && entry.ask.requester_user_id !== '') {
+    if (!sameScope({ realm: entry.ask.realm, userId: entry.ask.requester_user_id, projectId: entry.ask.project_id }, scope)) {
       // 会话内权限只有会话主人能批；跨人审批走连接器网关那条链路
       return { ok: false, error: '只有会话发起人可以回答此权限请求' }
     }
-    const ask = this.finish(id, option.kind.startsWith('reject') ? 'reject' : 'answer', value, answeredBy)
+    const ask = this.finish(id, option.kind.startsWith('reject') ? 'reject' : 'answer', value, scope.userId)
     return { ok: true, ...(ask ? { ask } : {}) }
   }
 
@@ -102,7 +107,7 @@ export function askFromPermission(context: PermissionContext, ref: string, reque
     realm: context.realm,
     title: `${context.engineId} 请求权限：${tool.title ?? tool.kind ?? tool.toolCallId}`.slice(0, 300),
     ...(detail ? { detail } : {}),
-    options: request.options.map(o => ({ id: o.optionId, label: o.name })),
+    options: request.options.map(o => ({ id: o.optionId, label: o.name, permissionKind: o.kind })),
     source: { kind: 'session', ref, session_ref: context.lumoSessionId, ...(context.runId ? { run_id: context.runId } : {}), operation: tool.kind ?? 'other' },
     requester_user_id: context.userId,
     ...(context.projectId ? { project_id: context.projectId } : {}),

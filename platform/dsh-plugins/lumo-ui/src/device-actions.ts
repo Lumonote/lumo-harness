@@ -66,6 +66,10 @@ export class DeviceActionsClient {
 
   catalog() { return this.call('GET', '/v1/device-actions') }
   calls() { return this.call('GET', '/v1/device-actions/calls') }
+  environment(method: 'GET' | 'POST', path: string, body?: unknown) {
+    if (!['/servers', '/device', '/device/activate', '/device/pause', '/device/resume', '/device/leave'].includes(path)) throw Error('unknown_environment_endpoint')
+    return this.call(method, `/v1/environment${path}`, body, 135_000)
+  }
   cancel(callId: string) { return this.call('POST', `/v1/device-actions/calls/${encodeURIComponent(callId)}/cancel`, {}) }
   requestPermission(name: 'accessibility' | 'screen-recording') { return this.call('POST', `/v1/device-actions/permissions/${name}/request`, {}) }
 

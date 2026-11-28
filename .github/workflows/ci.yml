@@ -22,6 +22,24 @@ on:
       - '.github/workflows/**'
 
 jobs:
+  desktop-unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: platform/desktop
+      - name: Desktop Rust unit tests without packaged runtime
+        run: node platform/desktop/test.mjs
+
   platform:
     # Playwright 1.58.2 supports Ubuntu 24.04; ubuntu-latest has moved to
     # 26.04, which its browser/dependency installer rejects.

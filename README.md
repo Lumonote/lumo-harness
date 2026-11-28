@@ -20,13 +20,13 @@
   <img src="./docs/guide/assets/promo/promo-2350x1000.png" alt="Lumo Harness：把「一切皆插件」的智能体内核装进一台电脑" width="100%">
 </p>
 
-> **零侵入。** 全部能力只经 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称 dsh）的原生扩展点实现：Cordis plugin / bundle、`ctx.*` 服务注册、`cordis.patch.yml` 覆写、seam / event / profile。dsh 始终以依赖引入，**绝不 fork / vendor / monkey-patch**。
+> **上游源码保持只读。** 平台业务能力通过 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称 dsh）的 Cordis plugin / bundle、`ctx.*`、seam / event / profile 扩展。当前构建还在隔离副本应用 [界面覆盖层](platform/dsh-overrides/README.md)，其中包含源码锚点替换；上游升级需要验证这些锚点，不能将工作区干净等同于没有兼容维护成本。
 
 Lumo Harness 在开源 dsh（Cordis 驱动的「一切皆插件」智能体框架）之上，补上分布式平台缺的那一层：**控制面**（调度、注册表、网关、治理、计量）、**数据面**（dsh 承载节点）、**协同面**（复制的 SessionEvent 日志 + 事件总线）。业务能力以 Cordis 插件形态挂载，基础设施是独立的 Go 服务——两者不互相塞进对方的进程。
 
 同一份内核也有本地形态：桌面**单机版**（`platform/desktop`）用 Tauri 2（Rust）壳拉起一个本机 DSH Web worker，把自包含的 Node、DSH CLI、Web 前端、SQLite 与 Lumo 插件全部打进应用 runtime，工作台跑在 `127.0.0.1:3080`，并显式置 `LUMO_DEPLOYMENT_MODE=local`。技能市场、插件市场、PPT、开放设计都是挂在这个内核上的插件 / 技能——不是「给 dsh 套壳」，而是长在它上面。
 
-**验证判据**（第一铁律的合规证明）：升级 dsh 版本无需 rebase 任何补丁；删除本平台全部代码后，dsh 仍可原样独立运行。
+**验证判据**：上游 checkout 无本地源码修改，删除本平台后可独立运行。发布与 CI 使用 `platform/dsh-pin.json` 固定提交，覆盖层在隔离副本通过兼容检查后进入构建。
 
 ```sh
 git -C deepseek-harness describe --tags --dirty   # 不得以 -dirty 结尾
@@ -35,7 +35,7 @@ git -C deepseek-harness status --porcelain -uno   # 必须无输出
 
 ## 为什么使用 Lumo Harness
 
-- **零侵入内核**：dsh 只作为依赖引入，全部能力走公开扩展面；上游升级不需要维护补丁分支，也不存在「跟上游越走越远」的维护债。
+- **上游独立维护**：dsh 作为独立依赖保留，平台插件和构建覆盖层位于 `platform/`；版本升级由固定提交与覆盖层兼容检查约束。
 - **三档同一引擎**：本地单机、服务器单例、服务器集群共用一套引擎与契约，差异只允许出现在装配层与部署清单——业务代码里没有 `if (standalone)`。
 - **能力即插件**：技能、专家包、插件市场、PPT、开放设计、知识库都以 Cordis 插件 / 技能分发，可单独装卸，单个插件崩溃不影响兄弟插件。
 - **本地优先**：单机版不启动任何网络中间件，状态只落本机 SQLite；缺失的能力显式返回 `CapabilityUnavailable`，不用别的东西静默模拟。
@@ -55,12 +55,14 @@ git -C deepseek-harness status --porcelain -uno   # 必须无输出
 | 知识库 | 图 + 向量双 seam（`ctx.knowledge.graph` / `ctx.knowledge.vector`），支持版本化来源、共享编辑与 realm 级隔离 |
 | 会话可观测 | Token / 耗时 / 上下文浏览器；历史、fork、resume 与审计全部从 append-only 的 SessionEvent 日志派生 |
 | 项目与协作 | 项目实体与成员角色、用量聚合、项目内制品 / 空间 / 自动化；用户自定义流程带 DAG 防环护栏与审核提升 |
-| 流程与自动化 | Go FlowEngine：DAG 拓扑执行、事件入口、持久 outbox、运行幂等记录与失败运行的显式重放 |
+| 流程与自动化 | Go FlowEngine：DAG 拓扑执行、事件入口、持久 outbox；手动运行支持幂等去重、节点回执和断连后查询，结果未知时需核对外部操作后再决定是否重试 |
 | 注册表与分发 | 制品签名安装计划、依赖闭包、Stable 通道灰度与回滚；Provisioner 验签、对账并原子物化到节点 |
 | 治理与安全 | 组织 / 角色 / 部门与授权期限、技能授权、连接器凭证入 Vault、OPA 策略、企业 OIDC、TOTP、Passkey |
 | 计量与预算 | 计量收敛在 `ctx.llm` 单一截面；用户树与项目树同事务扣减，任一超限即拒 |
 | 集群调度 | Scheduler 支持 EDF 截止时间、加权公平队列、能力值匹配、硬反亲和与安全抢占 |
 | 跨节点协同 | Seam Proxy 把平台新增的能力 seam 网络可达；远程子智能体放置、`ctx.jobs` 跨节点取消、复制的会话日志 |
+
+本轮授权、运行恢复、跨设备同步和发布输入修复的覆盖范围、测试证据与待验收事项，见[审计修复与验收记录](docs/plans/2026-11-25-audit-reliability-fixes.md)。历史实施记录中的测试结果只对应当时版本。
 
 ## AI 软件定制 · 智能体开发 · 业务自动化
 

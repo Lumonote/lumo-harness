@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareSkillHubArchive, skillHubArchiveUrls, stageSkillHub, verifySkillHubRuntime } from '../skillhub-tooling.mjs'
 
 const roots: string[] = []
@@ -12,7 +13,7 @@ const pythonRuntime: { home: string; executable: string } = JSON.parse(execFileS
   ['-c', 'import json, sys; print(json.dumps({"home": sys.base_prefix, "executable": sys.executable}))'],
   { encoding: 'utf8' }))
 const nodeName = process.platform === 'win32' ? 'node.exe' : 'node'
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+afterEach(() => { vi.unstubAllEnvs(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 function fixture(options: { missingEntry?: boolean; unsafePath?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'lumo skillhub (&) '))
@@ -56,7 +57,9 @@ with tarfile.open(sys.argv[1], 'w:gz') as bundle:
         entry.size = 3
         bundle.addfile(entry, io.BytesIO(b'bad'))
 `, archive, dirname(cli), options.unsafePath ? 'unsafe' : 'safe'])
-  return { root, runtime, archive }
+  const sha256 = createHash('sha256').update(readFileSync(archive)).digest('hex')
+  vi.stubEnv('LUMO_SKILLHUB_ARCHIVE_SHA256', sha256)
+  return { root, runtime, archive, sha256, cacheName: `skillhub-${sha256}.tar.gz` }
 }
 
 /** 在指定源列表下运行断言，结束后还原调用方的环境（用例之间不得互相污染源配置）。 */
@@ -119,17 +122,17 @@ describe('packaged SkillHub CLI', () => {
   })
 
   it('uses an explicit offline archive or the downloaded cache without a global installation', () => {
-    const { root, archive } = fixture()
+    const { root, archive, cacheName } = fixture()
     expect(prepareSkillHubArchive(join(root, 'empty-cache'), archive).archive).toBe(resolve(archive))
     const cache = join(root, 'cache')
     mkdirSync(cache)
-    renameSync(archive, join(cache, 'latest.tar.gz'))
-    expect(prepareSkillHubArchive(cache, '').archive).toBe(join(cache, 'latest.tar.gz'))
+    renameSync(archive, join(cache, cacheName))
+    expect(prepareSkillHubArchive(cache, '').archive).toBe(join(cache, cacheName))
     expect(() => prepareSkillHubArchive(cache, join(root, 'missing.tar.gz'))).toThrow('归档不存在')
   })
 
   it('falls back to the next source when the first address yields no gzip archive', () => {
-    const { root, archive } = fixture()
+    const { root, archive, cacheName } = fixture()
     const good = join(root, 'good.tar.gz')
     cpSync(archive, good)
     // 首个地址必须「连得上但给不出 gzip」，才能证明第二次尝试真的接上了手；
@@ -141,7 +144,7 @@ describe('packaged SkillHub CLI', () => {
     const cache = join(root, 'fallback-cache')
     withArchiveUrls(`${notAnArchive},${goodUrl}`, () => {
       const prepared = prepareSkillHubArchive(cache)
-      expect(prepared.archive).toBe(join(cache, 'latest.tar.gz'))
+      expect(prepared.archive).toBe(join(cache, cacheName))
       // 清单里的来源必须是真正取到归档的那个地址，而不是列表里的第一个。
       expect(prepared.source).toBe(goodUrl)
       const staged = stageSkillHub(join(root, 'runtime'), prepared.archive, process.platform, prepared.source)
@@ -175,5 +178,32 @@ describe('packaged SkillHub CLI', () => {
       if (previous === undefined) delete process.env.LUMO_SKILLHUB_ARCHIVE_URLS
       else process.env.LUMO_SKILLHUB_ARCHIVE_URLS = previous
     }
+  })
+
+  it('rejects altered offline and cached bytes before extraction or execution', () => {
+    const { root, runtime, archive, cacheName } = fixture()
+    const cache = join(root, 'cache'); mkdirSync(cache)
+    cpSync(archive, join(cache, cacheName))
+    writeFileSync(archive, 'changed offline payload')
+    expect(() => prepareSkillHubArchive(cache, archive)).toThrow(/SHA256/)
+    expect(() => stageSkillHub(runtime, archive)).toThrow(/SHA256/)
+    expect(existsSync(join(runtime, 'skillhub'))).toBe(false)
+    writeFileSync(join(cache, cacheName), 'changed cached payload')
+    expect(() => prepareSkillHubArchive(cache, '')).toThrow(/SHA256/)
+  })
+
+  it('rejects an invalid expected digest without attempting a download', () => {
+    const { root, archive } = fixture()
+    vi.stubEnv('LUMO_SKILLHUB_ARCHIVE_SHA256', 'invalid')
+    expect(() => prepareSkillHubArchive(root, archive)).toThrow(/64/)
+  })
+
+  it('tries the next mirror after a gzip payload with the wrong digest', () => {
+    const { root, archive } = fixture()
+    const wrong = join(root, 'wrong.tar.gz')
+    writeFileSync(wrong, Buffer.concat([readFileSync(archive), Buffer.from('changed')]))
+    withArchiveUrls(`${pathToFileURL(wrong).href},${pathToFileURL(archive).href}`, () => {
+      expect(prepareSkillHubArchive(join(root, 'hash-fallback')).source).toBe(pathToFileURL(archive).href)
+    })
   })
 })

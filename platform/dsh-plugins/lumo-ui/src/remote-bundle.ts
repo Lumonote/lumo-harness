@@ -7,11 +7,11 @@
  *   - 离线：本机目录 LUMO_REMOTE_BUNDLE_DIR 下有对应包时，先 `ssh mkdir -p R/incoming` 再 `scp` 推送
  *     包和 .sha256 到 R/incoming/，远端 install 优先使用 incoming 中的包（同样强制校验 sha256）。
  */
-import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ReleaseTarget, RemoteHost } from '../../../shared/seam-contracts/remote-hosts.ts'
+import { runSshCommand } from './remote-ssh-process.ts'
 
 export const DEFAULT_RELEASE_BASE = 'https://github.com/Lumonote/lumo-harness/releases/download'
 
@@ -61,15 +61,8 @@ export function scpArgs(sshBase: string[], files: string[], dest: string): strin
   return [...out, '--', ...files, `${sshBase[at + 1]}:${dest}`]
 }
 
-export function runScp(args: string[], timeoutMs = 30 * 60_000): Promise<{ code: number; stderr: string }> {
-  return new Promise(done => {
-    const child = spawn('scp', args, { stdio: ['ignore', 'ignore', 'pipe'] })
-    let stderr = ''
-    const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs)
-    child.stderr.on('data', d => { stderr += String(d) })
-    child.on('error', e => { clearTimeout(timer); done({ code: 127, stderr: e.message }) })
-    child.on('close', code => { clearTimeout(timer); done({ code: code ?? 1, stderr }) })
-  })
+export function runScp(args: string[], timeoutMs = 30 * 60_000, signal?: AbortSignal): Promise<{ code: number; stderr: string }> {
+  return runSshCommand('scp', args, { timeoutMs, ...(signal ? { signal } : {}) })
 }
 
 /** 远端 incoming 目录（安装目录可能是 `~/` 开头；scp 目标对 `~` 不展开，转成相对 home 的路径）。 */

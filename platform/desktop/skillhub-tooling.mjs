@@ -5,11 +5,24 @@ import { delimiter, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const desktopRoot = dirname(fileURLToPath(import.meta.url))
-export const SKILLHUB_ARCHIVE_URL = 'https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/latest.tar.gz'
+const pin = JSON.parse(readFileSync(new URL('./skillhub-pin.json', import.meta.url), 'utf8'))
+export const SKILLHUB_ARCHIVE_URL = pin.urls[0]
 // 同一个 COS 桶的全球加速域名，与主源指向同一份对象（实测同为 200 / 64145 字节）。
 // 区域域名的 DNS 在部分 CI runner 上会解析超时（curl 28），而加速域名是另一条接入，
 // 因此把它作为等价备用源：主源失败不是终点，再打一次就能把这类单点抖动吃掉。
-const SKILLHUB_ARCHIVE_MIRROR_URL = 'https://skillhub-1388575217.cos.accelerate.myqcloud.com/install/latest.tar.gz'
+const SKILLHUB_ARCHIVE_MIRROR_URL = pin.urls[1]
+
+function expectedDigest() {
+  const digest = process.env.LUMO_SKILLHUB_ARCHIVE_SHA256 ?? pin.sha256
+  if (!/^[a-fA-F0-9]{64}$/.test(digest)) throw new Error('SkillHub SHA256 必须为 64 位十六进制摘要')
+  return digest.toLowerCase()
+}
+
+function verifyArchive(archive, expected = expectedDigest()) {
+  const actual = createHash('sha256').update(readFileSync(archive)).digest('hex')
+  if (actual !== expected) throw new Error(`SkillHub SHA256 不匹配：expected=${expected}, actual=${actual}`)
+  return actual
+}
 
 function run(command, args, options, label) {
   const result = spawnSync(command, args, { encoding: 'utf8', windowsHide: true, timeout: 120_000, ...options })
@@ -71,23 +84,30 @@ function tryDownload(url, destination) {
 
 /** Download only the official CLI payload; never install into the builder's home. */
 export function prepareSkillHubArchive(cacheRoot, archivePath = process.env.LUMO_SKILLHUB_ARCHIVE) {
+  const digest = expectedDigest()
   if (archivePath) {
     const archive = resolve(archivePath)
     if (!existsSync(archive)) throw new Error(`SkillHub CLI 归档不存在：${archive}`)
+    verifyArchive(archive, digest)
     return { archive, source: archive }
   }
   mkdirSync(cacheRoot, { recursive: true })
-  const archive = resolve(cacheRoot, 'latest.tar.gz')
-  if (existsSync(archive)) return { archive, source: 'cache' }
+  const archive = resolve(cacheRoot, `skillhub-${digest}.tar.gz`)
+  if (existsSync(archive)) {
+    verifyArchive(archive, digest)
+    return { archive, source: 'cache' }
+  }
   const urls = skillHubArchiveUrls()
   const temporary = mkdtempSync(resolve(cacheRoot, 'download-'))
   const failures = []
   try {
-    const download = resolve(temporary, 'latest.tar.gz')
+    const download = resolve(temporary, 'skillhub.tar.gz')
     for (const url of urls) {
       console.log(`下载官方 SkillHub CLI：${url}`)
       const attempt = tryDownload(url, download)
       if (attempt.ok) {
+        try { verifyArchive(download, digest) }
+        catch (error) { failures.push(`  - ${url}：${error.message}`); continue }
         renameSync(download, archive)
         return { archive, source: url }
       }
@@ -99,8 +119,8 @@ export function prepareSkillHubArchive(cacheRoot, archivePath = process.env.LUMO
   }
   throw new Error(
     `下载 SkillHub CLI 失败（已尝试 ${String(urls.length)} 个地址）：\n${failures.join('\n')}\n`
-    + `换源：设置 LUMO_SKILLHUB_ARCHIVE_URLS=https://<镜像>/latest.tar.gz（逗号分隔，优先在前）。\n`
-    + '离线构建：预先下载官方 latest.tar.gz 并设置 LUMO_SKILLHUB_ARCHIVE=<路径>（见 platform/desktop/README.md）。',
+    + `换源：设置 LUMO_SKILLHUB_ARCHIVE_URLS=https://<镜像>/<固定版本归档>（逗号分隔，优先在前）。\n`
+    + '离线构建：预先下载 skillhub-pin.json 指定的归档并设置 LUMO_SKILLHUB_ARCHIVE=<路径>（见 platform/desktop/README.md）。',
   )
 }
 
@@ -117,6 +137,7 @@ function pythonEnvironment(runtimeRoot) {
 
 /** Stage the CLI alongside the already bundled Node/Python, then execute it. */
 export function stageSkillHub(runtimeRoot, archive, targetPlatform = process.platform, source = SKILLHUB_ARCHIVE_URL) {
+  const sha256 = verifyArchive(archive)
   const python = resolve(runtimeRoot, 'python', targetPlatform === 'win32' ? 'python.exe' : 'bin/python3')
   const destination = resolve(runtimeRoot, 'skillhub')
   // Read regular files explicitly: no archive symlinks or paths may escape the CLI directory.
@@ -153,7 +174,7 @@ with tarfile.open(archive, 'r:gz') as bundle:
   }
   return {
     source,
-    sha256: createHash('sha256').update(readFileSync(archive)).digest('hex'),
+    sha256,
     entrypoint: 'bin/skillhub.mjs',
     version: verifySkillHubRuntime(runtimeRoot, targetPlatform),
   }

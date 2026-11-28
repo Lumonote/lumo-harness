@@ -7,6 +7,7 @@
  * 遍历用递归 CTE + 深度/节点数双上限：LLM 生成的图查询不得失控（§5.3.4）。
  */
 import pg from 'pg'
+import { withInitializationClient } from './pg-initialization.ts'
 import type {
   GraphEdge,
   GraphNode,
@@ -56,12 +57,12 @@ export class PgGraphProvider implements GraphSeam {
   private readonly allowedRoles: ReadonlySet<string>
 
   constructor(config: PgGraphConfig) {
-    this.pool = new pg.Pool({ connectionString: config.connectionString })
+    this.pool = new pg.Pool({ connectionString: config.connectionString, connectionTimeoutMillis: 10_000 })
     this.allowedRoles = new Set(config.allowedRoles)
   }
 
-  async init(): Promise<void> {
-    await this.pool.query(GRAPH_DDL)
+  async init(signal?: AbortSignal): Promise<void> {
+    await withInitializationClient(this.pool, signal, async client => { await client.query(GRAPH_DDL) })
   }
 
   async upsertNodes(nodes: GraphNode[]): Promise<void> {

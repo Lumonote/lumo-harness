@@ -4,6 +4,7 @@ import { surfaceMeta } from './surface-navigation.ts'
 
 export function Glyph({ surface }: { surface: Surface }) {
   const paths: Record<Surface, ReactNode> = {
+    agents: <><circle cx="8" cy="7" r="3" /><path d="M2 20v-2a6 6 0 0 1 12 0v2M16 4a3 3 0 0 1 0 6m2 4a5 5 0 0 1 4 5v1M15 14l-3 3 3 3" /></>,
     computer: <><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4m-1-12 4 3-3 1-1 3z" /></>,
     collaboration: <><circle cx="12" cy="12" r="2.6" /><path d="M12 4.5a7.5 7.5 0 0 1 0 15" /><path d="M12 4.5a7.5 7.5 0 0 0 0 15" /><circle cx="12" cy="3" r="1.1" /><circle cx="19.5" cy="16.5" r="1.1" /><circle cx="4.5" cy="16.5" r="1.1" /></>,
     knowledge: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v14H6.5A2.5 2.5 0 0 0 4 19.5z" /><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v14h4.5a2.5 2.5 0 0 1 2.5 2.5z" /></>,
@@ -63,7 +64,7 @@ export function formatSync(value: string): string { return value ? new Date(valu
 export function WorkspaceHero({
   surface, onClose, statement, description, children,
 }: {
-  surface: 'operations' | 'market' | 'knowledge' | 'skillhub' | 'account' | 'skills' | 'connectors' | 'design' | 'presentation'
+  surface: 'operations' | 'market' | 'knowledge' | 'skillhub' | 'account' | 'skills' | 'connectors' | 'design' | 'presentation' | 'agents'
   onClose: () => void
   statement: string
   description: string
@@ -97,4 +98,28 @@ export function DomainTabs<T extends string>({ label, value, items, onChange }: 
 
 export function Metric({ label, value, note, tone = '' }: { label: string; value: string; note: string; tone?: string }) {
   return <SpotlightCard className={`lumo-metric ${tone}`}><small>{label}</small><strong>{value}</strong><span>{note}</span></SpotlightCard>
+}
+
+export function WorkbenchRail({ surface, available, select }: { surface: Surface; available: Surface[]; select: (surface: Surface) => void }) {
+  return <aside className="lumo-workbench-rail" aria-label="工作台导航">
+    <div className="lumo-rail-brand"><span className="lumo-brand-mark" aria-hidden="true">L</span><div><b>Lumo</b><small>WORKSPACE</small></div></div>
+    <div className="lumo-rail-menu-head"><span>工作领域</span><kbd>⌘K</kbd></div>
+    <nav aria-label="工作领域">
+      <div className="lumo-nav-group">
+        {available.map(item => <button
+          type="button"
+          key={item}
+          className={surface === item ? 'active' : ''}
+          title={surfaceMeta[item].label}
+          aria-label={surfaceMeta[item].label}
+          aria-current={surface === item ? 'page' : undefined}
+          onClick={() => select(item)}
+        >
+          <Glyph surface={item} />
+          <span>{surfaceMeta[item].label}</span>
+        </button>)}
+      </div>
+    </nav>
+    <div className="lumo-rail-footer"><span><i className="lumo-live-dot" />Lumo 工作台</span></div>
+  </aside>
 }

@@ -13,6 +13,8 @@ deepseek-harness/
 .omc/
 .workbuddy/
 .workbuddy-ai/
+# Superpowers 本地预览令牌、运行状态和临时报告。
+.superpowers/
 
 # ── 平台侧的可复现装配物：能被脚本重建的东西不入库 ──────────────────────
 # 固定上游 Skill 快照。由 platform/upstream/install-components.sh 按

@@ -70,14 +70,16 @@ func TestSessionRoute_InjectsVerifiedIdentity(t *testing.T) {
 	front, up := gateway(t, fakeSession)
 	defer front.Close()
 	defer up.Close()
-	code, body := get(t, front.URL+"/v1/memory-sync/changes?since=0", "Bearer good", map[string]string{"X-Lumo-User": "root"})
-	if code != 200 || body != "/v1/memory-sync/changes|alice|Bearer cp-token" {
-		t.Fatalf("got %d %q", code, body)
+	for _, path := range []string{"/v1/memory-sync/changes", "/v1/memory-sync/identity"} {
+		code, body := get(t, front.URL+path, "Bearer good", map[string]string{"X-Lumo-User": "root"})
+		if code != 200 || body != path+"|alice|Bearer cp-token" {
+			t.Fatalf("got %d %q", code, body)
+		}
+		if code, _ := get(t, front.URL+path, "Bearer bad", nil); code != http.StatusUnauthorized {
+			t.Fatalf("bad token: %d", code)
+		}
 	}
-	// 用户令牌无效 → 401，上游收不到请求
-	if code, _ := get(t, front.URL+"/v1/memory-sync/changes", "Bearer bad", nil); code != http.StatusUnauthorized {
-		t.Fatalf("bad token: %d", code)
-	}
+
 }
 
 func TestSessionRoute_DoesNotOpenOtherRoutes(t *testing.T) {

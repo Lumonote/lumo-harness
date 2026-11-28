@@ -135,6 +135,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/flows/{id}/versions/{version}", s.getVersion)
 	mux.HandleFunc("GET /v1/flows/{id}/versions/{version}/lineage/{node}", s.lineage)
 	mux.HandleFunc("GET /v1/flows/{id}/runs", s.listRuns)
+	mux.HandleFunc("GET /v1/flows/{id}/runs/{run}/result", s.manualRunResult)
 	mux.HandleFunc("GET /v1/projects/{pid}/cron/cursors", s.listCronCursors)
 	mux.HandleFunc("POST /v1/flows/{id}/runs/{runID}/replay", s.replayRun)
 	mux.HandleFunc("PUT /v1/flows/{id}/definition", s.updateDefinition)
@@ -213,29 +214,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"stored definition invalid"}`, http.StatusInternalServerError)
 		return
 	}
-	dept := ""
-	if len(c.depts) > 0 {
-		dept = c.depts[0]
-	}
-	executionCtx := r.Context()
-	if key := r.Header.Get("Idempotency-Key"); key != "" {
-		if len(key) > 200 || strings.IndexFunc(key, func(c rune) bool {
-			return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("_.:-", c))
-		}) >= 0 {
-			http.Error(w, `{"error":"invalid Idempotency-Key"}`, http.StatusBadRequest)
-			return
-		}
-		scope, _ := json.Marshal([]string{"manual", f.ID, strconv.Itoa(version), key})
-		executionCtx = engine.WithExecutionKey(executionCtx, string(scope))
-	}
-	result, err := s.engine.Run(engine.WithIdentity(executionCtx, observability.Identity{
-		Realm: c.realm, UserID: c.user, Roles: c.roles, ProjectID: f.ProjectID, DeptID: dept,
-	}), &def, req.Input)
-	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
+	s.executeManualRun(w, r, c, f, version, &def, req.Input)
 }
 
 // parseDefinition 入库护栏（防环在两处跑：TS 前端提示 + Go 入库强制——Go 是执法位）。
@@ -579,7 +558,11 @@ func (s *Server) updateDefinition(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid definition: `+err.Error()+`"}`, http.StatusBadRequest)
 		return
 	}
-	if err := s.store.UpdateDefinition(r.Context(), f.ID, norm); err != nil {
+	if err := s.store.UpdateDefinition(r.Context(), f.ID, norm, mutationActor(c)); err != nil {
+		if errors.Is(err, store.ErrManagementForbidden) {
+			s.writeManagementError(w, err)
+			return
+		}
 		if errors.Is(err, store.ErrOnlyDraft) {
 			http.Error(w, `{"error":"only draft can be edited"}`, http.StatusConflict)
 			return
@@ -605,8 +588,12 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
-	f, err = s.store.Transition(r.Context(), f.ID, domain.EventSubmit)
+	f, err = s.store.Transition(r.Context(), f.ID, domain.EventSubmit, mutationActor(c))
 	if err != nil {
+		if errors.Is(err, store.ErrManagementForbidden) {
+			s.writeManagementError(w, err)
+			return
+		}
 		http.Error(w, `{"error":"illegal transition: `+err.Error()+`"}`, http.StatusConflict)
 		return
 	}
@@ -643,6 +630,10 @@ func (s *Server) review(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err = s.store.Review(r.Context(), f.ID, c.user, req.Approve, req.Comment)
 	if err != nil {
+		if errors.Is(err, store.ErrManagementForbidden) {
+			s.writeManagementError(w, err)
+			return
+		}
 		http.Error(w, `{"error":"review failed: `+err.Error()+`"}`, http.StatusConflict)
 		return
 	}
@@ -689,8 +680,12 @@ func (s *Server) target(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"targeted visibility requires a non-empty audience"}`, http.StatusBadRequest)
 		return
 	}
-	f, err = s.store.Target(r.Context(), f.ID, req.Audience, visibility)
+	f, err = s.store.Target(r.Context(), f.ID, req.Audience, visibility, mutationActor(c))
 	if err != nil {
+		if errors.Is(err, store.ErrManagementForbidden) {
+			s.writeManagementError(w, err)
+			return
+		}
 		http.Error(w, `{"error":"target failed: `+err.Error()+`"}`, http.StatusConflict)
 		return
 	}
@@ -719,8 +714,12 @@ func (s *Server) deprecate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	f, err = s.store.Transition(r.Context(), f.ID, domain.EventDeprecate)
+	f, err = s.store.Transition(r.Context(), f.ID, domain.EventDeprecate, mutationActor(c))
 	if err != nil {
+		if errors.Is(err, store.ErrManagementForbidden) {
+			s.writeManagementError(w, err)
+			return
+		}
 		http.Error(w, `{"error":"illegal transition: `+err.Error()+`"}`, http.StatusConflict)
 		return
 	}
@@ -749,8 +748,12 @@ func (s *Server) rollback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"version required"}`, http.StatusBadRequest)
 		return
 	}
-	f, err = s.store.Rollback(r.Context(), f.ID, req.Version)
+	f, err = s.store.Rollback(r.Context(), f.ID, req.Version, mutationActor(c))
 	if err != nil {
+		if errors.Is(err, store.ErrManagementForbidden) {
+			s.writeManagementError(w, err)
+			return
+		}
 		if errors.Is(err, store.ErrVersionGone) {
 			http.Error(w, `{"error":"version not found"}`, http.StatusNotFound)
 			return

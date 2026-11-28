@@ -1,0 +1,49 @@
+.lumo-execution-content { min-width: 0; margin: 6px 0; font-size: 13px; }
+.lumo-execution-content small { color: var(--text-secondary, #8b8b8b); margin-left: 6px; }
+.lumo-execution-content [aria-label="工具输出"] { max-height: 480px; overflow: auto; }
+.lumo-execution-plan { list-style: none; padding: 10px 0; margin: 0; font-size: 13px; }
+.lumo-execution-plan li { display: flex; align-items: baseline; gap: 8px; padding: 4px; }
+.lumo-execution-plan li small { margin-left: auto; white-space: nowrap; opacity: .65; }
+.lumo-execution-plan li[data-state="completed"] { opacity: .65; }
+.lumo-conversation-management { display: grid; gap: 8px; }
+.lumo-conversation-management input { width: 100%; min-width: 0; }
+.lumo-conversation-management-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.lumo-conversation-management-actions .lumo-settings-icon { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 28px; min-height: 28px; padding: 0; border: 0; color: var(--lumo-muted); text-decoration: none; border-radius: 6px; background: transparent; }
+.lumo-conversation-management-actions .lumo-settings-icon:hover { background: var(--dsw-alias-interactive-bg-hover,var(--lumo-mint-soft)); color: var(--lumo-ink); }
+.lumo-conversation-management-actions [aria-pressed="true"] { color: var(--lumo-ink); background: var(--dsw-alias-interactive-bg-active,var(--lumo-mint-soft)); }
+.lumo-conversation-management-actions .lumo-settings-delete { margin-left: auto; }
+.lumo-dock-settings { min-width: 0; }
+.lumo-chat-dock-panel .lumo-dock-settings { gap: 0; }
+.lumo-dock-settings > .lumo-conversation-management { padding-bottom: 12px; }
+.lumo-settings-section { display: grid; gap: 10px; min-width: 0; padding: 14px 0; border-top: 1px solid var(--lumo-line); }
+.lumo-settings-section > h4 { margin: 0; color: var(--lumo-muted); font-size: 11px; font-weight: 500; line-height: 16px; }
+.lumo-chat-dock-panel .lumo-dock-settings label { display: grid; gap: 5px; min-width: 0; color: var(--lumo-muted); font-size: 12px; }
+.lumo-chat-dock-panel .lumo-dock-settings :is(input:not([type="color"]),select,textarea) { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l3,var(--lumo-line-strong)); border-radius: 6px; font: inherit; color: var(--lumo-ink); background: var(--dsw-alias-bg-base,var(--lumo-bg)); }
+.lumo-chat-dock-panel .lumo-dock-settings :is(input:not([type="color"]),select) { height: 32px; }
+.lumo-chat-dock-panel .lumo-dock-settings input:disabled { opacity: .6; }
+.lumo-settings-engine { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.lumo-settings-engine strong { flex: 1; min-width: 0; font-size: 12px; font-weight: 500; }
+.lumo-settings-engine small { font-size: 11px; color: var(--lumo-muted); white-space: nowrap; }
+.lumo-settings-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.lumo-chat-dock-panel .lumo-settings-actions > button { height: 30px; min-height: 30px; padding: 4px 8px; font-size: 11px; }
+.lumo-settings-actions > small { color: var(--lumo-muted); font-size: 11px; }
+.lumo-chat-dock-panel .lumo-settings-disclosure { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 6px 0; height: 30px; min-height: 30px; border: 0; background: transparent; text-align: left; font-size: 12px; }
+.lumo-settings-disclosure[aria-expanded="true"] > svg { transform: rotate(180deg); }
+.lumo-settings-confirm { padding: 10px; border: 1px solid var(--lumo-line-strong); border-radius: 6px; }
+.lumo-settings-confirm p { margin: 0 0 8px; color: var(--lumo-muted); font-size: 11px; }
+.lumo-chat-dock-panel .lumo-settings-delete:hover, .lumo-settings-confirm .lumo-settings-delete { color: var(--dsw-alias-status-danger,#d35a52); }
+.lumo-settings-storage { padding: 14px 0 0; border-top: 1px solid var(--lumo-line); color: var(--lumo-muted); font-size: 11px; }
+.lumo-settings-storage > summary { cursor: pointer; }
+.lumo-settings-storage > small { display: block; margin-bottom: 8px; }
+.lumo-chat-dock-panel .lumo-room-appearance { display: grid; grid-template-columns: 28px minmax(0,1fr) 38px; gap: 8px; align-items: end; }
+.lumo-chat-dock-panel .lumo-room-appearance > .lumo-room-logo { width: 28px; height: 32px; }
+.lumo-chat-dock-panel .lumo-room-appearance input[type="color"] { width: 34px; height: 32px; padding: 3px; }
+.lumo-chat-dock-panel .lumo-room-appearance label:last-child { white-space: nowrap; }
+.lumo-chat-dock-panel .lumo-room-colors { padding-top: 8px; }
+.lumo-conversation-management textarea { width: 100%; min-height: 96px; max-height: 240px; resize: vertical; font: inherit; }
+.lumo-conversation-handoff { padding: 10px 14px; margin: 10px 0; border: 1px solid var(--border-color, #8884); border-radius: 8px; font-size: 13px; }
+.lumo-context-file-row { display: flex; gap: 4px; align-items: center; min-width: 0; }
+.lumo-context-file-row > .lumo-dock-row { flex: 1; min-width: 0; }
+.lumo-file-preview { min-width: 0; font-size: 12px; }
+.lumo-file-preview > header { display: flex; gap: 8px; align-items: center; justify-content: space-between; margin: 10px 0; }
+.lumo-file-preview [data-code-block-banner] { position: sticky; top: 0; }

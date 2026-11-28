@@ -250,6 +250,15 @@ func TestDeviceGatewayRoutesTaskResults(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if _, err := pool.Exec(ctx, `ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS realm TEXT NOT NULL DEFAULT 'realm';
+        ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS worker_id TEXT NOT NULL DEFAULT 'user:employee';
+        ALTER TABLE scheduler_tasks ADD COLUMN IF NOT EXISTS updated_at BIGINT NOT NULL DEFAULT 0;
+        CREATE TABLE IF NOT EXISTS scheduler_task_attempts(task_id TEXT NOT NULL,realm TEXT NOT NULL,node_id TEXT NOT NULL,
+            attempt INT NOT NULL,state TEXT NOT NULL,updated_at BIGINT NOT NULL DEFAULT 0,PRIMARY KEY(task_id,attempt));
+        INSERT INTO scheduler_tasks(task_id,realm,worker_id,node_id,attempt,state) VALUES('task-run-1','realm','user:employee','device-a',1,'RUNNING');
+        INSERT INTO scheduler_task_attempts(task_id,realm,node_id,attempt,state) VALUES('task-run-1','realm','device-a',1,'RUNNING');`); err != nil {
+		t.Fatal(err)
+	}
 	payload, err := json.Marshal(map[string]any{
 		"task_id": "task", "run_id": "task-run-1", "state": "COMPLETED",
 		"session_ref": "task-session", "node_id": nodeID, "summary": "analysis delivered",

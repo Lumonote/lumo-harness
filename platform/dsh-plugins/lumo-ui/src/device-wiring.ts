@@ -6,6 +6,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import { createDeviceActions, handleDeviceActionsRoute, registerDeviceActionTools, type DeviceActionsClient, type RunTreeSink } from './device-actions.ts'
 import { handleRemoteAsksRoute, type RemoteAskService } from './remote-asks-wiring.ts'
+import { handleEnvironmentRoute } from './environment-api.ts'
 
 interface LooseCtx {
   get(name: string): unknown
@@ -37,6 +38,7 @@ export interface DeviceRoutesDeps { connectorUrl: string; headers: Record<string
 
 export async function handleDeviceRoutes(req: IncomingMessage, res: ServerResponse, pathname: string, deps: DeviceRoutesDeps): Promise<boolean> {
   if (!services) return false
+  if (await handleEnvironmentRoute(req, res, pathname, { ...(client ? { client } : {}), readBody: deps.readBody })) return true
   if (await handleDeviceActionsRoute(req, res, pathname, { client, readBody: deps.readBody, userId: deps.userId })) return true
   const service = services.get('lumoRemoteComputerUse') as RemoteAskService | undefined
   return handleRemoteAsksRoute(req, res, pathname, { service, confirm: client, ...(runTree ? { runTree } : {}), connectorUrl: deps.connectorUrl, headers: deps.headers, timeoutMs: deps.timeoutMs, readBody: deps.readBody })

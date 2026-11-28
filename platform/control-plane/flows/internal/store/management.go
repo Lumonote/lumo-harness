@@ -141,6 +141,9 @@ func (s *Store) ApplyFlowChange(ctx context.Context, id, realm, userID string, r
 			if _, err = tx.Exec(ctx, `UPDATE flows SET version=$2,definition=$3,review_comment=NULL,published_at=now(),updated_at=clock_timestamp() WHERE id=$1`, id, nextVersion, draft.Definition); err != nil {
 				return err
 			}
+			if err = s.publishLineage(ctx, tx, id, realm, nextVersion, draft.Definition); err != nil {
+				return err
+			}
 			_, err = tx.Exec(ctx, `DELETE FROM flow_change_drafts WHERE flow_id=$1`, id)
 		} else {
 			_, err = tx.Exec(ctx, `UPDATE flow_change_drafts SET status='draft',review_comment=$2,revision=revision+1,updated_at=clock_timestamp() WHERE flow_id=$1`, id, command.Comment)

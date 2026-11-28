@@ -265,6 +265,9 @@ func (s *Store) RecordDeviceTaskResult(ctx context.Context, realm, nodeID, conne
 	if err := recordTaskResultTx(ctx, tx, realm, &result, "device:"+nodeID); err != nil {
 		return err
 	}
+	if err := finishDeviceSchedulingTx(ctx, tx, realm, nodeID, runID, attempt, result.State); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -407,4 +410,29 @@ func (s *Store) CollaborationProgress(ctx context.Context, realm, taskID string)
 		return out, err
 	}
 	return out, tx.Commit(ctx)
+}
+
+// Finalize both scheduling ledgers in the same transaction as the immutable
+// result. Exact attempt/node bindings fence late reports after reassignment.
+func finishDeviceSchedulingTx(ctx context.Context, tx pgx.Tx, realm, nodeID, runID string, attempt int, resultState string) error {
+	terminal := resultState
+	if terminal == domain.DelegationCancelled {
+		terminal = "ABORTED"
+	}
+	for _, query := range []string{
+		`UPDATE scheduler_tasks SET state=$5,updated_at=(EXTRACT(EPOCH FROM now())*1000)::bigint
+         WHERE realm=$1 AND task_id=$2 AND node_id=$3 AND attempt=$4 AND state IN ('RUNNING','CANCELLING',$5)
+           AND worker_id=(SELECT worker_id FROM governance_task_runs WHERE realm=$1 AND id=$2 AND attempt=$4 AND assigned_node_id=$3)`,
+		`UPDATE scheduler_task_attempts SET state=$5,updated_at=(EXTRACT(EPOCH FROM now())*1000)::bigint
+         WHERE realm=$1 AND task_id=$2 AND node_id=$3 AND attempt=$4 AND state IN ('RUNNING','CANCELLING',$5)`,
+	} {
+		tag, err := tx.Exec(ctx, query, realm, runID, nodeID, attempt, terminal)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("%w: scheduler execution identity or terminal state changed", ErrConflict)
+		}
+	}
+	return nil
 }
