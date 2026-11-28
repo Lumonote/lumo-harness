@@ -278,13 +278,16 @@ export class EngineHost {
     const abort = () => this.dispose(live, 'cancelled')
     signal?.addEventListener('abort', abort, { once: true })
     const active = () => { if (this.sessions.get(id) !== live || signal?.aborted) throw new Error('会话建立已取消') }
+    let preparingMcp = false
     try {
       const init = await this.initialize(rpc)
       active()
       summary.capabilities = init.agentCapabilities
       if (saved && init.agentCapabilities?.loadSession !== true) throw new Error('当前引擎不支持恢复会话')
+      preparingMcp = true
       const mcpServers = await this.mcpServersFor(input, id)
       active()
+      preparingMcp = false
       if (saved) {
         const loaded = await rpc.request(ACP_METHODS.sessionLoad, { sessionId: saved.engineSessionId, cwd: input.cwd, mcpServers }, this.options.initTimeoutMs ?? 60_000)
         summary.models = readSessionModels(loaded)
@@ -310,9 +313,12 @@ export class EngineHost {
       for (const capability of pendingCapabilities) this.onUpdate(live, capability)
       return { ...summary }
     } catch (error) {
+      const alreadyClosed = live.summary.state === 'closed'
       this.dispose(live, 'failed')
       // MCP 生成可能在 abort 后才完成；再次撤销，覆盖后生成的临时 token。
-      try { this.options.onSessionClosed?.(id) } catch { /* 清理不可覆盖原始失败 */ }
+      if (alreadyClosed && preparingMcp) {
+        try { this.options.onSessionClosed?.(id) } catch { /* 清理不可覆盖原始失败 */ }
+      }
       throw error
     } finally { signal?.removeEventListener('abort', abort); this.startingIds.delete(id) }
   }
@@ -407,6 +413,20 @@ export class EngineHost {
     return { ok: true }
   }
 
+  /** Explicit force-stop only: retain interrupted history and never resend a prompt. */
+  terminate(id: string, scope: SessionScope): boolean {
+    if (!this.get(id, scope)) return false
+    const live = this.sessions.get(id) ?? this.unsavedClosed.get(id)
+    if (!live) return true
+    if (live.summary.state === 'closed') {
+      this.flush(live)
+      this.unsavedClosed.delete(id)
+      return true
+    }
+    this.dispose(live, 'terminated')
+    return true
+  }
+
   close(id: string, scope: SessionScope): boolean { return this.release(id, scope) }
   release(id: string, scope: SessionScope): boolean {
     const summary = this.get(id, scope)
@@ -434,9 +454,9 @@ export class EngineHost {
   /** Runtime shutdown stops processes while preserving journals and recovery metadata. */
   closeAll(): void { for (const live of [...this.sessions.values()]) this.dispose(live, 'cancelled') }
 
-  private dispose(live: Live, reason: 'completed' | 'cancelled' | 'failed'): void {
+  private dispose(live: Live, reason: 'completed' | 'cancelled' | 'failed' | 'terminated'): void {
     if (live.summary.state === 'closed') return
-    live.recorder.sessionClosed(reason)
+    live.recorder.sessionClosed(reason === 'terminated' ? 'cancelled' : reason)
     this.closed(live, reason)
     live.rpc.close()
   }
@@ -562,12 +582,15 @@ export class EngineHost {
     const starting = live.summary.state === 'starting'
     const running = live.summary.state === 'running'
     live.summary.state = 'closed'
+    if (starting && reason === 'terminated' && !live.summary.engineSessionId && live.summary.capabilities) {
+      live.summary.capabilities = { ...live.summary.capabilities, loadSession: false }
+    }
     live.releaseWorkspace?.(); live.releaseWorkspace = undefined
-    if (running) this.push(live, { type: 'turn.ended', sessionId: live.summary.id, stopReason: 'error', error: `引擎连接结束：${reason}`, at: now() })
+    if (running) this.push(live, { type: 'turn.ended', sessionId: live.summary.id, stopReason: 'error', error: reason === 'terminated' ? '引擎已强制结束；执行结果未确认，请核对实际修改后再继续。' : `引擎连接结束：${reason}`, at: now() })
     this.options.asks.cancelSession(live.summary.id)
     try { this.options.onSessionClosed?.(live.summary.id) } catch { /* 忽略 */ }
-    if (!['completed', 'cancelled', 'failed'].includes(reason)) live.recorder.sessionClosed('failed')
-    if (!starting) this.push(live, { type: 'session.closed', sessionId: live.summary.id, reason, at: now() })
+    if (!['completed', 'cancelled', 'failed', 'terminated'].includes(reason)) live.recorder.sessionClosed('failed')
+    if (!starting || reason === 'terminated') this.push(live, { type: 'session.closed', sessionId: live.summary.id, reason, at: now() })
     this.sessions.delete(live.summary.id)
     if (live.pending.length) this.unsavedClosed.set(live.summary.id, live)
     live.listeners.clear()

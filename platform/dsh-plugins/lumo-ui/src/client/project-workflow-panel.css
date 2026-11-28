@@ -1,0 +1,33 @@
+.lumo-project-workflow { display: grid; gap: 12px; font-size: 12px; line-height: 1.6; min-width: 0; }
+.lumo-project-workflow .lumo-workflow-field { display: grid; gap: 5px; margin: 9px 0; }
+.lumo-project-workflow input:not([type="checkbox"]), .lumo-project-workflow select, .lumo-project-workflow textarea { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--lumo-line); border-radius: 6px; background: var(--dsw-alias-bg-base,var(--lumo-bg)); color: var(--lumo-ink); font: inherit; padding: 6px 8px; }
+.lumo-project-workflow textarea { resize: vertical; min-height: 52px; max-height: 200px; }
+.lumo-project-workflow input:disabled, .lumo-project-workflow select:disabled, .lumo-project-workflow textarea:disabled { opacity: .75; }
+.lumo-workflow-status, .lumo-workflow-heading, .lumo-workflow-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lumo-workflow-status { justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--lumo-line); }
+.lumo-workflow-status strong { font-size: 13px; font-weight: 600; }
+.lumo-workflow-hint, .lumo-workflow-status small, .lumo-workflow-path { color: var(--lumo-muted); font-size: 11px; line-height: 1.65; }
+.lumo-workflow-path { display: block; overflow-wrap: anywhere; }
+.lumo-project-workflow p { margin: 5px 0; }
+.lumo-workflow-section { border-top: 1px solid var(--lumo-line); padding-top: 10px; }
+.lumo-project-workflow summary { cursor: pointer; overflow-wrap: anywhere; }
+.lumo-project-workflow h4 { margin: 0 0 8px; font-size: 12px; font-weight: 600; }
+.lumo-project-workflow pre { overflow: auto; max-height: 230px; white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; border-radius: 6px; background: var(--dsw-alias-bg-layer-2,var(--lumo-panel)); font-size: 11px; line-height: 1.55; }
+.lumo-project-workflow .lumo-workflow-code-input { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
+.lumo-workflow-task { border-bottom: 1px solid var(--lumo-line); padding: 8px 0; }
+.lumo-workflow-task > summary { display: flex; gap: 8px; align-items: baseline; list-style: none; }
+.lumo-workflow-task > summary::-webkit-details-marker { display: none; }
+.lumo-workflow-task > summary > span:last-child { flex: 1; min-width: 0; }
+.lumo-workflow-task > summary small { display: block; color: var(--lumo-muted); font-size: 11px; font-weight: 400; }
+.lumo-workflow-task-number { color: var(--lumo-muted); font-variant-numeric: tabular-nums; width: 16px; flex: none; }
+.lumo-workflow-task > summary::after { content: '+'; color: var(--lumo-muted); }
+.lumo-workflow-task[open] > summary::after { content: '−'; }
+.lumo-workflow-task[open] > summary { margin-bottom: 10px; }
+.lumo-project-capabilities, .lumo-workflow-dependencies, .lumo-role-cards .lumo-project-capabilities, .lumo-agent-editor .lumo-project-capabilities { border: 0; padding: 0; margin: 8px 0; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.lumo-project-capabilities legend, .lumo-workflow-dependencies legend { font-size: 11px; color: var(--lumo-muted); padding: 0; margin-bottom: 5px; }
+.lumo-project-capabilities > label, .lumo-workflow-dependencies > label { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; min-width: 0; }
+.lumo-project-capabilities input[type="checkbox"], .lumo-workflow-dependencies input[type="checkbox"] { width: 13px; height: 13px; flex: none; margin: 0; accent-color: var(--lumo-ink); }
+.lumo-project-workflow [role="alert"], .lumo-project-workflow li { overflow-wrap: anywhere; }
+.lumo-project-workflow ul { padding-left: 18px; margin: 6px 0; }
+.lumo-project-workflow .lumo-workflow-actions { gap: 6px; }
+.lumo-workflow-actions .lumo-native-button { font-size: 11px; }

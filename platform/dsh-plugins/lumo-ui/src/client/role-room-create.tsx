@@ -8,15 +8,17 @@ import { RoomAppearanceFields, DEFAULT_APPEARANCE } from './room-appearance.tsx'
 import { EngineLogo } from './engine-logo.tsx'
 import { ChatButton } from './chat-button.tsx'
 import { RefreshIcon } from './chat-icons.tsx'
+import { ProjectCapabilities } from './project-workflow-panel.tsx'
+import type { ProjectCapability } from '../../../acp-engines/src/project-workflow-model.ts'
 
-const seeds = [
-  { id: 'assistant', name: '个人助理', instruction: '澄清目标，整理各角色的结果与分歧，给出有证据的结论和下一步。' },
-  { id: 'engineer', name: '开发工程师', instruction: '检查工作区，落实实现与验证，报告改动、测试结果和产物路径。' },
-  { id: 'reviewer', name: '评审专家', instruction: '独立检查方案或实现的正确性、遗漏和风险，提出有依据的修改建议。' },
+const seeds: Array<{ id: string; name: string; instruction: string; capabilities: ProjectCapability[] }> = [
+  { id: 'assistant', name: '个人助理', instruction: '澄清目标，整理各角色的结果与分歧，给出有证据的结论和下一步。', capabilities: ['planning', 'documentation'] },
+  { id: 'engineer', name: '开发工程师', instruction: '检查工作区，落实实现与验证，报告改动、测试结果和产物路径。', capabilities: ['general', 'testing'] },
+  { id: 'reviewer', name: '评审专家', instruction: '独立检查方案或实现的正确性、遗漏和风险，提出有依据的修改建议。', capabilities: ['review', 'testing'] },
 ]
 export const RoleRoomCreate = ({ engines, busy, create, initialAgents, recentProjects = [], refreshEngines, manageTools }: { recentProjects?: string[]; engines: EngineProbeView[]; initialAgents?: AgentProfile[] | undefined; busy: boolean; create(config: RoomConfig): Promise<boolean>; refreshEngines?(): void; manageTools?(): void }) => {
   const available = engines.filter(engine => engine.available)
-  const [name, setName] = useState('我的协作团队'), [cwd, setCwd] = useState(''), [roles, setRoles] = useState<RoomRole[]>(() => initialAgents?.length ? initialAgents.map(a => ({ id: a.id, agentId: a.id, name: a.name, engineId: a.engineId, instruction: a.instruction, ...(a.modelId ? { modelId: a.modelId } : {}) })) : seeds.map((role, index) => ({ ...role, engineId: available[index % available.length]?.id ?? '' }))), [coordinatorId, setCoordinator] = useState(initialAgents?.[0]?.id ?? 'assistant')
+  const [name, setName] = useState('我的协作团队'), [cwd, setCwd] = useState(''), [roles, setRoles] = useState<RoomRole[]>(() => initialAgents?.length ? initialAgents.map(a => ({ id: a.id, agentId: a.id, name: a.name, engineId: a.engineId, instruction: a.instruction, ...(a.modelId ? { modelId: a.modelId } : {}), ...(a.capabilities ? { capabilities: [...a.capabilities] } : {}) })) : seeds.map((role, index) => ({ ...role, engineId: available[index % available.length]?.id ?? '' }))), [coordinatorId, setCoordinator] = useState(initialAgents?.[0]?.id ?? 'assistant')
   // Detection may arrive after the form mounts. Fill only unselected roles;
   // a refresh must never replace a user's chosen engine or a saved Agent.
   useEffect(() => {
@@ -58,6 +60,7 @@ export const RoleRoomCreate = ({ engines, busy, create, initialAgents, recentPro
       {role.engineId && !available.some(e => e.id === role.engineId) ? <small role="status">{engines.find(e => e.id === role.engineId)?.reason ?? '所选工具未就绪，请在工具与模型中检查。'}</small> : null}
       <small>模型：{role.modelId ?? '工具默认模型'} · 可在连接后调整</small>
       <label>角色职责<textarea aria-label={`角色 ${index + 1} 职责`} rows={3} value={role.instruction} required maxLength={2000} onChange={e => update(role.id, 'instruction', e.target.value)} /></label>
+      <ProjectCapabilities label={`角色 ${index + 1} 能力`} value={role.capabilities} disabled={busy} onChange={capabilities => setRoles(rows => rows.map(row => row.id === role.id ? { ...row, capabilities } : row))} />
       <ChatButton type="button" variant="ghost" disabled={roles.length <= 2} onClick={() => { const rest = roles.filter(r => r.id !== role.id); setRoles(rest); if (coordinatorId === role.id) setCoordinator(rest[0]!.id) }}>移除角色 {index + 1}</ChatButton>
     </fieldset>)}</div>
     <div className="lumo-role-toolbar"><ChatButton type="button" disabled={busy || roles.length >= 6} onClick={() => setRoles([...roles, { id: crypto.randomUUID(), name: '', instruction: '', engineId: available[roles.length % available.length]?.id ?? '' }])}>添加角色</ChatButton>

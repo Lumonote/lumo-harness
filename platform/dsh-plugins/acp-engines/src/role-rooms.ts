@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { RoomEvents, type RoomEvent } from './role-room-events.ts'
 import type { AgentSkills } from './prompt-context.ts'
 import { projectFileBlocks } from './project-files.ts'
@@ -9,6 +9,9 @@ import { sameScope, type SessionScope } from './session-scope.ts'
 import { ROOM_LIMITS, RoomError, roomConfig, roomAppearance, turnInput, planRoomTurn, roomPrompt, type RoleRoom, type RoomView, type RoomTurn, type RoomSummary } from './role-room-model.ts'
 import { RoleRoomStore } from './role-room-store.ts'
 import { runRoleTurn, type RoomEngine } from './role-room-turn.ts'
+import { ProjectWorkflowRunner } from './project-workflow-runner.ts'
+import { capabilityList, workflowSessions } from './project-workflow-model.ts'
+import { loadProjectRules, projectRulesPrompt } from './project-practice-rules.ts'
 
 interface ActiveRoom { room: RoleRoom; controller: AbortController; busy: boolean; storageError?: string; releaseWorkspace?: () => void; progressTimer?: ReturnType<typeof setTimeout> }
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 2000)
@@ -23,7 +26,7 @@ export class RoleRooms {
   listAgents(scope: SessionScope) { return this.store.listAgents(scope) }
   saveAgent(value: unknown, scope: SessionScope) { return this.store.saveAgent(value, scope) }
   removeAgent(id: string, scope: SessionScope) { this.store.removeAgent(id, scope) }
-  sessionOwner(id: string, scope: SessionScope) { return [...this.active.values()].map(l => l.room).find(r => sameScope(r, scope) && r.roles.some(role => role.sessionId === id)) ?? this.store.sessionOwner(id, scope) }
+  sessionOwner(id: string, scope: SessionScope) { return [...this.active.values()].map(l => l.room).find(r => sameScope(r, scope) && (r.roles.some(role => role.sessionId === id) || r.workflows?.some(run => workflowSessions(run).includes(id)))) ?? this.store.sessionOwner(id, scope) }
   workspaceBusy(cwd: string) { return [...this.active.values()].some(l => l.busy && l.room.cwd === workspace(cwd)) }
   list(scope: SessionScope, options: { includeArchived?: boolean; q?: string } = {}): RoomSummary[] {
     return this.store.summaries(scope, options).map(r => ({ ...r, busy: this.active.get(r.id)?.busy ?? false }))
@@ -172,7 +175,65 @@ export class RoleRooms {
     return this.view(id, scope)
   }
   stop(id: string, scope: SessionScope): RoomView {
-    this.owned(id, scope); this.active.get(id)?.controller.abort(); return this.view(id, scope)
+    const room = this.owned(id, scope)
+    this.active.get(id)?.controller.abort()
+    for (const sessionId of [...room.roles.flatMap(r => r.sessionId ? [r.sessionId] : []), ...(room.workflows ?? []).flatMap(workflowSessions)]) {
+      if (this.host.get(sessionId, scope)?.state === 'running') this.host.cancel(sessionId, scope)
+    }
+    return this.view(id, scope)
+  }
+  async workflow(id: string, value: unknown, scope: SessionScope): Promise<RoomView> {
+    const input = value as { action?: string; id?: string; runId?: string; roles?: unknown } | undefined
+    if (!input || !['prepare', 'update', 'suggest', 'run', 'merge', 'validate', 'reconcile', 'terminate', 'capabilities'].includes(input.action ?? '')) throw new RoomError('项目流程操作无效', 400)
+    const room = this.owned(id, scope), runner = new ProjectWorkflowRunner(this.host, undefined, this.skills)
+    if (input.action === 'capabilities') {
+      this.assertIdle(room)
+      if (!Array.isArray(input.roles) || input.roles.length !== room.roles.length || new Set(input.roles.map(r => r?.id)).size !== room.roles.length) throw new RoomError('角色能力配置无效', 400)
+      const roles = input.roles as Array<{ id: string; capabilities: unknown }>
+      for (const role of roles) { if (!room.roles.some(r => r.id === role.id)) throw new RoomError('成员不存在', 400); capabilityList(role.capabilities) }
+      room.roles = room.roles.map(role => ({ ...role, capabilities: capabilityList(roles.find(r => r.id === role.id)!.capabilities) }))
+      for (const draft of room.workflows ?? []) if (draft.state === 'draft') runner.update(room, draft, {})
+      this.save(room, true); return this.view(id, scope)
+    }
+    const digest = createHash('sha256').update(JSON.stringify(value)).digest('hex')
+    const previous = input.action === 'prepare' ? room.workflows?.find(run => run.id === input.id) : undefined
+    if (previous) { if (previous.requestDigest !== digest) throw new RoomError('流程标识已用于不同配置'); return this.view(id, scope) }
+    const run = input.action !== 'prepare' ? room.workflows?.find(run => run.id === input.runId) : undefined
+    if (input.action !== 'prepare' && !run) throw new RoomError('项目流程不存在', 404)
+    if (input.action === 'terminate') {
+      if (!this.host.terminate) throw new RoomError('当前引擎宿主不支持强制结束')
+      this.active.get(id)?.controller.abort()
+      for (const sessionId of workflowSessions(run!)) if (['running', 'starting'].includes(this.host.get(sessionId, scope)?.state ?? '')) this.host.terminate(sessionId, scope)
+      return this.view(id, scope)
+    }
+    if (run && ((input.action === 'run' && run.state !== 'draft') || (input.action === 'merge' && run.state === 'merged') || (input.action === 'suggest' && run.state === 'planning'))) return this.view(id, scope)
+    this.assertIdle(room)
+    if (room.archived) throw new RoomError('请先恢复归档话题')
+    if (input.action === 'update') { runner.update(room, run!, value); this.save(room, true); return this.view(id, scope) }
+    if (input.action === 'prepare' && (room.workflows?.length ?? 0) >= 16) throw new RoomError('此话题已有 16 个项目流程，请继续新话题')
+    if (input.action === 'suggest' && run!.state !== 'draft') throw new RoomError('只有草稿可以请求拆解建议')
+    if (input.action === 'merge' && run!.state !== 'ready') throw new RoomError('只有测试和独立评审通过的流程可以合并')
+    if (input.action === 'validate' && (!['failed', 'cancelled', 'interrupted', 'ready'].includes(run!.state) || run!.tasks.some(t => t.state !== 'completed'))) throw new RoomError('请先完成实现任务并核对隔离工作区，再重新验收')
+    if (input.action === 'reconcile' && !['failed', 'cancelled', 'interrupted', 'ready'].includes(run!.state)) throw new RoomError('当前流程无需核对合并回执')
+    if (input.action === 'run' && !run!.checks.length) throw new RoomError('请先配置至少一条实际验收命令')
+    const releaseWorkspace = this.host.reserveWorkspace?.(room.cwd, `room:${id}`)
+    const live: ActiveRoom = { room, controller: new AbortController(), busy: true, ...(releaseWorkspace ? { releaseWorkspace } : {}) }
+    this.active.set(id, live)
+    if (input.action === 'prepare') {
+      try {
+        const prepared = await runner.prepare(room, value)
+        prepared.requestDigest = digest
+        room.workflows = [...(room.workflows ?? []), prepared]; this.persist(live)
+      } finally { releaseWorkspace?.(); this.finishActivity(live) }
+      return this.view(id, scope)
+    }
+    const originalState = run!.state
+    run!.state = input.action === 'suggest' ? 'planning' : input.action === 'merge' ? 'merging' : input.action === 'reconcile' ? originalState : input.action === 'validate' ? 'validating' : 'running'
+    try { this.persist(live) } catch (error) { run!.state = originalState; releaseWorkspace?.(); live.busy = false; this.active.delete(id); throw error }
+    void runner.perform(room, run!, input.action as 'suggest' | 'run' | 'merge' | 'validate' | 'reconcile', () => this.persist(live), live.controller.signal)
+      .catch(error => { live.storageError = message(error); live.controller.abort() })
+      .finally(() => { releaseWorkspace?.(); try { this.finishActivity(live) } catch (error) { live.storageError = message(error); this.notify(room, true) } })
+    return this.view(id, scope)
   }
   async resume(id: string, scope: SessionScope): Promise<RoomView> {
     const room = this.owned(id, scope); this.assertIdle(room)
@@ -201,6 +262,11 @@ export class RoleRooms {
     this.active.delete(id); this.save(room, true); return this.view(id, scope)
   }
   private releaseHandles(room: RoleRoom, scope: SessionScope, remove = false): void {
+    for (const sessionId of (room.workflows ?? []).flatMap(workflowSessions)) {
+      if (remove && this.host.delete) this.host.delete(sessionId, scope)
+      else if (this.host.release) this.host.release(sessionId, scope)
+      else this.host.close(sessionId, scope)
+    }
     // Commit each handle so a failed release leaves the remaining controls recoverable.
     for (const role of room.roles) {
       if (!role.sessionId) continue
@@ -242,6 +308,7 @@ export class RoleRooms {
     if (this.active.get(room.id)?.busy) throw new RoomError('此房间正在协作，请先停止或等待完成')
     if ([...this.active.values()].some(l => l.busy && l.room.cwd === room.cwd)) throw new RoomError('此工作区已有协作回合，请等待完成')
     if (this.host.workspaceBusy?.(room.cwd, `room:${room.id}`)) throw new RoomError('此工作区仍有引擎在执行，请等待停止确认或结束对应会话')
+    if ((room.workflows ?? []).flatMap(workflowSessions).some(id => ['running', 'starting'].includes(this.host.get(id, room)?.state ?? ''))) throw new RoomError('项目任务仍在执行或等待停止确认，请核对成员会话')
     const live = this.active.get(room.id)
     if (live?.storageError) { this.store.put(live.room); this.active.delete(room.id) }
   }
@@ -253,6 +320,7 @@ export class RoleRooms {
     const { room, controller } = live
     try {
       const skillText = turn.skills?.length ? await this.skills!.load(turn.skills, room.cwd, controller.signal) : ''
+      const rulesText = projectRulesPrompt(await loadProjectRules(room.cwd))
       const fileBlocks = projectFileBlocks(room.cwd, turn.files ?? [])
       // Connect every planned member before the first prompt so capacity/setup errors cannot dispatch a partial relay.
       for (const step of turn.steps) {
@@ -272,7 +340,7 @@ export class RoleRooms {
         if (controller.signal.aborted) throw new RoomError('协作已停止')
         step.state = 'running'; this.save(room)
         let prompt = this.attachments.prompt(roomPrompt(room, turn, step), turn.attachments ?? [], room, this.host.get(role.sessionId!, room)?.capabilities)
-        if (skillText || fileBlocks.length) prompt = [...(typeof prompt === 'string' ? [{ type: 'text' as const, text: prompt }] : prompt), ...(skillText ? [{ type: 'text' as const, text: skillText }] : []), ...fileBlocks]
+        if (rulesText || skillText || fileBlocks.length) prompt = [...(typeof prompt === 'string' ? [{ type: 'text' as const, text: prompt }] : prompt), ...(rulesText ? [{ type: 'text' as const, text: rulesText }] : []), ...(skillText ? [{ type: 'text' as const, text: skillText }] : []), ...fileBlocks]
         this.attachments.retain(`session:${role.sessionId!}`, turn.attachments ?? [], room)
         await runRoleTurn(this.host, role.sessionId!, room, prompt, controller.signal, (text, truncated) => {
           step.text = text; step.truncated = truncated

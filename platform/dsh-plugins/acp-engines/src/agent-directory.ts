@@ -1,7 +1,8 @@
 import { roomRole } from './role-room-model.ts'
 import { sameScope, type SessionScope } from './session-scope.ts'
+import type { ProjectCapability } from './project-workflow-model.ts'
 
-export interface AgentProfile extends SessionScope { id: string; name: string; engineId: string; instruction: string; modelId?: string }
+export interface AgentProfile extends SessionScope { id: string; name: string; engineId: string; instruction: string; modelId?: string; capabilities?: ProjectCapability[] }
 export const agentProfile = (value: unknown, scope: SessionScope): AgentProfile => {
   const role = roomRole(value)
   const { agentId: _agentId, sessionId: _sessionId, ...config } = role

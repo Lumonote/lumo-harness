@@ -1,6 +1,6 @@
 import type { RoomTurn, RoomView } from './role-room-model.ts'
 
-export type RoomChange = Pick<RoomView, 'id' | 'revision' | 'busy' | 'name' | 'archived' | 'pinned' | 'updatedAt' | 'sessionStates' | 'sessionModels' | 'error'> & { roleSessions: Record<string, string | null>; turn?: RoomTurn; refresh?: boolean }
+export type RoomChange = Pick<RoomView, 'id' | 'revision' | 'busy' | 'name' | 'archived' | 'pinned' | 'updatedAt' | 'sessionStates' | 'sessionModels' | 'error' | 'workflows'> & { roleSessions: Record<string, string | null>; turn?: RoomTurn; refresh?: boolean }
 export type RoomEvent = { type: 'room.snapshot'; revision: number; room: RoomView } | { type: 'room.changed'; revision: number; change: RoomChange }
 
 /** Small replay window for transport interruptions; older cursors receive an authoritative snapshot. */
@@ -12,6 +12,7 @@ export class RoomEvents {
       id: room.id, revision: room.revision ?? 0, busy: room.busy, name: room.name, archived: room.archived ?? false,
       roleSessions: Object.fromEntries(room.roles.map(role => [role.id, role.sessionId ?? null])),
       pinned: room.pinned ?? false, ...(room.updatedAt ? { updatedAt: room.updatedAt } : {}), sessionStates: room.sessionStates, ...(room.sessionModels ? { sessionModels: room.sessionModels } : {}),
+      ...(room.workflows ? { workflows: structuredClone(room.workflows) } : {}),
       ...(room.error ? { error: room.error } : {}), ...(room.turns.at(-1) ? { turn: room.turns.at(-1)! } : {}), ...(refresh ? { refresh: true } : {}),
     } }
     const recent = [...(this.replay.get(room.id) ?? []), event].slice(-16); this.replay.set(room.id, recent)

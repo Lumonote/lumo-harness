@@ -2,16 +2,17 @@ import { promptContext, type PromptContext } from './prompt-context.ts'
 import { attachmentRefs, type ChatAttachment } from './chat-attachments.ts'
 import { validModelId, type SessionModels } from './session-models.ts'
 import type { SessionScope } from './session-scope.ts'
+import { capabilityList, type ProjectCapability, type ProjectWorkflow } from './project-workflow-model.ts'
 
 export const ROOM_LIMITS = { roles: 6, rooms: 16, turns: 24, message: 6000, output: 8000, summary: 12000 } as const
 export type RoomMode = 'direct' | 'relay' | 'discuss'
 export type StepState = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
-export interface RoomRole { id: string; name: string; engineId: string; instruction: string; sessionId?: string; modelId?: string; agentId?: string }
+export interface RoomRole { id: string; name: string; engineId: string; instruction: string; sessionId?: string; modelId?: string; agentId?: string; capabilities?: ProjectCapability[] }
 export interface RoomStep { roleId: string; purpose: 'reply' | 'summary'; state: StepState; text: string; truncated?: boolean; error?: string }
 export interface RoomTurn extends PromptContext { attachments?: ChatAttachment[]; id: string; text: string; mode: RoomMode; targetRoleId?: string; state: StepState; createdAt: string; steps: RoomStep[]; error?: string }
 export interface RoomAppearance { logo: string; color: string }
 export interface RoomHandoff { roomId: string; summary: string; createdAt: string }
-export interface RoleRoom extends SessionScope { appearance?: RoomAppearance; id: string; name: string; cwd: string; coordinatorId: string; roles: RoomRole[]; turns: RoomTurn[]; createdAt: string; archived?: boolean; pinned?: boolean; revision?: number; updatedAt?: string; handoff?: RoomHandoff }
+export interface RoleRoom extends SessionScope { appearance?: RoomAppearance; id: string; name: string; cwd: string; coordinatorId: string; roles: RoomRole[]; turns: RoomTurn[]; createdAt: string; archived?: boolean; pinned?: boolean; revision?: number; updatedAt?: string; handoff?: RoomHandoff; workflows?: ProjectWorkflow[] }
 export interface RoomView extends RoleRoom { sessionStates: Record<string, string>; sessionModels?: Record<string, SessionModels>; busy: boolean; error?: string }
 export type RoomSummary = Pick<RoomView, 'id' | 'name' | 'cwd' | 'busy' | 'appearance' | 'archived' | 'pinned' | 'revision' | 'handoff'> & { preview?: string; updatedAt?: string; engineIds?: string[] }
 export type RoomConfig = Pick<RoleRoom, 'id' | 'name' | 'cwd' | 'coordinatorId' | 'roles' | 'appearance'>
@@ -37,7 +38,7 @@ export const roomRole = (value: unknown): RoomRole => {
     || !text(r.engineId, 64) || !/^[a-z0-9][a-z0-9._-]*$/u.test(r.engineId)) throw new RoomError('角色名称、职责或引擎无效', 400)
   if (r.modelId !== undefined && !validModelId(r.modelId)) throw new RoomError('角色模型无效', 400)
   if (r.agentId !== undefined && (!text(r.agentId, 80) || !identifier.test(r.agentId))) throw new RoomError('Agent 标识无效', 400)
-  return { ...(r.modelId ? { modelId: r.modelId as string } : {}), ...(r.agentId ? { agentId: r.agentId as string } : {}),
+  return { ...(r.modelId ? { modelId: r.modelId as string } : {}), ...(r.agentId ? { agentId: r.agentId as string } : {}), ...(r.capabilities !== undefined ? { capabilities: capabilityList(r.capabilities) } : {}),
     id: r.id, name: r.name.trim(), instruction: r.instruction.trim(), engineId: r.engineId }
 }
 export const roomConfig = (value: unknown): RoomConfig => {

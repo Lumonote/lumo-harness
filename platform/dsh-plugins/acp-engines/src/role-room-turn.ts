@@ -6,7 +6,7 @@ import type { SessionScope } from './session-scope.ts'
 import { ROOM_LIMITS } from './role-room-model.ts'
 
 export type RoomEngine = Pick<EngineHost, 'get' | 'list' | 'probeStatic' | 'createSession' | 'resume' | 'prompt' | 'subscribe' | 'cancel' | 'close' | 'setModel'>
-  & Partial<Pick<EngineHost, 'ensureCapacity' | 'release' | 'delete' | 'reserveWorkspace' | 'workspaceBusy'>>
+  & Partial<Pick<EngineHost, 'ensureCapacity' | 'release' | 'delete' | 'reserveWorkspace' | 'workspaceBusy' | 'terminate' | 'setMode'>>
 
 /** Subscribe before dispatch, ignore replay, and stop the sequence on every non-success outcome. */
 export const runRoleTurn = (host: RoomEngine, id: string, scope: SessionScope, prompt: string | ContentBlock[], signal: AbortSignal,

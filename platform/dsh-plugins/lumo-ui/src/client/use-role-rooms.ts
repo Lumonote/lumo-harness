@@ -5,6 +5,7 @@ import { acpCall, scopeKey, type AskView, type SessionIdentity } from './acp-ses
 import type { RoomView, RoomSummary } from '../../../acp-engines/src/role-room-model.ts'
 import type { RoomChange } from '../../../acp-engines/src/role-room-events.ts'
 import type { EngineProbeView } from './acp-session-panel.tsx'
+import { workflowSessions } from '../../../acp-engines/src/project-workflow-model.ts'
 
 const ROOT = '/lumo/api/acp'
 type Snapshot = { identity: SessionIdentity; room: RoomView }
@@ -44,7 +45,7 @@ export const useRoleRooms = () => {
       setRoom(previous => previous?.revision !== undefined && previous.id === result.room.id && previous.revision > (result.room.revision ?? 0) ? previous : result.room); live.current = result.room.busy
       const pending = await acpCall<{ asks: AskView[]; warnings?: string[] }>(`${ROOT}/asks?status=pending`)
       if (!alive.current || epoch.current !== current || selected.current !== id) return
-      const sessions = new Set(result.room.roles.map(r => r.sessionId).filter(Boolean))
+      const sessions = new Set([...result.room.roles.map(r => r.sessionId).filter(Boolean), ...(result.room.workflows ?? []).flatMap(workflowSessions)])
       setAsks(pending.asks.filter(a => sessions.has(a.source.session_ref))); setApprovalError(pending.warnings?.join('；') ?? '')
     } catch (e) {
       if (alive.current && epoch.current === generation) {
@@ -78,6 +79,7 @@ export const useRoleRooms = () => {
         if (payload.identity && scopeKey(payload.identity) !== scope.current) return
         if (change.id !== id || selected.current !== id || (roomRef.current?.revision ?? -1) >= change.revision) return
         setRoom(previous => previous?.id !== id || (previous.revision ?? -1) >= change.revision ? previous : { ...previous, revision: change.revision, busy: change.busy, ...(change.archived !== undefined ? {archived: change.archived} : {}), ...(change.pinned !== undefined ? {pinned: change.pinned} : {}), ...(change.name ? {name: change.name} : {}), ...(change.updatedAt ? {updatedAt: change.updatedAt} : {}), ...(change.error ? {error: change.error} : {}), ...(change.sessionStates ? {sessionStates: change.sessionStates} : {}), ...(change.sessionModels ? {sessionModels: change.sessionModels} : {}),
+          ...(change.workflows ? { workflows: change.workflows } : {}),
           roles: change.roleSessions ? previous.roles.map(role => {
             const sessionId = change.roleSessions[role.id]
             if (sessionId === undefined) return role
@@ -98,7 +100,7 @@ export const useRoleRooms = () => {
       if (document.hidden) return
       void acpCall<{asks: AskView[]; warnings?: string[]}>(`${ROOT}/asks?status=pending`).then(result => {
         if (selected.current !== id || !alive.current || epoch.current !== current) return
-        const sessions = new Set(roomRef.current?.roles.map(role => role.sessionId))
+        const sessions = new Set([...(roomRef.current?.roles.map(role => role.sessionId) ?? []), ...(roomRef.current?.workflows ?? []).flatMap(workflowSessions)])
         setAsks(result.asks.filter(ask => sessions.has(ask.source.session_ref))); setApprovalError(result.warnings?.join('；') ?? '')
       }).catch(() => undefined)
     }, 5000)

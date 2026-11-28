@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { ROOM_LIMITS, RoomError, roomConfig, turnInput, planRoomTurn, type RoleRoom, type RoomSummary, type StepState } from './role-room-model.ts'
+import { decodeProjectWorkflow, workflowActive, workflowSessions } from './project-workflow-model.ts'
 
 const MAX_BYTES = 32 * 1024 * 1024
 const states: StepState[] = ['pending', 'running', 'completed', 'failed', 'cancelled', 'interrupted']
@@ -24,6 +25,11 @@ export const decodeRoom = (raw: RoleRoom): RoleRoom => {
     || (raw.projectId !== undefined && (!validText(raw.projectId, 256) || !raw.projectId))
     || !validText(raw.createdAt, 64) || !Number.isFinite(Date.parse(raw.createdAt)) || !Array.isArray(raw.turns) || raw.turns.length > ROOM_LIMITS.turns) throw new Error('角色协作记录无效')
   const room: RoleRoom = { ...config, realm: raw.realm, userId: raw.userId, ...(raw.projectId === undefined ? {} : { projectId: raw.projectId }), createdAt: raw.createdAt, turns: [], ...roomMetadata(raw) }
+  if (raw.workflows !== undefined) {
+    if (!Array.isArray(raw.workflows) || raw.workflows.length > 16) throw new Error('项目流程历史无效')
+    room.workflows = raw.workflows.map(decodeProjectWorkflow)
+    if (new Set(room.workflows.map(run => run.id)).size !== room.workflows.length || room.workflows.some(run => !room.roles.some(r => r.id === run.reviewerId) || run.tasks.some(t => !room.roles.some(r => r.id === t.roleId)))) throw new Error('项目流程角色或标识无效')
+  }
   room.roles.forEach((role, i) => {
     const id = raw.roles[i]?.sessionId
     if (id !== undefined) {
@@ -64,6 +70,10 @@ function atomic(file: string, data: unknown): void {
   finally { rmSync(temp, { force: true }) }
 }
 function interrupted(room: RoleRoom): RoleRoom {
+  for (const run of room.workflows ?? []) if (workflowActive(run.state)) {
+    run.state = 'interrupted'; run.error = '运行时已重启，请核对工作区和证据；不会自动重放项目任务或合并。'
+    for (const task of run.tasks) if (task.state === 'running' || task.state === 'pending') task.state = 'interrupted'
+  }
   for (const turn of room.turns) {
     if (turn.state !== 'running' && turn.state !== 'pending') continue
     turn.state = 'interrupted'; turn.error = '运行时已重启，请核对引擎执行结果；本轮不会自动重发。'
@@ -125,7 +135,7 @@ export class RoleRoomStore {
       .map(summarize).sort((a, b) => Number(b.pinned) - Number(a.pinned) || (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))
   }
   sessionOwner(id: string, scope: SessionScope): RoleRoom | undefined {
-    const e = [...this.entries.values()].find(e => sameScope(e.header, scope) && e.header.roles.some(r => r.sessionId === id))
+    const e = [...this.entries.values()].find(e => sameScope(e.header, scope) && (e.header.roles.some(r => r.sessionId === id) || e.header.workflows?.some(run => workflowSessions(run).includes(id))))
     return e && this.get(e.header.id)
   }
   list(): RoleRoom[] { return [...this.entries.keys()].map(id => this.get(id)!) }
@@ -144,7 +154,9 @@ export class RoleRoomStore {
   put(room: RoleRoom): void { this.putMany([room]) }
   putMany(rooms: RoleRoom[]): void {
     const next = new Map(this.entries), changed = new Map<string, RoleRoom>()
-    for (const room of rooms) { const copy = structuredClone(room); next.set(room.id, entryOf(copy)); changed.set(room.id, copy) }
+    // Validate before publishing either the index or a blob. A snapshot that
+    // cannot be decoded after restart must never replace the last readable one.
+    for (const room of rooms) { const copy = decodeRoom(structuredClone(room)); next.set(room.id, entryOf(copy)); changed.set(room.id, copy) }
     this.commit(next, changed)
   }
   remove(id: string): void { const next = new Map(this.entries); next.delete(id); this.commit(next, new Map()) }

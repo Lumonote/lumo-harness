@@ -29,6 +29,8 @@ import { validModelId } from './session-models.ts'
 import { ENGINE_ID } from './registry.ts'
 import { handleRoleRoomRoute } from './role-room-routes.ts'
 import type { RoleRooms } from './role-rooms.ts'
+import { loadProjectRules, projectRulesPrompt } from './project-practice-rules.ts'
+import { workflowSessions } from './project-workflow-model.ts'
 
 export type { SessionScope as AcpIdentity } from './session-scope.ts'
 import type { SessionScope as AcpIdentity } from './session-scope.ts'
@@ -76,7 +78,11 @@ export async function handleAcpRoute(req: IncomingMessage, res: ServerResponse, 
   if (host === undefined || asks === undefined) { json(res, 501, { error: 'ACP 引擎会话未启用（仅本地单机形态，且未设置 LUMO_ACP_ENGINES=off）' }); return true }
   const sub = pathname.slice(ACP_PREFIX.length)
   const withRoom = (session: SessionSummary) => {
-    const room = deps.rooms?.sessionOwner(session.id, identity), role = room?.roles.find(r => r.sessionId === session.id)
+    const room = deps.rooms?.sessionOwner(session.id, identity)
+    const run = room?.workflows?.find(r => workflowSessions(r).includes(session.id))
+    const task = run?.tasks.find(t => t.sessionId === session.id)
+    const roleId = task?.roleId ?? (run?.reviewSessionId === session.id ? run.reviewerId : run ? room?.coordinatorId : undefined)
+    const role = room?.roles.find(r => r.sessionId === session.id || r.id === roleId)
     return { ...session, ...(room && role ? { room: { id: room.id, name: room.name, roleId: role.id, roleName: role.name } } : {}) }
   }
   const method = req.method ?? 'GET'
@@ -119,7 +125,8 @@ export async function handleAcpRoute(req: IncomingMessage, res: ServerResponse, 
     const session = toolsRoute[1] === 'sessions' ? host.get(id, identity) : undefined
     const room = toolsRoute[1] === 'rooms' ? deps.rooms?.view(id, identity) : undefined
     if (!session && !room) { json(res, 404, { error: '对话不存在' }); return true }
-    const members = room ? room.roles.map(role => ({ id: role.id, name: role.name, engineId: role.engineId, sessionRef: role.sessionId }))
+    const members = room ? [...room.roles.map(role => ({ id: role.id, name: role.name, engineId: role.engineId, sessionRef: role.sessionId })),
+      ...(room.workflows?.at(-1)?.tasks ?? []).filter(t => t.sessionId).map(task => ({ id: task.id, name: task.title, engineId: room.roles.find(r => r.id === task.roleId)!.engineId, sessionRef: task.sessionId }))]
       : [{ id, name: session!.title ?? session!.engineId, engineId: session!.engineId, sessionRef: id }]
     json(res, 200, { members: members.map(({ sessionRef, ...member }) => ({ ...member,
       ...(sessionRef && host.get(sessionRef, identity) && deps.sharedTools ? deps.sharedTools(identity, sessionRef)
@@ -239,6 +246,8 @@ export async function handleAcpRoute(req: IncomingMessage, res: ServerResponse, 
         let prompt = attachments.length ? deps.attachments!.prompt(text, attachments, identity, session?.capabilities) : text
         if (!session) { json(res, 404, { error: '会话不存在' }); return true }
         const extra: ContentBlock[] = projectFileBlocks(session.cwd, context.files ?? [])
+        const rulesText = projectRulesPrompt(await loadProjectRules(session.cwd))
+        if (rulesText) extra.push({ type: 'text', text: rulesText })
         if (context.skills?.length) {
           if (!deps.skills) throw new Error('Skill 服务未启用')
           extra.push({ type: 'text', text: await whileConnected(res, signal => deps.skills!.load(context.skills!, session.cwd, signal), preparation.signal) })

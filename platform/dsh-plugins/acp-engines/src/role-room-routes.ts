@@ -18,7 +18,7 @@ export const handleRoleRoomRoute = async (sub: string, method: string, input: un
       json(200, { rooms: Object.keys(options).length ? rooms.list(scope, options) : rooms.list(scope), identity: scope }); return true
     }
     if (sub === '/rooms' && method === 'POST') { json(201, { room: rooms.create(input, scope), identity: scope }); return true }
-    const match = /^\/rooms\/([A-Za-z0-9_-]{1,80})(?:\/(turns|stop|resume|release|delete|model|connect|appearance|metadata|continue|history|events|export))?$/u.exec(sub)
+    const match = /^\/rooms\/([A-Za-z0-9_-]{1,80})(?:\/(turns|stop|resume|release|delete|model|connect|appearance|metadata|continue|history|events|export|workflow))?$/u.exec(sub)
     if (!match) { json(404, { error: '角色协作路由不存在' }); return true }
     const [, id, action] = match
     if (method === 'GET' && !action) { json(200, { room: rooms.view(id!, scope), identity: scope }); return true }
@@ -48,6 +48,7 @@ export const handleRoleRoomRoute = async (sub: string, method: string, input: un
     if (action === 'metadata') { json(200, { room: rooms.metadata(id!, input, scope), identity: scope }); return true }
     if (action === 'continue') { json(201, { room: rooms.continueTopic(id!, input, scope), identity: scope }); return true }
     if (action === 'appearance') { json(200, { room: rooms.setAppearance(id!, input, scope), identity: scope }); return true }
+    if (action === 'workflow') { json(202, { room: await rooms.workflow(id!, input, scope), identity: scope }); return true }
     if (action === 'connect') {
       const value = input as { roleId?: unknown }
       if (typeof value?.roleId !== 'string') throw new RoomError('需要角色', 400)

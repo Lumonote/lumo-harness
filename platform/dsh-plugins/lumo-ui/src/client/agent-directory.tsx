@@ -5,8 +5,9 @@ import type { AgentSeed } from './development-tools.tsx'
 import { acpCall, scopeKey, type SessionIdentity } from './acp-session-state.ts'
 import { EngineModelPicker } from './engine-model-picker.tsx'
 import { EngineLogo } from './engine-logo.tsx'
+import { ProjectCapabilities, capabilityLabels } from './project-workflow-panel.tsx'
 
-type Draft = Pick<AgentProfile, 'id' | 'name' | 'engineId' | 'instruction' | 'modelId'>
+type Draft = Pick<AgentProfile, 'id' | 'name' | 'engineId' | 'instruction' | 'modelId' | 'capabilities'>
 export const AgentDirectory = ({ identity, engines, seed, group, tools }: {
   identity: string; engines: EngineProbeView[]; seed?: AgentSeed | undefined; group(agents: AgentProfile[]): void; tools(): void
 }) => {
@@ -46,10 +47,12 @@ export const AgentDirectory = ({ identity, engines, seed, group, tools }: {
       <label>开发工具<select aria-label="Agent 开发工具" value={draft.engineId} onChange={e => { const { modelId: _, ...next } = draft; setDraft({ ...next, engineId: e.target.value }) }}>{!engines.some(e => e.id === draft.engineId) ? <option>{draft.engineId}</option> : null}{engines.map(e => <option key={e.id} value={e.id}>{e.label}{e.available ? '' : '（未就绪）'}</option>)}</select></label>
       <EngineModelPicker key={`${draft.id}:${draft.engineId}`} engineId={draft.engineId} identity={identity} available={engines.some(e => e.id === draft.engineId && e.available)} cwd={modelCwd} setCwd={setModelCwd} modelId={draft.modelId} disabled={busy} setModelId={id => { const next = { ...draft }; if (id) next.modelId = id; else delete next.modelId; setDraft(next) }} />
       <label>职责<textarea aria-label="Agent 职责" required maxLength={2000} rows={4} value={draft.instruction} onChange={e => setDraft({ ...draft, instruction: e.target.value })} /></label>
+      <ProjectCapabilities label="Agent 能力" value={draft.capabilities} disabled={busy} onChange={capabilities => setDraft({ ...draft, capabilities })} />
       <div className="lumo-role-toolbar"><button type="submit" disabled={!loaded}>保存 Agent</button><button type="button" onClick={() => setDraft(undefined)}>取消编辑</button></div>
     </fieldset></form> : null}
     <div className="lumo-role-roster">{agents.map(agent => <article key={agent.id}><label className="lumo-agent-check"><input type="checkbox" checked={selected.includes(agent.id)} disabled={!selected.includes(agent.id) && selected.length >= 6} onChange={e => setSelected(ids => e.target.checked ? [...ids, agent.id] : ids.filter(id => id !== agent.id))} /><EngineLogo engineId={agent.engineId} small />{agent.name}</label>
       <span>{engines.find(e => e.id === agent.engineId)?.label ?? agent.engineId} · {agent.modelId ?? '工具默认模型'}</span><small>{agent.instruction}</small>
+      {agent.capabilities?.length ? <small>{agent.capabilities.map(value => capabilityLabels[value]).join(' · ')}</small> : null}
       <div className="lumo-role-toolbar"><button type="button" disabled={busy} onClick={() => setDraft(agent)}>编辑</button><button type="button" disabled={busy} onClick={() => setDeleting(agent.id)}>移除</button>
         {deleting === agent.id ? <button type="button" disabled={busy} onClick={() => void save(agent.id)}>确认移出通讯录</button> : null}</div>
     </article>)}</div>{loaded && !agents.length ? <p className="lumo-muted">创建第一个 Agent，再选择两位或更多成员建立协作群组。</p> : null}
