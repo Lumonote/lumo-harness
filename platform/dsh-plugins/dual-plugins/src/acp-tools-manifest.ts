@@ -20,7 +20,7 @@ export const ACP_ENGINES_MANIFEST: DualPluginManifest = {
       action: 'agent:engine:list',
       risk: 'low',
       approval: 'never',
-      channels: ['platform', 'ui'],
+      channels: ['platform', 'acp', 'ui'],
       page: 'acp-session-panel',
     },
   ],

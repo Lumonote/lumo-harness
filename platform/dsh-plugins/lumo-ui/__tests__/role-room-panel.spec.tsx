@@ -68,7 +68,7 @@ describe('role creation and multi-engine conversation', () => {
     const active = { ...room, busy: true, turns: [{ id: 't', text: '修复', mode: 'direct' as const, state: 'running' as const, createdAt: room.createdAt, targetRoleId: 'engineer', steps: [{ roleId: 'engineer', purpose: 'reply' as const, state: 'running' as const, text: '定位到缺陷' }] }] }
     await act(async () => root.render(<RoleRoomConversation room={active} asks={[{ id: 'ask', title: '编辑文件', status: 'pending', source: { session_ref: 's2' }, options: [{ id: 'allow', label: '允许一次' }] }]} busy={false} send={vi.fn()} action={action} answer={answer} />))
     expect(container.querySelector('[role="log"]')!.textContent).toContain('工程师codex')
-    expect(button('发送协作消息').disabled).toBe(true); expect(answer).not.toHaveBeenCalled()
+    expect(container.querySelector('[aria-label="发送协作消息"]')).toBeNull(); expect(answer).not.toHaveBeenCalled()
     await act(async () => button('允许一次').click()); expect(answer).toHaveBeenCalledWith('ask', 'allow')
     await act(async () => button('停止协作').click()); expect(action).toHaveBeenCalledWith('stop')
   })

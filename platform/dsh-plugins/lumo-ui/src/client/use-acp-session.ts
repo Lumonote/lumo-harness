@@ -1,3 +1,4 @@
+import { refreshConversationCatalog } from './conversation-events.ts'
 import { removeConversationDraft, readDraft, useConversationDraft, writeDraft } from './conversation-drafts.ts'
 import type { PromptContext } from '../../../acp-engines/src/prompt-context.ts'
 import type { ChatAttachment } from '../../../acp-engines/src/chat-attachments.ts'
@@ -13,7 +14,7 @@ export function useAcpSession(identityKey: string, onIdentity?: (key: string) =>
   const [sessions, setSessions] = useState<SessionView[]>([])
   const [session, setSession] = useState<SessionView>()
   const [items, setItems] = useState<TranscriptItem[]>([])
-  const [asks, setAsks] = useState<AskView[]>([])
+  const [asks, setAsks] = useState<AskView[]>([]), [approvalError, setApprovalError] = useState('')
   const draftKey = `${session ? scopeKey(session) : identityKey}:session:${session?.id ?? 'new'}`
   const [text, setText, draftError] = useConversationDraft(draftKey, 'text', '')
   const [hasMore, setHasMore] = useState(false)
@@ -42,7 +43,7 @@ export function useAcpSession(identityKey: string, onIdentity?: (key: string) =>
     source.current?.close(); source.current = undefined
     selected.current = undefined; seq.current = 0
     setStreamEpoch(value => value + 1)
-    setSession(undefined); setItems([]); setAsks([]); historyEvents.current = []; setHasMore(false); setRunning(false); setBusy(false); setError(undefined); setConnection('')
+    setSession(undefined); setItems([]); setAsks([]); setApprovalError(''); historyEvents.current = []; setHasMore(false); setRunning(false); setBusy(false); setError(undefined); setConnection('')
   }, [])
   const refresh = useCallback(async () => {
     const version = ++listVersion.current
@@ -60,8 +61,8 @@ export function useAcpSession(identityKey: string, onIdentity?: (key: string) =>
   }, [clear])
   const refreshAsks = useCallback(async (epoch: number, id: string) => {
     try {
-      const result = await acpCall<{ asks: AskView[] }>('/lumo/api/acp/asks?status=pending')
-      if (alive.current && generation.current === epoch && selected.current?.id === id) setAsks(result.asks.filter(a => a.source.session_ref === id))
+      const result = await acpCall<{ asks: AskView[]; warnings?: string[] }>('/lumo/api/acp/asks?status=pending')
+      if (alive.current && generation.current === epoch && selected.current?.id === id) { setAsks(result.asks.filter(a => a.source.session_ref === id)); setApprovalError(result.warnings?.join('；') ?? '') }
     } catch (e) { if (alive.current && generation.current === epoch) setError(errorText(e)) }
   }, [])
 
@@ -69,7 +70,7 @@ export function useAcpSession(identityKey: string, onIdentity?: (key: string) =>
     alive.current = true; identity.current = undefined; clear(); setSessions([]); setReady(false)
     void refresh()
     const timer = setInterval(() => { if (!document.hidden) void refresh() }, 30_000)
-    const focus = () => void refresh(); window.addEventListener('focus', focus)
+    const focus = () => { void refresh() }; window.addEventListener('focus', focus)
     return () => {
       alive.current = false; ++generation.current; ++listVersion.current
       operation.current?.abort(); operation.current = undefined; pendingPrompt.current = undefined; pendingSessionId.current = undefined; source.current?.close(); source.current = undefined
@@ -101,7 +102,7 @@ export function useAcpSession(identityKey: string, onIdentity?: (key: string) =>
         if (event.type === 'turn.started') setRunning(true)
         if (event.type === 'turn.ended') setRunning(false)
         if (event.type === 'permission.ask' || event.type === 'permission.resolved') void refreshAsks(epoch, id)
-        if (event.type === 'session.closed' && selected.current) { selected.current = { ...selected.current, state: 'closed', historyOnly: true }; setSession(selected.current); setRunning(false); void refresh() }
+        if (event.type === 'session.closed' && selected.current) { selected.current = { ...selected.current, state: 'closed', historyOnly: true }; setSession(selected.current); setRunning(false); refreshConversationCatalog(); void refresh() }
       } catch { setError('会话事件无法解析，请重新连接') }
     })
     events.addEventListener('reset', (raw: MessageEvent) => {
@@ -124,14 +125,14 @@ export function useAcpSession(identityKey: string, onIdentity?: (key: string) =>
       if (!current()) return
       try {
         const info = JSON.parse(raw.data) as { session?: SessionView }
-        if (info.session?.id !== id || scopeKey(info.session) !== identity.current) { clear(); void refresh(); return }
+        if (info.session?.id !== id || scopeKey(info.session) !== identity.current) { clear(); refreshConversationCatalog(); void refresh(); return }
         // hello 是快照，不推进游标；尾部事件仍由 session 的 id 去重。
         selected.current = { ...info.session, ...(selected.current?.room ? { room: selected.current.room } : {}) }
         setSession(selected.current); setRunning(info.session.state === 'running'); setConnection('');
         if (info.session.historyOnly) events.close(); else void refreshAsks(epoch, id)
       } catch { setError('会话状态无法解析') }
     })
-    events.addEventListener('gone', () => { if (current()) { clear(); void refresh() } })
+    events.addEventListener('gone', () => { if (current()) { clear(); refreshConversationCatalog(); void refresh() } })
     events.onerror = () => { if (current() && !selected.current?.historyOnly) setConnection('连接中断，正在自动重连') }
     void refreshAsks(epoch, id)
     return () => { events.close(); if (source.current === events) source.current = undefined }
@@ -143,7 +144,7 @@ export function useAcpSession(identityKey: string, onIdentity?: (key: string) =>
     try {
       const result = await acpCall<{ session: SessionView }>(path, post(payload, controller.signal))
       if (!alive.current || generation.current !== epoch) return
-      if (scopeKey(result.session) !== identity.current) { clear(); void refresh(); return }
+      if (scopeKey(result.session) !== identity.current) { clear(); refreshConversationCatalog(); void refresh(); return }
       selected.current = result.session; seq.current = 0; setRunning(result.session.state === 'running')
       setItems(result.session.historyIncomplete ? [{ kind: 'notice', text: historyNotice }] : [])
       try {
@@ -152,7 +153,7 @@ export function useAcpSession(identityKey: string, onIdentity?: (key: string) =>
         if (Array.isArray(history.events)) { historyEvents.current = history.events; seq.current = history.seq; oldest.current = history.before; setHasMore(history.hasMore); setItems(history.events.reduce((all, entry) => reduceTranscript(all, entry.event), result.session.historyIncomplete ? [{ kind: 'notice', text: historyNotice }] as TranscriptItem[] : [] as TranscriptItem[])) }
       } catch (e) { if ((e as {status?: number}).status !== 404 && alive.current && generation.current === epoch) setError(errorText(e)) }
       if (alive.current && generation.current === epoch) setSession(result.session)
-      void refresh()
+      refreshConversationCatalog(); void refresh()
     } catch (e) { if (alive.current && generation.current === epoch) setError(errorText(e)) }
     finally { if (operation.current === controller) { operation.current = undefined; pendingSessionId.current = undefined; if (alive.current) setBusy(false) } }
   }, [clear, refresh])
@@ -179,18 +180,18 @@ export function useAcpSession(identityKey: string, onIdentity?: (key: string) =>
       await acpCall(`/lumo/api/acp/sessions/${entry.id}/${kind}`, post(kind === 'prompt' ? { text, clientMessageId: request.id, ...context, ...(attachments.length ? { attachments } : {}) } : {}, controller.signal))
       if (!alive.current || generation.current !== epoch) return
       if (kind === 'prompt' && controller.signal.aborted) return false
-      if (kind === 'cancel') { void refresh() }
+      if (kind === 'cancel') { refreshConversationCatalog(); void refresh() }
       if (kind === 'delete') {
         void removeConversationDraft(`${scopeKey(entry)}:session:${entry.id}`)
         if (selected.current?.id === entry.id || pendingSessionId.current === entry.id) clear()
-        void refresh()
+        refreshConversationCatalog(); void refresh()
       }
       if (kind === 'release' || kind === 'close' || kind === 'resume') {
         if (pendingSessionId.current === entry.id) clear()
         else if (selected.current?.id === entry.id) await connect(`/lumo/api/acp/sessions/${entry.id}/attach`, {}, entry.id)
-        void refresh()
+        refreshConversationCatalog(); void refresh()
       }
-      if (kind === 'prompt') { writeDraft(draftKey, 'request', undefined); setText(current => current === text ? '' : current); void refresh() }
+      if (kind === 'prompt') { writeDraft(draftKey, 'request', undefined); setText(current => current === text ? '' : current); refreshConversationCatalog(); void refresh() }
       return true
     } catch (e) { if (alive.current && generation.current === epoch) { setError(controller.signal.aborted && kind === 'prompt' ? '发送已取消，草稿已保留；已受理的执行正在停止。' : errorText(e)); if (kind === 'prompt') setRunning(false) } return false }
     finally { if (operation.current === controller) operation.current = undefined; if (pendingPrompt.current === controller) pendingPrompt.current = undefined }
@@ -203,7 +204,7 @@ export function useAcpSession(identityKey: string, onIdentity?: (key: string) =>
     try {
       const result = await acpCall<{ session: SessionView }>(`/lumo/api/acp/sessions/${entry.id}/model`, post({ modelId }, controller.signal))
       if (!alive.current || generation.current !== epoch || scopeKey(result.session) !== identity.current) return
-      selected.current = result.session; setSession(result.session); void refresh()
+      selected.current = result.session; setSession(result.session); refreshConversationCatalog(); void refresh()
     } catch (e) { if (alive.current && generation.current === epoch) setError(errorText(e)) }
     finally { if (operation.current === controller) { operation.current = undefined; if (alive.current) setBusy(false) } }
   }
@@ -233,7 +234,7 @@ export function useAcpSession(identityKey: string, onIdentity?: (key: string) =>
   }
   const metadata = async (value: {title?: string; archived?: boolean; pinned?: boolean}) => {
     const entry = selected.current; if (!entry) return
-    try { const result = await acpCall<{session: SessionView}>(`/lumo/api/acp/sessions/${entry.id}/metadata`, post(value)); if (selected.current?.id === entry.id) { selected.current = result.session; setSession(result.session) }; void refresh() } catch (e) { setError(errorText(e)) }
+    try { const result = await acpCall<{session: SessionView}>(`/lumo/api/acp/sessions/${entry.id}/metadata`, post(value)); if (selected.current?.id === entry.id) { selected.current = result.session; setSession(result.session) }; refreshConversationCatalog(); void refresh() } catch (e) { setError(errorText(e)) }
   }
-  return { sessions, session, draftKey, draftError, hasMore, loadEarlier, metadata, continueSession, items, asks, text, setText, running, busy, ready, error, setError, connection, refresh, start, attach, clear, action, answer, setModel }
+  return { sessions, session, draftKey, draftError, hasMore, loadEarlier, metadata, continueSession, items, asks, text, setText, running, busy, ready, error: error || approvalError, setError, connection, refresh, start, attach, clear, action, answer, setModel }
 }

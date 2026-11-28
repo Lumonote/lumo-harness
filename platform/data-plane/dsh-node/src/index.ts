@@ -719,9 +719,8 @@ const dshArgs = [
   ...extraArgs,
 ]
 
-// Packaged desktop builds carry their own Node and official dsh CLI. Repository
-// previews keep the pnpm path so HMR and local workspace development remain
-// unchanged.
+// Packaged builds and isolated previews launch the official CLI directly.
+// Raw source development can still use its package-manager script.
 // 集群存活自报（联邦注册表的客户端侧，见 cluster-reporter.ts）。与 Nacos 注册是
 // **两件不同的事**：Nacos 报的是「本机这个**节点**在服务发现里还活着」，这里报的是
 // 「本集群还活着」，后者是跨集群放置闸门的输入。多集群拓扑里一个调度实例只能替一个
@@ -752,7 +751,7 @@ const childCommand = packagedDshCli
   ? process.execPath
   : windowsCorepack ? 'cmd.exe' : 'corepack'
 const childArgs = packagedDshCli
-  ? [packagedDshCli, ...dshArgs]
+  ? [...(process.env['LUMO_PACKAGED_RUNTIME'] === '1' ? [] : ['--import', 'tsx/esm']), packagedDshCli, ...dshArgs]
   : windowsCorepack
     ? ['/d', '/s', '/c', 'corepack.cmd', 'pnpm', 'run', 'dsh', ...dshArgs]
     : ['pnpm', 'run', 'dsh', ...dshArgs]

@@ -646,6 +646,14 @@ function runProfileManager(
   env: NodeJS.ProcessEnv,
   args: string[],
 ): ReturnType<typeof spawnSync> {
+  // Repository previews share dependency directories with the read-only
+  // checkout. Launch its built CLI directly, so pnpm's pre-script install
+  // cannot relink those directories into the temporary snapshot.
+  const cli = env['LUMO_DSH_CLI']
+  if (cli) return spawnSync(process.execPath, [
+    ...(env['LUMO_PACKAGED_RUNTIME'] === '1' ? [] : ['--import', 'tsx/esm']),
+    cli, 'plugin', '--profile', options.profile, ...args,
+  ], { cwd: options.dshRoot, env: profileManagerEnv(env), stdio: 'inherit', timeout: 10 * 60_000 })
   // The outer CLI runs in the selected upstream checkout, whose pnpm pin can
   // differ from the platform/profile default. The profile shim deliberately
   // disables project probing, so select the upstream version explicitly.

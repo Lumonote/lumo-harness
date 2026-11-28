@@ -19,7 +19,7 @@ export function openEnvironment() {
 export function EnvironmentEntry({ wide = true }: { wide?: boolean }) {
   const { state } = useEnvironmentConnection()
   return <div className="lumo-native-content lumo-environment-entry"><Button size="sm" type="button" aria-label="环境与连接" title="环境与连接" onClick={openEnvironment}>
-    <IconGlobeOutlineRegular size={17} />{wide ? <span>环境与连接</span> : null}{state ? <StateDot size={8} state={state === 'connected' ? 'done' : state === 'connecting' ? 'ongoing' : 'error'} /> : null}
+    <IconGlobeOutlineRegular size={17} />{wide ? <span className="lumo-environment-entry-label">环境与连接</span> : null}{state ? <StateDot size={8} state={state === 'connected' ? 'done' : state === 'connecting' ? 'ongoing' : 'error'} /> : null}
   </Button></div>
 }
 

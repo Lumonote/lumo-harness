@@ -1,3 +1,4 @@
+import { installNativeWorkbench } from './native-workbench.tsx'
 import { installAgentProjectServices, type AgentProjectServices } from './agent-project-picker.tsx'
 import { installEnvironmentConnection, type EnvironmentConnection } from './environment-connection.ts'
 import { EnvironmentEntry } from './environment-panel.tsx'
@@ -93,9 +94,8 @@ interface ConversationInputActions {
 }
 
 type OverlayProps = PropsRuntime<'shell.overlay'>
-type SidebarNavigationProps = PropsRuntime<'sidebar.navigation'>
+type SidebarNavigationProps = { wide: boolean }
 type ComposerDockProps = PropsRuntime<'conversation.input.dock'>
-type HeroComposerDockProps = PropsRuntime<'conversation.hero.composer.dock'>
 
 interface Automation { automationId: string; projectId: string; triggerKind: string; triggerSpec: string; flowRef: string; enabled: boolean; revision: number }
 interface FlowVersionSnapshot { flow_id: string; version: number; reviewer: string; definition: FlowDefinition }
@@ -721,12 +721,6 @@ function takeCreativeSeed<T extends CreativeSeed['kind']>(kind: T): Extract<Crea
 // nested modal, so its own trap temporarily supersedes the workbench trap.
 
 function OpenDesignDock(props: ComposerDockProps) {
-  return <NativeConversationBridgeMount input={props.input} inputActions={props.inputActions} />
-}
-
-// 首页只保留原生对话桥；开放设计 / PPT 生成改由 /design、/ppt 命令或 ⌘K 打开，
-// 不再在输入框下方常驻一块创作工作台。
-function HeroOpenDesignDock(props: HeroComposerDockProps) {
   return <NativeConversationBridgeMount input={props.input} inputActions={props.inputActions} />
 }
 
@@ -3086,10 +3080,7 @@ export function apply(ctx: ClientContext): void {
     computerCtx.effect(() => installComputerUseServices(window, { sessions, layout } as unknown as ComputerUseClientServices), 'lumo-ui: current conversation computer controls')
   })
   installLumoThemes(ctx)
-  ctx.slots.inject('sidebar.navigation', () => ctx.slots.register(
-    { name: 'sidebar.navigation', id: 'lumo-navigation', order: 10, label: 'Lumo 功能菜单' },
-    SidebarNavigation,
-  ))
+  installNativeWorkbench(ctx, SidebarNavigation)
   // 原生侧边栏品牌位：mark 用外壳自带的鱼形回退，名字槽由 Lumo 占下产品名，
   // 避免无官方品牌构建时外壳回退到「DSH 本地构建」文案（品牌名 slot 为上游公开契约）。
   ctx.slots.inject('sidebar.brand.name', () => ctx.slots.register(
@@ -3109,10 +3100,6 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('conversation.input.dock', () => ctx.slots.register(
     { name: 'conversation.input.dock', id: 'lumo-native-skill-bridge', order: 20, label: 'Lumo 原生技能桥' },
     OpenDesignDock,
-  ))
-  ctx.slots.inject('conversation.hero.composer.dock', () => ctx.slots.register(
-    { name: 'conversation.hero.composer.dock', id: 'lumo-capability-launchers', order: 20, label: 'Lumo 功能入口' },
-    HeroOpenDesignDock,
   ))
   // 创作入口收进原生 `/` 命令菜单：inputTriggers 由上游 ui-input-trigger 提供，
   // 用 ctx.inject 等它就绪，避免和它的装配顺序耦合。

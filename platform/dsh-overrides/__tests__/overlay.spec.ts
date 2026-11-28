@@ -219,58 +219,27 @@ describe('applyLumoDshOverrides', () => {
     '      <div className={css.sectionHeader}>\n',
     '      <div className={clsx(css.sectionHeader, wide && searchSpacingMotionEnabled && css.searchSpacingMotion)}>\n',
     '      <div className={clsx(css.sectionHeader, wide && searchSpacingMotionEnabled && css.searchSpacingMotion)} data-sidebar-workspace-header="">\n',
-  ])('历史切换兼容已知 header 并保留上游属性:%s', (header) => {
+  ])('不再覆盖历史目录 header:%s', (header) => {
     const root = stagePristineUpstream('history-header')
     const file = 'packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx'
     writeFileSync(resolve(root, file), `function History() { return (\n${header}        native header\n      </div>\n) }`)
     expect(diagnoseOverlayAnchors(root)).toEqual([])
     const patched = read(root, file)
     expect(patched).toContain(header)
-    expect(patched).toContain("actions.setGroupBy('flat'); setQuery('')")
+    expect(patched).not.toContain("actions.setGroupBy('flat'); setQuery('')")
     applyLumoDshOverrides(root)
     expect(read(root, file)).toBe(patched)
   })
 
-  it('锚点在当前上游 HEAD 里仍然存在,会话与侧边栏都被打上扩展位', () => {
+  it('会话、侧栏与项目目录完全使用公开扩展位，保留原生源码字节', () => {
     const root = stagePristineUpstream('anchors')
     applyLumoDshOverrides(root)
-
-    const applyTs = read(root, PATCHED[0]!)
-    expect(applyTs).toContain("'conversation.hero.input.left': { kind: 'list', scope: 'root' }")
-    expect(applyTs).toContain("'conversation.hero.composer.dock': { kind: 'list', scope: 'root' }")
-
-    const slots = read(root, PATCHED[1]!)
-    expect(slots).toContain('HeroComposerOwnerProps')
-    expect(slots).toContain('LUMO_HERO_INPUT_BRIDGE')
-    expect(slots).toContain('readonly inputActions?: InputActions')
-    // 两个座位要在**两个**声明面都落上：全局 SlotMap（owner 类型）与 factory 的
-    // children（实例内 renderSlot 的类型来源）。上游 2026-09 的重构把后者从
-    // ConversationSlotProps 的 PropsRenderSlots 联合搬进了 SlotFactoryMap。
-    expect(slots).toContain("'conversation.hero.input.left': { kind: 'list'; scope: 'root'; owner: HeroComposerOwnerProps }")
-    expect(slots).toContain("'conversation.hero.composer.dock': { kind: 'list'; scope: 'root'; owner: HeroComposerOwnerProps }")
-    expect(slots).toContain("'conversation.hero.input.left': { kind: 'list'; scope: 'root' }")
-    expect(slots).toContain("'conversation.hero.composer.dock': { kind: 'list'; scope: 'root' }")
-
-    const conversationContent = read(root, PATCHED[2]!)
-    expect(conversationContent).toContain("renderSlot('conversation.hero.input.left', { input: inputState, inputActions: props.inputActions })")
-    expect(conversationContent).toContain("renderSlot('conversation.hero.composer.dock', { input: inputState, inputActions: props.inputActions })")
-
-    const sidebarApply = read(root, PATCHED[3]!)
-    expect(sidebarApply).toContain("'sidebar.navigation': { kind: 'list', scope: 'root' }")
-    const sidebarSlots = read(root, PATCHED[4]!)
-    expect(sidebarSlots).toContain('SidebarNavigationOwnerProps')
-    expect(sidebarSlots).toContain("| 'sidebar.navigation'")
-    const sidebarRoot = read(root, PATCHED[5]!)
-    expect(sidebarRoot).toContain("renderSlot('sidebar.navigation', { wide })")
-    if (sidebarRoot.includes('<div className={css.scrollRegion}>')) {
-      expect(sidebarRoot.indexOf("renderSlot('sidebar.navigation', { wide })")).toBeLessThan(sidebarRoot.indexOf('<div className={css.scrollRegion}>'))
+    for (const file of [...PATCHED.slice(0, 6), 'packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx', 'packages/client/ui-workspace/src/client/locales.ts']) {
+      expect(read(root, file)).toBe(execFileSync('git', ['show', `HEAD:${file}`], { cwd: dshRoot, encoding: 'utf8' }))
     }
-
-    const history = read(root, 'packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx')
-    expect(history).toContain('data-lumo-history-toggle')
-    expect(history).toContain("actions.setGroupBy('flat'); setQuery('')")
-    expect(history).toContain("actions.setGroupBy('workspace'); setQuery('')")
-    expect(read(root, 'packages/client/ui-workspace/src/client/locales.ts')).toContain("'groupBy.flat': '全部对话'")
+    for (const directory of ['packages/client/ui-conversation', 'packages/client/ui-sidebar', 'packages/client/ui-workspace']) {
+      expect(overriddenPackageDirectories).not.toContain(directory)
+    }
 
     // LUMO_STREAM_RESILIENCE：三处流韧性补丁都落上，且带各自的护栏标记。
     const streamServer = read(root, 'packages/api/gateway/src/stream-server.ts')
@@ -375,19 +344,18 @@ describe('applyLumoDshOverrides', () => {
       .filter((directory): directory is string => directory !== undefined))
     expect(directories.size).toBeGreaterThan(0)
     for (const directory of directories) {
+      if (['packages/client/ui-conversation', 'packages/client/ui-sidebar', 'packages/client/ui-workspace'].includes(directory)) continue
       expect(overriddenPackageDirectories, `${directory} 未登记,补丁不会进产物`).toContain(directory)
     }
   })
 
-  it('首页无会话时 hero 座位只在 hero 模式渲染,会话仍走上游的 input.dock 槽', () => {
+  it('原生 input.dock 覆盖空白和已发消息会话，无会话冷启动保持原生禁用语义', () => {
     const root = stagePristineUpstream('scope')
     applyLumoDshOverrides(root)
     const source = read(root, PATCHED[2]!)
-    // 上游已把 composer 重构为 input.dock + composer.bar,不再有 leftItems/三元。
-    // 关键:会话输入走上游的 input.dock;hero 座位用 hero 守卫,绝不无条件替换会话槽。
-    expect(source).toContain("renderSlot('conversation.input.dock', zone)")
-    expect(source).toContain("{hero && renderSlot('conversation.hero.input.left', { input: inputState, inputActions: props.inputActions })}")
-    expect(source).not.toMatch(/zone === undefined\s*\?\s*renderSlot\('conversation\.hero\.input\.left'/u)
+    expect(source).toContain("{zone !== undefined && renderSlot('conversation.input.dock', zone)}")
+    expect(source).toContain('session === undefined || inputState === undefined ? undefined : { session, input: inputState }')
+    expect(source).not.toContain('conversation.hero.composer.dock')
   })
 
   it('重复执行是幂等的,不会打第二遍', () => {
@@ -400,17 +368,16 @@ describe('applyLumoDshOverrides', () => {
 
   it('锚点消失时立刻报错并点名文件,而不是静默少打一个扩展位', () => {
     const root = stagePristineUpstream('missing')
-    // 模拟上游重构掉了 agentPreset 那一行。
-    const target = resolve(root, PATCHED[0]!)
-    writeFileSync(target, readFileSync(target, 'utf8').replace(/^.*conversation\.hero\.agentPreset.*$/mu, ''))
-    expect(() => { applyLumoDshOverrides(root) }).toThrow(/apply\.ts does not contain the expected upstream anchor/u)
+    const target = resolve(root, 'packages/api/gateway/src/stream-server.ts')
+    writeFileSync(target, readFileSync(target, 'utf8').replace('const MAX_MISSED_HEARTBEATS = 2', 'const MAX_MISSED_HEARTBEATS = 3'))
+    expect(() => { applyLumoDshOverrides(root) }).toThrow(/stream-server\.ts does not contain the expected upstream anchor/u)
   })
 
   it('锚点出现多次时拒绝,而不是赌第一处是对的', () => {
     const root = stagePristineUpstream('ambiguous')
-    const target = resolve(root, PATCHED[0]!)
+    const target = resolve(root, 'packages/api/gateway/src/stream-server.ts')
     const source = readFileSync(target, 'utf8')
-    const anchor = "      'conversation.hero.agentPreset': "
+    const anchor = 'const MAX_MISSED_HEARTBEATS = 2\n'
     writeFileSync(target, source.replace(anchor, anchor + anchor))
     expect(() => { applyLumoDshOverrides(root) }).toThrow(/contains the upstream anchor more than once/u)
   })

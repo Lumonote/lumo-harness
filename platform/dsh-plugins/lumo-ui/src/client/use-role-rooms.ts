@@ -1,3 +1,4 @@
+import { refreshConversationCatalog } from './conversation-events.ts'
 import { readDraft, writeDraft } from './conversation-drafts.ts'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { acpCall, scopeKey, type AskView, type SessionIdentity } from './acp-session-state.ts'
@@ -9,6 +10,7 @@ const ROOT = '/lumo/api/acp'
 type Snapshot = { identity: SessionIdentity; room: RoomView }
 export const useRoleRooms = () => {
   const [rooms, setRooms] = useState<RoomSummary[]>([]), [room, setRoom] = useState<RoomView>()
+  const [approvalError, setApprovalError] = useState('')
   const [engines, setEngines] = useState<EngineProbeView[]>([]), [asks, setAsks] = useState<AskView[]>([])
   const [identity, setIdentity] = useState(''), [error, setError] = useState(''), [busy, setBusy] = useState(false), [ready, setReady] = useState(false)
   const selected = useRef(''), scope = useRef(''), alive = useRef(false), epoch = useRef(0), writing = useRef(false), reading = useRef(false)
@@ -16,12 +18,12 @@ export const useRoleRooms = () => {
   roomRef.current = room
   const queuedRead = useRef(false)
   const live = useRef(false), lastRead = useRef(0)
-  const clearIdentity = () => { ++epoch.current; scope.current = ''; selected.current = ''; setIdentity(''); setRoom(undefined); setRooms([]); setAsks([]); setReady(false) }
+  const clearIdentity = () => { ++epoch.current; scope.current = ''; selected.current = ''; setIdentity(''); setRoom(undefined); setRooms([]); setAsks([]); setApprovalError(''); setReady(false) }
   const applyScope = (value: SessionIdentity): boolean => {
     if (!value?.realm || !value.userId) throw new Error('角色协作身份无效')
     const key = scopeKey(value)
     if (scope.current === key) return true
-    ++epoch.current; scope.current = key; selected.current = readDraft(key, 'selectedRoom', ''); setIdentity(key); setRoom(undefined); setRooms([]); setAsks([])
+    ++epoch.current; scope.current = key; selected.current = readDraft(key, 'selectedRoom', ''); setIdentity(key); setRoom(undefined); setRooms([]); setAsks([]); setApprovalError('')
     return false
   }
   const refresh = useCallback(async () => {
@@ -40,10 +42,10 @@ export const useRoleRooms = () => {
       if (!alive.current || epoch.current !== current || selected.current !== id || !applyScope(result.identity)) return
       if (roomRef.current?.id === id && (roomRef.current.revision ?? 0) > (result.room.revision ?? 0)) return
       setRoom(previous => previous?.revision !== undefined && previous.id === result.room.id && previous.revision > (result.room.revision ?? 0) ? previous : result.room); live.current = result.room.busy
-      const pending = await acpCall<{ asks: AskView[] }>(`${ROOT}/asks?status=pending`)
+      const pending = await acpCall<{ asks: AskView[]; warnings?: string[] }>(`${ROOT}/asks?status=pending`)
       if (!alive.current || epoch.current !== current || selected.current !== id) return
       const sessions = new Set(result.room.roles.map(r => r.sessionId).filter(Boolean))
-      setAsks(pending.asks.filter(a => sessions.has(a.source.session_ref)))
+      setAsks(pending.asks.filter(a => sessions.has(a.source.session_ref))); setApprovalError(pending.warnings?.join('；') ?? '')
     } catch (e) {
       if (alive.current && epoch.current === generation) {
         if ([401, 403].includes((e as { status?: number }).status ?? 0)) clearIdentity()
@@ -91,13 +93,13 @@ export const useRoleRooms = () => {
   }, [room?.id, identity, refresh])
   useEffect(() => {
     if (!room?.id || !room.busy) return
-    const id = room.id
+    const id = room.id, current = epoch.current
     const timer = setInterval(() => {
       if (document.hidden) return
-      void acpCall<{asks: AskView[]}>(`${ROOT}/asks?status=pending`).then(result => {
-        if (selected.current !== id || !alive.current) return
+      void acpCall<{asks: AskView[]; warnings?: string[]}>(`${ROOT}/asks?status=pending`).then(result => {
+        if (selected.current !== id || !alive.current || epoch.current !== current) return
         const sessions = new Set(roomRef.current?.roles.map(role => role.sessionId))
-        setAsks(result.asks.filter(ask => sessions.has(ask.source.session_ref)))
+        setAsks(result.asks.filter(ask => sessions.has(ask.source.session_ref))); setApprovalError(result.warnings?.join('；') ?? '')
       }).catch(() => undefined)
     }, 5000)
     return () => clearInterval(timer)
@@ -106,7 +108,7 @@ export const useRoleRooms = () => {
     try { const result = await acpCall<{ engines: EngineProbeView[] }>(`${ROOT}/engines`); if (alive.current && Array.isArray(result.engines)) setEngines(result.engines) }
     catch (e) { if (alive.current) setError(e instanceof Error ? e.message : String(e)) }
   }
-  const select = useCallback((id: string) => { if (selected.current === id) return; ++epoch.current; selected.current = id; writeDraft(scope.current, 'selectedRoom', id); live.current = true; setRoom(undefined); setAsks([]); setError(''); void refresh() }, [refresh])
+  const select = useCallback((id: string) => { if (selected.current === id) return; ++epoch.current; selected.current = id; writeDraft(scope.current, 'selectedRoom', id); live.current = true; setRoom(undefined); setAsks([]); setApprovalError(''); setError(''); void refresh() }, [refresh])
   const mutate = async (path: string, body: unknown = {}): Promise<boolean> => {
     if (writing.current || !ready) return false
     writing.current = true; setBusy(true); setError(''); const current = epoch.current
@@ -119,12 +121,12 @@ export const useRoleRooms = () => {
         const next = result.room; selected.current = next.id; writeDraft(scope.current, 'selectedRoom', next.id); setRoom(next); live.current = next.busy
         setRooms(previous => [...previous.filter(r => r.id !== next.id), { id: next.id, name: next.name, cwd: next.cwd, busy: next.busy, ...(next.appearance ? { appearance: next.appearance } : {}), engineIds: next.roles.map(role => role.engineId), preview: next.turns.at(-1)?.text.slice(0, 120) ?? '', updatedAt: next.updatedAt ?? next.turns.at(-1)?.createdAt ?? next.createdAt, ...(next.archived !== undefined ? {archived: next.archived} : {}), ...(next.pinned !== undefined ? {pinned: next.pinned} : {}), ...(next.revision !== undefined ? {revision: next.revision} : {}) }])
       } else if (path.endsWith('/delete')) { const id = selected.current; selected.current = ''; setRoom(undefined); setRooms(previous => previous.filter(r => r.id !== id)) }
-      setAsks([]); void refresh(); return true
+      setAsks([]); refreshConversationCatalog(); void refresh(); return true
     } catch (e) { if (alive.current && epoch.current === current) {
       if ([401, 403].includes((e as { status?: number }).status ?? 0)) clearIdentity()
       setError(`${e instanceof Error ? e.message : String(e)}。可刷新核对状态；重试同一消息会复用原请求。`)
     } return false }
     finally { writing.current = false; if (alive.current) setBusy(false) }
   }
-  return { rooms, room, engines, asks, identity, error, busy, ready, refresh, refreshEngines, select, mutate }
+  return { rooms, room, engines, asks, identity, error: error || approvalError, busy, ready, refresh, refreshEngines, select, mutate }
 }

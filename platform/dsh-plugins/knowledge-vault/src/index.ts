@@ -51,7 +51,7 @@ export function apply(ctx: Context, config: VaultKnowledgeConfig): void {
     realm: provider.realm,
     roles: ['viewer', 'operator'],
     defaultTopK: 5,
-  })
+  }, tool => (ctx as unknown as { provide(name: string, value: unknown): void }).provide('knowledgeQueryTool', tool))
   ctx.effect(() => () => {
     void provider.sync().catch((error: unknown) => {
       ctx.logger.warn('knowledge-vault: 启动同步失败（可经面板重新同步）: %s', error)

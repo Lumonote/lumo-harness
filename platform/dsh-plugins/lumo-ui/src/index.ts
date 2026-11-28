@@ -1,3 +1,4 @@
+import { installSharedTools } from './shared-tools.ts'
 import { acpSkills, type SkillRegistryService } from './acp-skills.ts'
 /** Host half: keep DSH's native Web shell and add a same-origin Lumo control API. */
 import { readFileSync } from 'node:fs'
@@ -23,7 +24,7 @@ import { handleMemorySyncRoute } from './memory-sync-proxy.ts'
 import { flowRunHeaders, flowRunTarget } from './flow-run-api.ts'
 import { writeUpstreamResult, type UpstreamResult } from './upstream-result.ts'
 import { createAcpEngines, handleAcpRoute, type AcpEngines } from '../../acp-engines/src/embed.ts'
-import { installDualPlugins, acpMcpOptions } from './dual-plugins-api.ts'
+import { installDualPlugins, acpMcpOptions, sharedToolsFor } from './dual-plugins-api.ts'
 import { handleDualRoute, type DualHost } from '../../dual-plugins/src/index.ts'
 import { registerDesktopPetReceiptRoutes } from './desktop-pet-receipts.ts'
 import { discoverSkillDemos, resolveSkillDemoAsset, type SkillDemo } from './skill-demos.ts'
@@ -2337,7 +2338,7 @@ export async function api(config: Config, knowledge: KnowledgeQueryService | und
   if (await handleMemorySyncRoute(req, res, pathname, { readBody, reject: (s, e) => writeJson(res, s, { error: e }), forward: async (p, m, b) => writeUpstream(res, await upstream(config, identity, 'projects', p, req, m, b, 'application/json')) })) return
   if (await handleRemoteHostsRoute(req, res, pathname, remoteHosts, { readBody, userId: identity.userId })) return
   if (await handleDualRoute(req, res, pathname, { gateway: dualHost?.gateway, identity: { userId: identity.userId, realm: identity.realm, ...(identity.projectId === undefined ? {} : { projectId: identity.projectId }) }, readBody })) return
-  if (await handleAcpRoute(req, res, pathname, { ...acpEngines, identity: { userId: identity.userId, realm: identity.realm, ...(identity.projectId === undefined ? {} : { projectId: identity.projectId }) }, readBody })) return
+  if (await handleAcpRoute(req, res, pathname, { ...acpEngines, conversationAsks, sharedTools: sharedToolsFor(dualHost), identity: { userId: identity.userId, realm: identity.realm, ...(identity.projectId === undefined ? {} : { projectId: identity.projectId }) }, readBody })) return
   if (await handleDeviceRoutes(req, res, pathname, { connectorUrl: config.connectorUrl, headers: identityHeaders(config, identity), timeoutMs: config.timeoutMs, readBody, userId: identity.userId })) return
   if (await handleAsksRoute(req, res, pathname, { connectorUrl: config.connectorUrl, headers: identityHeaders(config, identity), timeoutMs: config.timeoutMs, readBody })) return
   if (req.method === 'GET' && pathname === '/lumo/api/connector-approvals') {
@@ -2463,12 +2464,14 @@ let remoteHosts: RemoteHostsService | undefined // P1 SSH 远端接入；LUMO_RE
 // P1 ACP 引擎会话：仅本地单机形态；LUMO_ACP_ENGINES=off 关闭。
 let acpEngines: AcpEngines | undefined
 let dualHost: DualHost | undefined
+let conversationAsks: import('../../acp-engines/src/routes.ts').ConversationAsks | undefined
 
 export function apply(ctx: Context, config: Config): void {
   assertIdentityConfiguration(config)
   runTreeStore = new RunTreeStore(join(dirname(resolve(config.skillhubInstallFile ?? '.lumo/skillhub-installs.json')), 'run-tree.jsonl'))
   registerRunTreeCollector(ctx, runTreeStore)
   dualHost = installDualPlugins(ctx, config, runTreeStore, () => acpEngines?.host)
+  conversationAsks = installSharedTools(ctx, dualHost, config)
   acpEngines = config.deploymentMode === 'local' ? createAcpEngines({ skills: acpSkills(() => ctx.get('skills') as import('@deepseek-ai/dsh-skill').SkillRegistry | undefined), recoveryIndexPath: join(dirname(resolve(config.skillhubInstallFile ?? '.lumo/skillhub-installs.json')), 'acp-sessions.json'), runTree: runTreeStore, ...acpMcpOptions(dualHost) }) : undefined
   if (acpEngines) { const engines = acpEngines; ctx.effect(() => () => { engines.rooms.dispose(); engines.host.closeAll() }, 'lumo-ui: reap ACP engine processes') }
   registerComputerUseRoutes(ctx, config.deploymentMode === 'local')

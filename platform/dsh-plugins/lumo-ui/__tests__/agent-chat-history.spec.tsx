@@ -12,6 +12,7 @@ const sessions: SessionView[] = [
   { ...identity, id: 'older', engineId: 'codex', title: '旧记录', cwd: '/work/app/', state: 'idle', createdAt: '2026-11-27T00:00:00Z' },
   { ...identity, id: 'latest', engineId: 'claude-code', title: '当前任务', cwd: '/other/app', state: 'detached', createdAt: '2026-11-26T00:00:00Z', updatedAt: '2026-11-28T11:00:00Z' },
   { ...identity, id: 'member', engineId: 'codex', title: '隐藏的内部成员', cwd: '/work/app', state: 'idle', room: { id: 'team', name: '代码团队', roleId: 'coder', roleName: '开发' } },
+  { ...identity, id: 'provisional', engineId: 'codex', title: '正在初始化的内部成员', cwd: '/work/app', state: 'starting' },
 ]
 let container: HTMLDivElement, root: Root
 beforeEach(() => { vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); container = document.createElement('div'); document.body.append(container); root = createRoot(container) })
@@ -39,6 +40,7 @@ describe('project and recent conversation navigation', () => {
     const recent = container.querySelector('[aria-label="最近对话记录"]')!
     expect([...recent.querySelectorAll('b')].map(el => el.textContent)).toEqual(['当前任务', '代码团队', '旧记录'])
     expect(container.textContent).not.toContain('隐藏的内部成员')
+    expect(container.textContent).not.toContain('正在初始化的内部成员')
     await act(async () => recent.querySelector<HTMLButtonElement>('[aria-label="打开对话 当前任务"]')!.click()); expect(openSession).toHaveBeenCalledWith('latest')
     await act(async () => recent.querySelector<HTMLButtonElement>('[aria-label="打开群组 代码团队"]')!.click()); expect(openRoom).toHaveBeenCalledWith('team')
     await act(async () => project('/work/app').click()); expect(container.querySelector('[aria-label="/work/app 的对话"]')).toBeNull()

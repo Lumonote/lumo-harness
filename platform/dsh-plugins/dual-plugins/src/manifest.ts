@@ -31,7 +31,7 @@ export interface JsonSchemaLike {
   description?: string
   properties?: Record<string, JsonSchemaLike>
   required?: string[]
-  additionalProperties?: boolean
+  additionalProperties?: boolean | JsonSchemaLike
   items?: JsonSchemaLike
   enum?: unknown[]
   maxLength?: number
@@ -168,6 +168,7 @@ export function validateArgs(schema: JsonSchemaLike, value: unknown, path = 'arg
       const sub = schema.properties?.[k]
       if (sub) errors.push(...validateArgs(sub, v, `${path}.${k}`))
       else if (schema.additionalProperties === false) errors.push(`${path}.${k} 不是允许的参数`)
+      else if (typeof schema.additionalProperties === 'object') errors.push(...validateArgs(schema.additionalProperties, v, `${path}.${k}`))
     }
   }
   return errors

@@ -25,10 +25,18 @@ export interface KnowledgeToolConfig {
   overfetchFactor?: number
 }
 
+/** Shared execution face; callers supply identity, never a synthetic DSH Agent. */
+export interface KnowledgeQueryTool {
+  realm: string
+  parameters: ToolDefinition['parameters']
+  execute(args: unknown, context: { sessionRef?: string; userId?: string; signal?: AbortSignal }): Promise<{ hits: Array<{ docId: string; text: string; score: number }> }>
+}
+
 export function defineKnowledgeTool(
   ctx: Context,
   seam: { query(request: KnowledgeQuery): KnowledgeHit[] | Promise<KnowledgeHit[]> },
   config: KnowledgeToolConfig,
+  publish?: (tool: KnowledgeQueryTool) => void,
 ): () => void {
   const definition: ToolDefinition = {
     name: 'knowledge_query',
@@ -64,13 +72,16 @@ export function defineKnowledgeTool(
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
-    async execute(
-      args: unknown,
-      _exec: ToolRunContext,
-    ): Promise<{ hits: Array<{ docId: string; text: string; score: number }> }> {
+    execute(args: unknown, exec: ToolRunContext) {
+      return run(args, { ...((exec as { signal?: AbortSignal }).signal ? { signal: (exec as { signal?: AbortSignal }).signal } : {}) })
+    },
+  }
+  const run: KnowledgeQueryTool['execute'] = async (args, context) => {
       const { question, topK } = args as { question?: string; topK?: number }
-      if (!question?.trim()) throw new Error('knowledge_query: question 不能为空')
-      const k = Math.min(Math.max(topK ?? config.defaultTopK, 1), config.defaultTopK * 4)
+      context.signal?.throwIfAborted()
+      if (typeof question !== 'string' || !question.trim()) throw new Error('knowledge_query: question 不能为空')
+      if (topK !== undefined && (!Number.isFinite(topK) || topK <= 0)) throw new Error('knowledge_query: topK 必须为正数')
+      const k = Math.floor(Math.min(Math.max(topK ?? config.defaultTopK, 1), config.defaultTopK * 4))
       // 过量召回给重排留出空间；未配置 reranker 时倍数恒为 1，检索量不变。
       const factor = config.rerank ? Math.max(config.overfetchFactor ?? DEFAULT_OVERFETCH_FACTOR, 1) : 1
       const candidates = await seam.query({
@@ -83,10 +94,12 @@ export function defineKnowledgeTool(
       const hits = await rerankHits(config.rerank, question, candidates, k, (reason) =>
         ctx.logger.warn('knowledge: 重排降级为向量原序: %s', reason),
       )
+      context.signal?.throwIfAborted()
       return {
         hits: hits.map((h) => ({ docId: h.docId, text: h.text, score: h.score })),
       }
-    },
   }
+  publish?.({ realm: config.realm, parameters: definition.parameters, execute: run })
+
   return ctx.tools.register(definition)
 }

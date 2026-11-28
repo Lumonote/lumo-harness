@@ -48,3 +48,13 @@
 }
 
 .lumo-chat-dock-panel .lumo-dock-state { display: flex; align-items: center; gap: 5px; }
+.lumo-shared-tools { display: grid; gap: 16px; overflow-wrap: anywhere; }
+.lumo-shared-tools-heading { display: flex; align-items: center; gap: 8px; }
+.lumo-shared-tools-heading > small { flex: 1; color: var(--lumo-muted); line-height: 1.6; }
+.lumo-shared-tools h4 { margin: 0 0 8px; font-size: 12px; }
+.lumo-shared-tools h4 > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lumo-shared-tools details { padding: 10px 0; border-bottom: 1px solid var(--lumo-line); }
+.lumo-shared-tools summary { cursor: pointer; font-size: 12px; }
+.lumo-shared-tools p { line-height: 1.6; margin: 8px 0; }
+.lumo-shared-tools small, .lumo-shared-tools code { display: block; color: var(--lumo-muted); font-size: 11px; }
+.lumo-shared-tools code { margin-top: 6px; }

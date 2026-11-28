@@ -42,14 +42,21 @@ export async function waitForAsk(askID: string, options: AskGateOptions): Promis
     if (options.signal?.aborted) throw options.signal.reason ?? new Error('aborted')
     const ask = await options.fetchAsk(askID, options.signal)
     if (ask && ask.status !== 'pending') return ask
-    if (ask && (Date.parse(ask.expires_at) <= Date.now() || Date.now() >= deadline)) return { ...ask, status: 'expired' }
-    await new Promise(resolve => setTimeout(resolve, pollMs))
+    if (ask && Date.parse(ask.expires_at) <= Date.now()) return { ...ask, status: 'expired' }
+    if (Date.now() >= deadline) { if (ask) return { ...ask, status: 'expired' }; throw new Error('审批记录不可用，等待超时') }
+    await new Promise<void>((resolve, reject) => {
+      const done = () => { options.signal?.removeEventListener('abort', abort); resolve() }
+      const timer = setTimeout(done, pollMs)
+      const abort = () => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); reject(options.signal?.reason ?? new Error('aborted')) }
+      options.signal?.addEventListener('abort', abort, { once: true })
+      if (options.signal?.aborted) abort()
+    })
   }
 }
 
 export async function invokeWithAsk(client: Pick<ConnectorClient, 'invoke'>, req: InvokeRequest, options: AskGateOptions): Promise<InvokeResult> {
   try {
-    return await client.invoke(req)
+    return await client.invoke(req, options.signal)
   } catch (error) {
     const raw = askFromGatewayError(error)
     if (raw === undefined) throw error
@@ -66,6 +73,7 @@ export async function invokeWithAsk(client: Pick<ConnectorClient, 'invoke'>, req
     }
     options.onSettled?.(settled)
     if (settled.status !== 'answered' || settled.answer?.value === 'reject') throw new AskRejectedError(settled)
-    return client.invoke({ ...req, approvalId: settled.source.ref })
+    options.signal?.throwIfAborted()
+    return client.invoke({ ...req, approvalId: settled.source.ref }, options.signal)
   }
 }

@@ -4,46 +4,26 @@
   "policy": "历史隔离副本覆盖债务；不作为新增产品能力的默认扩展机制。上游工作区只读，发布升级需要兼容复核。",
   "packages": [
     {
-      "path": "packages/client/ui-conversation",
-      "purpose": "空会话首页的项目选择、composer dock 和原生输入上下文传递",
-      "files": ["src/client/apply.ts", "src/client/contract/slots.ts", "src/client/skeleton/ConversationContent.tsx"],
-      "mode": "rewrite",
-      "exitPriority": 2,
-      "replacement": "上游公开 root composer 插槽及 InputState/InputActions 契约，平台插件仅注册 slot contribution",
-      "exitGate": "原生空会话项目选择与创作交接验收通过后删除对应替换和此包重建例外"
-    },
-    {
       "path": "packages/client/ui-sidebar-documentpreview",
       "purpose": "资料库复用 PDF 与表格查看器",
-      "files": ["src/client/index.ts"],
-      "addedFiles": ["src/client/PdfDataPreview.tsx", "src/client/ExcelDataPreview.tsx"],
+      "files": [
+        "src/client/index.ts"
+      ],
+      "addedFiles": [
+        "src/client/PdfDataPreview.tsx",
+        "src/client/ExcelDataPreview.tsx"
+      ],
       "mode": "rewrite",
       "exitPriority": 2,
       "replacement": "上游以公开 client exports 或 document preview 注册入口接受平台文件数据",
       "exitGate": "PDF/Office转换/表格预览与释放资源测试通过后移除复制组件与补充export"
     },
     {
-      "path": "packages/client/ui-sidebar",
-      "purpose": "原生历史记录上方的平台导航入口",
-      "files": ["src/client/index.ts", "src/client/contract/slots.ts", "src/client/SidebarRoot.tsx"],
-      "mode": "rewrite",
-      "exitPriority": 2,
-      "replacement": "原生 sidebar.navigation 插槽或已公开侧栏贡献点",
-      "exitGate": "折叠/展开/键盘导航与原生历史共存测试通过后删除插槽注入"
-    },
-    {
-      "path": "packages/client/ui-workspace",
-      "purpose": "最近对话与项目分组切换及标签",
-      "files": ["src/client/rows/WorkspaceBrowser.tsx", "src/client/locales.ts"],
-      "mode": "rewrite",
-      "exitPriority": 2,
-      "replacement": "公开原生 groupBy 设置和菜单贡献，沿用 workspace actions",
-      "exitGate": "最近记录按时间显示与项目分组可切换后移除DOM与文案替换"
-    },
-    {
       "path": "packages/client/ui-model-selection",
       "purpose": "模型目录不等待会话历史投影，未知投影不覆盖已选模型",
-      "files": ["src/client/directory.ts"],
+      "files": [
+        "src/client/directory.ts"
+      ],
       "mode": "rewrite",
       "exitPriority": 1,
       "replacement": "上游修复目录与持久化选择的独立就绪生命周期",
@@ -52,7 +32,10 @@
     {
       "path": "packages/api/gateway",
       "purpose": "WebSocket写入超时、缓冲上限与客户端载波退避",
-      "files": ["src/stream-server.ts", "src/client/remote-stream.ts"],
+      "files": [
+        "src/stream-server.ts",
+        "src/client/remote-stream.ts"
+      ],
       "mode": "rewrite",
       "exitPriority": 1,
       "replacement": "上游原生传输层修复与公开超时/背压配置",
@@ -61,7 +44,9 @@
     {
       "path": "packages/api/session-controller",
       "purpose": "保留已见事件并以有限退避重开会话事件流，释放时取消定时器",
-      "files": ["src/client/sessions/session.ts"],
+      "files": [
+        "src/client/sessions/session.ts"
+      ],
       "mode": "rewrite",
       "exitPriority": 1,
       "replacement": "上游 session stream 恢复机制",
@@ -70,7 +55,9 @@
     {
       "path": "packages/client/modules",
       "purpose": "旧版插件逐项创建失败隔离；新版仅检查原生实现锚点",
-      "files": ["src/client/entries.ts"],
+      "files": [
+        "src/client/entries.ts"
+      ],
       "mode": "conditional-native-boot",
       "exitPriority": 0,
       "replacement": "已在支持原生 requiredClientEntryNames 启动审计的版本复用上游行为",
@@ -79,7 +66,10 @@
     {
       "path": "packages/client/web",
       "purpose": "旧版可选插件启动降级；新版仅检查原生必需插件审计",
-      "files": ["src/boot-client.ts", "src/boot.ts"],
+      "files": [
+        "src/boot-client.ts",
+        "src/boot.ts"
+      ],
       "mode": "conditional-native-boot",
       "exitPriority": 0,
       "replacement": "已采用上游原生可选插件警告和必需插件失败阻断",
@@ -97,7 +87,15 @@
     }
   ],
   "excludedBuildTransforms": [
-    { "owner": "prepare-runtime.mjs", "scope": "tsconfig.base.json 源码路径映射、构建产物投影和原生addon准备", "reason": "构建装配变换，单独受prepare-runtime与workspace-source-paths测试约束，不属于apply.mjs源码覆盖" },
-    { "owner": "brand-web.mjs", "scope": "web dist图标、标题与PWA manifest", "reason": "构建产物品牌化，受overlay品牌测试约束，不改上游源码" }
+    {
+      "owner": "prepare-runtime.mjs",
+      "scope": "tsconfig.base.json 源码路径映射、构建产物投影和原生addon准备",
+      "reason": "构建装配变换，单独受prepare-runtime与workspace-source-paths测试约束，不属于apply.mjs源码覆盖"
+    },
+    {
+      "owner": "brand-web.mjs",
+      "scope": "web dist图标、标题与PWA manifest",
+      "reason": "构建产物品牌化，受overlay品牌测试约束，不改上游源码"
+    }
   ]
 }

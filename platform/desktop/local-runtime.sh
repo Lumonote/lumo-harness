@@ -9,31 +9,24 @@ deepseek_root="${platform_root}/.build/deepseek-harness"
 
 # Preview and packaged builds share one source-isolation rule: copy only files
 # tracked by the official nested repository, then apply Lumo's small extension
-# overlay to the copy. Nothing below is allowed to compile in the source tree.
-node "${platform_root}/dsh-overrides/prepare-runtime.mjs" "${deepseek_source_root}" "${deepseek_root}"
-
-# The DSH Web host serves the built frontend package, not the source
-# apps/web/index.html. Build it on a repository preview when a fresh checkout
-# has no dist yet; a signed release runtime can set LUMO_AUTO_BUILD_WEB=0.
-web_index="${deepseek_root}/apps/web/dist/index.html"
-if [[ ! -f "${web_index}" ]]; then
-  if [[ "${LUMO_AUTO_BUILD_WEB:-1}" != "1" ]]; then
+# overlay to the copy. Only ignored generated artifacts may be projected back.
+# A preview needs the complete native graph (Host, Client and static manifests).
+# Running one conversation package leaves the shell's worker/assets incomplete.
+if [[ "${LUMO_AUTO_BUILD_WEB:-1}" == "1" ]]; then
+  node "${script_dir}/build-preview.mjs"
+else
+  node "${platform_root}/dsh-overrides/prepare-runtime.mjs" "${deepseek_source_root}" "${deepseek_root}"
+  web_index="${deepseek_root}/apps/web/dist/index.html"
+  if [[ ! -f "${web_index}" ]]; then
     echo "Lumo: missing DSH Web frontend: ${web_index}" >&2
     exit 1
   fi
-  if ! command -v corepack >/dev/null 2>&1; then
-    echo "Lumo: missing corepack; cannot build DSH Web frontend" >&2
-    exit 1
-  fi
-  echo "Lumo: building DSH Web frontend..." >&2
-  (cd "${deepseek_root}" && corepack pnpm --filter @deepseek-ai/dsh-client-ui-conversation run bundle)
-  (cd "${deepseek_root}" && corepack pnpm --filter @deepseek-ai/dsh-web-frontend run build)
 fi
 node "${platform_root}/dsh-overrides/brand-web.mjs" "${deepseek_root}"
 
 # The Web build above runs inside the staged copy, whose node_modules are
-# symlinked back to the source checkout — pnpm can follow a workspace link and
-# write compiled output into deepseek-harness/packages. Re-verify before the
+# symlinked back to the source checkout. Invoke the installed tools directly
+# so pnpm cannot relink source dependencies into this snapshot. Re-verify before the
 # runtime starts, so a write-back is reported here rather than discovered as
 # untracked .js/.d.ts files days later.
 node "${platform_root}/dsh-overrides/assert-pristine.mjs" "${deepseek_source_root}"
@@ -44,6 +37,7 @@ node "${platform_root}/dsh-overrides/assert-pristine.mjs" "${deepseek_source_roo
 export LUMO_DEPLOYMENT_MODE=local
 export LUMO_DSH_PROFILE=web
 export LUMO_DSH_ROOT="${deepseek_root}"
+export LUMO_DSH_CLI="${deepseek_root}/apps/cli/lib/bin.js"
 export LUMO_WEB_PORT="${LUMO_WEB_PORT:-3080}"
 # Repository-backed creative and orchestration components are installed once
 # in the platform workspace. Point the runtime at those exact bytes so a DSH

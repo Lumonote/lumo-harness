@@ -70,7 +70,7 @@ export function apply(ctx: Context, config: ConnectorConfig): void {
   ctx.provide('connectors', client)
   ctx.provide('connectorScope', scope)
 
-  const unregister = defineConnectorTools(ctx, client, scope, { ...(config.askWaitMs !== undefined ? { askWaitMs: config.askWaitMs } : {}) })
+  const unregister = defineConnectorTools(ctx, client, scope, { publish: tools => (ctx as unknown as { provide(name: string, value: unknown): void }).provide('connectorTools', tools), ...(config.askWaitMs !== undefined ? { askWaitMs: config.askWaitMs } : {}) })
   ctx.effect(() => () => {
     unregister()
   })

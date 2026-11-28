@@ -1,15 +1,16 @@
+import { ChatComposer, chatCommands } from './chat-composer.tsx'
 import { ChatButton } from './chat-button.tsx'
 import { AgentPermissionRequest } from './agent-permission-request.tsx'
 import { ChatRemoteExecution } from './chat-remote-execution.tsx'
 import { useConversationDraft } from './conversation-drafts.ts'
 import { ConversationManagement, AttachmentStorage, ConversationSettingsSection } from './conversation-management.tsx'
 import { AgentToolResult, AgentPlan } from './agent-execution-content.tsx'
-import { AgentComposerInput, usePromptContext } from './agent-composer-input.tsx'
-import { SendIcon, StopIcon, RefreshIcon, FolderIcon, DownIcon } from './chat-icons.tsx'
+import { usePromptContext } from './agent-composer-input.tsx'
+import { RefreshIcon, DownIcon } from './chat-icons.tsx'
 import { AgentChatDock, type ChatPanel } from './agent-chat-dock.tsx'
 import { AgentChatActivity } from './agent-chat-activity.tsx'
 import { AgentProjectPicker } from './agent-project-picker.tsx'
-import { AttachmentCards, AttachmentComposer, useChatAttachments } from './chat-attachments.tsx'
+import { useChatAttachments } from './chat-attachments.tsx'
 /**
  * ACP 引擎会话面板（P1）：选择引擎（Claude Code / Codex / Gemini CLI …）→ 在工作区里开会话 → 流式显示回复与工具调用，
  * 权限请求就地按 P0-1 Ask 的选项作答。独立组件文件，index.tsx 只挂一行。
@@ -185,13 +186,10 @@ export function AcpSessionPanel({ defaultCwd = '', identityKey = 'local', onIden
     {!locked && asks.length > 0 ? <div ref={permissions} tabIndex={-1} className="lumo-role-permissions" role="group" aria-label="待确认的权限请求">
       {asks.map(ask => <AgentPermissionRequest key={ask.id} ask={ask} disabled={busy} answer={id => void answer(ask, id)} />)}
     </div> : null}
-    {session && !locked && !session.historyOnly ? <form className="lumo-chat-composer" onDragOver={e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault() }} onDrop={attachments.drop} onPaste={attachments.paste} onSubmit={e => { e.preventDefault(); if (!running && !busy && !attachments.sending && (text.trim() || attachments.files.length || context.has)) void send() }}>
-      <AttachmentCards draft={attachments} />
-      <AgentComposerInput label="发送给引擎" value={text} onChange={setText} disabled={running || busy || attachments.sending} scopePath={`/lumo/api/acp/sessions/${session.id}`}
-        context={context.value} setContext={context.set} engineCommands={session.commands} send={() => void send()} commands={[{ name: 'remote', label: '远程执行', run: () => setPanel('remote') }, { name: 'project', label: '选择项目', run: () => { setCwd(session.cwd); setPanel('settings') } }, { name: 'settings', label: '会话设置', run: () => setPanel('settings') }, { name: 'files', label: '项目文件', run: () => setPanel('files') }, { name: 'skills', label: '加载 Skill', run: () => setPanel('skills') }, { name: 'activity', label: '执行记录', run: () => setPanel('activity') }]} />
-      <div className="lumo-chat-compose-actions"><AttachmentComposer draft={attachments} disabled={busy || running} /><small>{session.modelId ?? '工具默认模型'}</small><button type="button" className="lumo-chat-project-chip" title={session.cwd} onClick={() => { setCwd(session.cwd); setPanel('settings') }} aria-label="选择项目文件夹"><FolderIcon size={14} />{session.cwd.split(/[\\/]/u).filter(Boolean).at(-1) || session.cwd}</button>{running ? <button type="button" className="lumo-chat-icon-button" aria-label="停止" title="停止" onClick={() => void cancel()}><StopIcon size={18} /></button> : <button className="lumo-chat-send lumo-chat-icon-button" aria-label="发送" title="发送 · Enter" type="submit" disabled={busy || attachments.sending || (!text.trim() && !attachments.files.length && !context.has)}><SendIcon size={18} /></button>}</div>
-
-    </form> : null}
+    {session && !locked && !session.historyOnly ? <ChatComposer attachments={attachments} busy={busy} running={running} cwd={session.cwd}
+      project={() => { setCwd(session.cwd); setPanel('settings') }} stop={() => void cancel()} controls={<small>{session.modelId ?? '工具默认模型'}</small>}
+      label="发送给引擎" value={text} onChange={setText} scopePath={`/lumo/api/acp/sessions/${session.id}`}
+      context={context.value} setContext={context.set} engineCommands={session.commands} send={() => void send()} commands={chatCommands(setPanel)} /> : null}
     </div>
     {!readOnly && session ? <AgentChatDock key={`${identityKey}:${session.id}`} panel={panel} onPanel={value => { if (value === 'settings') setCwd(session.cwd); setPanel(value) }}
       scopePath={`/lumo/api/acp/sessions/${session.id}`} cwd={session.cwd} context={context.value} setContext={context.set}

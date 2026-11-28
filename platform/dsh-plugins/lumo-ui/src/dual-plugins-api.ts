@@ -5,6 +5,7 @@
  *   - 提供给 ACP 引擎会话的 MCP 下发函数
  */
 import type { Context } from '@deepseek-ai/cordis'
+import type { SharedToolsFor } from '../../acp-engines/src/conversation-tools.ts'
 
 import { createDualHost, registerDualPlugin, ACP_ENGINES_MANIFEST, type DualHost, type RunTreeSink } from '../../dual-plugins/src/index.ts'
 
@@ -36,4 +37,16 @@ export function acpMcpOptions(host: DualHost | undefined): { mcpServers?: (c: { 
   const mcp = host?.mcp
   if (!mcp) return {}
   return { mcpServers: c => mcp.serversFor(c), onSessionClosed: ref => mcp.revokeSession(ref) }
+}
+
+export function sharedToolsFor(host: DualHost | undefined): SharedToolsFor {
+  return (identity, sessionRef) => {
+    if (!host?.mcp) return { supplied: false, reason: '当前连接未启用共享工具', tools: [] }
+    if (!host.mcp.hasSession({ ...identity, sessionRef })) return { supplied: false, reason: '启动或恢复此成员会话后加载共享工具', tools: [] }
+    const plugins = host.gateway.listPlugins()
+    return { supplied: true, tools: host.gateway.listTools('acp').map(({ pluginId, tool }) => ({
+      name: tool.name, title: plugins.find(plugin => plugin.id === pluginId)?.title ?? pluginId, description: tool.description, action: tool.action, risk: tool.risk,
+      approval: pluginId === 'connectors-shared' ? 'source' : tool.approval ?? 'auto',
+    })) }
+  }
 }

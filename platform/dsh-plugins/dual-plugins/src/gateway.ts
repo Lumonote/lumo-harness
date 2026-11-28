@@ -159,7 +159,7 @@ export class DualPluginGateway {
     const tree = new CallRecorder(this.options.runTree, callId, manifest.id, tool.name, caller, this.now())
     tree.start()
     if (decision.effect === 'ask') {
-      const grantKey = [caller.realm, caller.userId, caller.sessionRef ?? '', manifest.id, tool.name].join('\u0000')
+      const grantKey = [caller.realm, caller.userId, caller.sessionRef ?? '', caller.projectId ?? '', manifest.id, tool.name].join('\u0000')
       const grantUntil = this.grants.get(grantKey)
       if (!(tool.risk !== 'high' && caller.sessionRef && grantUntil !== undefined && grantUntil > this.now())) {
         const argsPreview = preview(args)

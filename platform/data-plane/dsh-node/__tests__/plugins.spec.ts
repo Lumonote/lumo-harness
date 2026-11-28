@@ -128,6 +128,18 @@ describe('profile plugin installation', () => {
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
+  it('launches an isolated preview CLI directly without running a package-manager script in the shared checkout', () => {
+    const { root, options } = installationFixture('pnpm@11.28.5')
+    const cli = join(root, 'apps/cli/lib/bin.js')
+    vi.mocked(spawnSync).mockReset().mockReturnValue({ status: 0 } as ReturnType<typeof spawnSync>)
+    try {
+      ensureProfilePlugins({ ...options, env: { ...options.env, LUMO_DSH_CLI: cli } })
+      expect(spawnSync).toHaveBeenCalledExactlyOnceWith(process.execPath,
+        ['--import', 'tsx/esm', cli, 'plugin', '--profile', 'headless', 'add', `link:${root}/dsh-plugins/agent-teams`],
+        expect.objectContaining({ cwd: root }))
+    } finally { rmSync(root, { recursive: true, force: true }); vi.mocked(spawnSync).mockReset() }
+  })
+
   it('continues startup when an optional plugin installer fails or throws', () => {
     const root = mkdtempSync(join(tmpdir(), 'lumo-install-failure-'))
     const profileDir = join(root, 'dsh', 'profiles', 'web')

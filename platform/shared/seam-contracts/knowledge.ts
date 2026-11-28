@@ -57,7 +57,7 @@ export interface KnowledgeQuery {
    * 召回零条。区分两者是刻意的：把一个「过滤条件算出来是空集」误当成「没有过滤条件」，
    * 会让一次本该返回空的结果变成返回全部。
    */
-  spaces?: readonly string[]
+  spaces?: readonly string[] | undefined
 }
 
 /**
@@ -120,7 +120,7 @@ export interface AuthenticatedKnowledgeRequest {
   projectId: string
   text: string
   topK: number
-  spaces?: readonly string[]
+  spaces?: readonly string[] | undefined
 }
 /** Host-only read capability. Remote implementations sign each request with the
  * supplied current authenticated identity, never the shared deployment owner. */

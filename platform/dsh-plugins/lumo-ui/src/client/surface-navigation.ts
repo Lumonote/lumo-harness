@@ -31,6 +31,13 @@ export const OPEN_EVENT = 'lumo:open-workbench'
 
 export const CLOSE_EVENT = 'lumo:close-workbench'
 
+const nativeSurfaces = new Map<Surface, () => void>()
+export const hasNativeSurface = (surface: Surface) => nativeSurfaces.has(surface)
+export function registerNativeSurface(surface: Surface, open: () => void) {
+  nativeSurfaces.set(surface, open)
+  return () => { if (nativeSurfaces.get(surface) === open) nativeSurfaces.delete(surface) }
+}
+
 export function querySurface(): Surface | null {
   const value = new URLSearchParams(location.search).get('lumo')
   if (value === 'ops') return 'operations'
@@ -45,5 +52,7 @@ export function setQuerySurface(surface: Surface | null): void {
 }
 
 export function openSurface(surface: Surface): void {
+  const native = nativeSurfaces.get(surface)
+  if (native) { window.dispatchEvent(new Event(CLOSE_EVENT)); native(); return }
   window.dispatchEvent(new CustomEvent<Surface>(OPEN_EVENT, { detail: surface }))
 }

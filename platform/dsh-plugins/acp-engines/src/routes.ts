@@ -32,7 +32,14 @@ import type { RoleRooms } from './role-rooms.ts'
 
 export type { SessionScope as AcpIdentity } from './session-scope.ts'
 import type { SessionScope as AcpIdentity } from './session-scope.ts'
+export interface ConversationAsks {
+  list(identity: AcpIdentity, status?: string): Promise<{ asks: import('../../../shared/seam-contracts/asks.ts').Ask[]; warnings?: string[] }>
+  answer(id: string, value: string, identity: AcpIdentity): Promise<{ ok: boolean; error?: string }>
+}
 export interface AcpRouteDeps {
+  sharedTools?: import('./conversation-tools.ts').SharedToolsFor | undefined
+  conversationAsks?: ConversationAsks | undefined
+
   skills?: AgentSkills | undefined
   attachments?: AttachmentStore | undefined
   rooms?: RoleRooms | undefined
@@ -104,6 +111,20 @@ export async function handleAcpRoute(req: IncomingMessage, res: ServerResponse, 
         'content-disposition': `${/^image\/(png|jpeg|webp|gif)$/u.test(file.mimeType) ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.name)}` })
       res.end(bytes)
     } catch { json(res, 404, { error: '附件不存在或不可访问' }) }
+    return true
+  }
+  const toolsRoute = /^\/(sessions|rooms)\/([A-Za-z0-9_-]{1,80})\/tools$/u.exec(sub)
+  if (toolsRoute && method === 'GET') {
+    const id = toolsRoute[2]!
+    const session = toolsRoute[1] === 'sessions' ? host.get(id, identity) : undefined
+    const room = toolsRoute[1] === 'rooms' ? deps.rooms?.view(id, identity) : undefined
+    if (!session && !room) { json(res, 404, { error: '对话不存在' }); return true }
+    const members = room ? room.roles.map(role => ({ id: role.id, name: role.name, engineId: role.engineId, sessionRef: role.sessionId }))
+      : [{ id, name: session!.title ?? session!.engineId, engineId: session!.engineId, sessionRef: id }]
+    json(res, 200, { members: members.map(({ sessionRef, ...member }) => ({ ...member,
+      ...(sessionRef && host.get(sessionRef, identity) && deps.sharedTools ? deps.sharedTools(identity, sessionRef)
+        : { supplied: false, reason: sessionRef ? '当前连接未启用共享工具' : '启动此成员会话后加载共享工具', tools: [] }),
+    })) })
     return true
   }
   const contextRoute = /^\/(sessions|rooms)\/([A-Za-z0-9_-]{1,80})\/(skills|files|preview)$/u.exec(sub)
@@ -239,12 +260,24 @@ export async function handleAcpRoute(req: IncomingMessage, res: ServerResponse, 
 
   if (method === 'GET' && sub === '/asks') {
     const status = new URL(req.url ?? '/', 'http://lumo.local').searchParams.get('status') ?? undefined
-    json(res, 200, { asks: asks.list(identity, status ? { status } : {}) }); return true
+    try {
+      const shared = await deps.conversationAsks?.list(identity, status) ?? { asks: [] }
+      json(res, 200, { asks: [...asks.list(identity, status ? { status } : {}), ...shared.asks.filter(ask => ask.source.session_ref && host.get(ask.source.session_ref, identity))], ...(shared.warnings?.length ? { warnings: shared.warnings } : {}) })
+    } catch (error) { json(res, 200, { asks: asks.list(identity, status ? { status } : {}), warnings: [error instanceof Error ? error.message : '审批服务不可用'] }) }
+    return true
   }
   m = /^\/asks\/([^/]+)\/answer$/u.exec(sub)
   if (method === 'POST' && m) {
     const id = decodeURIComponent(m[1]!)
     const value = str(input.value, 200)
+    if (value !== undefined && !ASK_ID.test(id) && deps.conversationAsks) {
+      try {
+        const shared = (await deps.conversationAsks.list(identity, 'pending')).asks.find(ask => ask.id === id && ask.source.session_ref && host.get(ask.source.session_ref, identity))
+        if (!shared) { json(res, 404, { error: 'ask 不存在' }); return true }
+        const result = await deps.conversationAsks.answer(id, value, identity); json(res, result.ok ? 200 : 409, result)
+      } catch (error) { json(res, 502, { error: error instanceof Error ? error.message : '审批服务不可用' }) }
+      return true
+    }
     if (!ASK_ID.test(id) || value === undefined) { json(res, 400, { error: '需要合法 ask id 与 value' }); return true }
     const r = asks.answer(id, value, identity)
     json(res, r.ok ? 200 : 409, r); return true

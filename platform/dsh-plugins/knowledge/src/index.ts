@@ -217,7 +217,7 @@ export async function apply(ctx: Context, config: KnowledgeConfig): Promise<void
     defaultTopK,
     rerank,
     overfetchFactor,
-  }, scope)
+  }, scope, tool => (ctx as unknown as { provide(name: string, value: unknown): void }).provide('knowledgeQueryTool', tool))
   // Consumer 2：GraphRAG（向量召回 → 重排 → 图邻域扩展；输出带 provenance 标记，评审 R5）
   const unregisterGraph = defineGraphRagTool(ctx, provider, graph, {
     realm: config.realm,

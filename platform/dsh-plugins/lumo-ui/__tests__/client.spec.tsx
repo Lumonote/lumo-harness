@@ -1,24 +1,9 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '../../../../deepseek-harness/node_modules/@testing-library/react/dist/index.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ComponentType } from 'react'
+import { createLumoContext, type Registered, type SlashSource } from './fixtures/client-context.ts'
 import { webcrypto } from 'node:crypto'
 import { apply } from '../src/client/index.tsx'
-
-interface Registered {
-  id: string
-  name: string
-  Component: ComponentType<Record<string, unknown>>
-}
-
-interface SlashClaim { token: string; hint?: string; submit(args: string): Promise<{ kind: string }> }
-interface SlashSource {
-  trigger: string
-  name: string
-  candidates(session: unknown, req: { query: string }): Promise<ReadonlyArray<{ name: string; description?: string }>>
-  onPick(pick: { candidate: { name: string } }): { claim: SlashClaim } | undefined
-  matchEnter(session: unknown, line: string): Promise<{ claim: SlashClaim } | undefined>
-}
 
 const overview = {
   generatedAt: new Date().toISOString(),
@@ -49,35 +34,6 @@ const skillhubCatalog = {
   installed: { skills: [], packs: [], plugins: [] },
 }
 
-/** Native slot/theme fixture; effects execute as in Cordis. */
-function createLumoContext(preloadedThemes: string[] = []): { context: unknown; registered: Registered[]; sources: SlashSource[] } {
-  const registered: Registered[] = []
-  const sources: SlashSource[] = []
-  const slots = {
-    inject: (_name: string, mount: () => unknown) => { mount() },
-    register: (meta: { id: string; name: string }, Component: ComponentType<Record<string, unknown>>) => {
-      registered.push({ ...meta, Component })
-      return () => {}
-    },
-  }
-  const themeIDs = new Set(preloadedThemes)
-  const theme = {
-    getTheme: () => ({ active: { id: [...themeIDs][0] ?? 'default' }, themes: [...themeIDs].map(id => ({ id, tokens: {} })) }),
-    register: (definition: { id: string }) => {
-      if (themeIDs.has(definition.id)) throw new Error(`theme "${definition.id}" is already registered`)
-      themeIDs.add(definition.id)
-      return () => { themeIDs.delete(definition.id) }
-    },
-    setTheme: () => {},
-  }
-  // inputTriggers 是上游 ui-input-trigger 的公开服务；替身只记录登记的 `/` 源。
-  const inputTriggers = { registerSource: (source: SlashSource) => { sources.push(source); return () => { sources.splice(sources.indexOf(source), 1) } } }
-  const context: Record<string, unknown> = { [Symbol.for('cordis.root')]: {}, slots, theme, effect: (body: () => unknown) => { body() }, on: () => () => {} }
-  Object.defineProperty(context, 'root', { get() { throw Error('cannot get property "root" without inject') } })
-  context['get'] = (name: string) => name === 'inputTriggers' ? inputTriggers : undefined
-  context['inject'] = (_deps: string[], body: (ctx: unknown) => void) => { body(context) }
-  return { context, registered, sources }
-}
 
 function mountLumo(): Registered[] {
   return mountLumoWithSources().registered
@@ -297,7 +253,7 @@ describe('Lumo native Harness integration', () => {
   it('shows all available server workspaces in product navigation', async () => {
     const registered = mountLumo()
 
-    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const entries = registered.filter(item => item.name === 'main' && item.id === 'lumo-navigation')
     const overlay = registered.find(item => item.name === 'shell.overlay')
     expect(entries.map(item => item.id)).toEqual(['lumo-navigation'])
     // 品牌名槽由 Lumo 占下产品名，避免外壳回退到「DSH 本地构建」文案。
@@ -536,7 +492,7 @@ describe('Lumo native Harness integration', () => {
       return defaultFetch(input, init)
     }))
     const registered = mountLumo()
-    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const entries = registered.filter(item => item.name === 'main' && item.id === 'lumo-navigation')
     const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
     const Settings = registered.find(item => item.name === 'settings.section')!.Component
     render(<div><Settings close={() => {}} />{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
@@ -557,7 +513,7 @@ describe('Lumo native Harness integration', () => {
 
   it('把员工、上下游与智能体绑定画成节点与光轨', async () => {
     const registered = mountLumo()
-    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const entries = registered.filter(item => item.name === 'main' && item.id === 'lumo-navigation')
     const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
     const Settings = registered.find(item => item.name === 'settings.section')!.Component
     render(<div><Settings close={() => {}} />{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
@@ -604,7 +560,7 @@ describe('Lumo native Harness integration', () => {
 
   it('切到任务流向时画的是任务与依赖，卡住的那条边被标出来', async () => {
     const registered = mountLumo()
-    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const entries = registered.filter(item => item.name === 'main' && item.id === 'lumo-navigation')
     const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
     const Settings = registered.find(item => item.name === 'settings.section')!.Component
     render(<div><Settings close={() => {}} />{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
@@ -647,7 +603,7 @@ describe('Lumo native Harness integration', () => {
       capabilities: { threadRegistry: true, controlState: true }, errors: [],
     }
     const registered = mountLumo()
-    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const entries = registered.filter(item => item.name === 'main' && item.id === 'lumo-navigation')
     const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
     const Settings = registered.find(item => item.name === 'settings.section')!.Component
     render(<div><Settings close={() => {}} />{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
@@ -677,7 +633,7 @@ describe('Lumo native Harness integration', () => {
       })
     }))
     const registered = mountLumo()
-    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const entries = registered.filter(item => item.name === 'main' && item.id === 'lumo-navigation')
     const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
     const Settings = registered.find(item => item.name === 'settings.section')!.Component
     render(<div><Settings close={() => {}} />{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
@@ -718,7 +674,7 @@ describe('Lumo native Harness integration', () => {
       return Response.json({ threads: [{ id: 'first', title: '上次成功页任务', business_state: 'EXECUTING', state: 'RUNNING' }], capabilities: { threadRegistry: true, controlState: true }, errors: [], pagination: { nextTaskCursor: 'tasks-2', nextThreadCursor: '', taskCount: 200 } })
     }))
     const registered = mountLumo()
-    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const entries = registered.filter(item => item.name === 'main' && item.id === 'lumo-navigation')
     const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
     const Settings = registered.find(item => item.name === 'settings.section')!.Component
     render(<div><Settings close={() => {}} />{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
@@ -759,7 +715,7 @@ describe('Lumo native Harness integration', () => {
       return Response.json({ threads: [{ id: 'first', title: '权限撤销前任务', business_state: 'EXECUTING', state: 'RUNNING' }], capabilities: { threadRegistry: true, controlState: true }, errors: [], pagination: { nextTaskCursor: 'tasks-2', nextThreadCursor: '', taskCount: 200 } })
     }))
     const registered = mountLumo()
-    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const entries = registered.filter(item => item.name === 'main' && item.id === 'lumo-navigation')
     const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
     const Settings = registered.find(item => item.name === 'settings.section')!.Component
     render(<div><Settings close={() => {}} />{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
@@ -804,7 +760,7 @@ describe('Lumo native Harness integration', () => {
       })
     }))
     const registered = mountLumo()
-    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const entries = registered.filter(item => item.name === 'main' && item.id === 'lumo-navigation')
     const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
     const Settings = registered.find(item => item.name === 'settings.section')!.Component
     render(<div><Settings close={() => {}} />{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
@@ -835,7 +791,7 @@ describe('Lumo native Harness integration', () => {
       { id: 'thread-done', title: '需求拆解', business_state: 'DONE', state: 'COMPLETED' },
     ]
     const registered = mountLumo()
-    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const entries = registered.filter(item => item.name === 'main' && item.id === 'lumo-navigation')
     const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
     const Settings = registered.find(item => item.name === 'settings.section')!.Component
     render(<div><Settings close={() => {}} />{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
@@ -876,7 +832,7 @@ describe('Lumo native Harness integration', () => {
   it('协作空间的目标输入把文字交给「项目」的表单，并且只交一次', async () => {
     // 协作目标只交给管理工作台一次，保留唯一委派创建路径。
     const registered = mountLumo()
-    const entries = registered.filter(item => item.name === 'sidebar.navigation')
+    const entries = registered.filter(item => item.name === 'main' && item.id === 'lumo-navigation')
     const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
     const Settings = registered.find(item => item.name === 'settings.section')!.Component
     render(<div><Settings close={() => {}} />{entries.map(({ id, Component }) => <Component key={id} wide />)}<Overlay /></div>)
@@ -902,7 +858,7 @@ describe('Lumo native Harness integration', () => {
 
   it('shows only locally available workbenches in the desktop sidebar', async () => {
     const registered = mountLumo()
-    const entry = registered.find(item => item.name === 'sidebar.navigation')
+    const entry = registered.find(item => item.name === 'main' && item.id === 'lumo-navigation')
     const Navigation = entry!.Component
     // 本地桌面保留 vault 资料库和本机技能，创作入口沿用斜杠命令。
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
@@ -924,11 +880,11 @@ describe('Lumo native Harness integration', () => {
 
   it('separates experts from skills and supports creating an expert', async () => {
     const registered = mountLumo()
-    const entry = registered.find(item => item.name === 'sidebar.navigation')
+    const entry = registered.find(item => item.name === 'main' && item.id === 'lumo-navigation')
     const overlay = registered.find(item => item.name === 'shell.overlay')
     const Entry = entry!.Component
     const Overlay = overlay!.Component
-    const Dock = registered.find(item => item.name === 'conversation.hero.composer.dock')!.Component
+    const Dock = registered.find(item => item.name === 'conversation.input.dock')!.Component
     const setDraft = vi.fn()
     render(<><Entry wide /><Overlay /><Dock inputActions={{ setDraft, submit: vi.fn() }} /></>)
 
@@ -980,7 +936,7 @@ describe('Lumo native Harness integration', () => {
       return baseFetch(input, init)
     }))
     const registered = mountLumo()
-    const Entry = registered.find(item => item.name === 'sidebar.navigation')!.Component
+    const Entry = registered.find(item => item.name === 'main' && item.id === 'lumo-navigation')!.Component
     const Overlay = registered.find(item => item.name === 'shell.overlay')!.Component
     render(<><Entry wide /><Overlay /></>)
     fireEvent.click(within(screen.getByRole('navigation', { name: 'Lumo 功能菜单' })).getByRole('button', { name: '技能中心' }))
@@ -1006,7 +962,7 @@ describe('Lumo native Harness integration', () => {
   it('keeps the home composer clean and opens creative workbenches only through /design and /ppt', async () => {
     const { registered, sources } = mountLumoWithSources()
 
-    const dock = registered.find(item => item.name === 'conversation.hero.composer.dock')
+    const dock = registered.find(item => item.name === 'conversation.input.dock')
     const overlay = registered.find(item => item.name === 'shell.overlay')
     expect(dock).toBeDefined()
     expect(overlay).toBeDefined()
@@ -1111,7 +1067,7 @@ describe('Lumo native Harness integration', () => {
 
   it('keeps keyboard focus inside nested workbench dialogs and restores its opener', async () => {
     const registered = mountLumo()
-    const entry = registered.find(item => item.name === 'sidebar.navigation')
+    const entry = registered.find(item => item.name === 'main' && item.id === 'lumo-navigation')
     const overlay = registered.find(item => item.name === 'shell.overlay')
     expect(entry).toBeDefined()
     expect(overlay).toBeDefined()
@@ -1214,7 +1170,7 @@ describe('Lumo native Harness integration', () => {
 
     apply(Object.create(context as object) as never)
 
-    expect(first).toContain('sidebar.navigation:lumo-navigation')
+    expect(first).toContain('main:lumo-navigation')
     expect(first).toContain('shell.overlay:lumo-platform')
     expect(registered.map(item => `${item.name}:${item.id}`)).toEqual(first)
   })

@@ -253,6 +253,8 @@ tempCodeRunnerFile.py
 # Isolated DeepSeek Harness staging tree used by desktop/container builds.
 # Product overlays are applied here; the upstream checkout stays pristine.
 platform/.build/
+# Local conversation databases and engine runtime state.
+.lumo/
 
 # Ruff stuff:
 .ruff_cache/

@@ -159,7 +159,10 @@ jobs:
         run: node dsh-overrides/build-host.mjs ../deepseek-harness
 
       - name: Build client artifacts
-        run: node dsh-overrides/build-client.mjs ../deepseek-harness
+        run: |
+          node dsh-overrides/build-client.mjs ../deepseek-harness
+          # The assembly regression loads the public browser module factory.
+          pnpm --dir ../deepseek-harness --filter @deepseek-ai/dsh-client-ui-renderer run bundle
 
       - name: Verify CI evidence tools and release contracts
         run: node --test tools/__tests__/*.test.mjs

@@ -1,10 +1,11 @@
 /**
  * 工具调用审批 → P0-1 统一 Ask。
- *   id     = `run:dual-<n>`（P0-1 `<source>:<ref>` 约定；parseAskID 可解析）
+ *   id     = `run:dual-<uuid>`（P0-1 `<source>:<ref>` 约定；parseAskID 可解析）
  *   kind   = approval，选项 approve_once / approve_session / reject（high 风险不给 approve_session，R6）
  *   source = { kind:'run', ref, session_ref, run_id, operation:<权限动作> }
  * 状态机复用 shared/seam-contracts/asks.ts 的 transition()。
  */
+import { randomUUID } from 'node:crypto'
 import { transition, type Ask, type AskEvent, type AskEventType, type AskOption } from '../../../shared/seam-contracts/asks.ts'
 
 export const OPT_ONCE = 'approve_once'
@@ -21,7 +22,6 @@ export interface ToolAskRequest {
 interface Pending { ask: Ask; resolve: (o: ToolAskOutcome) => void; timer?: ReturnType<typeof setTimeout> }
 
 export class ToolAskBroker {
-  private seq = 0
   private readonly pending = new Map<string, Pending>()
   private readonly history = new Map<string, Ask>()
   private readonly listeners = new Set<(e: AskEvent) => void>()
@@ -34,7 +34,7 @@ export class ToolAskBroker {
   get(id: string): Ask | undefined { return this.history.get(id) }
 
   request(req: ToolAskRequest): { ask: Ask; outcome: Promise<ToolAskOutcome> } {
-    const ref = `dual-${++this.seq}`
+    const ref = `dual-${randomUUID()}`
     const options: AskOption[] = [{ id: OPT_ONCE, label: '允许本次' }, ...(req.risk === 'high' ? [] : [{ id: OPT_SESSION, label: '本会话内允许' }]), { id: OPT_REJECT, label: '拒绝' }]
     const now = this.now()
     const ask: Ask = {

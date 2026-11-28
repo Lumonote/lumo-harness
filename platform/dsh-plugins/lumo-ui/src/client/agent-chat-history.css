@@ -1,0 +1,30 @@
+/* These rows render both in the native sidebar and the standalone workbench. */
+.lumo-chat-history-sections { display:flex; flex-direction:column; gap:20px; flex:1; min-height:0; overflow:auto; }
+.lumo-chat-history-sections > .lumo-history-archive { align-self:flex-end; min-height:28px; padding:4px 7px; gap:5px; font-size:11px; }
+.lumo-chat-history-heading { display:flex; align-items:center; justify-content:space-between; padding:0 8px; margin-bottom:6px; color:var(--lumo-muted); }
+.lumo-chat-history-heading small { font-size:11px; }
+.lumo-chat-history { display:flex; flex-direction:column; min-width:0; gap:2px; }
+.lumo-chat-history-sections .lumo-chat-history { flex:none; overflow:visible; }
+.lumo-chat-project-group .lumo-chat-history { margin:2px 0 8px 9px; padding-left:6px; border-left:1px solid var(--lumo-line); }
+.lumo-chat-history-sections .lumo-chat-project-heading { width:100%; display:flex; align-items:center; gap:7px; padding:7px; border:0; border-radius:7px; background:transparent; color:var(--lumo-ink); font:inherit; font-size:12px; text-align:left; cursor:pointer; }
+.lumo-chat-project-heading > span:nth-child(2) { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.lumo-chat-project-heading small { color:var(--lumo-muted); font-size:10px; }
+.lumo-history-row { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; min-width:0; }
+.lumo-chat-history .lumo-chat-history-entry { display:flex; align-items:center; width:100%; min-width:0; min-height:42px; margin:0; padding:6px 7px; gap:8px; border:0; border-radius:7px; background:transparent; color:var(--lumo-ink); font:inherit; line-height:1.4; text-align:left; cursor:pointer; }
+.lumo-chat-history .lumo-chat-history-entry:hover { background:var(--dsw-alias-interactive-bg-hover,var(--lumo-mint-soft)); }
+.lumo-chat-history .lumo-chat-history-entry[aria-current] { background:var(--dsw-alias-interactive-bg-active,var(--lumo-mint-soft)); }
+.lumo-chat-history .lumo-chat-history-entry:focus-visible { outline:2px solid var(--lumo-mint); outline-offset:-2px; }
+.lumo-chat-history-entry > :first-child { flex:none; }
+.lumo-chat-history-entry > .lumo-room-logo, .lumo-chat-history-entry > .lumo-engine-logo { width:26px; height:26px; border-radius:7px; }
+.lumo-chat-history-entry .lumo-room-logo-stack .lumo-engine-logo { width:14px; height:14px; padding:1px; border-radius:4px; }
+.lumo-chat-history-entry .lumo-room-logo-stack .lumo-engine-logo + .lumo-engine-logo { margin-left:-8px; margin-top:6px; }
+.lumo-chat-history-entry .lumo-room-logo-stack .lumo-engine-logo:nth-child(3) { margin-top:-4px; }
+.lumo-chat-history-entry > .lumo-history-copy { display:grid; flex:1; min-width:0; gap:2px; text-align:left; }
+.lumo-history-copy > b, .lumo-history-copy > small { display:block; min-width:0; margin:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.lumo-history-copy > b { font-size:12px; font-weight:500; }
+.lumo-history-copy > small { color:var(--lumo-muted); font-size:10px; }
+.lumo-chat-history-sections p { margin:7px; font-size:12px; }
+.lumo-history-menu { display:contents; }
+.lumo-history-popover { grid-column:1 / -1; margin:4px; display:grid; gap:3px; padding:6px; border:1px solid var(--lumo-line); border-radius:8px; background:var(--lumo-panel); }
+.lumo-history-popover form { display:grid; gap:5px; }
+.lumo-history-popover input { width:100%; box-sizing:border-box; font:inherit; padding:6px; border:1px solid var(--lumo-line); background:var(--lumo-panel); color:var(--lumo-ink); }

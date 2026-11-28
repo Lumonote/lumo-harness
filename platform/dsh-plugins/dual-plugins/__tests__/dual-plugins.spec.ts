@@ -168,9 +168,9 @@ describe('channels', () => {
     const c = { realm: 'r', userId: 'u', sessionRef: 's' }
     expect(await handleMcpMessage(gw, c, { id: 1, method: 'initialize' })).toMatchObject({ result: { serverInfo: { name: 'lumo-plugins' } } })
     const list = await handleMcpMessage(gw, c, { id: 2, method: 'tools/list' }) as { result: { tools: Array<{ name: string }> } }
-    expect(list.result.tools.map(t => t.name)).toEqual(['demo_echo'])
+    expect(list.result.tools.map(t => t.name)).toEqual(['demo_echo', 'acp_engines_list'])
     expect(await handleMcpMessage(gw, c, { id: 3, method: 'tools/call', params: { name: 'demo_echo', arguments: { text: 'x' } } })).toMatchObject({ result: { isError: false, structuredContent: { echo: 'x' } } })
-    expect(await handleMcpMessage(gw, c, { id: 4, method: 'tools/call', params: { name: 'acp_engines_list', arguments: {} } })).toMatchObject({ result: { isError: true } })
+    expect(await handleMcpMessage(gw, c, { id: 4, method: 'tools/call', params: { name: 'acp_engines_list', arguments: {} } })).toMatchObject({ result: { isError: false, structuredContent: { engines: [] } } })
     expect(await handleMcpMessage(gw, c, { method: 'notifications/initialized' })).toBeUndefined()
   })
   it('dsh 工具：execute 走网关，deny 抛错', async () => {

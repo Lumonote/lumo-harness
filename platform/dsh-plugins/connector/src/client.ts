@@ -136,8 +136,12 @@ export class ConnectorClient {
     }
   }
 
-  async list(): Promise<ConnectorSummary[]> {
-    const res = await this.fetch('/connectors', { method: 'GET' })
+  matchesIdentity(caller: { realm: string; userId: string; projectId?: string | undefined }): boolean {
+    return caller.realm === this.identity['X-Lumo-Realm'] && caller.userId === this.identity['X-Lumo-User'] && (caller.projectId || undefined) === (this.identity['X-Lumo-Project'] || undefined)
+  }
+
+  async list(signal?: AbortSignal): Promise<ConnectorSummary[]> {
+    const res = await this.fetch('/connectors', { method: 'GET' }, signal)
     const json = (await res.json()) as { connectors?: ConnectorSummary[] }
     return json.connectors ?? []
   }
@@ -149,7 +153,12 @@ export class ConnectorClient {
     return json.asks ?? []
   }
 
-  async invoke(req: InvokeRequest): Promise<InvokeResult> {
+  async answerAsk(id: string, value: string): Promise<unknown> {
+    const res = await this.fetch(`/asks/${encodeURIComponent(id)}/answer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value }) })
+    return res.json()
+  }
+
+  async invoke(req: InvokeRequest, signal?: AbortSignal): Promise<InvokeResult> {
     const res = await this.fetch(`/connectors/${encodeURIComponent(req.connectorId)}/invoke`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...sessionHeader(req.sessionRef) },
@@ -162,7 +171,7 @@ export class ConnectorClient {
         correlationId: req.correlationId,
         approvalId: req.approvalId,
       }),
-    })
+    }, signal)
     return (await res.json()) as InvokeResult
   }
 

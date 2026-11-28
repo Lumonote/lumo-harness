@@ -7,13 +7,16 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
+import type { Ask } from '../../../shared/seam-contracts/asks.ts'
 import type { DualPluginGateway } from './gateway.ts'
 import { TOOL_NAME_RE } from './manifest.ts'
+
+export const ownsToolAsk = (ask: Ask, identity: DualRouteDeps['identity']) => ask.realm === identity.realm && ask.requester_user_id === identity.userId && (ask.project_id || undefined) === (identity.projectId || undefined)
 
 export const DUAL_PREFIX = '/lumo/api/dual'
 export interface DualRouteDeps {
   gateway: DualPluginGateway | undefined
-  identity: { userId: string; realm: string; projectId?: string }
+  identity: { userId: string; realm: string; projectId?: string | undefined }
   readBody: (req: IncomingMessage) => Promise<Buffer>
 }
 
@@ -48,12 +51,14 @@ export async function handleDualRoute(req: IncomingMessage, res: ServerResponse,
     }
     if (req.method === 'GET' && pathname === `${DUAL_PREFIX}/asks`) {
       const status = new URL(req.url ?? '/', 'http://lumo.local').searchParams.get('status') ?? undefined
-      json(res, 200, { asks: gateway.asks.list({ userId: identity.userId, ...(status ? { status } : {}) }) }); return true
+      json(res, 200, { asks: gateway.asks.list({ userId: identity.userId, ...(status ? { status } : {}) }).filter(ask => ownsToolAsk(ask, identity)) }); return true
     }
     const ans = pathname.match(/^\/lumo\/api\/dual\/asks\/([^/]+)\/answer$/u)
     if (req.method === 'POST' && ans) {
       const id = decodeURIComponent(ans[1]!)
-      if (!/^run:dual-\d{1,12}$/u.test(id)) { json(res, 400, { error: 'invalid ask id' }); return true }
+      if (!/^run:dual-[A-Za-z0-9-]{1,64}$/u.test(id)) { json(res, 400, { error: 'invalid ask id' }); return true }
+      const ask = gateway.asks.get(id)
+      if (!ask || !ownsToolAsk(ask, identity)) { json(res, 404, { error: 'ask 不存在' }); return true }
       const body = await readJson(req, deps)
       const r = gateway.asks.answer(id, typeof body.value === 'string' ? body.value : '', identity.userId)
       json(res, r.ok ? 200 : 409, r); return true

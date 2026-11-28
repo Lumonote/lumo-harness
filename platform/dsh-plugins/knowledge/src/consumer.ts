@@ -20,24 +20,20 @@ export interface KnowledgeToolConfig {
   overfetchFactor?: number
 }
 
+/** Shared execution face; callers supply identity, never a synthetic DSH Agent. */
+export interface KnowledgeQueryTool {
+  realm: string
+  parameters: ToolDefinition['parameters']
+  execute(args: unknown, context: { sessionRef?: string; userId?: string; signal?: AbortSignal }): Promise<{ hits: Array<{ docId: string; text: string; score: number }> }>
+}
+
 export function defineKnowledgeTool(
   ctx: Context,
   seam: KnowledgeSeam,
   config: KnowledgeToolConfig,
   scope: KnowledgeSessionScope,
+  publish?: (tool: KnowledgeQueryTool) => void,
 ): () => void {
-  /**
-   * 这一次会话允许的空间。读的是 `exec.agent.session.id`——与 `@lumo/control` 读控制状态
-   * 同一个形状，因为工具执行时拿不到 agent 的作用域（`Agent.ctx` 是私有的）。
-   *
-   * 取不到会话（例如 PTC 之类的合成调用）时返回 `undefined` = 不按空间收窄。**这与
-   * 「读不到收窄条件」是同一条语义**：收窄是调用方设的，没设就是不设限——而它不是安全
-   * 边界，realm 才是（见契约里那段）。
-   */
-  const sessionSpaces = (exec: ToolRunContext): readonly string[] | undefined => {
-    const session = (exec as { agent?: { session?: { id?: unknown } } }).agent?.session?.id
-    return session === undefined || session === null ? undefined : scope.spacesFor(String(session))
-  }
   const sessionUserId = (exec: ToolRunContext): string | undefined => {
     const session = (exec as { agent?: { session?: { id?: unknown } } }).agent?.session?.id
     return session === undefined || session === null ? undefined : scope.userIdFor?.(String(session))
@@ -76,34 +72,42 @@ export function defineKnowledgeTool(
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
-    async execute(
-      args: unknown,
-      exec: ToolRunContext,
-    ): Promise<{ hits: Array<{ docId: string; text: string; score: number }> }> {
+    execute(args: unknown, exec: ToolRunContext) {
+      const id = (exec as { agent?: { session?: { id?: unknown } } }).agent?.session?.id, userId = sessionUserId(exec)
+      return run(args, { ...(id == null ? {} : { sessionRef: String(id) }), ...(userId ? { userId } : {}), ...((exec as { signal?: AbortSignal }).signal ? { signal: (exec as { signal?: AbortSignal }).signal } : {}) })
+    },
+  }
+  const run: KnowledgeQueryTool['execute'] = async (args, context) => {
+      const scopedUser = context.sessionRef ? scope.userIdFor?.(context.sessionRef) : undefined
+      if (scopedUser && context.userId && scopedUser !== context.userId) throw new Error('knowledge: 会话身份不匹配')
       const { question, topK } = args as { question?: string; topK?: number }
-      if (!question?.trim()) throw new Error('knowledge_query: question 不能为空')
-      const k = Math.min(Math.max(topK ?? config.defaultTopK, 1), config.defaultTopK * 4)
+      context.signal?.throwIfAborted()
+      if (typeof question !== 'string' || !question.trim()) throw new Error('knowledge_query: question 不能为空')
+      if (topK !== undefined && (!Number.isFinite(topK) || topK <= 0)) throw new Error('knowledge_query: topK 必须为正数')
+      const k = Math.floor(Math.min(Math.max(topK ?? config.defaultTopK, 1), config.defaultTopK * 4))
       // 过量召回给重排留出空间；未配置 reranker 时倍数恒为 1，检索量不变。
       const factor = config.rerank ? Math.max(config.overfetchFactor ?? DEFAULT_OVERFETCH_FACTOR, 1) : 1
       const candidates = await seam.query({
         realm: config.realm,
         roles: config.roles,
-        ...(sessionUserId(exec) === undefined ? {} : { userId: sessionUserId(exec) }),
+        ...(context.userId === undefined ? {} : { userId: context.userId }),
         text: question,
         topK: k * factor,
         scope: 'published', // 铁律 17：模型只读发布态
         // 这一次会话的收窄条件（受治理执行按预设设的）。**没设过就是 undefined**，
         // 而 `spaces: undefined` 与省略同义（不按空间收窄）——契约里那条区分在
         // Provider 侧实现，这里只负责如实传下去，不在这里替它做判断。
-        spaces: sessionSpaces(exec),
+        spaces: context.sessionRef ? scope.spacesFor(context.sessionRef) : undefined,
       })
       const hits = await rerankHits(config.rerank, question, candidates, k, (reason) =>
         ctx.logger.warn('knowledge: 重排降级为向量原序: %s', reason),
       )
+      context.signal?.throwIfAborted()
       return {
         hits: hits.map((h) => ({ docId: h.docId, text: h.text, score: h.score })),
       }
-    },
   }
+  publish?.({ realm: config.realm, parameters: definition.parameters, execute: run })
+
   return ctx.tools.register(definition)
 }

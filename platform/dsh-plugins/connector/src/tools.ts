@@ -14,7 +14,16 @@ import { AskRejectedError, askFromGatewayError, invokeWithAsk } from './asks.ts'
 import type { ConnectorSessionScope } from '../../../shared/seam-contracts/connector-scope.ts'
 import { ASK_RUN_TREE_EVENT, runTreeLinkOf, withAskContext, type Ask } from '../../../shared/seam-contracts/asks.ts'
 
+export interface ConnectorInvocation { sessionRef?: string; runId?: string; signal?: AbortSignal; onAsk?(ask: Ask): void; onSettled?(ask: Ask): void }
+export interface ConnectorTools {
+  definitions: Array<Pick<ToolDefinition, 'name' | 'description' | 'parameters'>>
+  list(context: ConnectorInvocation): Promise<unknown>
+  invoke(args: unknown, context: ConnectorInvocation): Promise<unknown>
+}
+
 export interface ConnectorToolOptions {
+  publish?: (tools: ConnectorTools) => void
+
   /**
    * 428 approval_required 后在工具内等待人工决议的上限（毫秒）。默认 10 分钟（网关 TTL 15 分钟）。
    * 设为 0 恢复旧行为：立即把 approval_required 交回模型（仍会登记 Ask 到运行树）。
@@ -37,13 +46,12 @@ function linkAsk(ctx: Context, ask: Ask): void {
   } catch { /* 关联失败不影响调用本身 */ }
 }
 
-function sessionScope(exec: ToolRunContext | undefined, scope: ConnectorSessionScope): readonly string[] | undefined {
+function invocationOf(exec: ToolRunContext | undefined): ConnectorInvocation {
   const agent = (exec as { agent?: { session?: { id?: unknown } } } | undefined)?.agent
   const raw = agent?.session?.id
-  if (agent && (raw === undefined || raw === null || String(raw) === '')) {
-    throw new Error('connector: agent session identity is unavailable')
-  }
-  return raw === undefined || raw === null ? undefined : scope.allowedFor(String(raw))
+  if (agent && (raw === undefined || raw === null || String(raw) === '')) throw new Error('connector: agent session identity is unavailable')
+  const runId = runIdOf(exec), signal = (exec as { signal?: AbortSignal } | undefined)?.signal
+  return { ...(raw == null ? {} : { sessionRef: String(raw) }), ...(runId ? { runId } : {}), ...(signal ? { signal } : {}) }
 }
 
 export function defineConnectorTools(ctx: Context, client: ConnectorClient, scope: ConnectorSessionScope, options: ConnectorToolOptions = {}): () => void {
@@ -93,9 +101,7 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient, scop
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
     async execute(_args: unknown, exec: ToolRunContext): Promise<unknown> {
-      const allowed = sessionScope(exec, scope)
-      const connectors = await client.list()
-      return { connectors: allowed === undefined ? connectors : connectors.filter(connector => allowed.includes(connector.id)) }
+      return list(invocationOf(exec))
     },
   }
 
@@ -152,7 +158,14 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient, scop
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
-    async execute(args: unknown, exec: ToolRunContext): Promise<unknown> {
+    execute(args: unknown, exec: ToolRunContext) { return invoke(args, invocationOf(exec)) },
+  }
+  const list: ConnectorTools['list'] = async context => {
+    const allowed = context.sessionRef ? scope.allowedFor(context.sessionRef) : undefined
+    const connectors = await client.list(context.signal)
+    return { connectors: allowed === undefined ? connectors : connectors.filter(connector => allowed.includes(connector.id)) }
+  }
+  const invoke: ConnectorTools['invoke'] = async (args, context) => {
       const a = args as {
         connectorId?: string; operation?: string
         pathParams?: Record<string, string>; query?: Record<string, string>
@@ -161,13 +174,9 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient, scop
       if (!a.connectorId?.trim()) throw new Error('connector_invoke: connectorId 不能为空')
       if (!a.operation?.trim()) throw new Error('connector_invoke: operation 不能为空')
 
-      // 会话归属：审计要能回答「哪个会话调了外部系统」，而网关拿不到 dsh 会话
-      // ——它只认请求头。`agent.session` 的类型增强不一定在本插件的类型图里，
-      // 故与 session-log 的 `tools/pre-execute` 用同一种防御式取值。
-      // 取不到就不发这个头（审计照记，只是 session_id 为 NULL），不阻断调用。
-      const session = (exec as { agent?: { session?: { id?: unknown } } }).agent?.session?.id
-      const sessionRef = session === undefined || session === null ? undefined : String(session)
-      const allowed = sessionScope(exec, scope)
+      context.signal?.throwIfAborted()
+      const sessionRef = context.sessionRef
+      const allowed = sessionRef ? scope.allowedFor(sessionRef) : undefined
       if (allowed !== undefined && !allowed.includes(a.connectorId)) {
         return {
           provenance: `external:connector/${a.connectorId}`,
@@ -178,29 +187,29 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient, scop
         }
       }
 
-      const askContext = { ...(runIdOf(exec) ? { run_id: runIdOf(exec) } : {}), ...(sessionRef ? { session_ref: sessionRef } : {}) }
+      const askContext = { ...(context.runId ? { run_id: context.runId } : {}), ...(sessionRef ? { session_ref: sessionRef } : {}) }
       const request = {
         connectorId: a.connectorId,
         operation: a.operation,
-        pathParams: a.pathParams,
-        query: a.query,
+        ...(a.pathParams ? { pathParams: a.pathParams } : {}),
+        ...(a.query ? { query: a.query } : {}),
         body: a.body,
-        correlationId: a.correlationId,
-        sessionRef,
+        ...(a.correlationId ? { correlationId: a.correlationId } : {}),
+        ...(sessionRef ? { sessionRef } : {}),
       }
       try {
         // P0-1：428 时取统一 Ask，挂到运行树节点，等待决议后用 approvalId 重放同一请求。
         const result = askWaitMs > 0
           ? await invokeWithAsk(client, request, {
             fetchAsk: async (id, signal) => (await client.listAsks(undefined, signal)).find(ask => ask.id === id),
-            onAsk: ask => linkAsk(ctx, ask),
-            onSettled: ask => linkAsk(ctx, ask),
+            onAsk: ask => { linkAsk(ctx, ask); context.onAsk?.(ask) },
+            onSettled: ask => { linkAsk(ctx, ask); context.onSettled?.(ask) },
             context: askContext,
             maxWaitMs: askWaitMs,
             ...(options.askPollMs ? { pollMs: options.askPollMs } : {}),
-            ...((exec as { signal?: AbortSignal } | undefined)?.signal ? { signal: (exec as { signal?: AbortSignal }).signal } : {}),
+            ...(context.signal ? { signal: context.signal } : {}),
           })
-          : await client.invoke(request)
+          : await client.invoke(request, context.signal)
         return {
           provenance: `external:connector/${a.connectorId}`,
           ok: result.status < 400,
@@ -231,6 +240,7 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient, scop
             // askWaitMs=0 的旧路径：仍把 Ask 登记到运行树，模型拿到 askId 可告知用户。
             const ask = withAskContext(pending, askContext)
             linkAsk(ctx, ask)
+            context.onAsk?.(ask)
             return {
               provenance: `external:connector/${a.connectorId}`,
               ok: false,
@@ -251,8 +261,8 @@ export function defineConnectorTools(ctx: Context, client: ConnectorClient, scop
         }
         throw e
       }
-    },
   }
+  options.publish?.({ definitions: [listTool, invokeTool], list, invoke })
 
   const disposeList = ctx.tools.register(listTool)
   const disposeInvoke = ctx.tools.register(invokeTool)

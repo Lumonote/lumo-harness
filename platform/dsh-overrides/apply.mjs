@@ -16,7 +16,7 @@ export const overlayAssetPaths = ['sidebar-documentpreview/PdfDataPreview.tsx', 
  * `diagnoseOverlayAnchors()` 一次给出完整清单。
  *
  * 收集模式仍然照常落盘，因为同一个文件常有多段补丁，后一段的锚点就是前一段的产物
- * （slots.ts 的 `HeroComposerOwnerProps` 插入即由第二段补丁消费）。跳过落盘会把
+ * （同一文件的后续替换可能消费先前的产物）。跳过落盘会把
  * 这类依赖报成假失配。诊断只在一次性副本上跑，写坏没有代价。
  */
 const missedAnchors = []
@@ -72,11 +72,8 @@ function addLibraryDocumentPreview(root) {
  * applied below.
  */
 export const overriddenPackageDirectories = [
-  'packages/client/ui-conversation',
   // Lumo 的资料库预览直接复用此包导出的 Office PDF 与表格查看器。
   'packages/client/ui-sidebar-documentpreview',
-  'packages/client/ui-sidebar',
-  'packages/client/ui-workspace',
   'packages/client/ui-model-selection',
   // LUMO_STREAM_RESILIENCE: 聊天「内容消失 / 对话卡住」链路修复涉及的三个包
   // （服务端 WS mux 背压、客户端载波退避、Session 事件流自动重开）。
@@ -89,7 +86,7 @@ export const overriddenPackageDirectories = [
 ]
 
 /**
- * Apply the existing overlay inventory (9 package scopes and root tsdown). This must
+ * Apply the existing overlay inventory (6 package scopes and root tsdown). This must
  * only be called for an isolated checkout/copy, never the upstream worktree.
  */
 export function applyLumoDshOverrides(root) {
@@ -111,155 +108,6 @@ export function applyLumoDshOverrides(root) {
     "    entry: client ? '' : ['lib/types/index.js'], // LUMO_DSH_TYSDOWN_ENTRY: 花括号 entry 在重构期对 dsh-root 解析断裂,见 apply.mjs 注释\n",
   ]], 'LUMO_DSH_TYSDOWN_ENTRY')
 
-  patchFile(root, 'packages/client/ui-conversation/src/client/apply.ts', [[
-    // 锚在座位名上、不带 scope。上游 2026-09 的 provider 重构把 hero.agentPreset 的
-    // scope 从 root 改成 session-maybe，带 scope 的整行锚当场失配。座位插到锚行
-    // **之前** —— 对象字面量里相邻成员的声明顺序没有语义。
-    "      'conversation.hero.agentPreset': ",
-    "      // LUMO_DSH_OVERLAY: root composer extension seats.\n"
-      + "      'conversation.hero.input.left': { kind: 'list', scope: 'root' },\n"
-      + "      'conversation.hero.composer.dock': { kind: 'list', scope: 'root' },\n"
-      + "      'conversation.hero.agentPreset': ",
-  ]])
-
-  patchFile(root, 'packages/client/ui-conversation/src/client/contract/slots.ts', [
-    [
-      // 同 apply.ts：只锚座位名，不锚 scope。座位插到锚行之前。
-      // 行首的 "\n" 是必需的——8 空格缩进的行里同样含有「4 空格 + 座位名」这段子串，
-      // 不加行首换行会被 replaceExactlyOnce 判成「锚点出现多次」。
-      "\n    'conversation.hero.agentPreset': ",
-      "\n    /** LUMO_DSH_OVERLAY: project/space control before a session exists. */\n"
-        + "    'conversation.hero.input.left': { kind: 'list'; scope: 'root'; owner: HeroComposerOwnerProps }\n"
-        + "    /** LUMO_DSH_OVERLAY: embedded design panel below the homepage input. */\n"
-        + "    'conversation.hero.composer.dock': { kind: 'list'; scope: 'root'; owner: HeroComposerOwnerProps }\n"
-        + "    'conversation.hero.agentPreset': ",
-    ],
-    [
-      // 锚在 InputZone 的声明行上，并插到它**之前**。块体里 `session` 的类型上游会来回改
-      // （dsh-v0.1.1-rc.2 是 ConversationSnapshot，0.1.2-alpha.1 又改回 SessionSnapshot），
-      // 把整块当锚点等于每次改名都得跟着校准一次。声明行本身稳定得多，而插入位置对
-      // 顶层 interface 声明没有语义差别。
-      // __tests__/overlay.spec.ts 对着 `git show HEAD:` 的原文跑，锚点漂移会当场红。
-      "export interface InputZone {",
-      "/** LUMO_DSH_OVERLAY: root-scoped currency for pre-session composer extensions. */\n"
-        + "export interface HeroComposerOwnerProps {}\n\n"
-        + "export interface InputZone {",
-    ],
-    [
-      // Factory 实例的 children 声明面。上游 2026-09 的重构把 hero 座位从
-      // `ConversationSlotProps` 的 PropsRenderSlots 联合挪进了 SlotFactoryMap：联合没了，
-      // 座位改在这份 children 里声明，实例内的 renderSlot 才有类型。
-      "\n        'conversation.hero.agentPreset': ",
-      "\n        // LUMO_DSH_OVERLAY: the factory instance renders the same hero seats.\n"
-        + "        'conversation.hero.input.left': { kind: 'list'; scope: 'root' }\n"
-        + "        'conversation.hero.composer.dock': { kind: 'list'; scope: 'root' }\n"
-        + "        'conversation.hero.agentPreset': ",
-    ],
-  ])
-
-  // 渲染点在上游 2026-09（e62587c163「open subagent chats in sidebar」）从
-  // `ConversationRoot.tsx` 搬到了 `ConversationContent.tsx`：前者退化成 13 行转发壳
-  // （`return <ConversationMainPanel {...props} />`），再没有可插入的渲染行；后者持有
-  // `heroWorkspaceRow` 与 `inputBar`，也就是 hero composer 的真正装配处。
-  //
-  // 另注意 `ConversationContent` 现在同时服务 main 与 embedded 两种 variant，所以两个
-  // 座位都严格用 `hero` 守卫：hero 只在 main 的无会话（或 blank）相位为真，embedded
-  // 实例不会渲染它们。
-  patchFile(root, 'packages/client/ui-conversation/src/client/skeleton/ConversationContent.tsx', [
-    // 上游把 composer 重构：`leftItems` 属性已移除，首页输入改为 `composer.bar` + `input.dock`。
-    // 锚点移到 `heroWorkspaceRow`——它在 composerBar 里唯一且稳定；`hero` 守卫保证只在
-    // 首页（无会话）渲染左侧项目/空间控制座位。
-    [
-      "      {hero && heroWorkspaceRow}\n",
-      "      {hero && heroWorkspaceRow}\n"
-        + "      {hero && renderSlot('conversation.hero.input.left', { input: inputState, inputActions: props.inputActions })} {/* LUMO_DSH_OVERLAY: pre-session project scope control */}\n",
-    ],
-    [
-      "      {inputBar}\n    </div>\n",
-      "      {inputBar}\n"
-        + "      {hero && renderSlot('conversation.hero.composer.dock', { input: inputState, inputActions: props.inputActions })} {/* LUMO_DSH_OVERLAY */}\n"
-        + "    </div>\n",
-    ],
-  ])
-
-  // The Lumo workspace navigation belongs between New Session and the native
-  // workspace/history browser. Add a dedicated seat in staged copies instead
-  // of replacing ui-workspace or editing the upstream checkout.
-  patchFile(root, 'packages/client/ui-sidebar/src/client/index.ts', [[
-    "      'sidebar.brand.name': { kind: 'single', scope: 'root' },\n",
-    "      'sidebar.brand.name': { kind: 'single', scope: 'root' },\n"
-      + "      // LUMO_SIDEBAR_NAVIGATION: product navigation above session history.\n"
-      + "      'sidebar.navigation': { kind: 'list', scope: 'root' },\n",
-  ]], 'LUMO_SIDEBAR_NAVIGATION')
-
-  patchFile(root, 'packages/client/ui-sidebar/src/client/contract/slots.ts', [
-    [
-      "    'sidebar.brand.name': { kind: 'single'; scope: 'root'; owner: SidebarBrandNameOwnerProps }\n",
-      "    'sidebar.brand.name': { kind: 'single'; scope: 'root'; owner: SidebarBrandNameOwnerProps }\n"
-        + "    /** LUMO_SIDEBAR_NAVIGATION: product navigation above native history. */\n"
-        + "    'sidebar.navigation': { kind: 'list'; scope: 'root'; owner: SidebarNavigationOwnerProps }\n",
-    ],
-    [
-      "/** Owner share of an action rendered beside Settings at the sidebar foot. */\nexport interface SidebarFooterActionOwnerProps {\n",
-      "/** LUMO_SIDEBAR_NAVIGATION: geometry supplied to product navigation. */\n"
-        + "export interface SidebarNavigationOwnerProps {\n"
-        + "  /** Whether the sidebar renders wide content (false = 56px rail). */\n"
-        + "  wide: boolean\n"
-        + "}\n\n"
-        + "/** Owner share of an action rendered beside Settings at the sidebar foot. */\nexport interface SidebarFooterActionOwnerProps {\n",
-    ],
-    [
-      "    | 'sidebar.brand.name'\n",
-      "    | 'sidebar.brand.name'\n"
-        + "    | 'sidebar.navigation' // LUMO_SIDEBAR_NAVIGATION\n",
-    ],
-  ], 'LUMO_SIDEBAR_NAVIGATION')
-
-  // The browsing region now wraps the panel list and history in scrollRegion;
-  // retain the same seat position after New Session for both known layouts.
-  const sidebarRootFile = 'packages/client/ui-sidebar/src/client/SidebarRoot.tsx'
-  const sidebarRootSource = readFileSync(resolve(root, sidebarRootFile), 'utf8')
-  const browsingRegion = sidebarRootSource.includes('      <div className={css.scrollRegion}>\n')
-    ? '      <div className={css.scrollRegion}>\n'
-    : '      {/* The browsing region fills the column between the controls and the\n'
-  patchFile(root, sidebarRootFile, [
-    [
-      browsingRegion,
-      "      {renderSlot('sidebar.navigation', { wide })} {/* LUMO_SIDEBAR_NAVIGATION */}\n\n"
-        + browsingRegion,
-    ],
-  ], 'LUMO_SIDEBAR_NAVIGATION')
-
-  // Upstream added search-spacing motion to the header. Keep its class expression
-  // intact; the Lumo controls are siblings, not a replacement for native chrome.
-  const historyFile = 'packages/client/ui-workspace/src/client/rows/WorkspaceBrowser.tsx'
-  const historySource = readFileSync(resolve(root, historyFile), 'utf8')
-  // Match the class expression, preserving new upstream DOM attributes too.
-  const historyHeader = historySource.includes('      <div className={css.sectionHeader}')
-    ? '      <div className={css.sectionHeader}'
-    : '      <div className={clsx(css.sectionHeader, wide && searchSpacingMotionEnabled && css.searchSpacingMotion)}'
-  patchFile(root, historyFile, [[
-    historyHeader,
-    `      {wide && (
-        <div data-lumo-history-toggle className={css.sectionHeader}>
-          <button type="button" className={css.iconButton} style={{ width: 'auto', padding: '0 8px' }}
-            aria-pressed={groupBy === 'flat'} onClick={() => { actions.setGroupBy('flat'); setQuery('') }}>
-            {t('groupBy.flat')}
-          </button>
-          <button type="button" className={css.iconButton} style={{ width: 'auto', padding: '0 8px' }}
-            aria-pressed={groupBy === 'workspace'} onClick={() => { actions.setGroupBy('workspace'); setQuery('') }}>
-            {t('groupBy.workspace')}
-          </button>
-        </div>
-      )}
-` + historyHeader,
-  ]], 'data-lumo-history-toggle')
-
-  patchFile(root, 'packages/client/ui-workspace/src/client/locales.ts', [
-    ["  'groupBy.flat': '单列表',", "  'groupBy.flat': '全部对话',"],
-    ["  'groupBy.flat': 'In one list',", "  'groupBy.flat': 'All conversations',"],
-  ], "'All conversations'")
-
   patchFile(root, 'packages/client/ui-model-selection/src/client/directory.ts', [
     [
       "    if (catalog.status !== 'ready' || catalog.value === null || projected === undefined) {\n",
@@ -278,22 +126,6 @@ export function applyLumoDshOverrides(root) {
       "    const routable = selection === null ? null : catalog.value.groups.some(group => group.id === selection.provider\n",
     ],
   ], 'LUMO_MODEL_CATALOG')
-
-  // Root hero extensions need the same public draft/submit face as a live
-  // session dock so Lumo can hand an OpenDesign/PPT brief to the native
-  // conversation. The owner values remain optional for the cold no-session
-  // state, where the native composer is intentionally inert.
-  patchFile(root, 'packages/client/ui-conversation/src/client/contract/slots.ts', [[
-      "export interface HeroComposerOwnerProps {}\n",
-    "/** LUMO_HERO_INPUT_BRIDGE: optional native input currency for blank sessions. */\n"
-      + "export interface HeroComposerOwnerProps {\n"
-      // `ConversationContent` always forwards the hook values, which may be
-      // undefined during the no-session state. Keep the optional fields
-      // explicitly undefined-able under exactOptionalPropertyTypes.
-      + "  readonly input?: InputState | undefined\n"
-      + "  readonly inputActions?: InputActions | undefined\n"
-      + "}\n",
-  ]], 'LUMO_HERO_INPUT_BRIDGE')
 
   // ── LUMO_STREAM_RESILIENCE ─────────────────────────────────────────────────
   // 桌面端「聊天内容突然消失 / 对话卡住」的链路修复。因果链：

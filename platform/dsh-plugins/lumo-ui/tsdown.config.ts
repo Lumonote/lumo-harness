@@ -41,6 +41,14 @@ const node = {
   external: (source: string) => source !== '@deepseek-ai/dsh-host-authentication-token/src/browser-auth.ts'
     && (/^@deepseek-ai\//u.test(source) || /^node:/u.test(source)),
   noExternal: ['@deepseek-ai/dsh-host-authentication-token/src/browser-auth.ts'],
+  plugins: [{
+    name: 'lumo-mcp-relay',
+    generateBundle(this: { emitFile(asset: { type: 'asset'; fileName: string; source: string }): string }) {
+      // McpBridge is bundled into lib/index.js, so its import.meta.url now
+      // resolves here. Ship the executable alongside it in previews/releases.
+      this.emitFile({ type: 'asset', fileName: 'mcp-relay.mjs', source: readFileSync(new URL('../dual-plugins/src/mcp-relay.mjs', import.meta.url), 'utf8') })
+    },
+  }],
   outputOptions: { entryFileNames: 'index.js' },
 }
 

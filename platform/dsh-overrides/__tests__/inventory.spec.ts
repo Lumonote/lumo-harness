@@ -3,8 +3,8 @@ import { overriddenPackageDirectories } from '../apply.mjs'
 import { auditOverlayEffects, overlayInventory, validateOverlayInventory } from '../inventory.mjs'
 
 describe('overlay debt inventory', () => {
-  it('covers all nine build package scopes and root tsdown with explicit removal criteria', () => {
-    expect(overriddenPackageDirectories).toHaveLength(9)
+  it('covers all six build package scopes and root tsdown with explicit removal criteria', () => {
+    expect(overriddenPackageDirectories).toHaveLength(6)
     expect(() => validateOverlayInventory(overriddenPackageDirectories)).not.toThrow()
     expect(overlayInventory.rootFiles.map(item => item.path)).toEqual(['tsdown.config.ts'])
     expect(() => validateOverlayInventory([...overriddenPackageDirectories, 'packages/hidden'])).toThrow('differs')
@@ -21,7 +21,7 @@ describe('overlay debt inventory', () => {
     }
     before.set('tsdown.config.ts', Buffer.from('original')); after.set('tsdown.config.ts', Buffer.from('changed'))
     const report = auditOverlayEffects(before, after)
-    expect(report.packageCount).toBe(9)
+    expect(report.packageCount).toBe(6)
     expect(report.unchangedCompatibilityPackages).toEqual(['packages/client/modules', 'packages/client/web'])
     after.set('packages/unlisted/src/index.ts', Buffer.from('surprise'))
     expect(() => auditOverlayEffects(before, after)).toThrow('Undocumented overlay change')

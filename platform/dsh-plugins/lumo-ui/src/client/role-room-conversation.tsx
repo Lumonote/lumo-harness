@@ -1,12 +1,13 @@
+import { ChatComposer, chatCommands } from './chat-composer.tsx'
 import { ChatButton } from './chat-button.tsx'
 import { AgentPermissionRequest } from './agent-permission-request.tsx'
 import { ChatRemoteExecution } from './chat-remote-execution.tsx'
 import { removeConversationDraft, readDraft, useConversationDraft, writeDraft } from './conversation-drafts.ts'
 import { ConversationManagement, AttachmentStorage, ConversationSettingsSection } from './conversation-management.tsx'
-import { AgentComposerInput, usePromptContext } from './agent-composer-input.tsx'
-import { SendIcon, StopIcon, CloseIcon, FolderIcon, DownIcon } from './chat-icons.tsx'
+import { usePromptContext } from './agent-composer-input.tsx'
+import { CloseIcon, DownIcon } from './chat-icons.tsx'
 import { AgentProjectPicker } from './agent-project-picker.tsx'
-import { AttachmentCards, AttachmentComposer, useChatAttachments } from './chat-attachments.tsx'
+import { useChatAttachments } from './chat-attachments.tsx'
 import { AgentModelSelect } from './agent-model-select.tsx'
 import { AcpSessionPanel } from './acp-session-panel.tsx'
 import { EngineLogo } from './engine-logo.tsx'
@@ -84,18 +85,12 @@ export const RoleRoomConversation = ({ room, asks, busy, send, action, answer, c
       </section>)}
     </div>
     {asks.length ? <section ref={permissions} tabIndex={-1} aria-label="角色权限请求" className="lumo-role-permissions">{asks.map(ask => <AgentPermissionRequest key={ask.id} ask={ask} member={room.roles.find(r => r.sessionId === ask.source.session_ref)?.name} disabled={busy} answer={id => void answer(ask.id, id)} />)}</section> : null}
-    <form className="lumo-chat-composer" onDragOver={e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault() }} onDrop={attachments.drop} onPaste={attachments.paste} onSubmit={event => { event.preventDefault(); void submit() }}>
-
-      <AttachmentCards draft={attachments} />
-      <AgentComposerInput inputRef={input} label="协作消息输入" value={text} onChange={changeText} maxLength={6000} disabled={busy || room.busy || attachments.sending}
-        scopePath={`/lumo/api/acp/rooms/${room.id}`} context={context.value} setContext={context.set} members={room.roles} mention={mention} send={() => void submit()}
-        commands={[{ name: 'remote', label: '远程执行', run: () => setPanel('remote') }, { name: 'project', label: '选择项目', run: () => setPanel('settings') }, { name: 'files', label: '项目文件', run: () => setPanel('files') }, { name: 'skills', label: '加载 Skill', run: () => setPanel('skills') }, { name: 'members', label: '群组成员', run: () => setPanel('members') }, { name: 'activity', label: '执行记录', run: () => setPanel('activity') }, { name: 'direct', label: '单人回复', run: () => setMode('direct') }, { name: 'discuss', label: '团队讨论', run: () => setMode('discuss') }, { name: 'relay', label: '角色接力', run: () => setMode('relay') }]} />
-      <div className="lumo-chat-compose-actions"><AttachmentComposer draft={attachments} disabled={busy || room.busy} /><select aria-label="对话方式" value={mode} disabled={busy || room.busy} onChange={e => setMode(e.target.value as RoomMode)}><option value="direct">单人回复</option><option value="discuss">团队讨论</option><option value="relay">角色接力</option></select>
-        {mode === 'direct' ? <select aria-label="发送给角色" value={target} disabled={busy || room.busy} onChange={e => setTarget(e.target.value)}>{room.roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}</select> : null}
-        <button type="button" className="lumo-chat-project-chip" title={room.cwd} onClick={() => setPanel('settings')} aria-label="选择项目文件夹"><FolderIcon size={14} />{room.cwd.split(/[\\/]/u).filter(Boolean).at(-1) || room.cwd}</button>
-        <button className="lumo-chat-send lumo-chat-icon-button" aria-label="发送协作消息" title="发送 · Enter" type="submit" disabled={busy || room.busy || attachments.sending || (!text.trim() && !attachments.files.length && !context.has)}><SendIcon size={18} /></button>{room.busy ? <button type="button" className="lumo-chat-icon-button" aria-label="停止协作" title="停止协作" disabled={busy} onClick={() => void action('stop')}><StopIcon size={18} /></button> : null}
-      </div>
-    </form>
+    <ChatComposer attachments={attachments} busy={busy} running={room.busy} cwd={room.cwd} project={() => setPanel('settings')} stop={() => void action('stop')}
+      sendLabel="发送协作消息" stopLabel="停止协作" inputRef={input} label="协作消息输入" value={text} onChange={changeText} maxLength={6000}
+      scopePath={`/lumo/api/acp/rooms/${room.id}`} context={context.value} setContext={context.set} members={room.roles} mention={mention} send={() => void submit()}
+      commands={[...chatCommands(setPanel), { name: 'members', label: '群组成员', run: () => setPanel('members') }, { name: 'direct', label: '单人回复', run: () => setMode('direct') }, { name: 'discuss', label: '团队讨论', run: () => setMode('discuss') }, { name: 'relay', label: '角色接力', run: () => setMode('relay') }]}
+      controls={<><select aria-label="对话方式" value={mode} disabled={busy || room.busy} onChange={event => setMode(event.target.value as RoomMode)}><option value="direct">单人回复</option><option value="discuss">团队讨论</option><option value="relay">角色接力</option></select>
+        {mode === 'direct' ? <select aria-label="发送给角色" value={target} disabled={busy || room.busy} onChange={event => setTarget(event.target.value)}>{room.roles.map(role => <option key={role.id} value={role.id}>{role.name}</option>)}</select> : null}</>} />
     </div>
     <AgentChatDock panel={panel} onPanel={setPanel} scopePath={`/lumo/api/acp/rooms/${room.id}`} cwd={room.cwd}
       context={context.value} setContext={context.set} disabled={busy || room.busy || attachments.sending} pending={asks.length} running={room.busy}

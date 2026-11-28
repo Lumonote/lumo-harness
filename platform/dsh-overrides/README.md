@@ -10,22 +10,24 @@
 |---|---|---|
 | `assert-pristine.mjs` | 上游洁净度闸门。已跟踪文件有改动，或 `apps/`、`packages/` 下出现未跟踪且未被 gitignore 排除的文件，立即失败 | `prepare-runtime.mjs`（构建前）、`build-runtime.mjs` 与 `local-runtime.sh`（构建后） |
 | `prepare-runtime.mjs` | 把 `git ls-files` 列出的文件复制成隔离副本（`platform/.build/deepseek-harness`），软链 workspace 的 `node_modules`，再对**副本**打 `apply.mjs` 的补丁 | `desktop/build-runtime.mjs`、`desktop/local-runtime.sh` |
-| `apply.mjs` | 处理 9 个包的覆盖/兼容分支和根 `tsdown.config.ts`；包括插槽、资料预览、分组、模型目录、传输恢复与旧版启动隔离。**仅作用于隔离副本** | `prepare-runtime.mjs` |
+| `apply.mjs` | 处理 6 个包的覆盖/兼容分支和根 `tsdown.config.ts`；包括资料预览、模型目录、传输恢复与旧版启动隔离。**仅作用于隔离副本** | `prepare-runtime.mjs` |
 | `brand-web.mjs` | 在 `apps/web/dist/` 构建产物上覆盖 Lumo 品牌（图标、标题、PWA manifest） | 同上 |
 | `check-compatibility.mjs` | 在一次性副本检查全部锚点，并比对实际文件变化与 `inventory.json`，不修改源工作区 | CI、pin 升级与本地诊断 |
 
 ## 当前范围与退出顺序
 
-机器可读清单是 [`inventory.json`](inventory.json)：每项含具体文件、目的、替代机制、退出优先级和验收门槛。`inventory.mjs` 将清单与 `apply.mjs` 的 9 个构建包范围比对，并对临时副本的前后文件字节做审计；新增未登记变化、漏掉声明文件、或已不再需要的必改覆盖都会使检查失败。
+机器可读清单是 [`inventory.json`](inventory.json)：每项含具体文件、目的、替代机制、退出优先级和验收门槛。`inventory.mjs` 将清单与 `apply.mjs` 的 6 个构建包范围比对，并对临时副本的前后文件字节做审计；新增未登记变化、漏掉声明文件、或已不再需要的必改覆盖都会使检查失败。
 
-2026-11-28 对上游提交 `4b399c39a6d1479cd84ca591b4d7c88e24d38a96` 的实测为 **9 个登记包范围 + 1 个根配置，实际变化 16 个文件**。`client/modules` 与 `client/web` 在该提交复用原生启动审计，仅验证锚点，不改字节；保留在构建清单是旧版本兼容范围，不能把登记数量等同于每个版本实际改写数量。
+2026-11-28 对上游提交 `4b399c39a6d1479cd84ca591b4d7c88e24d38a96` 的实测为 **6 个登记包范围 + 1 个根配置，实际变化 8 个文件**。`client/modules` 与 `client/web` 在该提交复用原生启动审计，仅验证锚点，不改字节；保留在构建清单是旧版本兼容范围，不能把登记数量等同于每个版本实际改写数量。
 
 | 顺序 | 范围 | 退出条件 |
 |---|---|---|
 | 0 | `client/modules`、`client/web` 的旧启动分支 | 最低支持版本和发布 pin 均具备原生必需插件审计、可选失败隔离后，删除旧分支及不必要的重建例外，保留黑盒回归 |
 | 0 | 根 `tsdown.config.ts` | 上游构建或平台独立构建配置可完整生成 host/client/typert 产物后移除根入口替换 |
 | 1 | `api/gateway`、`api/session-controller`、`client/ui-model-selection` | 上游原生版本通过慢消费者、断线恢复、历史保留和模型目录先后到达测试后，删除对应修复 |
-| 2 | `client/ui-conversation`、`client/ui-sidebar`、`client/ui-workspace`、`client/ui-sidebar-documentpreview` | 迁移到公开插槽、分组菜单和文件预览导出，完成原生界面回归后删除组件复制与源码注入 |
+| 2 | `client/ui-sidebar-documentpreview` | 迁移到公开插槽、分组菜单和文件预览导出，完成原生界面回归后删除组件复制与源码注入 |
+
+本轮已移除 `client/ui-sidebar` 的 `sidebar.navigation` 注入、`client/ui-workspace` 的分组标题补丁，以及 `client/ui-conversation` 的 hero 输入槽补丁（合计 8 个文件）。统一对话目录使用原生 `sidebar.workspaces`，工作台入口使用 `sidebar.panellist` 与 `main`，原生输入桥接使用已有 `conversation.input.dock`；上游侧栏、工作区和对话源码字节不再改变。
 
 这里的顺序是迁移计划，不宣称上游已提供尚不存在的 API。每次移除都应同时收紧 `overriddenPackageDirectories`、机器清单和相关缓存/重建范围。新功能不得借此扩大覆盖层。
 
@@ -47,9 +49,9 @@ workspace 链接把编译产物写回 `deepseek-harness/packages`——仓库里
 | `apps/web/public/favicon.svg` | `brand-web.mjs` | 把 `desktop-assets/lumo-logo.png` 拷进 `dist/branding/logo.png` |
 | `apps/web/public/manifest.webmanifest` | `brand-web.mjs` | 改 dist 产物的 `name`/`short_name`/`icons` |
 | `apps/web/tests/pwa-manifest.e2e.ts` | `__tests__/overlay.spec.ts` | 该用例当时被就地改成断言 Lumo 品牌。还原成上游版本后，品牌契约由本目录的用例承担 |
-| `packages/client/ui-conversation/src/client/apply.ts` | `apply.mjs` | 在 `conversation.content` factory 的 children 里声明 `conversation.hero.input.left` / `conversation.hero.composer.dock` 两个 root 作用域槽 |
-| `packages/client/ui-conversation/src/client/contract/slots.ts` | `apply.mjs` | 两个槽的类型契约（全局 `SlotMap` + factory children 两个面）+ `HeroComposerOwnerProps` |
-| `packages/client/ui-conversation/src/client/skeleton/ConversationContent.tsx` | `apply.mjs` | 无会话时渲染 hero 变体的左槽与 dock。**2026-09（e62587c163）前落点是 `ConversationRoot.tsx`**——那次重构把 `heroWorkspaceRow` / `inputBar` 搬进了本文件，前者退化成 13 行转发壳 |
+| `packages/client/ui-conversation/src/client/apply.ts` | `lumo-ui/src/client/index.tsx` | 已退出源码覆盖；使用原生公开 `conversation.input.dock`，有 Session/InputState 的空会话和已有对话共用桥接 |
+| `packages/client/ui-conversation/src/client/contract/slots.ts` | `lumo-ui/src/client/index.tsx` | 已退出源码覆盖；使用原生公开 `conversation.input.dock`，有 Session/InputState 的空会话和已有对话共用桥接 |
+| `packages/client/ui-conversation/src/client/skeleton/ConversationContent.tsx` | `lumo-ui/src/client/index.tsx` | 已退出源码覆盖；使用原生公开 `conversation.input.dock`，有 Session/InputState 的空会话和已有对话共用桥接 |
 | `packages/client/ui-theme/src/client/index.ts`（四套主题） | `platform/dsh-plugins/lumo-ui/src/client/themes.ts` | `ctx.theme.register(definition)` —— 上游原生的公开扩展点 |
 | `packages/client/ui-theme/src/client/index.ts`（主题 cookie） | 同上 `persistLumoTheme()` | 登录页等预壳层读同名 cookie（`user-auth/src/html.ts`） |
 | `packages/client/ui-theme/src/theme-settings.ts` | `lumo-ui/src/theme-catalog.ts` | 产品主题走 localStorage，不进上游 settings 文档，因此不需要扩上游的 `THEME_PREFERENCES` 枚举 |
@@ -118,7 +120,7 @@ node -e "import('./platform/dsh-overrides/apply.mjs').then(m => console.log(m.di
 
 诊断会就地改坏传进去的那棵树（收集模式照常落盘），所以每次都重新解包一份，别复用。
 
-上游工作区保持洁净不等于覆盖层“零 rebase”。这些字符串锚点仍需要升级适配，隔离副本也不是已兑现零源码覆盖的证明。上面的退出计划用于逐步归还这些兼容成本；本轮仅补清单、真实审计和文档，没有新增覆盖行为。
+上游工作区保持洁净不等于覆盖层“零 rebase”。这些字符串锚点仍需要升级适配，隔离副本也不是已兑现零源码覆盖的证明。上面的退出计划用于逐步归还这些兼容成本；本轮移除三处包范围、补齐真实宿主验收、审计和文档，没有新增覆盖行为。
 
 **快进之后必须在 dsh 树里重跑装配**，否则平台套件会撞上过期产物：
 

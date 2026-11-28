@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@testing-library/react':
+        specifier: link:../deepseek-harness/node_modules/@testing-library/react
+        version: link:../deepseek-harness/node_modules/@testing-library/react
       '@types/node':
         specifier: ^26.2.0
         version: 26.2.0
