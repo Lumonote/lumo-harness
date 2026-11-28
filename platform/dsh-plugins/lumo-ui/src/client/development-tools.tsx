@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { EngineProbeView } from './acp-session-panel.tsx'
 import { EngineModelPicker } from './engine-model-picker.tsx'
 import { EngineLogo } from './engine-logo.tsx'
+import { CliInstallationPanel } from './cli-installation-panel.tsx'
 
 export type AgentSeed = { engineId: string; modelId?: string }
 export const DevelopmentTools = ({ engines, identity, refresh, createAgent, openSession }: {
@@ -9,6 +10,7 @@ export const DevelopmentTools = ({ engines, identity, refresh, createAgent, open
 }) => {
   const [query, setQuery] = useState(''), [selected, setSelected] = useState(engines[0]?.id ?? '')
   const [cwd, setCwd] = useState(''), [modelId, setModelId] = useState('')
+  const [installationRevision, setInstallationRevision] = useState(0)
   const choose = (id: string) => { setSelected(id); setModelId('') }
   useEffect(() => { if (!engines.some(e => e.id === selected)) choose(engines.find(e => e.available)?.id ?? engines[0]?.id ?? '') }, [engines, selected])
   const current = engines.find(e => e.id === selected)
@@ -20,9 +22,10 @@ export const DevelopmentTools = ({ engines, identity, refresh, createAgent, open
       <span className="lumo-engine-heading"><EngineLogo engineId={engine.id} /><b>{engine.label}</b></span><span>{engine.available ? engine.launchKind === 'on-demand' ? '适配器按需启动' : '已检测到入口' : '未就绪'}</span><small>{engine.available ? '登录与模型需连接确认' : engine.reason}</small>
     </button>)}{!shown.length ? <p>没有匹配的开发工具。</p> : null}</div>
     {current ? <section className="lumo-dev-detail" aria-label={`${current.label} 配置`}><h3 className="lumo-engine-heading"><EngineLogo engineId={current.id} /><span>{current.label}</span></h3>
+      <CliInstallationPanel key={`${identity}:${current.id}`} engineId={current.id} available={current.available} onChanged={() => { setInstallationRevision(n => n + 1); setModelId(''); refresh() }} />
       <p>{current.authHint || '沿用此工具的本机登录与配置。请先在终端完成该工具的首次登录。'}</p>
       {!current.available ? <p role="status">{current.reason}</p> : null}
-      <EngineModelPicker key={current.id} engineId={current.id} identity={identity} available={current.available} cwd={cwd} setCwd={value => { setCwd(value); setModelId('') }} modelId={modelId} setModelId={setModelId} />
+      <EngineModelPicker key={`${current.id}:${installationRevision}`} engineId={current.id} identity={identity} available={current.available} cwd={cwd} setCwd={value => { setCwd(value); setModelId('') }} modelId={modelId} setModelId={setModelId} />
       <div className="lumo-role-toolbar"><button type="button" disabled={!current.available} onClick={() => createAgent({ engineId: current.id, ...(modelId ? { modelId } : {}) })}>用此工具创建 Agent</button>
         <button type="button" disabled={!current.available || !cwd.trim()} onClick={() => openSession(current.id, cwd.trim(), modelId || undefined)}>打开独立会话</button></div>
     </section> : <p>正在读取开发工具目录…</p>}</div>

@@ -2473,7 +2473,7 @@ export function apply(ctx: Context, config: Config): void {
   dualHost = installDualPlugins(ctx, config, runTreeStore, () => acpEngines?.host)
   conversationAsks = installSharedTools(ctx, dualHost, config)
   acpEngines = config.deploymentMode === 'local' ? createAcpEngines({ skills: acpSkills(() => ctx.get('skills') as import('@deepseek-ai/dsh-skill').SkillRegistry | undefined), recoveryIndexPath: join(dirname(resolve(config.skillhubInstallFile ?? '.lumo/skillhub-installs.json')), 'acp-sessions.json'), runTree: runTreeStore, ...acpMcpOptions(dualHost) }) : undefined
-  if (acpEngines) { const engines = acpEngines; ctx.effect(() => () => { engines.rooms.dispose(); engines.host.closeAll() }, 'lumo-ui: reap ACP engine processes') }
+  if (acpEngines) { const engines = acpEngines; ctx.effect(() => () => { engines.cli.dispose(); engines.rooms.dispose(); engines.host.closeAll() }, 'lumo-ui: reap ACP engine processes') }
   registerComputerUseRoutes(ctx, config.deploymentMode === 'local')
   registerRemoteComputerRoutes(ctx, config.deploymentMode === 'local')
   installDeviceActions(ctx, config.deploymentMode === 'local', runTreeStore)

@@ -44,6 +44,20 @@ Agent 工作台的「开发工具与模型」展示全部已注册工具；检�
 
 群组会话在列表与连接响应中带 `room` 归属，独立会话 API 拒绝直接修改其生命周期和模型。成员详情只读；回合和审批继续使用现有引擎链路。模型配置和成员句柄写入失败时保留控制入口，不伪报成功或自动重复发送。
 
+### 页面管理 CLI 安装
+
+在「工具与模型」选择工具并展开「CLI 安装」，可在线安装、指定版本、重新安装、取消及重试，查看安装阶段、日志和位置。版本留空时，「在线安装／安装新版本」解析最新版；「重新安装」沿用已受管版本，没有受管版本时解析最新版。重试保留失败任务的版本参数。
+
+支持 Codex、Claude Code（ACP 适配器与 Claude CLI）、Codex ACP、Gemini、CodeBuddy、GitHub Copilot、OpenCode、Qwen Code 和 TRAE CLI 共 9 个注册入口。前 8 项使用固定 npm 包名与官方 registry，需本机 Node.js/npm；TRAE 使用官方安装器，当前支持 macOS/Linux。WorkBuddy 和 Kiro 保留本机检测，并显示尚未支持在线安装的原因。真实安装验收目前覆盖 macOS 上的 Codex 和 TRAE，其余工具及 Windows/Linux 尚未逐一实装验收。
+
+安装目录默认为会话状态目录旁的 `cli-tools/`，无自定义状态路径时为 `.lumo/cli-tools/`，可通过 `LUMO_CLI_HOME` 指定。同一目录一次只运行一个安装任务；磁盘不足在下载前报错。每次安装写入独立版本目录，成功校验入口后才切换启用版本；失败或取消保留原版本，已有引擎进程继续使用原路径。普通对话、Agent 群组及项目流程通过同一个引擎注册表优先使用受管入口，禁用引擎配置仍生效。
+
+状态保存已启用版本与最近一次任务，重启后可查看日志；未完成任务显示中断并允许手动重试，不自动重放。旧版本目录保留用于已有进程，目前没有版本清理或回滚页面。安装完成不代表登录成功；连接时继续使用工具原生账户配置，页面会显示实际认证结果。安装器使用独立缓存和临时 HOME，不更改全局 npm 前缀或 shell 配置。
+
+安装 API 为 `GET /engines/:id/installation`、`POST /engines/:id/installation/install` 和 `POST /engines/:id/installation/cancel`，同样使用 `/lumo/api/acp` 前缀。安装请求包含 UUID `requestId`、`action: install | reinstall` 和 `version: latest | semver`，取消请求包含 `jobId`。接口限本机同源页面访问；不接收自定义包、命令或下载地址，远程浏览器不能直接安装服务器工具。
+
+实际安装、页面控制及模型连接结果见 [CLI 安装验收](../../../docs/cli-installation-acceptance-2026-11-28.md)。
+
 ## 真实本机 Claude 验收
 
 默认启动优先寻找 `claude-agent-acp`，兼容 `claude-code-acp`，按需安装固定为 `@agentclientprotocol/claude-agent-acp@0.113.0`。能力、命令、模式和模型来自握手及原生事件。可用以下显式开关运行真实调用（会使用本机登录和模型额度）：

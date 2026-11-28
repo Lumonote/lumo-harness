@@ -8,7 +8,7 @@
  * 可执行文件查找沿用桌面端 dev_agents.rs 的约定目录（~/.local/bin、Homebrew、NVM、Codex.app）。
  */
 import { existsSync, readdirSync, statSync } from 'node:fs'
-import { delimiter, isAbsolute, join } from 'node:path'
+import { delimiter, dirname, isAbsolute, join } from 'node:path'
 
 export type EngineProtocol = 'acp' | 'codex-app-server'
 
@@ -92,7 +92,10 @@ export interface EngineProbe {
   authHint?: string
 }
 
-export interface LookupOptions { pathEnv?: string; home?: string; extraDirs?: string[]; isExecutable?: (file: string) => boolean; isFile?: (file: string) => boolean }
+export interface LookupOptions {
+  pathEnv?: string; home?: string; extraDirs?: string[]; isExecutable?: (file: string) => boolean; isFile?: (file: string) => boolean
+  managed?: (engineId: string) => { bin: string; args: string[]; pathDir?: string } | { error: string } | undefined
+}
 
 function isRegularFile(file: string): boolean {
   try { return statSync(file).isFile() } catch { return false }
@@ -160,6 +163,13 @@ export class EngineRegistry {
     const definition = this.engines.get(id)
     if (definition === undefined) return { error: `未知引擎：${id}` }
     if (this.disabled.has(id)) return { error: `引擎 ${id} 已被配置禁用` }
+    const managed = this.lookup.managed?.(id)
+    if (managed) {
+      if ('error' in managed) return managed
+      // Desktop launches may have no Node on PATH. Reuse the host runtime and managed companions.
+      const env = { ...definition.env, PATH: [managed.pathDir ?? dirname(managed.bin), dirname(process.execPath), definition.env?.PATH ?? process.env.PATH].filter(Boolean).join(delimiter) }
+      return { definition: { ...definition, env }, bin: managed.bin, args: [...managed.args, ...definition.commands[0]!.args] }
+    }
     for (const c of definition.commands) {
       if (c.requiredFile && !(this.lookup.isFile ?? isRegularFile)(c.requiredFile)) continue
       const bin = findExecutable(c.bin, this.lookup)

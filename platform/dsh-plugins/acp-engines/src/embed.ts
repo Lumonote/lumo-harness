@@ -11,10 +11,11 @@ import { dirname, join } from 'node:path'
 import { RoleRooms } from './role-rooms.ts'
 import { AttachmentStore } from './attachment-store.ts'
 import { RoleRoomStore } from './role-room-store.ts'
+import { ManagedCliTools } from './managed-cli.ts'
 
 export { handleAcpRoute, ACP_PREFIX, type AcpRouteDeps } from './routes.ts'
 
-export interface AcpEngines { host: EngineHost; asks: SessionAskBroker; rooms: RoleRooms; attachments: AttachmentStore; skills?: AgentSkills | undefined }
+export interface AcpEngines { host: EngineHost; asks: SessionAskBroker; rooms: RoleRooms; attachments: AttachmentStore; cli: ManagedCliTools; skills?: AgentSkills | undefined }
 
 export function acpEnginesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const v = (env.LUMO_ACP_ENGINES ?? '').trim().toLowerCase()
@@ -28,8 +29,9 @@ export function createAcpEngines(options: { skills?: AgentSkills; recoveryIndexP
   const disabled = new Set((env.LUMO_ACP_DISABLED_ENGINES ?? '').split(',').map(s => s.trim()).filter(Boolean))
   const max = Number(env.LUMO_ACP_MAX_SESSIONS ?? 8)
   const asks = new SessionAskBroker()
-  const host = new EngineHost({ ...(options.recoveryIndexPath ? { recoveryIndexPath: options.recoveryIndexPath } : {}), registry: new EngineRegistry(BUILTIN_ENGINES, disabled), asks, ...(options.runTree ? { runTree: options.runTree } : {}), ...(options.mcpServers ? { mcpServers: options.mcpServers } : {}), ...(options.onSessionClosed ? { onSessionClosed: options.onSessionClosed } : {}), maxSessions: Number.isSafeInteger(max) && max > 0 ? max : 8 })
+  const cli = new ManagedCliTools(env.LUMO_CLI_HOME ?? join(options.recoveryIndexPath ? dirname(options.recoveryIndexPath) : '.lumo', 'cli-tools'))
+  const host = new EngineHost({ ...(options.recoveryIndexPath ? { recoveryIndexPath: options.recoveryIndexPath } : {}), registry: new EngineRegistry(BUILTIN_ENGINES, disabled, { managed: id => cli.resolve(id) }), asks, ...(options.runTree ? { runTree: options.runTree } : {}), ...(options.mcpServers ? { mcpServers: options.mcpServers } : {}), ...(options.onSessionClosed ? { onSessionClosed: options.onSessionClosed } : {}), maxSessions: Number.isSafeInteger(max) && max > 0 ? max : 8 })
   const attachments = new AttachmentStore(options.recoveryIndexPath ? join(dirname(options.recoveryIndexPath), 'acp-attachments') : undefined)
   const rooms = new RoleRooms(host, new RoleRoomStore(options.recoveryIndexPath ? join(dirname(options.recoveryIndexPath), 'acp-role-rooms.json') : undefined), attachments, options.skills)
-  return { host, asks, rooms, attachments, skills: options.skills }
+  return { host, asks, rooms, attachments, cli, skills: options.skills }
 }

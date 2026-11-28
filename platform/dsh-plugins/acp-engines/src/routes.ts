@@ -31,6 +31,8 @@ import { handleRoleRoomRoute } from './role-room-routes.ts'
 import type { RoleRooms } from './role-rooms.ts'
 import { loadProjectRules, projectRulesPrompt } from './project-practice-rules.ts'
 import { workflowSessions } from './project-workflow-model.ts'
+import { handleCliInstallRoute } from './cli-install-routes.ts'
+import type { ManagedCliTools } from './managed-cli.ts'
 
 export type { SessionScope as AcpIdentity } from './session-scope.ts'
 import type { SessionScope as AcpIdentity } from './session-scope.ts'
@@ -39,6 +41,7 @@ export interface ConversationAsks {
   answer(id: string, value: string, identity: AcpIdentity): Promise<{ ok: boolean; error?: string }>
 }
 export interface AcpRouteDeps {
+  cli?: ManagedCliTools | undefined
   sharedTools?: import('./conversation-tools.ts').SharedToolsFor | undefined
   conversationAsks?: ConversationAsks | undefined
 
@@ -90,6 +93,8 @@ export async function handleAcpRoute(req: IncomingMessage, res: ServerResponse, 
   if (method === 'POST') {
     try { input = await body(req, deps, sub === '/attachments' ? ATTACHMENT_LIMITS.bodyBytes : undefined) } catch (error) { json(res, 400, { error: error instanceof Error ? error.message : '请求体无效' }); return true }
   }
+
+  if (handleCliInstallRoute(req, res, sub, input, deps.cli)) return true
 
   if (sub === '/attachments' && method === 'POST') {
     if (!deps.attachments) { json(res, 503, { error: '附件服务未启用' }); return true }
